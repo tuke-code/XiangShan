@@ -19,6 +19,7 @@ import xiangshan.backend.issue._
 import xiangshan.backend.issue.EntryBundles._
 import xiangshan.backend.regfile._
 import xiangshan.backend.rob.RobPtr
+import xiangshan.backend.rename.CompressType
 import xiangshan.backend.trace._
 import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.frontend.bpu.BranchAttribute
@@ -232,11 +233,19 @@ object Bundles {
     val isFetchMalAddr = Bool()
     val trigger = TriggerAction()
     val isRVC = Bool()
+    val RVC = UInt(2.W)
     val fixedTaken = Bool()
     val predTaken = Bool()
     val crossPageIPFFix = Bool()
     val ftqPtr = new FtqPtr
     val ftqOffset = UInt(FetchBlockInstOffsetWidth.W)
+    val hasLastInFtqEntry = UInt(2.W)
+    val compressType = CompressType()
+    val complexHasDest = UInt(1.W)
+    val hasStore = Bool()
+    val noCompressSource = UInt(2.W)
+    val needFlush = UInt(2.W)
+    val interrupt_safe = Bool()
     val commitType = CommitType()
 
     val srcType = Vec(numSrc, SrcType())
@@ -270,6 +279,7 @@ object Bundles {
     val pdest = UInt(PhyRegIdxWidth.W)
     val pdestVl = UInt(VlPhyRegIdxWidth.W)
     val robIdx = new RobPtr
+    val chanelIdx = UInt(log2Up(RenameWidth).W) // TODO: move it to dispatchOut
     val dirtyFs = Bool()
     val dirtyVs = Bool()
     val traceBlockInPipe = new TracePipe(IretireWidthEncoded)
@@ -308,6 +318,7 @@ object Bundles {
   class DispatchOutBaseUop(implicit p: Parameters) extends XSBundle {
     def numSrc = backendParams.numSrc
     // from frontend
+    val RVC = UInt(2.W)
     val isRVC = Bool()
     val fixedTaken = Bool()
     val predTaken = Bool()
@@ -335,6 +346,7 @@ object Bundles {
     val pdest = UInt(PhyRegIdxWidth.W)
     val pdestVl = UInt(VlPhyRegIdxWidth.W)
     val robIdx = new RobPtr
+    val chanelIdx = UInt(log2Up(RenameWidth).W)
     val numLsElem = NumLsElem()
     val rasAction = BranchAttribute.RasAction()
     // for mdp
@@ -391,6 +403,7 @@ object Bundles {
     val lastUop  = Option.when(params.inVfSchd)(Bool())
     // from rename
     val robIdx    = new RobPtr
+    val chanelIdx = UInt(log2Up(RenameWidth).W)
     val psrc      = Vec(numSrc, UInt(PhyRegIdxWidth.W))
     val psrcVl    = Option.when(params.readVlRf)(UInt(VlPhyRegIdxWidth.W))
     val pdest     = UInt(PhyRegIdxWidth.W)
@@ -519,6 +532,7 @@ object Bundles {
     val isFetchMalAddr  = Bool()
     val hasException    = Bool()
     val trigger         = TriggerAction()
+    val RVC             = UInt(2.W)
     val isRVC           = Bool()
     val fixedTaken      = Bool()
     val predTaken       = Bool()
@@ -544,6 +558,13 @@ object Bundles {
     val canRobCompress  = Bool()
     val crossFtqCommit  = UInt(2.W) // use to caculate the ftq idx of ftqentry when commit
     val crossFtq        = Bool() // use to caculate the ftq idx of brh instructions when pass to exu
+    val hasLastInFtqEntry = UInt(2.W)
+    val compressType    = CompressType()
+    val complexHasDest = UInt(1.W)
+    val hasStore = Bool()
+    val noCompressSource = UInt(2.W)
+    val needFlush = UInt(2.W)
+    val interrupt_safe = Bool()
     val fusionNum       = UInt(2.W)
     val selImm          = SelImm()
     val imm             = UInt(32.W)
@@ -1547,6 +1568,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
     val pc = UInt(VAddrData().dataWidth.W)
     val instr = UInt(32.W)
     val commitType = CommitType()
+    val isStore = Bool()
     val exceptionVec = ExceptionVec()
     val isPcBkpt = Bool()
     val isFetchMalAddr = Bool()
@@ -1558,6 +1580,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
     val vls = Bool()
     val trigger = TriggerAction()
     val isForVSnonLeafPTE = Bool()
+    val isFormer = Bool() // TODO: it is only used for difftest 
   }
 
   object UopIdx {

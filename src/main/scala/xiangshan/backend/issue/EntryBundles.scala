@@ -19,6 +19,7 @@ object EntryBundles extends HasCircularQueuePtrHelper {
   class Status(implicit p: Parameters, params: IssueBlockParams) extends XSBundle {
     //basic status
     val robIdx                = new RobPtr
+    val chanelIdx             = UInt(log2Up(RenameWidth).W)
     val fuType                = IQFuType()
     //src status
     val srcStatus             = Vec(params.numRegSrc, new SrcStatus)
@@ -138,6 +139,7 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     val srcReady              = Output(Bool())
     val fuType                = Output(FuType())
     val robIdx                = Output(new RobPtr)
+    val chanelIdx             = UInt(log2Up(RenameWidth).W)
     val uopIdx                = Option.when(params.isVecMemIQ)(Output(UopIdx()))
     //src
     val dataSources           = Vec(params.numRegSrc, Output(DataSource()))
@@ -309,6 +311,7 @@ object EntryBundles extends HasCircularQueuePtrHelper {
                                                           else true.B)
     val respIssueFail                                  = commonIn.issueResp.failed && sqIdxHit
     entryUpdate.status.robIdx                         := status.robIdx
+    entryUpdate.status.chanelIdx                      := status.chanelIdx
     entryUpdate.status.fuType                         := IQFuType.readFuType(status.fuType, params.getFuCfgs.map(_.fuType))
     entryUpdate.status.srcStatus.zip(status.srcStatus).zipWithIndex.foreach { case ((srcStatusNext, srcStatus), srcIdx) =>
       val srcLoadCancel = common.srcLoadCancelVec(srcIdx)
@@ -427,6 +430,7 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     commonOut.srcReady                                := common.canIssue
     commonOut.fuType                                  := IQFuType.readFuType(status.fuType, params.getFuCfgs.map(_.fuType)).asUInt
     commonOut.robIdx                                  := status.robIdx
+    commonOut.chanelIdx                               := status.chanelIdx
     commonOut.dataSources.zipWithIndex.foreach{ case (dataSourceOut, srcIdx) =>
       val wakeupByIQWithoutCancel = hasIQWakeupGet.srcWakeupByIQWithoutCancel(srcIdx).asUInt.orR
       val wakeupByIQIsUncertain = hasIQWakeupGet.srcWakeupByIQIsUncertain(srcIdx).asUInt.orR
