@@ -570,43 +570,43 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
       }
   }
 
-  val debug_repl_use_a = {
+  val debug_follower_repl_use_a = {
     val mpAccess = in.mpAccess.bits
-    in.mpAccess.valid && mpAccess.isRepl && (match_a(mpAccess.set) || follower(mpAccess.set) && use_a)
+    in.mpAccess.valid && mpAccess.isRepl && follower(mpAccess.set) && use_a
   }
-  val debug_repl_use_b = {
+  val debug_follower_repl_use_b = {
     val mpAccess = in.mpAccess.bits
-    in.mpAccess.valid && mpAccess.isRepl && (match_b(mpAccess.set) || follower(mpAccess.set) && use_b)
+    in.mpAccess.valid && mpAccess.isRepl && follower(mpAccess.set) && use_b
   }
-  val access_a_sdm = PopCount(
+  val debug_access_a_sdm = PopCount(
     in.lduAccess.map (a => a.valid && match_a(a.bits.set)) ++
     Seq(in.mpAccess.valid && match_a(in.mpAccess.bits.set)))
-  val access_b_sdm = PopCount(
+  val debug_access_b_sdm = PopCount(
     in.lduAccess.map (b => b.valid && match_b(b.bits.set)) ++
     Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set)))
-  val access_normal_sdm = PopCount(
+  val debug_access_normal_sdm = PopCount(
     in.lduAccess.map (b => b.valid && follower(b.bits.set)) ++
     Seq(in.mpAccess.valid && follower(in.mpAccess.bits.set)))
-  val a_sdm_hit = PopCount(
+  val debug_a_sdm_hit = PopCount(
     in.lduAccess.map (a => a.valid && match_a(a.bits.set) && a.bits.isHit) ++
     Seq(in.mpAccess.valid && match_a(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
-  val b_sdm_hit = PopCount(
+  val debug_b_sdm_hit = PopCount(
     in.lduAccess.map (b => b.valid && match_b(b.bits.set) && b.bits.isHit) ++
     Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
-  val a_sdm_miss = PopCount(
-    in.lduAccess.map (a => a.valid && match_b(a.bits.set) && a.bits.isMiss) ++
+  val debug_a_sdm_miss = PopCount(
+    in.lduAccess.map (a => a.valid && match_a(a.bits.set) && a.bits.isMiss) ++
+    Seq(in.mpAccess.valid && match_a(in.mpAccess.bits.set) && in.mpAccess.bits.isMiss))
+  val debug_b_sdm_miss = PopCount(
+    in.lduAccess.map (b => b.valid && match_b(b.bits.set) && b.bits.isMiss) ++
     Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isMiss))
-  val b_sdm_miss = PopCount(
-    in.lduAccess.map (b => b.valid && match_b(b.bits.set) && b.bits.isHit) ++
-    Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
 
-  XSPerfAccumulate("repl_use_a", debug_repl_use_a)
-  XSPerfAccumulate("repl_use_b", debug_repl_use_b)
-  XSPerfAccumulate("access_a_sdm", access_a_sdm)
-  XSPerfAccumulate("access_b_sdm", access_b_sdm)
-  XSPerfAccumulate("access_normal_sdm", access_normal_sdm)
-  XSPerfAccumulate("a_hit", a_sdm_hit)
-  XSPerfAccumulate("b_hit", b_sdm_hit)
-  XSPerfAccumulate("a_miss", a_sdm_miss)
-  XSPerfAccumulate("b_miss", b_sdm_miss)
+  XSPerfAccumulate("follower_repl_use_a", debug_follower_repl_use_a)
+  XSPerfAccumulate("follower_repl_use_b", debug_follower_repl_use_b)
+  XSPerfAccumulate("access_a_sdm", debug_access_a_sdm)
+  XSPerfAccumulate("access_b_sdm", debug_access_b_sdm)
+  XSPerfAccumulate("access_normal_sdm", debug_access_normal_sdm)
+  XSPerfAccumulate("a_sdm_hit", debug_a_sdm_hit)
+  XSPerfAccumulate("b_sdm_hit", debug_b_sdm_hit)
+  XSPerfAccumulate("a_sdm_miss", debug_a_sdm_miss)
+  XSPerfAccumulate("b_sdm_miss", debug_b_sdm_miss)
 }
