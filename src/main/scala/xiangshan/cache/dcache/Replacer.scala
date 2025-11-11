@@ -12,7 +12,17 @@ import xiangshan.CSROpType.seti
 import freechips.rocketchip.regmapper.RRTest0Map.de
 import utility.{XSPerfAccumulate, XSPerfHistogram}
 
-class PolicySelector(implicit p: Parameters) {
+class PolicySelector(implicit p: Parameters) extends DCacheModule {
+  val in = IO(Flipped(Vec(4, Valid(new Bundle {
+    val belong_a = Bool()
+    val belong_b = Bool()
+    val hit = Bool()
+    val miss = Bool()
+  }))))
+  val debug_in_repl = IO(Input(Bool()))
+  val out = IO(new Bundle {
+    val select_a = Bool()
+  })
   // saturation counter
   val sat_cnt_bits = 10
   val sat_cnt_median = (1 << (sat_cnt_bits - 1)).U(sat_cnt_bits.W)
@@ -29,86 +39,76 @@ class PolicySelector(implicit p: Parameters) {
 
   clearCnt := clearCnt + 1.U
 
-  def update(valids: Seq[Bool], belong_a: Seq[Bool], belong_b: Seq[Bool], hits: Seq[Bool], misses: Seq[Bool]) = {
-    require(valids.length == 4)
-    require(belong_a.length == 4)
-    require(hits.length == 4)
-    val seqs = (valids zip belong_a zip belong_b zip hits zip misses).map {
-      case ((((valid, a), b), hit), miss) => (valid, a, b, hit, miss)
-    }
-    val aHit = PopCount(seqs.map{ case (valid, a, b, hit, miss) => valid && a && hit })
-    val bHit = PopCount(seqs.map{ case (valid, a, b, hit, miss) => valid && b && hit })
-    val aMiss = PopCount(seqs.map{ case (valid, a, b, hit, miss) => valid && a && miss })
-    val bMiss = PopCount(seqs.map{ case (valid, a, b, hit, miss) => valid && b && miss })
+  val aHit = PopCount(in.map{ case req => req.valid && req.bits.belong_a && req.bits.hit })
+  val bHit = PopCount(in.map{ case req => req.valid && req.bits.belong_b && req.bits.hit })
+  val aMiss = PopCount(in.map{ case req => req.valid && req.bits.belong_a && req.bits.miss })
+  val bMiss = PopCount(in.map{ case req => req.valid && req.bits.belong_b && req.bits.miss })
 
-    val updatePtr = clearCnt === 0.U ||
-      aHit =/= 0.U && prdAHit(ptr)(period_cnt_bits - 1, 2).andR ||
-      bHit =/= 0.U && prdBHit(ptr)(period_cnt_bits - 1, 2).andR ||
-      aMiss =/= 0.U && prdAMiss(ptr)(period_cnt_bits - 1, 2).andR ||
-      bMiss =/= 0.U && prdBMiss(ptr)(period_cnt_bits - 1, 2).andR
+  val updatePtr = clearCnt === 0.U ||
+    aHit =/= 0.U && prdAHit(ptr)(period_cnt_bits - 1, 2).andR ||
+    bHit =/= 0.U && prdBHit(ptr)(period_cnt_bits - 1, 2).andR ||
+    aMiss =/= 0.U && prdAMiss(ptr)(period_cnt_bits - 1, 2).andR ||
+    bMiss =/= 0.U && prdBMiss(ptr)(period_cnt_bits - 1, 2).andR
 
-    when (updatePtr) {
-      def shrink_cnt(cnt: UInt): Unit = cnt := (cnt >> (cnt.getWidth / 2)).max(1.U)
-      shrink_cnt(prdAHit(ptr))
-      shrink_cnt(prdAMiss(ptr))
-      shrink_cnt(prdBHit(ptr))
-      shrink_cnt(prdBMiss(ptr))
-      prdAHit(!ptr) := aHit.max(1.U)
-      prdAMiss(!ptr) := aMiss.max(1.U)
-      prdBHit(!ptr) := bHit.max(1.U)
-      prdBMiss(!ptr) := bMiss.max(1.U)
-      ptr := !ptr
-    }.otherwise {
-      when (aHit =/= 0.U) { prdAHit(ptr) := prdAHit(ptr) + aHit }
-      when (bHit =/= 0.U) { prdBHit(ptr) := prdBHit(ptr) + bHit }
-      when (aMiss =/= 0.U) { prdAMiss(ptr) := prdAMiss(ptr) + aMiss }
-      when (bMiss =/= 0.U) { prdBMiss(ptr) := prdBMiss(ptr) + bMiss }
-    }
-
-    satHit := satHit + Mux(satHit(sat_cnt_bits - 1, 2).andR, 0.U, aHit) -
-      Mux(satHit(sat_cnt_bits - 1, 2) === 0.U, 0.U, bHit)
-    satMiss := satMiss + Mux(satMiss(sat_cnt_bits - 1, 2).andR, 0.U, aMiss) -
-      Mux(satMiss(sat_cnt_bits - 1, 2) === 0.U, 0.U, bMiss)
+  when (updatePtr) {
+    def shrink_cnt(cnt: UInt): Unit = cnt := (cnt >> (cnt.getWidth / 2)).max(1.U)
+    shrink_cnt(prdAHit(ptr))
+    shrink_cnt(prdAMiss(ptr))
+    shrink_cnt(prdBHit(ptr))
+    shrink_cnt(prdBMiss(ptr))
+    prdAHit(!ptr) := aHit.max(1.U)
+    prdAMiss(!ptr) := aMiss.max(1.U)
+    prdBHit(!ptr) := bHit.max(1.U)
+    prdBMiss(!ptr) := bMiss.max(1.U)
+    ptr := !ptr
+  }.otherwise {
+    when (aHit =/= 0.U) { prdAHit(ptr) := prdAHit(ptr) + aHit }
+    when (bHit =/= 0.U) { prdBHit(ptr) := prdBHit(ptr) + bHit }
+    when (aMiss =/= 0.U) { prdAMiss(ptr) := prdAMiss(ptr) + aMiss }
+    when (bMiss =/= 0.U) { prdBMiss(ptr) := prdBMiss(ptr) + bMiss }
   }
+
+  satHit := satHit + Mux(satHit(sat_cnt_bits - 1, 2).andR, 0.U, aHit) -
+    Mux(satHit(sat_cnt_bits - 1, 2) === 0.U, 0.U, bHit)
+  satMiss := satMiss + Mux(satMiss(sat_cnt_bits - 1, 2).andR, 0.U, aMiss) -
+    Mux(satMiss(sat_cnt_bits - 1, 2) === 0.U, 0.U, bMiss)
 
   val hitRatioSelectA = (prdAHit(ptr) + prdAHit(!ptr)) * (prdBMiss(ptr) + prdBMiss(!ptr)) >= 
     (prdBHit(ptr) + prdBHit(!ptr)) * (prdAMiss(ptr) + prdAMiss(!ptr))
-  def select_a = {
-    MuxCase(hitRatioSelectA, Seq(
+
+  out.select_a := MuxCase(hitRatioSelectA, Seq(
       (satHit(sat_cnt_bits - 1) && !satMiss(sat_cnt_bits - 1)) -> true.B,
       (!satHit(sat_cnt_bits - 1) && satMiss(sat_cnt_bits - 1)) -> false.B
     ))
-  }
 
-  def debug(inRepl: Bool) = {
-    XSPerfHistogram("satHit_inrepl", satHit, inRepl, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
-    XSPerfHistogram("satMiss_inrepl", satMiss, inRepl, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
-    XSPerfHistogram("satHit_intotal", satHit, true.B, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
-    XSPerfHistogram("satMiss_intotal", satMiss, true.B, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
-    val aHitRatio = (100.U * (prdAHit(ptr) + prdAHit(!ptr))) /
-      (prdAHit(ptr) + prdAHit(!ptr) + prdAMiss(ptr) + prdAMiss(!ptr))
-    val bHitRatio = (100.U * (prdBHit(ptr) + prdBHit(!ptr))) /
-      (prdBHit(ptr) + prdBHit(!ptr) + prdBMiss(ptr) + prdBMiss(!ptr))
-    XSPerfHistogram("a_hit_ratio_inrepl", aHitRatio, inRepl, 0, 100, 5)
-    XSPerfHistogram("b_hit_ratio_inrepl", bHitRatio, inRepl, 0, 100, 5)
-    XSPerfHistogram("a_hit_ratio_intotal", aHitRatio, true.B, 0, 100, 5)
-    XSPerfHistogram("b_hit_ratio_intotal", bHitRatio, true.B, 0, 100, 5)
-    XSPerfHistogram("a_sub_b_ratio_inrepl", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 0.U), inRepl, 0, 100, 5)
-    XSPerfHistogram("a_sub_b_ratio_intotal", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 0.U), true.B, 0, 100, 5)
-    XSPerfHistogram("b_sub_a_ratio_inrepl", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 0.U), inRepl, 0, 100, 5)
-    XSPerfHistogram("b_sub_a_ratio_intotal", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 0.U), true.B, 0, 100, 5)
-    when (inRepl) {
-      XSPerfAccumulate("select_a_use_sat", satHit(sat_cnt_bits - 1) && !satMiss(sat_cnt_bits - 1))
-      XSPerfAccumulate("select_b_use_sat", !satHit(sat_cnt_bits - 1) && satMiss(sat_cnt_bits - 1))
-      XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && hitRatioSelectA)
-      XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && !hitRatioSelectA)
-      XSPerfAccumulate("select_change_inrepl", select_a && RegNext(select_a))
-      XSPerfAccumulate("select_change_by_ratio_inrepl", hitRatioSelectA && !RegNext(hitRatioSelectA))
-    }
-    // 命中率计数器切换的次数
-    XSPerfAccumulate("select_change_intotal", select_a && !RegNext(select_a))
-    XSPerfAccumulate("select_change_by_ratio_intotal", hitRatioSelectA && !RegNext(hitRatioSelectA))
+  val inRepl = debug_in_repl
+  XSPerfHistogram("satHit_inrepl", satHit, inRepl, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
+  XSPerfHistogram("satMiss_inrepl", satMiss, inRepl, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
+  XSPerfHistogram("satHit_intotal", satHit, true.B, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
+  XSPerfHistogram("satMiss_intotal", satMiss, true.B, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
+  val aHitRatio = (100.U * (prdAHit(ptr) + prdAHit(!ptr))) /
+    (prdAHit(ptr) + prdAHit(!ptr) + prdAMiss(ptr) + prdAMiss(!ptr))
+  val bHitRatio = (100.U * (prdBHit(ptr) + prdBHit(!ptr))) /
+    (prdBHit(ptr) + prdBHit(!ptr) + prdBMiss(ptr) + prdBMiss(!ptr))
+  XSPerfHistogram("a_hit_ratio_inrepl", aHitRatio, inRepl, 0, 100, 5)
+  XSPerfHistogram("b_hit_ratio_inrepl", bHitRatio, inRepl, 0, 100, 5)
+  XSPerfHistogram("a_hit_ratio_intotal", aHitRatio, true.B, 0, 100, 5)
+  XSPerfHistogram("b_hit_ratio_intotal", bHitRatio, true.B, 0, 100, 5)
+  XSPerfHistogram("a_sub_b_ratio_inrepl", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 0.U), inRepl, 0, 100, 5)
+  XSPerfHistogram("a_sub_b_ratio_intotal", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 0.U), true.B, 0, 100, 5)
+  XSPerfHistogram("b_sub_a_ratio_inrepl", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 0.U), inRepl, 0, 100, 5)
+  XSPerfHistogram("b_sub_a_ratio_intotal", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 0.U), true.B, 0, 100, 5)
+  when (inRepl) {
+    XSPerfAccumulate("select_a_use_sat", satHit(sat_cnt_bits - 1) && !satMiss(sat_cnt_bits - 1))
+    XSPerfAccumulate("select_b_use_sat", !satHit(sat_cnt_bits - 1) && satMiss(sat_cnt_bits - 1))
+    XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && hitRatioSelectA)
+    XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && !hitRatioSelectA)
+    XSPerfAccumulate("select_change_inrepl", out.select_a && RegNext(out.select_a))
+    XSPerfAccumulate("select_change_by_ratio_inrepl", hitRatioSelectA && !RegNext(hitRatioSelectA))
   }
+  // 命中率计数器切换的次数
+  XSPerfAccumulate("select_change_intotal", out.select_a && !RegNext(out.select_a))
+  XSPerfAccumulate("select_change_by_ratio_intotal", hitRatioSelectA && !RegNext(hitRatioSelectA))
 }
 
 class LduAccess(implicit p: Parameters) extends DCacheBundle {
@@ -298,8 +298,8 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
     !match_a(set) && !match_b(set)
   }
 
-  def use_a = psel.select_a
-  def use_b = !psel.select_a
+  def use_a = psel.out.select_a
+  def use_b = !psel.out.select_a
 
   // hit: insert mru
   // miss: update psel
@@ -328,10 +328,14 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
   }
 
   val accesses = in.lduAccess ++ Seq(in.mpAccess)
-  val belong_a = accesses.map(a => match_a(a.bits.set))
-  val belong_b = accesses.map(b => match_b(b.bits.set))
-  psel.update(accesses.map(_.valid), belong_a, belong_b, accesses.map(_.bits.isHit), accesses.map(_.bits.isMiss))
-  psel.debug(in.mpAccess.bits.isRepl && in.mpAccess.valid)
+  (psel.in zip accesses).foreach {
+    case (in, access) =>
+      in.valid := access.valid
+      in.bits.belong_a := match_a(access.bits.set)
+      in.bits.belong_b := match_b(access.bits.set)
+      in.bits.hit := access.bits.isHit
+      in.bits.miss := access.bits.isMiss
+  }
 
   out.replResp.way := get_replace_way(state_vec(in.replReq.bits.set))
   val mpAccessSet = in.mpAccess.bits.set
@@ -508,8 +512,8 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
     !match_a(set) && !match_b(set)
   }
 
-  def use_a = psel.select_a
-  def use_b = !psel.select_a
+  def use_a = psel.out.select_a
+  def use_b = !psel.out.select_a
 
   // hit: insert mru
   // miss: update psel
@@ -545,10 +549,14 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
   }
 
   val accesses = in.lduAccess ++ Seq(in.mpAccess)
-  val belong_a = accesses.map(a => match_a(a.bits.set))
-  val belong_b = accesses.map(b => match_b(b.bits.set))
-  psel.update(accesses.map(_.valid), belong_a, belong_b, accesses.map(_.bits.isHit), accesses.map(_.bits.isMiss))
-  psel.debug(in.mpAccess.bits.isRepl && in.mpAccess.valid)
+  (psel.in zip accesses).foreach {
+    case (in, access) =>
+      in.valid := access.valid
+      in.bits.belong_a := match_a(access.bits.set)
+      in.bits.belong_b := match_b(access.bits.set)
+      in.bits.hit := access.bits.isHit
+      in.bits.miss := access.bits.isMiss
+  }
 
   out.replResp.way := get_replace_way(state_vec(in.replReq.bits.set))
   val mpAccessSet = in.mpAccess.bits.set
