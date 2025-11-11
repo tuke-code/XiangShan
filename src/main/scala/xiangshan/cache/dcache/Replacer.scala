@@ -174,7 +174,7 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
 
   val state_vec = if (state_bits == 0) Reg(Vec(n_sets, UInt(0.W))) else RegInit(VecInit(Seq.fill(n_sets)(0.U(state_bits.W))))
   val bip_cnt = RegInit(0.U(bipcnt_bits.W))
-  val psel = new PolicySelector
+  val psel = Module(new PolicySelector)
 
   private val insertLRU = 1.U(1.W)
   private val insertMRU = 0.U(1.W)
@@ -434,7 +434,7 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
 
   val state_vec = if (state_bits == 0) Reg(Vec(n_sets, UInt(0.W))) else RegInit(VecInit(Seq.fill(n_sets)(0.U(state_bits.W))))
   val bip_cnt = RegInit(0.U(bipcnt_bits.W))
-  val psel = new PolicySelector
+  val psel = Module(new PolicySelector)
 
   def get_next_state(state: UInt, touch_way: UInt, is_repl: Bool, insert_mode: UInt, tree_nways: Int, is_mainpipe: Option[Boolean]): UInt = {
         val State  = Wire(Vec(n_ways, UInt(2.W)))
