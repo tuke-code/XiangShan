@@ -98,15 +98,10 @@ class PolicySelector(implicit p: Parameters) extends DCacheModule {
   XSPerfHistogram("a_sub_b_ratio_intotal", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 0.U), true.B, 0, 100, 5)
   XSPerfHistogram("b_sub_a_ratio_inrepl", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 0.U), inRepl, 0, 100, 5)
   XSPerfHistogram("b_sub_a_ratio_intotal", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 0.U), true.B, 0, 100, 5)
-  when (inRepl) {
-    XSPerfAccumulate("select_a_use_sat", satHit(sat_cnt_bits - 1) && !satMiss(sat_cnt_bits - 1))
-    XSPerfAccumulate("select_b_use_sat", !satHit(sat_cnt_bits - 1) && satMiss(sat_cnt_bits - 1))
-    XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && hitRatioSelectA)
-    XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && !hitRatioSelectA)
-    XSPerfAccumulate("select_change_inrepl", out.select_a && RegNext(out.select_a))
-    XSPerfAccumulate("select_change_by_ratio_inrepl", hitRatioSelectA && !RegNext(hitRatioSelectA))
-  }
-  // 命中率计数器切换的次数
+  XSPerfAccumulate("select_a_use_sat", satHit(sat_cnt_bits - 1) && !satMiss(sat_cnt_bits - 1) && inRepl)
+  XSPerfAccumulate("select_b_use_sat", !satHit(sat_cnt_bits - 1) && satMiss(sat_cnt_bits - 1) && inRepl)
+  XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && hitRatioSelectA && inRepl)
+  XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && !hitRatioSelectA && inRepl)
   XSPerfAccumulate("select_change_intotal", out.select_a && !RegNext(out.select_a))
   XSPerfAccumulate("select_change_by_ratio_intotal", hitRatioSelectA && !RegNext(hitRatioSelectA))
 }
@@ -557,6 +552,7 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
       in.bits.hit := access.bits.isHit
       in.bits.miss := access.bits.isMiss
   }
+  psel.debug_in_repl := in.mpAccess.valid && in.mpAccess.bits.isRepl
 
   out.replResp.way := get_replace_way(state_vec(in.replReq.bits.set))
   val mpAccessSet = in.mpAccess.bits.set
