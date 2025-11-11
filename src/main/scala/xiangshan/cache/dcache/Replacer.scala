@@ -10,65 +10,9 @@ import xiangshan.cache.DCacheModule
 import xiangshan.cache.DCacheBundle
 import xiangshan.CSROpType.seti
 import freechips.rocketchip.regmapper.RRTest0Map.de
-import utility.XSPerfAccumulate
+import utility.{XSPerfAccumulate, XSPerfHistogram}
 
-// class setBIP(n_sets: Int, n_ways: Int) {
-//   def nBits = n_ways - 1
-//   protected val state_vec = if (nBits == 0) Reg(Vec(n_sets, UInt(0.W))) else RegInit(Vec(n_sets, 0.U(nBits.W)))
-//   protected val bip_cnt = RegInit(0.U(bipcnt_bits.W))
-//   protected val repl_plru = new PseudoLRU(n_ways)
-
-//   def access(valid: Bool, set: UInt, touch_way: UInt, req_info: UInt) = {
-//     require(req_info.getWidth == 1)
-//     val hit = req_info(0)
-//     val miss = !req_info(0)
-//     when (valid) {
-//       when (hit || miss && bip_cnt === 0.U) {
-//         state_vec(set) := repl_plru.get_next_state(state_vec(set), touch_way)
-//       }
-//     }
-//   }
-
-//   def access(valids: Seq[Bool], sets: Seq[UInt], touch_ways: Seq[UInt], req_infos: Seq[UInt]) = {
-//     require(Seq(sets.size, touch_ways.size, req_infos.size).foldLeft(true)((acc, size) => acc && (size == valids.size)), "size should be same")
-//     require(req_infos.map(_.getWidth == 1).reduce(_ && _))
-//     assert(PopCount((valids zip req_infos).map { case (valid, info) => valid && !info(0)}) <= 1.U, "Must only one replace in precess")
-//     for (set <- 0 until n_sets) {
-//       when ((valids zip sets).map{case (v,s) => v && (s === set.U)}.reduce(_ && _)) {
-//         state_vec(set) := (valids zip sets zip touch_ways zip req_infos).foldLeft(state_vec(set)) { 
-//           case (state, (((valid, touch_set), touch_way), req_info)) =>
-//             val hit = req_info(0)
-//             val miss = !req_info(0)
-//             val next = Mux(valid && touch_set === set.U && (hit || miss && bip_cnt === 0.U),
-//               repl_plru.get_next_state(state, touch_way), state)
-//             next
-//     }}}
-//   }
-
-//   def way(set: UInt, valid: Bool): UInt = {
-//     when (valid) {
-//       bip_cnt := bip_cnt + 1.U
-//     }
-//     repl_plru.get_replace_way(state_vec(set))
-//   }
-// }
-
-// class DynamicInsertPolicy(dedicated_sets_num: Int, psel_bits: Int) {
-//   def match_a(set: UInt) = {
-//     val set_bits = set.getWidth
-//     val dedicated_set_bits = log2Ceil(dedicated_sets_num)
-//     require((set_bits - dedicated_set_bits) > (dedicated_set_bits - 1))
-//     set(set_bits - 1, set_bits - dedicated_set_bits) === set(dedicated_set_bits - 1, 0)
-//   }
-//   def match_b(set: UInt) = {
-//     val set_bits = set.getWidth
-//     val dedicated_set_bits = log2Ceil(dedicated_sets_num)
-//     require((set_bits - dedicated_set_bits) > (dedicated_set_bits - 1))
-//     set(set_bits - 1, set_bits - dedicated_set_bits) === ~(set(dedicated_set_bits - 1, 0)).asUInt
-//   }
-// }
-
-private class PolicySelector(implicit p: Parameters) extends DCacheModule {
+class PolicySelector(implicit p: Parameters) extends DCacheModule {
   // saturation counter
   val sat_cnt_bits = 10
   val sat_cnt_median = (1 << (sat_cnt_bits - 1)).U(sat_cnt_bits.W)
@@ -78,24 +22,24 @@ private class PolicySelector(implicit p: Parameters) extends DCacheModule {
   val satMiss = RegInit(sat_cnt_median - 1.U)
 
   // period counter
-  val period_cnt_bits = 14
+  val period_cnt_bits = 15
   val clearCnt = RegInit(1.U(period_cnt_bits.W))
   val prdAHit, prdBHit, prdAMiss, prdBMiss = RegInit(VecInit(Seq.fill(2)(1.U(period_cnt_bits.W))))
   val ptr = RegInit(false.B)
 
   clearCnt := clearCnt + 1.U
 
- 
-
-  def update(valids: Seq[Bool], belong_a: Seq[Bool], hits: Seq[Bool]) = {
+  def update(valids: Seq[Bool], belong_a: Seq[Bool], belong_b: Seq[Bool], hits: Seq[Bool], misses: Seq[Bool]) = {
     require(valids.length == 4)
     require(belong_a.length == 4)
     require(hits.length == 4)
-    val seqs = (valids zip belong_a zip hits).map(a => (a._1._1, a._1._2, a._2))
-    val aHit = PopCount(seqs.map(a => a._1 && a._2 && a._3))
-    val bHit = PopCount(seqs.map(a => a._1 && !a._2 && a._3))
-    val aMiss = PopCount(seqs.map(a => a._1 && a._2 && !a._3))
-    val bMiss = PopCount(seqs.map(a => a._1 && !a._2 && !a._3))
+    val seqs = (valids zip belong_a zip belong_b zip hits zip misses).map {
+      case ((((valid, a), b), hit), miss) => (valid, a, b, hit, miss)
+    }
+    val aHit = PopCount(seqs.map{ case (valid, a, b, hit, miss) => valid && a && hit })
+    val bHit = PopCount(seqs.map{ case (valid, a, b, hit, miss) => valid && b && hit })
+    val aMiss = PopCount(seqs.map{ case (valid, a, b, hit, miss) => valid && a && miss })
+    val bMiss = PopCount(seqs.map{ case (valid, a, b, hit, miss) => valid && b && miss })
 
     val updatePtr = clearCnt === 0.U ||
       aHit =/= 0.U && prdAHit(ptr)(period_cnt_bits - 1, 2).andR ||
@@ -127,12 +71,43 @@ private class PolicySelector(implicit p: Parameters) extends DCacheModule {
       Mux(satMiss(sat_cnt_bits - 1, 2) === 0.U, 0.U, bMiss)
   }
 
+  val hitRatioSelectA = (prdAHit(ptr) + prdAHit(!ptr)) * (prdBMiss(ptr) + prdBMiss(!ptr)) >= 
+    (prdBHit(ptr) + prdBHit(!ptr)) * (prdAMiss(ptr) + prdAMiss(!ptr))
   def select_a = {
-    val hitRateSelectA = prdAHit(ptr) * prdBMiss(ptr) - prdBHit(ptr) * prdAMiss(ptr)
-    MuxCase(hitRateSelectA, Seq(
+    MuxCase(hitRatioSelectA, Seq(
       (satHit(sat_cnt_bits - 1) && !satMiss(sat_cnt_bits - 1)) -> true.B,
       (!satHit(sat_cnt_bits - 1) && satMiss(sat_cnt_bits - 1)) -> false.B
     ))
+  }
+
+  def debug(inRepl: Bool) = {
+    XSPerfHistogram("satHit_inrepl", satHit, inRepl, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
+    XSPerfHistogram("satMiss_inrepl", satMiss, inRepl, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
+    XSPerfHistogram("satHit_intotal", satHit, true.B, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
+    XSPerfHistogram("satMiss_intotal", satMiss, true.B, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
+    val aHitRatio = (100.U * (prdAHit(ptr) + prdAHit(!ptr))) /
+      (prdAHit(ptr) + prdAHit(!ptr) + prdAMiss(ptr) + prdAMiss(!ptr))
+    val bHitRatio = (100.U * (prdBHit(ptr) + prdBHit(!ptr))) /
+      (prdBHit(ptr) + prdBHit(!ptr) + prdBMiss(ptr) + prdBMiss(!ptr))
+    XSPerfHistogram("a_hit_ratio_inrepl", aHitRatio, inRepl, 0, 100, 5)
+    XSPerfHistogram("b_hit_ratio_inrepl", bHitRatio, inRepl, 0, 100, 5)
+    XSPerfHistogram("a_hit_ratio_intotal", aHitRatio, true.B, 0, 100, 5)
+    XSPerfHistogram("b_hit_ratio_intotal", bHitRatio, true.B, 0, 100, 5)
+    XSPerfHistogram("a_sub_b_ratio_inrepl", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 0.U), inRepl, 0, 100, 5)
+    XSPerfHistogram("a_sub_b_ratio_intotal", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 0.U), true.B, 0, 100, 5)
+    XSPerfHistogram("b_sub_a_ratio_inrepl", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 0.U), inRepl, 0, 100, 5)
+    XSPerfHistogram("b_sub_a_ratio_intotal", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 0.U), true.B, 0, 100, 5)
+    when (inRepl) {
+      XSPerfAccumulate("select_a_use_sat", satHit(sat_cnt_bits - 1) && !satMiss(sat_cnt_bits - 1))
+      XSPerfAccumulate("select_b_use_sat", !satHit(sat_cnt_bits - 1) && satMiss(sat_cnt_bits - 1))
+      XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && hitRatioSelectA)
+      XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && !hitRatioSelectA)
+      XSPerfAccumulate("select_change_inrepl", select_a && RegNext(select_a))
+      XSPerfAccumulate("select_change_by_ratio_inrepl", hitRatioSelectA && !RegNext(hitRatioSelectA))
+    }
+    // 命中率计数器切换的次数
+    XSPerfAccumulate("select_change_intotal", select_a && !RegNext(select_a))
+    XSPerfAccumulate("select_change_by_ratio_intotal", hitRatioSelectA && !RegNext(hitRatioSelectA))
   }
 }
 
@@ -167,10 +142,7 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
   val n_sets = cacheParams.nSets
   val dedicated_sets_num = 16
   val state_bits = n_ways - 1
-  val psel_bits = 10
   val bipcnt_bits = 5
-  val pselInit = ((1 << (psel_bits - 1)) - 1).U(psel_bits.W)
-  val pselMax = ~(0.U(psel_bits.W))
 
   val in = IO(Input(new Bundle {
     val lduAccess = Vec(LoadPipelineWidth, ValidIO(new LduAccess))
@@ -185,7 +157,6 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
   // for unit test
   val debug = if (debug_mode) Some(IO(new Bundle {
     val w = Flipped(new Bundle {
-      val psel = Valid(UInt(psel_bits.W))
       val bip_cnt = Valid(UInt(bipcnt_bits.W))
       val state = Valid(new Bundle {
         val set = UInt(idxBits.W)
@@ -193,7 +164,6 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
       })
     })
     val r = new Bundle {
-      val psel = UInt(psel_bits.W)
       val bip_cnt = UInt(bipcnt_bits.W)
       val state = new Bundle {
         val set = Input(UInt(idxBits.W))
@@ -204,7 +174,7 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
 
   val state_vec = if (state_bits == 0) Reg(Vec(n_sets, UInt(0.W))) else RegInit(VecInit(Seq.fill(n_sets)(0.U(state_bits.W))))
   val bip_cnt = RegInit(0.U(bipcnt_bits.W))
-  val psel = RegInit(pselInit)
+  val psel = Module(new PolicySelector)
 
   private val insertLRU = 1.U(1.W)
   private val insertMRU = 0.U(1.W)
@@ -328,8 +298,8 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
     !match_a(set) && !match_b(set)
   }
 
-  def use_a = !psel(psel_bits - 1)
-  def use_b = psel(psel_bits - 1)
+  def use_a = psel.select_a
+  def use_b = !psel.select_a
 
   // hit: insert mru
   // miss: update psel
@@ -358,23 +328,10 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
   }
 
   val accesses = in.lduAccess ++ Seq(in.mpAccess)
-  val aMiss = PopCount(VecInit(accesses.map {
-    case access => access.valid && match_a(access.bits.set) && access.bits.isMiss
-  }))
-
-  val bMiss = PopCount(VecInit(accesses.map {
-    case access => access.valid && match_b(access.bits.set) && access.bits.isMiss
-  }))
-
-  val pselUpd = psel + aMiss - bMiss
-
-  // another way is only add aMiss when too small or only sub bMiss when too large
-  when (accesses.map(_.valid).asUInt.orR) {
-    psel := MuxCase(pselUpd, Seq(
-      (pselUpd < pselInit && psel > pselInit) -> pselMax,
-      (pselUpd > pselInit && psel < pselInit) -> 0.U
-    ))
-  }
+  val belong_a = accesses.map(a => match_a(a.bits.set))
+  val belong_b = accesses.map(b => match_b(b.bits.set))
+  psel.update(accesses.map(_.valid), belong_a, belong_b, accesses.map(_.bits.isHit), accesses.map(_.bits.isMiss))
+  psel.debug(in.mpAccess.bits.isRepl && in.mpAccess.valid)
 
   out.replResp.way := get_replace_way(state_vec(in.replReq.bits.set))
   val mpAccessSet = in.mpAccess.bits.set
@@ -385,59 +342,55 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
   debug.foreach {
     case io =>
       io.r.bip_cnt := bip_cnt
-      io.r.psel := psel
       io.r.state.value := state_vec(io.r.state.set)
 
       when (io.w.bip_cnt.valid) {
         bip_cnt := io.w.bip_cnt.bits
-      }
-      when (io.w.psel.valid) {
-        psel := io.w.psel.bits
       }
       when (io.w.state.valid) {
         state_vec(io.w.state.bits.set) := io.w.state.bits.value
       }
   }
 
-  val debug_repl_use_a = {
+  val debug_follower_repl_use_a = {
     val mpAccess = in.mpAccess.bits
-    in.mpAccess.valid && mpAccess.isRepl && (match_a(mpAccess.set) || follower(mpAccess.set) && use_a)
+    in.mpAccess.valid && mpAccess.isRepl && follower(mpAccess.set) && use_a
   }
-  val debug_repl_use_b = {
+  val debug_follower_repl_use_b = {
     val mpAccess = in.mpAccess.bits
-    in.mpAccess.valid && mpAccess.isRepl && (match_b(mpAccess.set) || follower(mpAccess.set) && use_b)
+    in.mpAccess.valid && mpAccess.isRepl && follower(mpAccess.set) && use_b
   }
-  val access_a_sdm = PopCount(
+  val debug_access_a_sdm = PopCount(
     in.lduAccess.map (a => a.valid && match_a(a.bits.set)) ++
     Seq(in.mpAccess.valid && match_a(in.mpAccess.bits.set)))
-  val access_b_sdm = PopCount(
+  val debug_access_b_sdm = PopCount(
     in.lduAccess.map (b => b.valid && match_b(b.bits.set)) ++
     Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set)))
-  val access_normal_sdm = PopCount(
+  val debug_access_normal_sdm = PopCount(
     in.lduAccess.map (b => b.valid && follower(b.bits.set)) ++
     Seq(in.mpAccess.valid && follower(in.mpAccess.bits.set)))
-  val a_sdm_hit = PopCount(
+  val debug_a_sdm_hit = PopCount(
     in.lduAccess.map (a => a.valid && match_a(a.bits.set) && a.bits.isHit) ++
     Seq(in.mpAccess.valid && match_a(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
-  val b_sdm_hit = PopCount(
+  val debug_b_sdm_hit = PopCount(
     in.lduAccess.map (b => b.valid && match_b(b.bits.set) && b.bits.isHit) ++
     Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
-  val a_sdm_miss = PopCount(
-    in.lduAccess.map (a => a.valid && match_b(a.bits.set) && a.bits.isMiss) ++
+  val debug_a_sdm_miss = PopCount(
+    in.lduAccess.map (a => a.valid && match_a(a.bits.set) && a.bits.isMiss) ++
+    Seq(in.mpAccess.valid && match_a(in.mpAccess.bits.set) && in.mpAccess.bits.isMiss))
+  val debug_b_sdm_miss = PopCount(
+    in.lduAccess.map (b => b.valid && match_b(b.bits.set) && b.bits.isMiss) ++
     Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isMiss))
-  val b_sdm_miss = PopCount(
-    in.lduAccess.map (b => b.valid && match_b(b.bits.set) && b.bits.isHit) ++
-    Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
 
-  XSPerfAccumulate("repl_use_a", debug_repl_use_a)
-  XSPerfAccumulate("repl_use_b", debug_repl_use_b)
-  XSPerfAccumulate("access_a_sdm", access_a_sdm)
-  XSPerfAccumulate("access_b_sdm", access_b_sdm)
-  XSPerfAccumulate("access_normal_sdm", access_normal_sdm)
-  XSPerfAccumulate("a_hit", a_sdm_hit)
-  XSPerfAccumulate("b_hit", b_sdm_hit)
-  XSPerfAccumulate("a_miss", a_sdm_miss)
-  XSPerfAccumulate("b_miss", b_sdm_miss)
+  XSPerfAccumulate("follower_repl_use_a", debug_follower_repl_use_a)
+  XSPerfAccumulate("follower_repl_use_b", debug_follower_repl_use_b)
+  XSPerfAccumulate("access_a_sdm", debug_access_a_sdm)
+  XSPerfAccumulate("access_b_sdm", debug_access_b_sdm)
+  XSPerfAccumulate("access_normal_sdm", debug_access_normal_sdm)
+  XSPerfAccumulate("a_sdm_hit", debug_a_sdm_hit)
+  XSPerfAccumulate("b_sdm_hit", debug_b_sdm_hit)
+  XSPerfAccumulate("a_sdm_miss", debug_a_sdm_miss)
+  XSPerfAccumulate("b_sdm_miss", debug_b_sdm_miss)
 }
 
 class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheModule {
@@ -445,10 +398,7 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
   val n_sets = cacheParams.nSets
   val dedicated_sets_num = 16
   val state_bits = 2 * n_ways
-  val psel_bits = 10
   val bipcnt_bits = 5
-  val pselInit = ((1 << (psel_bits - 1)) - 1).U(psel_bits.W)
-  val pselMax = ~(0.U(psel_bits.W))
 
   val in = IO(Input(new Bundle {
     val lduAccess = Vec(LoadPipelineWidth, ValidIO(new LduAccess))
@@ -463,7 +413,6 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
   // for unit test
   val debug = if (debug_mode) Some(IO(new Bundle {
     val w = Flipped(new Bundle {
-      val psel = Valid(UInt(psel_bits.W))
       val bip_cnt = Valid(UInt(bipcnt_bits.W))
       val state = Valid(new Bundle {
         val set = UInt(idxBits.W)
@@ -471,7 +420,6 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
       })
     })
     val r = new Bundle {
-      val psel = UInt(psel_bits.W)
       val bip_cnt = UInt(bipcnt_bits.W)
       val state = new Bundle {
         val set = Input(UInt(idxBits.W))
@@ -482,7 +430,7 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
 
   val state_vec = if (state_bits == 0) Reg(Vec(n_sets, UInt(0.W))) else RegInit(VecInit(Seq.fill(n_sets)(0.U(state_bits.W))))
   val bip_cnt = RegInit(0.U(bipcnt_bits.W))
-  val psel = RegInit(pselInit)
+  val psel = Module(new PolicySelector)
 
   def get_next_state(state: UInt, touch_way: UInt, is_repl: Bool, insert_mode: UInt, tree_nways: Int, is_mainpipe: Option[Boolean]): UInt = {
         val State  = Wire(Vec(n_ways, UInt(2.W)))
@@ -560,8 +508,8 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
     !match_a(set) && !match_b(set)
   }
 
-  def use_a = !psel(psel_bits - 1)
-  def use_b = psel(psel_bits - 1)
+  def use_a = psel.select_a
+  def use_b = !psel.select_a
 
   // hit: insert mru
   // miss: update psel
@@ -597,23 +545,10 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
   }
 
   val accesses = in.lduAccess ++ Seq(in.mpAccess)
-  val aMiss = PopCount(VecInit(accesses.map {
-    case access => access.valid && match_a(access.bits.set) && access.bits.isMiss
-  }))
-
-  val bMiss = PopCount(VecInit(accesses.map {
-    case access => access.valid && match_b(access.bits.set) && access.bits.isMiss
-  }))
-
-  val pselUpd = psel + aMiss - bMiss
-
-  // another way is only add aMiss when too small or only sub bMiss when too large
-  when (accesses.map(_.valid).asUInt.orR) {
-    psel := MuxCase(pselUpd, Seq(
-      (pselUpd < pselInit && psel > pselInit) -> pselMax,
-      (pselUpd > pselInit && psel < pselInit) -> 0.U
-    ))
-  }
+  val belong_a = accesses.map(a => match_a(a.bits.set))
+  val belong_b = accesses.map(b => match_b(b.bits.set))
+  psel.update(accesses.map(_.valid), belong_a, belong_b, accesses.map(_.bits.isHit), accesses.map(_.bits.isMiss))
+  psel.debug(in.mpAccess.bits.isRepl && in.mpAccess.valid)
 
   out.replResp.way := get_replace_way(state_vec(in.replReq.bits.set))
   val mpAccessSet = in.mpAccess.bits.set
@@ -624,14 +559,10 @@ class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheM
   debug.foreach {
     case io =>
       io.r.bip_cnt := bip_cnt
-      io.r.psel := psel
       io.r.state.value := state_vec(io.r.state.set)
 
       when (io.w.bip_cnt.valid) {
         bip_cnt := io.w.bip_cnt.bits
-      }
-      when (io.w.psel.valid) {
-        psel := io.w.psel.bits
       }
       when (io.w.state.valid) {
         state_vec(io.w.state.bits.set) := io.w.state.bits.value
