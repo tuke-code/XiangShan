@@ -331,6 +331,7 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
       in.bits.hit := access.bits.isHit
       in.bits.miss := access.bits.isMiss
   }
+  psel.debug_in_repl := in.mpAccess.valid && in.mpAccess.bits.isRepl
 
   out.replResp.way := get_replace_way(state_vec(in.replReq.bits.set))
   val mpAccessSet = in.mpAccess.bits.set
