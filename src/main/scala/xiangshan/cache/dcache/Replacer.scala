@@ -68,6 +68,74 @@ import utility.XSPerfAccumulate
 //   }
 // }
 
+private class PolicySelector(implicit p: Parameters) extends DCacheModule {
+  // saturation counter
+  val sat_cnt_bits = 10
+  val sat_cnt_median = (1 << (sat_cnt_bits - 1)).U(sat_cnt_bits.W)
+  // a hit + 1, a miss + 1
+  // when hit > median and miss < median, choose a
+  val satHit = RegInit(sat_cnt_median)
+  val satMiss = RegInit(sat_cnt_median - 1.U)
+
+  // period counter
+  val period_cnt_bits = 14
+  val clearCnt = RegInit(1.U(period_cnt_bits.W))
+  val prdAHit, prdBHit, prdAMiss, prdBMiss = RegInit(VecInit(Seq.fill(2)(1.U(period_cnt_bits.W))))
+  val ptr = RegInit(false.B)
+
+  clearCnt := clearCnt + 1.U
+
+ 
+
+  def update(valids: Seq[Bool], belong_a: Seq[Bool], hits: Seq[Bool]) = {
+    require(valids.length == 4)
+    require(belong_a.length == 4)
+    require(hits.length == 4)
+    val seqs = (valids zip belong_a zip hits).map(a => (a._1._1, a._1._2, a._2))
+    val aHit = PopCount(seqs.map(a => a._1 && a._2 && a._3))
+    val bHit = PopCount(seqs.map(a => a._1 && !a._2 && a._3))
+    val aMiss = PopCount(seqs.map(a => a._1 && a._2 && !a._3))
+    val bMiss = PopCount(seqs.map(a => a._1 && !a._2 && !a._3))
+
+    val updatePtr = clearCnt === 0.U ||
+      aHit =/= 0.U && prdAHit(ptr)(period_cnt_bits - 1, 2).andR ||
+      bHit =/= 0.U && prdBHit(ptr)(period_cnt_bits - 1, 2).andR ||
+      aMiss =/= 0.U && prdAMiss(ptr)(period_cnt_bits - 1, 2).andR ||
+      bMiss =/= 0.U && prdBMiss(ptr)(period_cnt_bits - 1, 2).andR
+
+    when (updatePtr) {
+      def shrink_cnt(cnt: UInt): Unit = cnt := (cnt >> (cnt.getWidth / 2)).max(1.U)
+      shrink_cnt(prdAHit(ptr))
+      shrink_cnt(prdAMiss(ptr))
+      shrink_cnt(prdBHit(ptr))
+      shrink_cnt(prdBMiss(ptr))
+      prdAHit(!ptr) := aHit.max(1.U)
+      prdAMiss(!ptr) := aMiss.max(1.U)
+      prdBHit(!ptr) := bHit.max(1.U)
+      prdBMiss(!ptr) := bMiss.max(1.U)
+      ptr := !ptr
+    }.otherwise {
+      when (aHit =/= 0.U) { prdAHit(ptr) := prdAHit(ptr) + aHit }
+      when (bHit =/= 0.U) { prdBHit(ptr) := prdBHit(ptr) + bHit }
+      when (aMiss =/= 0.U) { prdAMiss(ptr) := prdAMiss(ptr) + aMiss }
+      when (bMiss =/= 0.U) { prdBMiss(ptr) := prdBMiss(ptr) + bMiss }
+    }
+
+    satHit := satHit + Mux(satHit(sat_cnt_bits - 1, 2).andR, 0.U, aHit) -
+      Mux(satHit(sat_cnt_bits - 1, 2) === 0.U, 0.U, bHit)
+    satMiss := satMiss + Mux(satMiss(sat_cnt_bits - 1, 2).andR, 0.U, aMiss) -
+      Mux(satMiss(sat_cnt_bits - 1, 2) === 0.U, 0.U, bMiss)
+  }
+
+  def select_a = {
+    val hitRateSelectA = prdAHit(ptr) * prdBMiss(ptr) - prdBHit(ptr) * prdAMiss(ptr)
+    MuxCase(hitRateSelectA, Seq(
+      (satHit(sat_cnt_bits - 1) && !satMiss(sat_cnt_bits - 1)) -> true.B,
+      (!satHit(sat_cnt_bits - 1) && satMiss(sat_cnt_bits - 1)) -> false.B
+    ))
+  }
+}
+
 class LduAccess(implicit p: Parameters) extends DCacheBundle {
   val set = UInt(idxBits.W)
   val way = UInt(wayBits.W)
