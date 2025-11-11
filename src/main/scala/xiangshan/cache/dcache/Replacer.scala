@@ -26,10 +26,11 @@ class PolicySelector(implicit p: Parameters) extends DCacheModule {
   // saturation counter
   val sat_cnt_bits = 10
   val sat_cnt_median = (1 << (sat_cnt_bits - 1)).U(sat_cnt_bits.W)
+  val satMissInit = (1 << (sat_cnt_bits - 1) - 1).U(sat_cnt_bits.W)
   // a hit + 1, a miss + 1
   // when hit > median and miss < median, choose a
   val satHit = RegInit(sat_cnt_median)
-  val satMiss = RegInit(sat_cnt_median - 1.U)
+  val satMiss = RegInit(satMissInit)
 
   // period counter
   val period_cnt_bits = 15
