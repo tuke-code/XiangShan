@@ -102,7 +102,7 @@ class PolicySelector(implicit p: Parameters) extends DCacheModule {
   XSPerfAccumulate("select_a_use_sat", satHit(sat_cnt_bits - 1) && !satMiss(sat_cnt_bits - 1) && inRepl)
   XSPerfAccumulate("select_b_use_sat", !satHit(sat_cnt_bits - 1) && satMiss(sat_cnt_bits - 1) && inRepl)
   XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && hitRatioSelectA && inRepl)
-  XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && !hitRatioSelectA && inRepl)
+  XSPerfAccumulate("select_b_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && !hitRatioSelectA && inRepl)
   XSPerfAccumulate("select_change_intotal", out.select_a && !RegNext(out.select_a))
   XSPerfAccumulate("select_change_by_ratio_intotal", hitRatioSelectA && !RegNext(hitRatioSelectA))
 }
