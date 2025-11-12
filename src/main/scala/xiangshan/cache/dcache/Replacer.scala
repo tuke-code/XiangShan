@@ -83,10 +83,10 @@ class PolicySelector(implicit p: Parameters) extends DCacheModule {
     ))
 
   val inRepl = debug_in_repl
-  XSPerfHistogram("satHit_inrepl", satHit, inRepl, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
-  XSPerfHistogram("satMiss_inrepl", satMiss, inRepl, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
-  XSPerfHistogram("satHit_intotal", satHit, true.B, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
-  XSPerfHistogram("satMiss_intotal", satMiss, true.B, 0, 1 << sat_cnt_bits - 1, 1 << (sat_cnt_bits - 4))
+  XSPerfHistogram("satHit_inrepl", satHit, inRepl, 0, (1 << sat_cnt_bits) - 1, 1 << (sat_cnt_bits - 4))
+  XSPerfHistogram("satMiss_inrepl", satMiss, inRepl, 0, (1 << sat_cnt_bits) - 1, 1 << (sat_cnt_bits - 4))
+  XSPerfHistogram("satHit_intotal", satHit, true.B, 0, (1 << sat_cnt_bits) - 1, 1 << (sat_cnt_bits - 4))
+  XSPerfHistogram("satMiss_intotal", satMiss, true.B, 0, (1 << sat_cnt_bits) - 1, 1 << (sat_cnt_bits - 4))
   val aHitRatio = (100.U * (prdAHit(ptr) + prdAHit(!ptr))) /
     (prdAHit(ptr) + prdAHit(!ptr) + prdAMiss(ptr) + prdAMiss(!ptr))
   val bHitRatio = (100.U * (prdBHit(ptr) + prdBHit(!ptr))) /
@@ -95,10 +95,10 @@ class PolicySelector(implicit p: Parameters) extends DCacheModule {
   XSPerfHistogram("b_hit_ratio_inrepl", bHitRatio, inRepl, 0, 100, 5)
   XSPerfHistogram("a_hit_ratio_intotal", aHitRatio, true.B, 0, 100, 5)
   XSPerfHistogram("b_hit_ratio_intotal", bHitRatio, true.B, 0, 100, 5)
-  XSPerfHistogram("a_sub_b_ratio_inrepl", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 0.U), inRepl, 0, 100, 5)
-  XSPerfHistogram("a_sub_b_ratio_intotal", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 0.U), true.B, 0, 100, 5)
-  XSPerfHistogram("b_sub_a_ratio_inrepl", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 0.U), inRepl, 0, 100, 5)
-  XSPerfHistogram("b_sub_a_ratio_intotal", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 0.U), true.B, 0, 100, 5)
+  XSPerfHistogram("a_sub_b_ratio_inrepl", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 101.U), inRepl, 0, 100, 5)
+  XSPerfHistogram("a_sub_b_ratio_intotal", Mux(aHitRatio > bHitRatio, aHitRatio - bHitRatio, 101.U), true.B, 0, 100, 5)
+  XSPerfHistogram("b_sub_a_ratio_inrepl", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 101.U), inRepl, 0, 100, 5)
+  XSPerfHistogram("b_sub_a_ratio_intotal", Mux(bHitRatio > aHitRatio, bHitRatio - aHitRatio, 101.U), true.B, 0, 100, 5)
   XSPerfAccumulate("select_a_use_sat", satHit(sat_cnt_bits - 1) && !satMiss(sat_cnt_bits - 1) && inRepl)
   XSPerfAccumulate("select_b_use_sat", !satHit(sat_cnt_bits - 1) && satMiss(sat_cnt_bits - 1) && inRepl)
   XSPerfAccumulate("select_a_use_period", (satHit(sat_cnt_bits - 1) === satMiss(sat_cnt_bits - 1)) && hitRatioSelectA && inRepl)
