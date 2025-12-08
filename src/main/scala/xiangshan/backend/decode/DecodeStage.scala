@@ -28,7 +28,6 @@ import xiangshan.backend.fu.vector.Bundles.{VType, Vl}
 import xiangshan.backend.fu.FuType
 import xiangshan.backend.fu.wrapper.CSRToDecode
 import yunsuan.VpermType
-import xiangshan.ExceptionNO.{illegalInstr, virtualInstr}
 import xiangshan.frontend.ftq.FtqPtr
 
 class DecodeStageIO(implicit p: Parameters) extends XSBundle {
