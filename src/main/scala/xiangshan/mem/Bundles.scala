@@ -198,6 +198,7 @@ object Bundles {
       res.miss := this.miss
       res.metaSource := this.meta_prefetch
       res.refillLatency := this.refillLatency
+      res.lqIdx := this.uop.lqIdx
       res
     }
   }
