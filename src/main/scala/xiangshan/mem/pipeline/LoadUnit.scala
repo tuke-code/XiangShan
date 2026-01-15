@@ -959,9 +959,10 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
                        s1_nuke_paddr_match(w) && // paddr match
                        (s1_in.mask & io.stld_nuke_query(w).bits.mask).orR // data mask contain
                       })).asUInt.orR && !s1_tlb_miss
-  val s1_nuke_first =  VecInit((0 until StorePipelineWidth).map(w => {
-                          s1_in.uop.waitForRobIdx === io.stld_nuke_query(w).bits.robIdx || !s1_in.uop.loadWaitBit
-                        })).asUInt.orR
+  val s1_nuke_first =  VecInit((0 until StorePipelineWidth).map(w => {(
+                          s1_in.uop.loadPred.bits.getWaitStoreRobIdx(s1_in.uop.robIdx) === io.stld_nuke_query(w).bits.robIdx 
+                      || !(s1_in.uop.loadPred.valid && s1_in.uop.loadPred.bits.realLoadWait)
+                        )})).asUInt.orR
 
   s1_out                   := s1_in
   s1_out.vaddr             := s1_vaddr
@@ -1210,9 +1211,10 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
                           (s2_in.mask & io.stld_nuke_query(w).bits.mask).orR // data mask contain
                         })).asUInt.orR && !s2_tlb_miss || s2_in.rep_info.nuke
 
-  val s2_nuke_first    = VecInit((0 until StorePipelineWidth).map(w => {
-                          s2_in.uop.waitForRobIdx === io.stld_nuke_query(w).bits.robIdx || !s2_in.uop.loadWaitBit
-                        })).asUInt.orR || s2_in.nuke_first
+  val s2_nuke_first    = VecInit((0 until StorePipelineWidth).map(w => {(
+                          s2_in.uop.loadPred.bits.getWaitStoreRobIdx(s2_in.uop.robIdx) === io.stld_nuke_query(w).bits.robIdx 
+                      || !(s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.realLoadWait)
+                        )})).asUInt.orR || s2_in.nuke_first
   val s2_cache_handled   = io.dcache.resp.bits.handled
 
   //if it is NC with data, it should handle the replayed situation.
