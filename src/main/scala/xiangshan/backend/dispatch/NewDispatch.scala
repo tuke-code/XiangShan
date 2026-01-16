@@ -928,36 +928,99 @@ class NewDispatch(implicit p: Parameters) extends XSModule with HasPerfEvents wi
 
   val decodeReason = RegNextN(io.stallReason.reason, 2)
   val renameReason = RegNext(io.stallReason.reason)
+  
+  temp = 0
+  val dispatchPolicyStallMatrix = allIssueParams.zipWithIndex.map { case (issue, iqidx) => {
+    val result = uopSelIQMatrix.map(_(iqidx)).map(x => x > issue.numEnq.U)
+    temp = temp + issue.numEnq
+    result
+  }}.transpose
+  val dispatchPolicyStallReason1 = dispatchPolicyStallMatrix.zip(fromRename).map{ case (blockList, uop) =>
+    // TODO: explain
+    val block = blockList.reduce(_ || _)
+    uop.valid && block
+  }
+  val dispatchPolicyStallReason2 = fromRename.map(uop =>
+    !fromRename(0).valid && fromRename.map(_.valid).reduce(_ || _) && !uop.valid)
+
+  temp = 0
+  val issueQueueStallMatrix = allIssueParams.zipWithIndex.map { case (issue, iqidx) => {
+    val result = uopSelIQMatrix.map(_(iqidx)).map(x => !io.toIssueQueues(temp).ready && x.orR && x <= issue.numEnq.U)
+    temp = temp + issue.numEnq
+    result
+  }}.transpose
+  val issueQueueStall = issueQueueStallMatrix.zip(fromRename).map{ case (blockList, uop) =>
+    val block = blockList.reduce(_ || _)
+    uop.valid && block
+  }
+
+
 
   val stallReason = Wire(chiselTypeOf(io.stallReason.reason))
   val firedVec = fromRename.map(_.fire)
   io.stallReason.backReason.valid := !canAccept
+  // TODO : rob不可接收直接归到other core?
   io.stallReason.backReason.bits := TopDownCounters.OtherCoreStall.id.U
-  stallReason.zip(io.stallReason.reason).zip(firedVec).zipWithIndex.zip(fusedVec).map { case ((((update, in), fire), idx), fused) =>
+  stallReason.zip(io.stallReason.reason).zip(firedVec).zipWithIndex.zip(fusedVec).foreach { case ((((update, in), fire), idx), fused) =>
     val headIsInt = FuType.isInt(io.robHeadFuType)  && io.robHeadNotReady
     val headIsFp  = FuType.isFArith(io.robHeadFuType)   && io.robHeadNotReady
     val headIsDiv = FuType.isDivSqrt(io.robHeadFuType) && io.robHeadNotReady
     val headIsLd  = io.robHeadFuType === FuType.ldu.U && io.robHeadNotReady || !io.lqCanAccept
     val headIsSt  = io.robHeadFuType === FuType.stu.U && io.robHeadNotReady || !io.sqCanAccept
-    val headIsAmo = io.robHeadFuType === FuType.mou.U && io.robHeadNotReady
+    val headIsAmo = io.robHead.getDebugFuType === FuType.mou.U && io.robHeadNotReady
     val headIsLs  = headIsLd || headIsSt
     val robLsFull = io.robFull || !io.lqCanAccept || !io.sqCanAccept
+    val dispatchStallIsLoad    = (FuType.isLoad(fromRename(idx).bits.fuType) && dispatchPolicyStallReason1(idx)) ||
+      (FuType.isLoad(fromRename(renameWidth - 1).bits.fuType) && dispatchPolicyStallReason2(idx))
+    val dispatchStallIsStore   = (FuType.isStore(fromRename(idx).bits.fuType) && dispatchPolicyStallReason1(idx)) ||
+      (FuType.isStore(fromRename(renameWidth - 1).bits.fuType) && dispatchPolicyStallReason2(idx))
+    val dispatchStall          = dispatchPolicyStallReason1(idx) || dispatchPolicyStallReason2(idx)
+    val lsqStallDispatch       = fromRename(idx).valid && !lsqCanAccept
+
+    val issueQueueStallIsAlu   = FuType.isAlu(fromRename(idx).bits.fuType) && issueQueueStall(idx) && !robLsFull
+    val issueQueueStallIsBrh   = FuType.isBJU(fromRename(idx).bits.fuType) && issueQueueStall(idx) && !robLsFull
+    val issueQueueStallIsInt   = FuType.isInt(fromRename(idx).bits.fuType) && issueQueueStall(idx) && !robLsFull
+    val issueQueueStallIsFp    = FuType.isFArith(fromRename(idx).bits.fuType) && issueQueueStall(idx) && !robLsFull
+    val issueQueueStallIsVec   = FuType.isVArithMem(fromRename(idx).bits.fuType) && issueQueueStall(idx) && !robLsFull
+    val issueQueueStallIsLoad  = FuType.isLoad(fromRename(idx).bits.fuType) && issueQueueStall(idx) && !robLsFull
+    val issueQueueStallIsStore = FuType.isStore(fromRename(idx).bits.fuType) && issueQueueStall(idx) && !robLsFull
 
     import TopDownCounters._
+    // TODO: temporarily fix miss frontend bubble
+    val frontendMissBubble     = !fromRename.map(_.valid).reduce(_ || _) && (decodeReason(idx) === NoStall.id.U)
+
+
     update := MuxCase(OtherCoreStall.id.U, Seq(
       // fire
-      (fire || fused                                     ) -> NoStall.id.U          ,
+      (fire || fused                                     ) -> NoStall.id.U                  ,
+      // dispatch stall
+      // dispatch policy stall
+      (dispatchStallIsLoad                               ) -> LoadDispatchPolicyStall.id.U  ,
+      (dispatchStallIsStore                              ) -> StoreDispatchPolicyStall.id.U ,
+      (dispatchStall                                     ) -> OtherDispatchPolicyStall.id.U ,
+      // loadstore queue stall dispatch
+      (lsqStallDispatch                                  ) -> LoadStoreStallDispatch.id.U   ,
+
       // dispatch not stall / core stall from decode or rename
-      (in =/= OtherCoreStall.id.U && in =/= NoStall.id.U ) -> in                    ,
+      (in =/= OtherCoreStall.id.U && in =/= NoStall.id.U ) -> in                            ,
+      // issuequeue stall dispatch
+      (issueQueueStallIsAlu                              ) -> IntIQFullStallAlu.id.U        ,
+      (issueQueueStallIsBrh                              ) -> IntIQFullStallBrh.id.U        ,
+      (issueQueueStallIsInt                              ) -> IntIQFullStallOther.id.U      ,
+      (issueQueueStallIsFp                               ) -> FpIQFullStall.id.U            ,
+      (issueQueueStallIsVec                              ) -> VecIQFullStall.id.U           ,
+      (issueQueueStallIsLoad                             ) -> LoadIQFullStall.id.U          ,
+      (issueQueueStallIsStore                            ) -> StoreIQFullStall.id.U         ,
       // rob stall
-      (headIsAmo                                         ) -> AtomicStall.id.U      ,
-      (headIsSt                                          ) -> StoreStall.id.U       ,
-      (headIsLd                                          ) -> ldReason              ,
-      (headIsDiv                                         ) -> DivStall.id.U         ,
-      (headIsInt                                         ) -> IntNotReadyStall.id.U ,
-      (headIsFp                                          ) -> FPNotReadyStall.id.U  ,
-      (renameReason(idx) =/= NoStall.id.U                ) -> renameReason(idx)     ,
-      (decodeReason(idx) =/= NoStall.id.U                ) -> decodeReason(idx)     ,
+      (headIsAmo                                         ) -> AtomicStall.id.U              ,
+      (headIsSt                                          ) -> StoreStall.id.U               ,
+      (headIsLd                                          ) -> ldReason                      ,
+      (headIsDiv                                         ) -> DivStall.id.U                 ,
+      (headIsInt                                         ) -> IntNotReadyStall.id.U         ,
+      (headIsFp                                          ) -> FPNotReadyStall.id.U          ,
+      (renameReason(idx) =/= NoStall.id.U                ) -> renameReason(idx)             ,
+      (decodeReason(idx) =/= NoStall.id.U                ) -> decodeReason(idx)             ,
+      (frontendMissBubble                                ) -> ICacheMissBubble.id.U         ,
     ))
   }
 
