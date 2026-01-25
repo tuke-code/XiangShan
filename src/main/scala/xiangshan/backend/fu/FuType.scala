@@ -209,6 +209,10 @@ object FuType extends ChiselOHEnum {
 
   def isBlockBackCompress(fuType: UInt): Bool = FuTypeOrR(fuType, blockBackCompress)
 
+  def isStoreVstore(fuType: UInt): Bool = isStore(fuType) || isVStore(fuType)
+
+  def isLoadVload(fuType: UInt): Bool = isLoad(fuType) || isVLoad(fuType)
+
   val functionNameMap = Map(
     jmp -> "jmp",
     brh -> "brh",
