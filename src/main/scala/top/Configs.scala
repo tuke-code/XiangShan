@@ -497,8 +497,8 @@ class CHIFrontendDebugConfig(n: Int = 1) extends Config(
   })
 )
 
-class TLBackendV2Config(n: Int = 1) extends Config(
-  new TLConfig(n).alter((site, here, up) => {
+class CHIBackendV2Config(n: Int = 1) extends Config(
+  new CHIConfig(n).alter((site, here, up) => {
     case XSTileKey => up(XSTileKey).map { p =>
       p.copy(
         EnableBackendV2Config = true,
@@ -546,7 +546,7 @@ class TLBackendV2Config(n: Int = 1) extends Config(
     }
   })
 )
-class BackendV2Config(n: Int = 1) extends TLBackendV2Config(n) with DeprecatedConfigWarning
+class BackendV2Config(n: Int = 1) extends CHIBackendV2Config(n) with DeprecatedConfigWarning
 
 class CVMCompile extends Config((site, here, up) => {
   case CVMParamsKey => up(CVMParamsKey).copy(
