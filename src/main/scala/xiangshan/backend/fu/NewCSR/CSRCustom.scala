@@ -115,8 +115,9 @@ class SmblockctlBundle extends CSRBundle {
 }
 
 class SrnctlBundle extends CSRBundle {
+  val HIGH_DENSITY_ROB_COMPRESSION_ENABLE = RW(4).withReset(true.B)
   val WFI_ENABLE     = RW(2).withReset(true.B)
-  val FUSION_ENABLE  = RW(0).withReset(false.B)
+  val FUSION_ENABLE  = RW(0).withReset(true.B)
 }
 
 class McorepwrBundle extends CSRBundle {
@@ -147,4 +148,3 @@ object SpfctlL2PfDelayLatency extends CSREnum with RWApply {
 object SlvpredCtlTimeOut extends CSREnum with RWApply {
   val initValue = Value(3.U)
 }
-

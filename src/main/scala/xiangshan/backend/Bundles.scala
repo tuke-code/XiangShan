@@ -116,6 +116,7 @@ object Bundles {
     val blockBackward = Bool()
     val flushPipe = Bool() // This inst will flush all the pipe when commit, like exception but can commit
     val canRobCompress = Bool()
+    val simple = Bool()
     val selImm = SelImm()
     val imm = UInt(32.W)
     val fpu = new FPUCtrlSignals
@@ -197,6 +198,9 @@ object Bundles {
     val noCompressSource = UInt(2.W)
     val needFlush = UInt(2.W)
     val interrupt_safe = Bool()
+    val formerInstrCnt = UInt(log2Ceil(RenameWidth + 1).W)
+    val latterInstrCnt = UInt(log2Ceil(RenameWidth + 1).W)
+    val formerLen = UInt(log2Ceil(RenameWidth * 4 + 1).W)
     val commitType = CommitType()
 
     val srcType = Vec(numSrc, SrcType())
@@ -222,7 +226,8 @@ object Bundles {
     val isVset = Bool()
     val firstUop = Bool()
     val lastUop = Bool()
-    val numWB = UInt(log2Up(MaxUopSize).W) // rob need this
+    val formerNumWB = UInt(log2Ceil(RenameWidth + 1).W) // rob need this
+    val latterNumWB = UInt(log2Ceil(RenameWidth).W) // rob need this
     // rename
     val psrc = Vec(numSrc, UInt(PhyRegIdxWidth.W))
     val pdest = UInt(PhyRegIdxWidth.W)
@@ -473,6 +478,9 @@ object Bundles {
     val noCompressSource = UInt(2.W)
     val needFlush = UInt(2.W)
     val interrupt_safe = Bool()
+    val formerInstrCnt = UInt(log2Ceil(RenameWidth + 1).W)
+    val latterInstrCnt = UInt(log2Ceil(RenameWidth + 1).W)
+    val formerLen = UInt(log2Ceil(RenameWidth * 4 + 1).W)
     val fusionNum       = UInt(2.W)
     val selImm          = SelImm()
     val imm             = UInt(32.W)
@@ -487,7 +495,8 @@ object Bundles {
     val firstUop        = Bool()
     val lastUop         = Bool()
     val numUops         = UInt(log2Up(MaxUopSize).W) // rob need this
-    val numWB           = UInt(log2Up(MaxUopSize).W) // rob need this
+    val formerNumWB     = UInt(log2Ceil(RenameWidth + 1).W) // rob need this
+    val latterNumWB     = UInt(log2Ceil(RenameWidth).W) // rob need this
     val commitType      = CommitType()
     // rename
     val srcState        = Vec(numSrc, SrcState())

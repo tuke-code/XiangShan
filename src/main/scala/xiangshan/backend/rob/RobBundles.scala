@@ -50,10 +50,14 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val compressType = CompressType()
     val noCompressSource = UInt(2.W) // used for Perf
 
-    val uopNum = UInt(log2Up(MaxUopSize + 1).W)
+    val formerUopNum = UInt(log2Ceil(RenameWidth + 1).W)
+    val latterUopNum = UInt(log2Ceil(RenameWidth).W)
     val realDestSize = UInt(log2Up(MaxUopSize + 1).W)
     val complexHasDest = UInt(1.W)
     val hasStore = Bool()
+    val formerInstrCnt = UInt(log2Ceil(RenameWidth + 1).W)
+    val latterInstrCnt = UInt(log2Ceil(RenameWidth + 1).W)
+    val formerLen = UInt(log2Ceil(RenameWidth * 4 + 1).W)
 
     val ftqIdx = new FtqPtr
     val ftqOffset = UInt(FetchBlockInstOffsetWidth.W) // TODO: it could change to 'instrEndOffset'
@@ -92,8 +96,8 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val debug_fusionNum = OptionWrapper(backendParams.debugEn, UInt(2.W))
     // debug_end
 
-    def isWritebacked: Bool = !uopNum.orR
-    def isUopWritebacked: Bool = !uopNum.orR
+    def isWritebacked: Bool = !formerUopNum.orR && !latterUopNum.orR
+    def isUopWritebacked: Bool = !formerUopNum.orR && !latterUopNum.orR
 
   }
 
@@ -103,7 +107,8 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val commit_w = Bool()
     val compressType = CompressType()
     val noCompressSource = UInt(2.W)
-    val uopNum = UInt(log2Up(MaxUopSize + 1).W)
+    val formerUopNum = UInt(log2Ceil(RenameWidth + 1).W)
+    val latterUopNum = UInt(log2Ceil(RenameWidth).W)
     val realDestSize = UInt(log2Up(MaxUopSize + 1).W)
     val interrupt_safe = Bool()
     val wflags = Bool()
@@ -119,6 +124,9 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val mmio = Bool()
     val commitType = CommitType()
     val hasStore = Bool()
+    val formerInstrCnt = UInt(log2Ceil(RenameWidth + 1).W)
+    val latterInstrCnt = UInt(log2Ceil(RenameWidth + 1).W)
+    val formerLen = UInt(log2Ceil(RenameWidth * 4 + 1).W)
     val ftqIdx = new FtqPtr
     val ftqOffset = UInt(FetchBlockInstOffsetWidth.W)
     val hasLastInFtqEntry = UInt(2.W)
@@ -150,10 +158,14 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robEntry.compressType := robEnq.compressType // TODO
     robEntry.noCompressSource := robEnq.noCompressSource
 
-//    robEntry.uopNum
+    robEntry.formerUopNum := robEnq.formerNumWB
+    robEntry.latterUopNum := robEnq.latterNumWB
 //    robEntry.realDestSize
     robEntry.complexHasDest := robEnq.complexHasDest
     robEntry.hasStore := robEnq.hasStore
+    robEntry.formerInstrCnt := robEnq.formerInstrCnt
+    robEntry.latterInstrCnt := robEnq.latterInstrCnt
+    robEntry.formerLen := robEnq.formerLen
 
     robEntry.ftqIdx := robEnq.ftqPtr
     robEntry.ftqOffset := robEnq.ftqOffset
@@ -195,10 +207,11 @@ object RobBundles extends HasCircularQueuePtrHelper {
   def connectCommitEntry(robCommitEntry: RobCommitEntryBundle, robEntry: RobEntryBundle): Unit = {
     robCommitEntry.walk_v := robEntry.valid
     robCommitEntry.commit_v := robEntry.valid
-    robCommitEntry.commit_w := robEntry.uopNum === 0.U
+    robCommitEntry.commit_w := robEntry.formerUopNum === 0.U && robEntry.latterUopNum === 0.U
     robCommitEntry.compressType := robEntry.compressType
     robCommitEntry.noCompressSource := robEntry.noCompressSource
-    robCommitEntry.uopNum := robEntry.uopNum
+    robCommitEntry.formerUopNum := robEntry.formerUopNum
+    robCommitEntry.latterUopNum := robEntry.latterUopNum
     robCommitEntry.realDestSize := robEntry.realDestSize
     robCommitEntry.interrupt_safe := robEntry.interrupt_safe
     robCommitEntry.rfWen := robEntry.rfWen
@@ -219,6 +232,9 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robCommitEntry.hasLastInFtqEntry := robEntry.hasLastInFtqEntry
     robCommitEntry.commitType := robEntry.commitType
     robCommitEntry.hasStore := robEntry.hasStore
+    robCommitEntry.formerInstrCnt := robEntry.formerInstrCnt
+    robCommitEntry.latterInstrCnt := robEntry.latterInstrCnt
+    robCommitEntry.formerLen := robEntry.formerLen
     robCommitEntry.dirtyFs := robEntry.fpWen || robEntry.wflags
     robCommitEntry.dirtyVs := robEntry.dirtyVs
     robCommitEntry.needFlush := robEntry.needFlush
@@ -411,6 +427,6 @@ class RobFlushInfo(implicit p: Parameters) extends XSBundle {
 }
 
 class RobFlushPcInfo(implicit p: Parameters) extends XSBundle {
-  val formerLen = UInt(3.W)
+  val formerLen = UInt(log2Ceil(RenameWidth * 4 + 1).W)
   val flushIsRVC = Bool()
 }
