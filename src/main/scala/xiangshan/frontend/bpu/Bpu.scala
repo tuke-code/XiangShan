@@ -42,6 +42,7 @@ import xiangshan.frontend.bpu.tage.Tage
 import xiangshan.frontend.bpu.ubtb.MicroBtb
 import xiangshan.frontend.bpu.utage.MicroTage
 import xiangshan.frontend.bpu.utage.MicroTageMeta
+import xiangshan.mem.mdp.NewMdp.MdpMASCOT
 
 class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   class BpuIO extends Bundle {
@@ -66,6 +67,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val phr         = Module(new Phr)
   private val commonHR    = Module(new CommonHR)
   private val uras        = Module(new MicroRas)
+  //MDP
+  private val mdp         = Module(new MdpMASCOT)
 
   private def predictors: Seq[BasePredictor] = Seq(
     fallThrough,
@@ -234,6 +237,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   sc.io.s3_override         := s3_override
   sc.io.commonHR            := commonHR.io.s0_commonHR
 
+  mdp.io.stageCtrl          := stageCtrl
+  mdp.io.fromBpu.startPc    := s0_startPc
+  mdp.io.fromPhr.foldedPathHist         := phr.io.s0_foldedPhr
+  mdp.io.fromPhr.foldedPathHistForTrain := phr.io.mdpTrainFoldedPhr
+  mdp.io.toTrain <> io.fromFtq.mdpTrain
+
   s3_flush := redirect.valid
   s2_flush := s3_flush || s3_override
   s1_flush := s2_flush
@@ -377,6 +386,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s2_s1Prediction = RegEnable(s1_prediction, s1_fire)
   private val s3_s1Prediction = RegEnable(s2_s1Prediction, s2_fire)
 
+  private val s3_mdpPrediction = RegEnable(mdp.io.prediction, s2_fire)
   s3_override := s3_valid && !(s3_prediction === s3_s1Prediction)
 
   private val s2_phrMeta = RegEnable(phr.io.phrMeta, s1_fire)
@@ -402,6 +412,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_resolveMeta.sc     := sc.io.meta
   s3_resolveMeta.ittage := ittage.io.meta
   s3_resolveMeta.phr    := s3_phrMeta
+//
+  s3_resolveMeta.mdpBase := RegEnable(mdp.io.meta, s2_fire)
   s3_resolveMeta.debug_utage.foreach(_ := s3_utageMeta)
 
   private val s3_commitMeta = Wire(new BpuCommitMeta)
@@ -419,6 +431,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     io.toFtq.prediction.bits.fromStage(s1_startPc, s1_prediction)
   }
   io.toFtq.prediction.bits.s3Override := s3_override
+  //
+  io.toFtq.prediction.bits.mdpPrediction := s3_mdpPrediction
 
   // used for meta enqueue and s3 override
   private val s2_ftqPtr = RegEnable(io.fromFtq.bpuPtr, s1_fire)
@@ -460,6 +474,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   phr.io.commit.valid := io.fromFtq.train.fire
   phr.io.commit.bits  := train
+  phr.io.mdpPhrMeta   := io.fromFtq.mdpTrain.bits.meta.phr
 
   s0_foldedPhr   := phr.io.s0_foldedPhr
   s1_foldedPhr   := phr.io.s1_foldedPhr

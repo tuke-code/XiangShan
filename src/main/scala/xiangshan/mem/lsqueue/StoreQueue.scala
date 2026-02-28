@@ -670,6 +670,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       WireInit(VecInit((0 until StoreQueueSize).map(j => io.forward(i).uop.loadWaitBit && uop(j).robIdx === io.forward(i).uop.waitForRobIdx))),
       WireInit(VecInit((0 until StoreQueueSize).map(j => uop(j).storeSetHit && uop(j).ssid === io.forward(i).uop.ssid)))
     )
+    val mdpHitVec = WireInit(VecInit((0 until StoreQueueSize).map(j =>
+      io.forward(i).uop.loadPred.bits.loadWait && uop(j).robIdx === io.forward(i).uop.loadPred.bits.getWaitStoreRobIdx(io.forward(i).uop.robIdx))))
 
     val forwardMask1 = Mux(differentFlag, ~deqMask, deqMask ^ forwardMask)
     val forwardMask2 = Mux(differentFlag, forwardMask, 0.U(StoreQueueSize.W))
@@ -735,8 +737,15 @@ class StoreQueue(implicit p: Parameters) extends XSModule
 
     // If SSID match, address not ready, mark it as addrInvalid
     // load_s2: generate addrInvalid
-    val addrInvalidMask1 = (~addrValidVec.asUInt & storeSetHitVec.asUInt & forwardMask1.asUInt)
-    val addrInvalidMask2 = (~addrValidVec.asUInt & storeSetHitVec.asUInt & forwardMask2.asUInt)
+    val mdpFinalHitVec = Wire(Vec(StoreQueueSize,Bool()))
+    val EnableNewMdp = true
+    if(EnableNewMdp){
+      mdpFinalHitVec := mdpHitVec
+    }else{
+      mdpFinalHitVec := storeSetHitVec
+    }
+    val addrInvalidMask1 = (~addrValidVec.asUInt & mdpFinalHitVec.asUInt & forwardMask1.asUInt)
+    val addrInvalidMask2 = (~addrValidVec.asUInt & mdpFinalHitVec.asUInt & forwardMask2.asUInt)
     // make chisel happy
     val addrInvalidMask1Reg = Wire(UInt(StoreQueueSize.W))
     addrInvalidMask1Reg := RegNext(addrInvalidMask1)

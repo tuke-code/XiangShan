@@ -28,6 +28,8 @@ import xiangshan.frontend.bpu.sc.ScParameters
 import xiangshan.frontend.bpu.tage.TageParameters
 import xiangshan.frontend.bpu.ubtb.MicroBtbParameters
 import xiangshan.frontend.bpu.utage.MicroTageParameters
+import xiangshan.mem.mdp.NewMdp.MdpTageTableParameters
+import xiangshan.mem.mdp.NewMdp.MdpBaseTableParameters
 
 // For users: these are default Bpu parameters set by dev, do not change them here,
 // use top-level Parameters.scala instead.
@@ -47,7 +49,10 @@ case class BpuParameters(
     tageParameters:   TageParameters = TageParameters(),
     scParameters:     ScParameters = ScParameters(),
     ittageParameters: IttageParameters = IttageParameters(),
-    rasParameters:    RasParameters = RasParameters()
+    rasParameters:    RasParameters = RasParameters(),
+    //MDP    
+    mdpTageTableParameters: MdpTageTableParameters = MdpTageTableParameters(),
+    mdpBaseTableParameters: MdpBaseTableParameters = MdpBaseTableParameters()
 ) {}
 
 trait HasBpuParameters extends HasFrontendParameters {
@@ -84,6 +89,9 @@ trait HasBpuParameters extends HasFrontendParameters {
       }.reduce(_ ++ _) ++
       bpuParameters.utageParameters.TableInfos.map {
         _.getFoldedHistoryInfoSet()
+      }.reduce(_ ++ _) ++
+      bpuParameters.mdpTageTableParameters.TableInfos.map {
+        _.getFoldedHistoryInfoSet(bpuParameters.mdpTageTableParameters.NumBanks, bpuParameters.mdpTageTableParameters.TagWidth)
       }.reduce(_ ++ _)
 
   // sanity check

@@ -51,6 +51,8 @@ import xiangshan.frontend.bpu.BpuPredictionSource
 import xiangshan.frontend.bpu.BpuRedirectMeta
 import xiangshan.frontend.bpu.BpuResolveMeta
 import xiangshan.frontend.bpu.HalfAlignHelper
+import xiangshan.PhrInfo
+import xiangshan.mem.mdp.NewMdp.MdpResolveQueue
 
 class Ftq(implicit p: Parameters) extends FtqModule
     with HalfAlignHelper
@@ -105,6 +107,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   // resolveQueue caches branch resolve information from backend.
   private val resolveQueue = Module(new ResolveQueue)
+  private val mdpResolveQueue = Module(new MdpResolveQueue)
 
   // commitQueue caches branch commit information from backend.
   private val commitQueue = Module(new CommitQueue)
@@ -178,6 +181,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   when((prediction.fire || bpuS3Redirect) && !redirect.valid) {
     entryQueue(predictionPtr.value).startPc        := prediction.bits.startPc
     entryQueue(predictionPtr.value).takenCfiOffset := prediction.bits.takenCfiOffset
+    entryQueue(predictionPtr.value).mdpPrediction  := prediction.bits.mdpPrediction
   }
 
   when(io.fromBpu.meta.valid) {
@@ -193,7 +197,8 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   resolveQueue.io.bpuEnqueue    := bpuEnqueue
   resolveQueue.io.bpuEnqueuePtr := predictionPtr
-
+  mdpResolveQueue.io.bpuEnqueue    := bpuEnqueue
+  mdpResolveQueue.io.bpuEnqueuePtr := predictionPtr
   // --------------------------------------------------------------------------------
   // Interaction with ICache and IFU
   // --------------------------------------------------------------------------------
@@ -271,6 +276,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toIfu.req.bits.fetch(0).nextCachelineVAddr := io.toIfu.req.bits.fetch(0).startVAddr + (CacheLineSize / 8).U
   io.toIfu.req.bits.fetch(0).ftqIdx             := ifuPtr(0)
   io.toIfu.req.bits.fetch(0).takenCfiOffset     := entryQueue(ifuPtr(0).value).takenCfiOffset
+  io.toIfu.req.bits.fetch(0).mdpPrediction      := entryQueue(ifuPtr(0).value).mdpPrediction
 
   io.toIfu.req.bits.fetch(1) := 0.U.asTypeOf(new FetchRequestBundle)
 
@@ -324,12 +330,19 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   resolveQueue.io.backendRedirect    := backendRedirect.valid
   resolveQueue.io.backendRedirectPtr := backendRedirect.bits.ftqIdx
+  mdpResolveQueue.io.backendRedirect := backendRedirect.valid
+  mdpResolveQueue.io.backendRedirectPtr := backendRedirect.bits.ftqIdx
 
   // --------------------------------------------------------------------------------
   // Resolve and train BPU
   // --------------------------------------------------------------------------------
 
   resolveQueue.io.backendResolve := io.fromBackend.resolve
+  mdpResolveQueue.io.toMdpResolveUpdate := io.fromBackend.mdpUpdate
+  for(i <- 0 until backendParams.LduCnt + 1){
+    val ftqIdx = io.fromBackend.mdpUpdate(i).bits.ftqIdx
+    mdpResolveQueue.io.updateStartPc(i) := entryQueue(ftqIdx.value).startPc
+  }
 
   io.toBpu.train.valid           := resolveQueue.io.bpuTrain.valid
   resolveQueue.io.bpuTrain.ready := io.toBpu.train.ready
@@ -337,6 +350,13 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.train.bits.startPc    := resolveQueue.io.bpuTrain.bits.startPc
   io.toBpu.train.bits.branches   := resolveQueue.io.bpuTrain.bits.branches
   io.toBpu.train.bits.perfMeta   := perfQueue(resolveQueue.io.bpuTrain.bits.ftqIdx.value).bpuPerf
+
+  io.toBpu.mdpTrain.valid := mdpResolveQueue.io.mdpTrain.valid
+  mdpResolveQueue.io.mdpTrain.ready := io.toBpu.mdpTrain.ready
+  io.toBpu.mdpTrain.bits.meta.base  := metaQueueResolve(mdpResolveQueue.io.mdpTrain.bits.ftqIdx.value).mdpBase
+  io.toBpu.mdpTrain.bits.meta.phr   := metaQueueResolve(mdpResolveQueue.io.mdpTrain.bits.ftqIdx.value).phr
+  io.toBpu.mdpTrain.bits.startPc    := mdpResolveQueue.io.mdpTrain.bits.startPc
+  io.toBpu.mdpTrain.bits.loads      := mdpResolveQueue.io.mdpTrain.bits.loads
 
   io.fromBackend.resolve.foreach { branch =>
     val ftqIdx      = branch.bits.ftqIdx.value

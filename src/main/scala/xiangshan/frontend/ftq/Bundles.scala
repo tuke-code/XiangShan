@@ -23,10 +23,12 @@ import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.BpuMeta
 import xiangshan.frontend.bpu.BpuPerfMeta
 import xiangshan.frontend.bpu.BranchInfo
+import xiangshan.mem.mdp.NewMdp.{MdpPrediction,HasMdpParameters}
 
-class FtqEntry(implicit p: Parameters) extends FtqBundle {
+class FtqEntry(implicit p: Parameters) extends FtqBundle with HasMdpParameters{
   val startPc:        PrunedAddr  = PrunedAddr(VAddrBits)
   val takenCfiOffset: Valid[UInt] = Valid(UInt(CfiPositionWidth.W))
+  val mdpPrediction: Vec[Valid[MdpPrediction]] = Vec(NumMdpResultEntries, Valid(new MdpPrediction))
 }
 
 class MetaEntry(implicit p: Parameters) extends FtqBundle {

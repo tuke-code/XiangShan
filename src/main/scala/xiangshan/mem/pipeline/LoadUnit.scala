@@ -35,6 +35,7 @@ import xiangshan.backend.fu.util.SdtrigExt
 import xiangshan.backend.exu.ExeUnitParams
 import xiangshan.mem.mdp._
 import xiangshan.mem.Bundles._
+import xiangshan.mem.mdp.NewMdp.{MdpUpdateType,MdpUpdate,MdpPredictStatuses}
 import xiangshan.cache._
 import xiangshan.cache.wpu.ReplayCarry
 import xiangshan.cache.mmu._
@@ -185,6 +186,9 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
     // Load RAR rollback
     val rollback = Valid(new Redirect)
 
+    // mdp update 
+    val mdpUpdate = Valid(new MdpUpdate)
+
     // perf
     val debug_ls         = Output(new DebugLsInfoBundle)
     val lsTopdownInfo    = Output(new LsTopdownInfo)
@@ -326,6 +330,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
 
   s0_mmio_select := s0_src_select_vec(mmio_idx) && !s0_kill
   s0_nc_select := s0_src_select_vec(nc_idx) && !s0_kill
+  val s0_replay_select = s0_src_select_vec(lsq_rep_idx) && !s0_kill
   //judgment: is NC with data or not.
   //If true, it's from `io.lsq.nc_ldin` or `io.fast_rep_in`
   val s0_nc_with_data = s0_sel_src.isnc && !s0_kill
@@ -856,6 +861,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   val s1_fire       = s1_valid && !s1_kill && s1_can_go
   val s1_vecActive        = RegEnable(s0_out.vecActive, true.B, s0_fire)
   val s1_nc_with_data = RegNext(s0_nc_with_data)
+  val s1_replay_select = RegEnable(s0_replay_select, s0_fire)
 
   s1_ready := !s1_valid || s1_kill || s2_ready
   when (s0_fire) { s1_valid := true.B }
@@ -1069,6 +1075,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   val s2_pbmt = RegEnable(s1_pbmt, s1_fire)
   val s2_trigger_debug_mode = RegEnable(s1_trigger_debug_mode, false.B, s1_fire)
   val s2_nc_with_data = RegNext(s1_nc_with_data)
+  val s2_replay_select = RegEnable(s1_replay_select, s1_fire)
   val s2_mmio_req = Wire(Valid(new ExuOutput(param)))
   s2_mmio_req.valid := RegNextN(io.lsq.uncache.fire, 2, Some(false.B))
   s2_mmio_req.bits  := RegNextN(io.lsq.uncache.bits.toExuOutput(param), 2)
@@ -1286,6 +1293,12 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
       io.sbuffer.forwardData(i)))
   }
 
+  val s2_fwd_mask_no_ubuffer = io.lsq.forward.forwardMask.asUInt | io.sbuffer.forwardMask.asUInt
+  //来自前递就是mdp预测依赖成功，不来自前递就是mdp预测依赖失败
+  val s2_mdpPredictHit = (~s2_fwd_mask_no_ubuffer.asUInt & s2_in.mask) === 0.U && !io.lsq.forward.dataInvalid
+  s2_out.mdpPredictStatuses := Mux(s2_mdpPredictHit,MdpPredictStatuses.DEPEND,MdpPredictStatuses.INDEPEND) 
+  //TODO:: XSDebug
+
   XSDebug(s2_fire, "[FWD LOAD RESP] pc %x fwd %x(%b) + %x(%b)\n",
     s2_in.uop.pc,
     io.lsq.forward.forwardData.asUInt, io.lsq.forward.forwardMask.asUInt,
@@ -1392,6 +1405,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   val s3_ld_valid_dup = RegEnable(s2_ld_valid_dup, s2_fire)
   val s3_fast_rep     = Wire(Bool())
   val s3_nc_with_data = RegNext(s2_nc_with_data)
+  val s3_replay_select = RegEnable(s2_replay_select, s2_fire)
   val s3_troublem     = GatedValidRegNext(s2_troublem)
   val s3_kill         = s3_in.uop.robIdx.needFlush(io.redirect)
   val s3_vecout       = Wire(new OnlyVecExuOutput)
@@ -1527,6 +1541,30 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
 
   io.lsq.ldin.bits.uop := s3_out.bits.uop
 //  io.lsq.ldin.bits.uop.exceptionVec(loadAddrMisaligned) := Mux(s3_in.onlyMisalignException, false.B, s3_in.uop.exceptionVec(loadAddrMisaligned))
+  io.mdpUpdate.valid := (!io.lsq.ldin.bits.rep_info.need_rep && io.lsq.ldin.bits.updateAddrValid 
+                        && s3_out.bits.uop.loadPred.valid && ~s3_out.bits.uop.loadPred.bits.static)
+  io.mdpUpdate.bits.pc := s3_out.bits.uop.pc
+  io.mdpUpdate.bits.ftqIdx := s3_out.bits.uop.ftqPtr
+  io.mdpUpdate.bits.ftqOffset := s3_out.bits.uop.ftqOffset
+  //FIXME:少个了计数器弱化的情况？
+  /*情况举例:  预测器	 依赖	   非依赖
+              预测器	依赖	  依赖
+              预测器	依赖	  依赖不同地址 loadQRAW
+              预测器	非依赖	非依赖
+              预测器	非依赖	依赖 loadQRAW*/
+  val fromMdpPredictDependency = MuxLookup(s3_out.bits.mdpPredictStatuses, MdpUpdateType.NULL)(Seq(
+    MdpPredictStatuses.DEPEND       -> MdpUpdateType.M_IS,
+    MdpPredictStatuses.INDEPEND     -> MdpUpdateType.M_AW
+  ))
+  val fromMdpPredictNoDependency = MuxLookup(s3_out.bits.mdpPredictStatuses, MdpUpdateType.NULL)(Seq(
+    MdpPredictStatuses.INDEPEND     -> MdpUpdateType.M_IW
+  ))
+  io.mdpUpdate.bits.updateType := Mux(s3_out.bits.uop.loadPred.bits.loadWait,fromMdpPredictDependency,fromMdpPredictNoDependency)
+  // assert(s3_out.bits.uop.loadPredict.valid && ~s3_out.bits.uop.loadPredict.bits.static 
+  //     && s3_out.bits.uop.loadPredict.bits.loadWait && ~s3_replay_select) //TODO:缺少一个正常指令的情况
+  //不需要distance
+  //s3_replay_select
+  io.mdpUpdate.bits.distance := 0.U
 
   val s3_revoke = s3_exception || io.lsq.ldin.bits.rep_info.need_rep || s3_mis_align || (s3_frm_mabuf && io.misalign_ldout.bits.rep_info.need_rep)
   io.lsq.ldld_nuke_query.revoke := s3_revoke

@@ -24,7 +24,7 @@ import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.frontend.bpu.BranchAttribute
 import xiangshan.mem.{LqPtr, SqPtr}
 import xiangshan.mem.VecMissalignedDebugBundle
-
+import xiangshan.mem.mdp.NewMdp.MdpPredictInfo
 import utility._
 
 
@@ -116,6 +116,8 @@ object Bundles {
     val ftqOffset = UInt(FetchBlockInstOffsetWidth.W)
     val isLastInFtqEntry = Bool()
     val instr = UInt(32.W)
+    //
+    val loadPred = Valid(new MdpPredictInfo)
     val debug = OptionWrapper(backendParams.debugEn, new DecodeInUopDebug())
 
     def connectCtrlFlow(source: CtrlFlow): Unit = {
@@ -178,6 +180,8 @@ object Bundles {
     val lastUop = Bool()
     val numWB = UInt(log2Up(MaxUopSize).W) // rob need this
     val needFrm = new NeedFrmBundle
+    //
+    val loadPred = Valid(new MdpPredictInfo)
     val debug = OptionWrapper(backendParams.debugEn, new DecodeOutUopDebug())
 
     private def allSignals = srcType.take(3) ++ Seq(fuType, fuOpType, rfWen, fpWen, vecWen,
@@ -265,6 +269,7 @@ object Bundles {
     val lastUop = Bool()
     val numUops = UInt(log2Up(MaxUopSize).W) // rob need this
     val numWB = UInt(log2Up(MaxUopSize).W) // rob need this
+    val loadPred = Valid(new MdpPredictInfo)
     // rename
     val psrc = Vec(numSrc, UInt(PhyRegIdxWidth.W))
     val psrcVl = UInt(VlPhyRegIdxWidth.W)
@@ -360,6 +365,8 @@ object Bundles {
     val numLsElem = NumLsElem()
     val rasAction = BranchAttribute.RasAction()
     // for mdp
+    val loadPred = Valid(new MdpPredictInfo)
+
     val storeSetHit = Bool()
     val waitForRobIdx = new RobPtr
     val loadWaitBit = Bool()
@@ -420,6 +427,7 @@ object Bundles {
     val numLsElem = Option.when(params.isVecMemIQ)(NumLsElem())
     val rasAction = Option.when(params.needRasAction)(BranchAttribute.RasAction())
     // for mdp
+    val loadPred          = Option.when(params.isLdAddrIQ)(Valid(new MdpPredictInfo))
     val storeSetHit       = Option.when(params.isLdAddrIQ)(Bool())
     val waitForRobIdx     = Option.when(params.isLdAddrIQ)(new RobPtr)
     val loadWaitBit       = Option.when(params.isLdAddrIQ)(Bool())
@@ -502,6 +510,7 @@ object Bundles {
     val numLsElem = Option.when(params.isVecMemIQ)(NumLsElem())
     val rasAction = Option.when(params.needRasAction)(BranchAttribute.RasAction())
     // for mdp
+    val loadPred          = Option.when(params.isLdAddrIQ)(Valid(new MdpPredictInfo))
     val storeSetHit       = Option.when(params.isLdAddrIQ)(Bool())
     val waitForRobIdx     = Option.when(params.isLdAddrIQ)(new RobPtr)
     val loadWaitBit       = Option.when(params.isLdAddrIQ)(Bool())
@@ -601,6 +610,8 @@ object Bundles {
     val snapshot        = Bool()
     val perfDebugInfo   = new PerfDebugInfo
     val debug_seqNum    = InstSeqNum()
+    // mdp
+    val loadPred        = Valid(new MdpPredictInfo)
     val storeSetHit     = Bool() // inst has been allocated an store set
     val waitForRobIdx   = new RobPtr // store set predicted previous store robIdx
     // Load wait is needed
@@ -1052,6 +1063,7 @@ object Bundles {
       val fixedTaken = Bool()
       val predTaken = Bool()
     }) else None
+    val loadPred       = OptionWrapper(params.hasLoadExu, Valid(new MdpPredictInfo))
     val loadWaitBit    = OptionWrapper(params.hasLoadExu, Bool())
     val waitForRobIdx  = OptionWrapper(params.hasLoadExu, new RobPtr) // store set predicted previous store robIdx
     val storeSetHit    = OptionWrapper(params.hasLoadExu, Bool()) // inst has been allocated an store set
@@ -1162,6 +1174,7 @@ object Bundles {
       uop.vlWen          := this.vlWen.getOrElse(false.B)
       uop.flushPipe      := this.flushPipe.getOrElse(false.B)
       uop.pc             := this.pc.getOrElse(0.U) + (this.ftqOffset.getOrElse(0.U) << instOffsetBits)
+      uop.loadPred       := this.loadPred.getOrElse(0.U.asTypeOf(Valid(new MdpPredictInfo)))
       uop.loadWaitBit    := this.loadWaitBit.getOrElse(false.B)
       uop.waitForRobIdx  := this.waitForRobIdx.getOrElse(0.U.asTypeOf(new RobPtr))
       uop.storeSetHit    := this.storeSetHit.getOrElse(false.B)

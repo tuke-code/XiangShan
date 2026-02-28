@@ -41,6 +41,7 @@ import xiangshan.backend.issue.{FpScheduler, IntScheduler, VecScheduler}
 import xiangshan.backend.trace._
 import xiangshan.frontend.bpu.BranchAttribute
 import xiangshan.Redirect.findOldestRedirect
+import xiangshan.mem.mdp.NewMdp.MdpUpdate
 
 class CtrlToFtqIO(implicit p: Parameters) extends XSBundle {
   val redirect = Valid(new Redirect)
@@ -48,6 +49,7 @@ class CtrlToFtqIO(implicit p: Parameters) extends XSBundle {
   val ftqIdxSelOH = Valid(UInt((BackendRedirectNum).W))
 
   val resolve = Vec(backendParams.BrhCnt, Valid(new Resolve))
+  val mdpUpdate = Vec(LoadPipelineWidth + 1, Valid(new MdpUpdate))
 
   val commit = Valid(new FtqPtr)
   val callRetCommit = Vec(CommitWidth, Valid(new CallRetCommit))
@@ -199,6 +201,7 @@ class CtrlBlockImp(
   }).toSeq
 
   private val memViolation = io.fromMem.violation
+  private val mdpUpdate    = io.fromMem.mdpUpdate
   val loadReplay = Wire(ValidIO(new Redirect))
   loadReplay.valid := GatedValidRegNext(memViolation.valid)
   loadReplay.bits := RegEnable(memViolation.bits, memViolation.valid)
@@ -356,6 +359,8 @@ class CtrlBlockImp(
   //exception
   io.frontend.toFtq.ftqIdxAhead.last.valid := s4_flushFromRobValidAhead
   io.frontend.toFtq.ftqIdxAhead.last.bits := frontendFlushBits.ftqIdx
+  //MemViolation for train(no-flush). flush use loadReplay
+  io.frontend.toFtq.mdpUpdate := mdpUpdate
 
   for (i <- 0 until CommitWidth) {
     val crc = io.frontend.toFtq.callRetCommit(i)
@@ -945,6 +950,7 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
   val fromMem = new Bundle {
     val stIn = Vec(params.StaExuCnt, Flipped(ValidIO(new StoreUnitToLFST))) // use storeSetHit, ssid, robIdx
     val violation = Flipped(ValidIO(new Redirect))
+    val mdpUpdate = Flipped(Vec(LoadPipelineWidth + 1, Valid(new MdpUpdate)))
   }
   val memStPcRead = Vec(params.StaCnt, Flipped(new FtqRead(UInt(VAddrBits.W))))
   val memHyPcRead = Vec(params.HyuCnt, Flipped(new FtqRead(UInt(VAddrBits.W))))

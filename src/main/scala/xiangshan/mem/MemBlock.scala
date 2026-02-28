@@ -45,6 +45,7 @@ import xiangshan.cache._
 import xiangshan.cache.mmu._
 import xiangshan.frontend.instruncache.HasInstrUncacheConst
 import xiangshan.mem.prefetch.{PrefetcherWrapper, TLBPlace}
+import xiangshan.mem.mdp.NewMdp.MdpUpdate
 
 trait HasMemBlockParameters extends HasXSParameter {
   val intSchdParams = backendParams.intSchdParams.get
@@ -207,6 +208,7 @@ class mem_to_ooo(implicit p: Parameters) extends MemBlockBundle {
   val stIssuePtr = Output(new SqPtr())
 
   val memoryViolation = ValidIO(new Redirect)
+  val mdpUpdate       = Vec(LoadPipelineWidth + 1, Valid(new MdpUpdate)) // + 1 from RAW oldestViolation
   val sbIsEmpty = Output(Bool())
 
   val lsTopdownInfo = Vec(LdExuCnt, Output(new LsTopdownInfo))
@@ -1158,6 +1160,9 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   io.mem_to_ooo.memoryViolation := oldestRedirect
   io.mem_to_ooo.lsqio.lqCanAccept  := lsq.io.lqCanAccept
   io.mem_to_ooo.lsqio.sqCanAccept  := lsq.io.sqCanAccept
+
+  val allMdpUpdate = loadUnits.map(_.io.mdpUpdate) ++ lsq.io.mdpUpdateOldest
+  io.mem_to_ooo.mdpUpdate := allMdpUpdate
 
   // lsq.io.uncache        <> uncache.io.lsq
   val s_idle :: s_scalar_uncache :: s_vector_uncache :: Nil = Enum(3)

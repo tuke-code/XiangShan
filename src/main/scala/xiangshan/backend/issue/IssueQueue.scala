@@ -934,6 +934,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       x.fixedTaken := deqEntryVec(i).bits.payload.fixedTaken.getOrElse(false.B)
       x.predTaken := deqEntryVec(i).bits.payload.predTaken.getOrElse(false.B)
     })
+    deq.bits.common.loadPred.foreach(_ := deqEntryVec(i).bits.payload.loadPred.get)
     deq.bits.common.loadWaitBit.foreach(_ := deqEntryVec(i).bits.payload.loadWaitBit.get)
     deq.bits.common.waitForRobIdx.foreach(_ := deqEntryVec(i).bits.payload.waitForRobIdx.get)
     deq.bits.common.storeSetHit.foreach(_ := deqEntryVec(i).bits.payload.storeSetHit.get)
