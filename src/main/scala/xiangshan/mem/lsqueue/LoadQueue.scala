@@ -33,6 +33,7 @@ import xiangshan.mem.mdp._
 import xiangshan.mem.Bundles._
 import xiangshan.cache._
 import xiangshan.cache.mmu._
+import xiangshan.mem.mdp.NewMdp.MdpUpdate
 
 class LqPtr(implicit p: Parameters) extends CircularQueuePtr[LqPtr](
   p => p(XSCoreParamsKey).VirtualLoadQueueSize
@@ -190,6 +191,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     val release = Flipped(Valid(new Release))
     val nuke_rollback = Vec(StorePipelineWidth, Output(Valid(new Redirect)))
     val nack_rollback = Vec(1, Output(Valid(new Redirect))) // uncachebuffer
+    val mdpUpdateOldest = Output(Valid(new MdpUpdate))
     val rob = Flipped(new RobLsqIO)
     val uncache = new UncacheWordIO
     val exceptionAddr = new ExceptionAddrIO
@@ -309,7 +311,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
 
   io.nuke_rollback := loadQueueRAW.io.rollback
   io.nack_rollback(0) := uncacheBuffer.io.rollback
-
+  io.mdpUpdateOldest := loadQueueRAW.io.mdpUpdateOldest
   /* <------- DANGEROUS: Don't change sequence here ! -------> */
 
   /**

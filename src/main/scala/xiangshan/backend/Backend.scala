@@ -45,6 +45,7 @@ import xiangshan.backend.rob.{RobCoreTopDownIO, RobDebugRollingIO, RobLsqIO, Rob
 import xiangshan.backend.trace.TraceCoreInterface
 import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
+import xiangshan.mem.mdp.NewMdp.MdpUpdate
 
 
 class Backend(val params: BackendParams)(implicit p: Parameters) extends LazyModule
@@ -216,6 +217,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   ctrlBlock.io.fromWB.delayedOldestExuRedirect := intRegion.io.wbDataPathToCtrlBlock.delayedOldestExuRedirect.get
   ctrlBlock.io.fromMem.stIn <> io.mem.stIn
   ctrlBlock.io.fromMem.violation <> io.mem.memoryViolation
+  ctrlBlock.io.fromMem.mdpUpdate <> io.mem.mdpUpdate
   ctrlBlock.io.lqCanAccept := io.mem.lqCanAccept
   ctrlBlock.io.sqCanAccept := io.mem.sqCanAccept
 
@@ -640,6 +642,7 @@ class BackendMemIO(implicit p: Parameters, params: BackendParams) extends XSBund
   val stIn = Input(Vec(params.StaExuCnt, ValidIO(new StoreUnitToLFST)))
 
   val memoryViolation = Flipped(ValidIO(new Redirect))
+  val mdpUpdate = Flipped(Vec(LoadPipelineWidth + 1, Valid(new MdpUpdate)))
   val exceptionAddr = Input(new Bundle {
     val vaddr = UInt(XLEN.W)
     val gpaddr = UInt(XLEN.W)

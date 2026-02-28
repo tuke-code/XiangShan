@@ -27,6 +27,7 @@ import xiangshan.backend._
 import xiangshan.backend.rob.{RobLsqIO, RobPtr}
 import xiangshan.backend.fu.FuType
 import xiangshan.mem.Bundles._
+import xiangshan.mem.mdp.NewMdp.MdpUpdate
 import xiangshan.cache._
 import xiangshan.cache.{DCacheLineIO, DCacheWordIO, MemoryOpConstants}
 import xiangshan.cache.{CMOReq, CMOResp}
@@ -96,6 +97,7 @@ class LsqWrapper(implicit p: Parameters) extends XSModule
     val rob = Flipped(new RobLsqIO)
     val nuke_rollback = Vec(StorePipelineWidth, Output(Valid(new Redirect)))
     val nack_rollback = Vec(1, Output(Valid(new Redirect))) // uncahce
+    val mdpUpdateOldest = Vec(1, Output(Valid(new MdpUpdate)))
     val release = Flipped(Valid(new Release))
    // val refill = Flipped(Valid(new Refill))
     val tl_d_channel  = Input(new DcacheToLduForwardIO)
@@ -219,6 +221,7 @@ class LsqWrapper(implicit p: Parameters) extends XSModule
   loadQueue.io.rob                 <> io.rob
   loadQueue.io.nuke_rollback       <> io.nuke_rollback
   loadQueue.io.nack_rollback       <> io.nack_rollback
+  loadQueue.io.mdpUpdateOldest     <> io.mdpUpdateOldest(0)
   loadQueue.io.replay              <> io.replay
  // loadQueue.io.refill              <> io.refill
   loadQueue.io.tl_d_channel        <> io.tl_d_channel

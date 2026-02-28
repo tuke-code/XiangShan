@@ -144,7 +144,8 @@ class XSCoreImp(outer: XSCoreBase) extends LazyModuleImp(outer)
   backend.io.mem.stIn.zip(memBlock.io.mem_to_ooo.updateLFST).foreach { case (sink, source) =>
     sink := source
   }
-  backend.io.mem.memoryViolation := memBlock.io.mem_to_ooo.memoryViolation
+  backend.io.mem.memoryViolation := memBlock.io.mem_to_ooo.memoryViolation //TODO: delete it ？
+  backend.io.mem.mdpUpdate       := memBlock.io.mem_to_ooo.mdpUpdate
   backend.io.mem.lsqEnqIO <> memBlock.io.ooo_to_mem.enqLsq
   backend.io.mem.sqDeq := memBlock.io.mem_to_ooo.sqDeq
   backend.io.mem.lqDeq := memBlock.io.mem_to_ooo.lqDeq

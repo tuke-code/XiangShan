@@ -28,6 +28,9 @@ import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.frontend.ibuffer.IBufPtr
 import xiangshan.frontend.icache.HasICacheParameters
 import xiangshan.frontend.icache.ICacheRespBundle
+import xiangshan.PhrInfo
+import xiangshan.mem.mdp.NewMdp.MdpPrediction
+import xiangshan.mem.mdp.NewMdp.HasMdpParameters
 
 /* ***
  * Naming:
@@ -62,8 +65,9 @@ class InstrIndexEntry(implicit p: Parameters) extends IfuBundle {
   val value: UInt = UInt(log2Ceil(ICacheLineBytes / 2).W)
 }
 
-class FetchBlockInfo(implicit p: Parameters) extends IfuBundle {
+class FetchBlockInfo(implicit p: Parameters) extends IfuBundle with HasMdpParameters{
   val ftqIdx:         FtqPtr      = new FtqPtr
+  val mdpPrediction:  Vec[Valid[MdpPrediction]] = Vec(NumMdpResultEntries, Valid(new MdpPrediction))
   val doubleline:     Bool        = Bool()
   val predTakenIdx:   Valid[UInt] = Valid(UInt(IfuIdxWidth.W))
   val takenCfiOffset: Valid[UInt] = Valid(UInt(FetchBlockInstOffsetWidth.W))
@@ -104,6 +108,8 @@ class FetchBlockInfo(implicit p: Parameters) extends IfuBundle {
     target         := ftqFetch.nextStartVAddr
     pcHighPlus1    := ftqFetch.startVAddr(VAddrBits - 1, PcCutPoint) + 1.U
     fetchSize      := calcFetchSize
+    //
+    mdpPrediction  := ftqFetch.mdpPrediction
     this
   }
 }

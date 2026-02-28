@@ -32,6 +32,10 @@ import xiangshan.frontend.bpu.ras.RasRedirectMeta
 import xiangshan.frontend.bpu.sc.ScMeta
 import xiangshan.frontend.bpu.tage.TageMeta
 import xiangshan.frontend.bpu.utage.MicroTageMeta
+import xiangshan.mem.mdp.NewMdp.MdpBaseMeta
+import xiangshan.mem.mdp.NewMdp.MdpPrediction
+import xiangshan.mem.mdp.NewMdp.HasMdpParameters
+
 
 /* *** public const & type *** */
 class BranchAttribute extends Bundle {
@@ -191,12 +195,14 @@ class BpuCtrl extends Bundle {
 }
 
 // Bpu -> Ftq
-class BpuPrediction(implicit p: Parameters) extends BpuBundle with HalfAlignHelper {
+class BpuPrediction(implicit p: Parameters) extends BpuBundle with HasMdpParameters with HalfAlignHelper {
   val startPc:        PrunedAddr  = PrunedAddr(VAddrBits)
   val target:         PrunedAddr  = PrunedAddr(VAddrBits)
   val takenCfiOffset: Valid[UInt] = Valid(UInt(CfiPositionWidth.W))
   // override valid
   val s3Override: Bool = Bool()
+  //
+  val mdpPrediction: Vec[Valid[MdpPrediction]] = Vec(NumMdpResultEntries, Valid(new MdpPrediction))
 
   def fromStage(startPc: PrunedAddr, prediction: Prediction): Unit = {
     this.startPc              := startPc
@@ -282,6 +288,7 @@ class BpuResolveMeta(implicit p: Parameters) extends BpuBundle {
   val ittage: IttageMeta  = new IttageMeta
   val phr:    PhrMeta     = new PhrMeta
 
+  val mdpBase: MdpBaseMeta = new MdpBaseMeta
   val debug_utage: Option[MicroTageMeta] = Option.when(!env.FPGAPlatform)(new MicroTageMeta)
 }
 

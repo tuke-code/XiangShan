@@ -27,6 +27,7 @@ import xiangshan.backend.rob.RobPtr
 import xiangshan.cache._
 import xiangshan.cache.wpu.ReplayCarry
 import xiangshan.mem.prefetch.{PrefetchReqBundle, TrainReqBundle}
+import xiangshan.mem.mdp.NewMdp.{MdpPredictStatuses,MdpPredictInfo}
 
 import scala.math._
 
@@ -115,7 +116,7 @@ object Bundles {
     val feedbacked = Bool()
     val schedIndex = UInt(log2Up(LoadQueueReplaySize).W)
     val tlbNoQuery = Bool()
-
+    val mdpPredictStatuses = UInt(MdpPredictStatuses.width.W)
     // misalign
     val isFrmMisAlignBuf = Bool()
     val isMisalign = Bool()

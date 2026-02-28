@@ -133,6 +133,9 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s0_fetchBlock = VecInit.tabulate(FetchPorts)(i =>
     Wire(new FetchBlockInfo).fromFtqRequest(s0_ftqFetch(i), s0_flush || s0_flushFromBpu(i))
   )
+  //
+  private val s0_mdpPredication  = s0_fetchBlock(0).mdpPrediction
+  //
   private val s0_firstSize       = s0_fetchBlock(0).fetchSize
   private val s0_firstValid      = s0_ftqFetch(0).valid
   private val s0_secondValid     = s0_ftqFetch(1).valid
@@ -194,6 +197,8 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s1_icacheMeta  = VecInit.tabulate(FetchPorts)(i => Wire(new ICacheMeta).fromICacheResp(fromICache.bits))
   private val s1_maybeRvc    = Cat(s1_maybeRvcMap, s1_maybeRvcMap) >> s1_fetchBlock(0).startVAddr(5, 1)
   private val s1_rawData     = fromICache.bits.data
+  //megre cachedata and mdpPrediction to instr
+  private val s1_mdpPrediction = RegEnable(s0_mdpPredication, s0_fire)
   private val s1_perfInfo    = io.fromICache.perf
 
   instrBoundary.io.req.valid                 := s1_valid
@@ -645,6 +650,8 @@ class Ifu(implicit p: Parameters) extends IfuModule
     0.U,
     s3_rvcExceptionOffset
   )
+  io.toIBuffer.bits.mdpPredictInfos := 0.U.asTypeOf(io.toIBuffer.bits.mdpPredictInfos)
+  dontTouch(io.toIBuffer.bits.mdpPredictInfos)
 
   io.toIBuffer.bits.triggered := s3_alignTriggered
 
@@ -724,6 +731,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
     // so the valid signal enqueued into the IBuffer must align with s3_alignBlockStartPos.
     io.toIBuffer.bits.valid     := s3_alignBlockStartPos.asUInt
     io.toIBuffer.bits.enqEnable := s3_alignBlockStartPos.asUInt
+    //
 
     uncacheFlushWb.bits.isRVC     := uncacheIsRvc
     uncacheFlushWb.bits.attribute := brAttribute

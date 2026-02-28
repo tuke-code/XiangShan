@@ -26,8 +26,10 @@ import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.backend.rob.RobPtr
 import xiangshan.backend.Bundles.DynInst
 import xiangshan.mem.mdp._
+import xiangshan.mem.mdp.NewMdp.MdpUpdate
 import xiangshan.mem.Bundles._
 import xiangshan.cache._
+import xiangshan.mem.mdp.NewMdp.MdpUpdateType
 
 class LoadQueueRAW(implicit p: Parameters) extends XSModule
   with HasDCacheParameters
@@ -47,6 +49,9 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
 
     // global rollback flush
     val rollback = Vec(StorePipelineWidth,Output(Valid(new Redirect)))
+    
+    // mdp update 
+    val mdpUpdateOldest = Output(Valid(new MdpUpdate))
 
     // to LoadQueueReplay
     val stAddrReadySqPtr = Input(new SqPtr)
@@ -329,12 +334,14 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   val rollbackLqWb = Wire(Vec(StorePipelineWidth, Valid(new DynInst)))
   val stFtqIdx = Wire(Vec(StorePipelineWidth, new FtqPtr))
   val stFtqOffset = Wire(Vec(StorePipelineWidth, UInt(FetchBlockInstOffsetWidth.W)))
+  val stRobIdx = Wire(Vec(StorePipelineWidth, new RobPtr))
   for (w <- 0 until StorePipelineWidth) {
     val detectedRollback = detectRollback(w)
     rollbackLqWb(w).valid := detectedRollback._1 && DelayN(storeIn(w).valid && !storeIn(w).bits.miss, TotalSelectCycles)
     rollbackLqWb(w).bits  := detectedRollback._2
     stFtqIdx(w) := DelayNWithValid(storeIn(w).bits.uop.ftqPtr, storeIn(w).valid, TotalSelectCycles)._2
     stFtqOffset(w) := DelayNWithValid(storeIn(w).bits.uop.ftqOffset, storeIn(w).valid, TotalSelectCycles)._2
+    stRobIdx(w) := DelayNWithValid(storeIn(w).bits.uop.robIdx, storeIn(w).valid, TotalSelectCycles)._2
   }
 
   // select rollback (part2), generate rollback request, then fire rollback request
@@ -360,6 +367,21 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   })
   io.rollback := allRedirect
 
+  val oldestOH = Redirect.selectOldestRedirect(allRedirect)
+  val mdpUpdateFilter = (0 until StorePipelineWidth).map(i => {
+    val update = Wire(Valid(new MdpUpdate))
+    val predictFromStatic = rollbackLqWb(i).bits.loadPred.bits.static
+    update.valid := rollbackLqWb(i).valid && rollbackLqWb(i).bits.loadPred.valid
+    update.bits.pc     := rollbackLqWb(i).bits.pc
+    update.bits.ftqIdx := rollbackLqWb(i).bits.ftqPtr
+    update.bits.ftqOffset := rollbackLqWb(i).bits.ftqOffset
+    update.bits.updateType := Mux(predictFromStatic, MdpUpdateType.M_WZ , MdpUpdateType.M_AS)
+    update.bits.distance   := update.bits.getDistance(rollbackLqWb(i).bits.robIdx,stRobIdx(i))
+    update
+  })
+
+  io.mdpUpdateOldest := Mux1H(oldestOH, mdpUpdateFilter)
+
   // perf cnt
   val canEnqCount = PopCount(io.query.map(_.req.fire))
   val validCount = freeList.io.validCount
@@ -375,4 +397,6 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   )
   generatePerfEvent()
   // end
+
+  
 }

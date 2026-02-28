@@ -51,6 +51,9 @@ import xiangshan.cache.HasDCacheParameters
 import xiangshan.mem.LqPtr
 import xiangshan.mem.SqPtr
 import xiangshan.mem.prefetch.PrefetchCtrl
+import xiangshan.frontend.bpu.history.phr.PhrAllFoldedHistories
+import xiangshan.frontend.bpu.history.phr.HasPhrParameters
+import xiangshan.mem.mdp.NewMdp.MdpPredictInfo
 
 class ValidUndirectioned[T <: Data](gen: T) extends Bundle {
   val valid = Bool()
@@ -114,6 +117,8 @@ class CtrlFlow(implicit p: Parameters) extends XSBundle {
   val ftqPtr = new FtqPtr
   val ftqOffset = UInt(FetchBlockInstOffsetWidth.W)
   val isLastInFtqEntry = Bool()
+  //
+  val loadPred     = Valid(new MdpPredictInfo)
   val debug_seqNum = InstSeqNum()
 }
 
@@ -809,4 +814,8 @@ class LowPowerIO(implicit p: Parameters) extends Bundle {
   // power on/off sequence control for Core iso/rst
   val i_cpu_iso_en= Input(Bool())
   val i_cpu_sw_rst_n = Input(Bool())
+}
+
+class PhrInfo(implicit p: Parameters) extends XSBundle with HasPhrParameters{
+  val phr = new PhrAllFoldedHistories(AllFoldedHistoryInfo)
 }

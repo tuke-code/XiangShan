@@ -52,7 +52,7 @@ class PreDecode(implicit p: Parameters) extends IfuModule with PreDecodeHelper {
 
     io.resp.pd(i).valid := io.req.bits.instrValid(i)
     io.resp.pd(i).isRVC := io.req.bits.isRvc(i)
-
+    io.resp.pd(i).isLoad:= inst(6,0) === "b0000011".U
     // for diff purpose only
     io.resp.pd(i).brAttribute := BranchAttribute.decode(inst, io.req.valid)
 

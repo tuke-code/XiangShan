@@ -44,6 +44,12 @@ import xiangshan.frontend.icache.ICacheRespBundle
 import xiangshan.frontend.icache.ICacheTopdownInfo
 import xiangshan.frontend.instruncache.InstrUncacheReq
 import xiangshan.frontend.instruncache.InstrUncacheResp
+import xiangshan.frontend.bpu.history.phr.PhrMeta
+import xiangshan.PhrInfo
+import xiangshan.mem.mdp.NewMdp.{MdpUpdate,MdpPrediction,MdpPredictInfo}
+import xiangshan.XSBundle
+import xiangshan.mem.mdp.NewMdp.MdpTrain
+import xiangshan.mem.mdp.NewMdp.HasMdpParameters
 
 class FrontendTopDownBundle(implicit p: Parameters) extends FrontendBundle {
   val reasons:    Vec[Bool] = Vec(TopDownCounters.NumStallReasons.id, Bool())
@@ -66,10 +72,12 @@ class FtqToBpuIO(implicit p: Parameters) extends FrontendBundle {
   val commit:          Valid[BpuCommit]      = Valid(new BpuCommit)
   val bpuPtr:          FtqPtr                = Output(new FtqPtr)
   val redirectFromIFU: Bool                  = Output(Bool())
+
+  val mdpTrain:        DecoupledIO[MdpTrain] = Decoupled(new MdpTrain)
 }
 
 // TODO: unify FetchRequestBundle (Ftq->Ifu) with FtqFetchRequest (Ftq->ICache.MainPipe)
-class FetchRequestBundle(implicit p: Parameters) extends FrontendBundle with ICacheCacheLineHelper {
+class FetchRequestBundle(implicit p: Parameters) extends FrontendBundle with ICacheCacheLineHelper with HasMdpParameters{
 
   // fast path: Timing critical
   val valid:              Bool       = Bool()
@@ -79,6 +87,8 @@ class FetchRequestBundle(implicit p: Parameters) extends FrontendBundle with ICa
   // slow path
   val ftqIdx:         FtqPtr      = new FtqPtr
   val takenCfiOffset: Valid[UInt] = Valid(UInt(CfiPositionWidth.W))
+  //
+  val mdpPrediction: Vec[Valid[MdpPrediction]] = Vec(NumMdpResultEntries, Valid(new MdpPrediction))
 
   def crossCacheline: Bool = super.isCrossLine(this.startVAddr, this.takenCfiOffset.bits)
 
@@ -305,6 +315,7 @@ class PreDecodeInfo extends Bundle { // 8 bit
   val valid:       Bool            = Bool()
   val isRVC:       Bool            = Bool()
   val brAttribute: BranchAttribute = new BranchAttribute
+  val isLoad:      Bool            = Bool()
   // val excType = UInt(3.W)
   def isBr:   Bool = brAttribute.isConditional
   def isJal:  Bool = brAttribute.isDirect
@@ -345,6 +356,8 @@ class FetchToIBuffer(implicit p: Parameters) extends FrontendBundle {
   val prevInstrCount: UInt                  = UInt(log2Ceil(IBufferEnqueueWidth).W)
   val debug_seqNum:   Vec[InstSeqNum]       = Vec(IBufferEnqueueWidth, InstSeqNum())
   val ftqPtr:         Vec[FtqPtr]           = Vec(IBufferEnqueueWidth, new FtqPtr)
+  //
+  val mdpPredictInfos: Vec[Valid[MdpPredictInfo]] = Vec(IBufferEnqueueWidth, Valid(new MdpPredictInfo))
   val topdownInfo:    FrontendTopDownBundle = new FrontendTopDownBundle
 }
 
