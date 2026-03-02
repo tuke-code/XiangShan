@@ -88,10 +88,16 @@ class MdpUpdate(implicit p: Parameters) extends XSBundle with HasMdpParameters w
   val pc          = PrunedAddr(VAddrBits)
   val ftqIdx      = new FtqPtr()
   val ftqOffset   = UInt(FetchBlockInstOffsetWidth.W) 
-  val updateType  = UInt(MdpUpdateType.width.W) //为高阻塞，为低不阻塞
+  val updateType  = UInt(MdpUpdateType.width.W)
   val distance    = UInt(RobDistance.W)      //loadRobIdx - distance = storeRobIdx
   def getDistance[T <: CircularQueuePtr[T]](enq_ptr: T, deq_ptr: T): UInt = 
     distanceBetween(enq_ptr, deq_ptr)
+  def updateIsNull:           Bool = updateType === MdpUpdateType.NULL
+  def updateIsWriteZero:      Bool = updateType === MdpUpdateType.M_WZ
+  def updateIsAllocateWeak:   Bool = updateType === MdpUpdateType.M_AW
+  def updateIsAllocateStrong: Bool = updateType === MdpUpdateType.M_AS
+  def updateIsNxStrong:       Bool = updateType === MdpUpdateType.M_IS
+  def updateIsNxWeak:         Bool = updateType === MdpUpdateType.M_IW
 }
 
 class MdpResolveEntry(implicit p: Parameters) extends XSBundle with HasMdpParameters{
