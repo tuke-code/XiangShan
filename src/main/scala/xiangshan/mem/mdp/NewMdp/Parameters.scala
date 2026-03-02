@@ -255,12 +255,13 @@ object MdpPredictStatuses {
   val width = 2 
 }
 
-object MdpUpdateType {
-  val NULL = 0.U
-  val M_WZ = 1.U //WriteZero
-  val M_AW = 2.U //AllocateWeak Ni+1 & Weak Ni
-  val M_AS = 3.U //AllocateStrong Ni+1 & Weak Ni
-  val M_IS = 4.U //Ni Strong
-  val M_IW = 5.U //Ni Weak
+object MdpUpdateType{
   val width = 3
+  val NULL = 0.U(width.W)
+  val M_WZ = 1.U(width.W) //WriteZero
+  val M_AW = 2.U(width.W) //AllocateWeak Ni+1 & Weak Ni
+  val M_AS = 3.U(width.W) //AllocateStrong Ni+1 & Weak Ni
+  val M_IS = 4.U(width.W) //Ni Strong
+  val M_IW = 5.U(width.W) //Ni Weak
 }
+

@@ -44,6 +44,7 @@ import xiangshan.frontend.PrunedAddrInit
 import xiangshan.frontend.bpu.BranchAttribute
 import xiangshan.frontend.ibuffer.IBufPtr
 import xiangshan.frontend.icache.PmpCheckBundle
+import xiangshan.mem.mdp.NewMdp.MdpPredictInfo
 
 class Ifu(implicit p: Parameters) extends IfuModule
     with PreDecodeHelper
@@ -133,8 +134,8 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s0_fetchBlock = VecInit.tabulate(FetchPorts)(i =>
     Wire(new FetchBlockInfo).fromFtqRequest(s0_ftqFetch(i), s0_flush || s0_flushFromBpu(i))
   )
-  //
-  private val s0_mdpPredication  = s0_fetchBlock(0).mdpPrediction
+  //TODO: 暂时不考虑two fetch
+  private val s0_loadPredVec = getMdpInfo(s0_ftqFetch(0).startVAddr, s0_ftqFetch(0).mdpPrediction)
   //
   private val s0_firstSize       = s0_fetchBlock(0).fetchSize
   private val s0_firstValid      = s0_ftqFetch(0).valid
@@ -198,7 +199,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s1_maybeRvc    = Cat(s1_maybeRvcMap, s1_maybeRvcMap) >> s1_fetchBlock(0).startVAddr(5, 1)
   private val s1_rawData     = fromICache.bits.data
   //megre cachedata and mdpPrediction to instr
-  private val s1_mdpPrediction = RegEnable(s0_mdpPredication, s0_fire)
+  private val s1_loadPredVec  = RegEnable(s0_loadPredVec, s0_fire)
   private val s1_perfInfo    = io.fromICache.perf
 
   instrBoundary.io.req.valid                 := s1_valid
@@ -247,6 +248,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   instrCompactor.io.req.rawInstrValid           := dealInstrValid
   instrCompactor.io.req.rawIsRvc                := rawIsRvc
   instrCompactor.io.req.instrCountBeforeCurrent := instrCountBeforeCurrent
+  instrCompactor.io.req.loadPredVec             := s1_loadPredVec
   private val instrCompactInfo = Wire(new InstrCompactBundle(FetchBlockInstNum))
   instrCompactInfo                   := instrCompactor.io.resp
   instrCompactInfo.instrEndOffset(0) := Mux(s1_prevLastIsHalfRvi, 0.U, Mux(rawIsRvc(0), 0.U, 1.U))
@@ -602,6 +604,18 @@ class Ifu(implicit p: Parameters) extends IfuModule
   io.toIBuffer.bits.isRvc          := s3_alignPds.map(_.isRVC)
   io.toIBuffer.bits.pc             := s3_alignPc
   io.toIBuffer.bits.prevIBufEnqPtr := s3_prevIBufEnqPtr
+  io.toIBuffer.bits.mdpPredictInfos := {
+    val rawLoadPredInfo = s3_alignCompactInfo.instrLoadPred
+    val mdpPredInfo = Wire(Vec(IBufferEnqueueWidth, Valid(new MdpPredictInfo)))
+    for (i <- 0 until IBufferEnqueueWidth) { 
+      // mdpPredInfo(i).valid //TODO:
+      mdpPredInfo(i).valid := s3_alignPds(i).isLoad
+      mdpPredInfo(i).bits.static   := rawLoadPredInfo(i).valid
+      mdpPredInfo(i).bits.loadWait := rawLoadPredInfo(i).bits.loadWait && s3_alignPds(i).isLoad
+      mdpPredInfo(i).bits.distance := rawLoadPredInfo(i).bits.distance
+    }
+    mdpPredInfo
+  }
   io.toIBuffer.bits.ftqPtr.zipWithIndex.foreach { case (ftqPtr, i) =>
     ftqPtr := Mux(s3_alignCompactInfo.selectBlock(i), s3_alignFetchBlock(1).ftqIdx, s3_alignFetchBlock(0).ftqIdx)
   }
@@ -650,8 +664,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
     0.U,
     s3_rvcExceptionOffset
   )
-  io.toIBuffer.bits.mdpPredictInfos := 0.U.asTypeOf(io.toIBuffer.bits.mdpPredictInfos)
-  dontTouch(io.toIBuffer.bits.mdpPredictInfos)
+
 
   io.toIBuffer.bits.triggered := s3_alignTriggered
 

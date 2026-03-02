@@ -21,6 +21,9 @@ import utility.SignExt
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.PrunedAddrInit
 import xiangshan.frontend.icache.ICacheRespBundle
+import xiangshan.frontend.bpu.HalfAlignHelper
+import xiangshan.mem.mdp.NewMdp.{HasMdpParameters,MdpPredictInfo,MdpPrediction}
+
 
 trait PreDecodeHelper extends HasIfuParameters {
   def isRVC(inst: UInt): Bool = inst(1, 0) =/= 3.U
@@ -40,7 +43,7 @@ trait PreDecodeHelper extends HasIfuParameters {
   }
 }
 
-trait IfuHelper extends HasIfuParameters {
+trait IfuHelper extends HasIfuParameters with HalfAlignHelper with HasMdpParameters {
   private object ShiftType {
     val NoShift     = 0.U(2.W)
     val ShiftRight1 = 1.U(2.W)
@@ -120,6 +123,23 @@ trait IfuHelper extends HasIfuParameters {
     out.selectBlock    := alignData(indata.selectBlock, shiftNum, false.B)
     out.instrPcLower   := alignData(indata.instrPcLower, shiftNum, 0.U((PcCutPoint + 1).W))
     out.instrEndOffset := alignData(indata.instrEndOffset, shiftNum, 0.U(log2Ceil(FetchBlockInstNum).W))
+    out.instrLoadPred  := alignData(indata.instrLoadPred, shiftNum, 0.U.asTypeOf(Valid(new MdpPredictInfo)))
     out
+  }
+
+  def getMdpInfo(startPc: PrunedAddr, mdpPrediction: Vec[Valid[MdpPrediction]]): Vec[Valid[MdpPredictInfo]] = {
+    val ftqOffsetVec = Wire(Vec(NumMdpResultEntries, UInt(CfiPositionWidth.W)))
+    val loadPredVec  = WireDefault(VecInit(Seq.fill(FetchBlockInstNum)(0.U.asTypeOf(Valid(new MdpPredictInfo)))))
+    for (i <- 0 until NumMdpResultEntries) {
+      ftqOffsetVec(i) := getFtqOffset(startPc, mdpPrediction(i).bits.cfiPosition)
+    }
+
+    for (i <- 0 until NumMdpResultEntries) {
+      loadPredVec(ftqOffsetVec(i)).valid         := mdpPrediction(i).valid
+      loadPredVec(ftqOffsetVec(i)).bits.static   := mdpPrediction(i).bits.static
+      loadPredVec(ftqOffsetVec(i)).bits.loadWait := mdpPrediction(i).bits.loadWait
+      loadPredVec(ftqOffsetVec(i)).bits.distance := mdpPrediction(i).bits.distance
+    }
+    loadPredVec
   }
 }
