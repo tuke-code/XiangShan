@@ -476,6 +476,9 @@ class TageBaseTableAlignBank(
   replacer.io.trainTouch.valid        := t1_fire && t1_entryNeedWrite
   replacer.io.trainTouch.bits.setIdx  := getReplacerSetIndex(t1_startPc)
   replacer.io.trainTouch.bits.wayMask := t1_entryWayMask
+  when(t1_fire && t1_entryNeedWrite) {
+    assert(PopCount(t1_entryWayMask) <= 1.U, "Replacer victim wayMask should be at-most-one-hot")
+  }
 
   /* *** update counter *** */
   private val t1_newCounters    = Wire(Vec(BaseNumWays, UsefulCounter()))
