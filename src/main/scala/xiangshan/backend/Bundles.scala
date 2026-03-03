@@ -1257,6 +1257,7 @@ object Bundles {
     val copy           = new ExuCopyBundle(params, copyWakeupOut, copyNum, hasCopySrc)
     val iqIdx          = UInt(log2Up(MemIQSizeMax).W)  // Only used by store yet
     val isFirstIssue   = Bool()                        // Only used by store yet
+    val loadPred       = Option.when(params.hasLoadExu)(Valid(new MdpPredictInfo)) //new mdp
     val loadWaitBit    = Option.when(params.hasLoadExu)(Bool())
     val waitForRobIdx  = Option.when(params.hasLoadExu)(new RobPtr) // store set predicted previous store robIdx
     val storeSetHit    = Option.when(params.hasLoadExu)(Bool())     // inst has been allocated an store set

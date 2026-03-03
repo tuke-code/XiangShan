@@ -46,6 +46,7 @@ import xiangshan.backend.trace.TraceCoreInterface
 import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
 import xiangshan.mem.mdp.NewMdp.MdpUpdate
+import xiangshan.mem.mdp.NewMdp.MdpPredictInfo
 
 
 class Backend(val params: BackendParams)(implicit p: Parameters) extends LazyModule
@@ -471,6 +472,8 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
     connectExuInput(sink, source)
     val enableMdp = Constantin.createRecord("EnableMdp", true)
     sink.bits.pc.foreach(_ := source.bits.data.pc.get + (source.bits.ctrl.ftqOffset.get << instOffsetBits))
+    //new mdp
+    sink.bits.loadPred.foreach(_ := Mux(enableMdp, source.bits.loadPred.get, 0.U.asTypeOf(Valid(new MdpPredictInfo))))
     sink.bits.loadWaitBit.foreach(_ := Mux(enableMdp, source.bits.loadWaitBit.get, false.B))
     sink.bits.waitForRobIdx.foreach(_ := Mux(enableMdp, source.bits.waitForRobIdx.get, 0.U.asTypeOf(new RobPtr)))
     sink.bits.storeSetHit.foreach(_ := Mux(enableMdp, source.bits.storeSetHit.get, false.B))

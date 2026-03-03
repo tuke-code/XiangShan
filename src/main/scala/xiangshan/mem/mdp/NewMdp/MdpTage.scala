@@ -157,6 +157,9 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     dontTouch(hitTableMask.asUInt.suggestName(s"t2_load_${i}_hitTableMask"))
     val longestHistTableOH  = getLongestHistTableOH(hitTableMask)
     val prediction = Mux1H(longestHistTableOH, allTableTagMatchResults)
+    when(s2_fire) {
+      assert(PopCount(longestHistTableOH) <= 1.U, "Multiple tables hit in prediction")
+    }
 
     io.result(i).valid := hitTable
     io.result(i).bits.distance := prediction.distance
@@ -196,6 +199,13 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     table.io.trainReadReq.bits.bankMask := t0_bankMask
   }
 
+when(t0_fire) {
+  t0_loads.zipWithIndex.foreach { case (load, i) =>
+    when(load.valid) {
+      assert(load.bits.updateType =/= MdpUpdateType.NULL, s"Load ${i} updateType should not be NULL when valid")
+    }
+  }
+}
   /* --------------------------------------------------------------------------------------------------------------
      train pipeline stage 1
      - get read data from tables
@@ -273,7 +283,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     val newUsefulCtr = provider.usefulCtr.getUpdate(increase = trainNxType.isStrong,en = usefulCtrUpdate)
 
     val trainInfo = Wire(new TrainInfo).suggestName(s"t2_Load_${i}_trainInfo")
-    trainInfo.valid           := tageHitTableMask.asUInt.orR
+    trainInfo.valid           := tageHitTableMask.reduce(_ || _) || needAllocateWeak || needAllocateStrong
     trainInfo.trainNxOH       := longestHistTableOH.asUInt
     trainInfo.hitWayMaskOH    := provider.hitWayMaskOH
     trainInfo.allocateNxOH    := 0.U
@@ -285,7 +295,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     trainInfo.allocateUsefulCtr := Mux(needAllocateStrong, UsefulCounter.InitStrong,
                                     Mux(needAllocateWeak, UsefulCounter.InitWeak, UsefulCounter.Init))
     trainInfo.updateUsefulCtr   := newUsefulCtr
-    trainInfo.updateEntry.valid := true.B
+    trainInfo.updateEntry.valid := !tageHitTableMask.reduce(_ || _)
     trainInfo.updateEntry.tag   := provider.tag
     trainInfo.updateEntry.distance := provider.distance
     trainInfo.AllWayWeakUsefulCtrs := provider.allWayWeakUsefulCtrs
@@ -310,7 +320,6 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
           trainInfo.allocateNxOH  := PriorityEncoderOH(~tageWayFullMask.asUInt) //get first not full idx to allocate
           trainInfo.canAllocate   := getFirstNonFullTableOH(Seq.fill(NumTables)(true.B), tageWayFullMask)._2
         }
-        assert(~trainInfo.valid && load.valid)
       }
       is(MdpUpdateType.M_AS){
         when(tageHitTableMask.asUInt.orR){ //命中NX
@@ -326,7 +335,6 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
           trainInfo.allocateNxOH  := PriorityEncoderOH(~tageWayFullMask.asUInt) //get first not full idx to allocate
           trainInfo.canAllocate   := getFirstNonFullTableOH(Seq.fill(NumTables)(true.B), tageWayFullMask)._2
         }
-        assert(~trainInfo.valid && load.valid)
       }
       is(MdpUpdateType.M_IS){
         when(tageHitTableMask.asUInt.orR){ //命中NX
@@ -334,7 +342,6 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
         }.otherwise{
           // trainBaseType.loadType := LoadType.Strong
         }
-        assert(~trainInfo.valid && load.valid)
       }
       is(MdpUpdateType.M_IW){
         when(tageHitTableMask.asUInt.orR){ //命中NX
@@ -342,12 +349,24 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
         }.otherwise{
           // trainBaseType.loadType := LoadType.Weak
         }
-        assert(~trainInfo.valid && load.valid)
       }
     }
     trainInfo
   }
-
+  when(t2_fire) {
+    t2_trainInfoVec.zipWithIndex.foreach { case (info, i) =>
+      when(info.valid) {
+        // 检查valid trainInfo的基本一致性
+        assert(info.trainNxOH.orR, s"Train info ${i} trainNxOH should be valid when info is valid")
+        assert(info.hitWayMaskOH.orR, s"Train info ${i} hitWayMaskOH should be valid when info is valid")
+        
+        // 如果needAllocate，必须要有有效的分配信息
+        when(info.needAllocate) {
+          assert(info.allocateNxOH.orR, s"Train info ${i} allocateNxOH should be valid when needAllocate")
+        }
+      }
+    }
+  }
 
   //allocate
   private val t2_needAllocateLoadOH = t2_trainInfoVec.map(info => info.valid && info.needAllocate)
@@ -379,6 +398,20 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     entry.tag   := rawTag ^ position
     entry.distance := t2_allocateLoad.bits.distance
     entry
+  }
+  when(t2_fire && t2_allocate) {
+    assert(t2_allocateTableOH.orR, "Allocate table OH should be valid when allocating")
+    assert(t2_allocateWayOH.orR, "Allocate way OH should be valid when allocating")
+    
+    // 确保选择的way确实可用
+    val allocatedTableIdx = OHToUInt(t2_allocateTableOH)
+    val allocatedWayIdx = OHToUInt(t2_allocateWayOH)
+    val wayIsAvailable = Mux1H(t2_allocateTableOH, t2_tageTableCanAllocateWayMask)(allocatedWayIdx)
+    assert(wayIsAvailable, cf"Allocated way ${allocatedWayIdx} in table ${allocatedTableIdx} should be available")
+    
+    // 确保allocate的entry是有效的
+    assert(t2_allocateEntry.valid, "Allocated entry should be valid")
+    assert(t2_allocateEntry.tag =/= 0.U, "Allocated entry tag should not be zero")
   }
 
   //NOTE:Allocate也划分为AllocateWeak和AllocateStrong
@@ -412,6 +445,11 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
                                   Mux(weakWayEn, weakWayEntry, updateEntry))
       writeUsefulCtrs(wayIdx) := Mux(allocateEn, allocateUsefulCtr,
                                   Mux(weakWayEn, weakWayUsefulCtr, updateUsefulCtr))
+      when(t2_fire) {
+        val operations = Seq(updateEn, allocateEn, weakWayEn).map(_.asUInt)
+        val opCount = PopCount(operations.reduce(_ | _))
+        assert(opCount <= 1.U, cf"Multiple write operations on table ${tableIdx} way ${wayIdx}: update=${updateEn}, allocate=${allocateEn}, weak=${weakWayEn}")
+      }
     }
     table.io.writeReq.valid                := t2_fire && writeWayMask.reduce(_ || _)
     table.io.writeReq.bits.setIdx          := t2_setIdx(tableIdx)
