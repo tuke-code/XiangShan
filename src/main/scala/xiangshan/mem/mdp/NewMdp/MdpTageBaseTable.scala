@@ -34,6 +34,7 @@ import xiangshan.frontend.bpu.WriteBuffer
 import xiangshan.frontend.bpu.mbtb.MainBtbReplacer
 import com.fasterxml.jackson.databind.deser.ValueInstantiators.Base
 import xiangshan.frontend.bpu.CrossPageHelper
+import xiangshan.frontend.bpu.BranchAttribute.RasAction.Pop
 
 
 trait MdpBaseUtilHelper extends HasMdpBaseTableParameters{
@@ -641,6 +642,9 @@ class MdpTageBaseTable(implicit p: Parameters) extends XSModule with HasMdpBaseT
     // see comments in MainBtbAlignBank.scala
     b.io.write.req.bits.mispredictInfo := t1_mispredictInfo
   }
+
+  val mdpBaseTrainCnt = PopCount(t1_train.loads.map(v => v.valid && t1_fire))
+  XSPerfAccumulate("mdpBaseTrainCnt", mdpBaseTrainCnt)
 }
 
 

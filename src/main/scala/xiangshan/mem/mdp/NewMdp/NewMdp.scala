@@ -60,6 +60,9 @@ class MdpResolveQueue(implicit p: Parameters) extends XSModule with HasMdpParame
   private val full = distanceBetween(enqPtr, deqPtr) >= (MdpResolveQueueSize - 4).U
 
   private val mdpResolve = io.toMdpResolveUpdate
+  mdpResolve.zipWithIndex.foreach { case (entry, i) =>
+    entry.valid := io.toMdpResolveUpdate(i).valid && io.toMdpResolveUpdate(i).bits.updateType =/= MdpPredictStatuses.NULL
+  }
 
   private val hit = mdpResolve.map { load =>
     mem.map(entry =>
@@ -130,6 +133,7 @@ class MdpResolveQueue(implicit p: Parameters) extends XSModule with HasMdpParame
     mem(deqPtr.value).bits.flushed := false.B
     mem(deqPtr.value).bits.loads.foreach(_.valid := false.B)
   }
+  
 }
 
 
@@ -140,7 +144,8 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
     val fromPhr    = Input(new PhrToTageIO)
 
     val meta       = Output(new MdpBaseMeta)
-    val prediction = Output(Vec(NumMdpResultEntries, Valid(new MdpPrediction)))
+    val basePred   = Output(Vec(NumMdpResultEntries, Valid(new MdpPrediction)))
+    val finalPred  = Output(Vec(NumMdpResultEntries, Valid(new MdpPrediction)))
 
     val toTrain = Flipped(Decoupled(new MdpTrain))
     //
@@ -156,18 +161,29 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
   //base的第i项预测结果对应tage第二项，根据实际结果决定真正选择的信号
 
   val stageCtrl = WireDefault(io.stageCtrl)
-  stageCtrl.t0_fire := io.toTrain.fire //override
   io.toTrain.ready  := base.io.trainReady && tage.io.trainReady
+
   //MDP
   //s0 stage
-  base.io.stageCtrl := io.stageCtrl
+  base.io.stageCtrl := stageCtrl
   base.io.startPc   := io.fromBpu.startPc
-  tage.io.stageCtrl := io.stageCtrl
+  tage.io.stageCtrl := stageCtrl
   tage.io.startPc   := io.fromBpu.startPc
   tage.io.fromPhr.foldedPathHist := io.fromPhr.foldedPathHist
   //s1 stage
-
-
+  private val s1_prediction = {
+    val prediction = Wire(Vec(NumMdpResultEntries, Valid(new MdpPrediction)))
+    (base.io.result zip prediction).map{ case (base, pred) =>
+      pred.valid := base.valid
+      // pred.bits  := Mux(tage.valid, tage.bits, base.bits)
+      pred.bits.cfiPosition := base.bits.cfiPosition
+      pred.bits.static      := base.bits.static
+      pred.bits.loadWait    := base.bits.loadWait
+      pred.bits.distance    := base.bits.distance
+    }
+    prediction
+  }
+  io.basePred := s1_prediction
   //s2 stage
   private val s2_baseResult = base.io.result
   tage.io.fromBaseResult := s2_baseResult
@@ -197,10 +213,11 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
   }
 
   base.io.s3_takenMask := s3_takenMask
-  io.prediction := s3_prediction 
+  io.finalPred := s3_prediction 
 
 
   //t0 stage 
+  stageCtrl.t0_fire := io.toTrain.fire //override
   private val train = WireDefault(io.toTrain.bits)
   private val t0_compareMatrix = CompareMatrix(VecInit(io.toTrain.bits.loads.map(_.bits.cfiPosition)))
   private val t0_firstMispredictMask = t0_compareMatrix.getLowerElementMask(
@@ -212,4 +229,7 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
   tage.io.fromPhr.foldedPathHistForTrain := io.fromPhr.foldedPathHistForTrain
   base.io.train := train
   tage.io.train := train
+
+  val mdpTageTrainReadBankConflict = ~tage.io.trainReady && io.toTrain.valid
+  XSPerfAccumulate("mdpTageTrainReadBankConflict", mdpTageTrainReadBankConflict)
 }

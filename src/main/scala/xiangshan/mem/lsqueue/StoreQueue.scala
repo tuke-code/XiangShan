@@ -671,7 +671,9 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       WireInit(VecInit((0 until StoreQueueSize).map(j => uop(j).storeSetHit && uop(j).ssid === io.forward(i).uop.ssid)))
     )
     val mdpHitVec = WireInit(VecInit((0 until StoreQueueSize).map(j =>
-      io.forward(i).uop.loadPred.bits.loadWait && uop(j).robIdx === io.forward(i).uop.loadPred.bits.getWaitStoreRobIdx(io.forward(i).uop.robIdx))))
+      io.forward(i).uop.loadPred.bits.loadWait && uop(j).robIdx === io.forward(i).uop.loadPred.bits.getWaitStoreRobIdx(io.forward(i).uop.robIdx)
+    )))
+    dontTouch(mdpHitVec)
 
     val forwardMask1 = Mux(differentFlag, ~deqMask, deqMask ^ forwardMask)
     val forwardMask2 = Mux(differentFlag, forwardMask, 0.U(StoreQueueSize.W))

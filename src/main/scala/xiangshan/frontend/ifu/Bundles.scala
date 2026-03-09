@@ -28,7 +28,6 @@ import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.frontend.ibuffer.IBufPtr
 import xiangshan.frontend.icache.HasICacheParameters
 import xiangshan.frontend.icache.ICacheRespBundle
-import xiangshan.PhrInfo
 import xiangshan.mem.mdp.NewMdp.{MdpPrediction,MdpPredictInfo,HasMdpParameters}
 /* ***
  * Naming:

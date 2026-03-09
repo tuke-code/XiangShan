@@ -45,7 +45,6 @@ import xiangshan.frontend.icache.ICacheTopdownInfo
 import xiangshan.frontend.instruncache.InstrUncacheReq
 import xiangshan.frontend.instruncache.InstrUncacheResp
 import xiangshan.frontend.bpu.history.phr.PhrMeta
-import xiangshan.PhrInfo
 import xiangshan.mem.mdp.NewMdp.{MdpUpdate,MdpPrediction,MdpPredictInfo}
 import xiangshan.XSBundle
 import xiangshan.mem.mdp.NewMdp.MdpTrain

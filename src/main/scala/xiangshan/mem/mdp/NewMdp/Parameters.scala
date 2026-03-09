@@ -156,14 +156,11 @@ case class MdpTageTableParameters(
   NumBanks:            Int = 4, // to alleviate read-write conflicts in single-port SRAM
   NumWays:             Int = 4,
   TagWidth:            Int = 13,
+  WriteBufferSize:     Int = 4,
+
   TakenCtrWidth:       Int = 3,
   UsefulCtrWidth:      Int = 3,
   UsefulCtrInitValue:  Int = 0,
-  WriteBufferSize:     Int = 4,
-  UsefulResetCtrWidth: Int = 8,
-  EnableTageTrace:     Boolean = false,
-  BaseTableTakenCtrWidth: Int = 2,
-  
 ){}
 
 case class MdpBaseTableParameters( //fromMainBtb
@@ -180,8 +177,6 @@ case class MdpBaseTableParameters( //fromMainBtb
   TargetWidth:     Int = 20,       // 2B aligned
   WriteBufferSize: Int = 4,
   Replacer:        String = "Lru", // "Lru" or "Plru"
-  // Base table
-  TakenCntWidth: Int = 2,
   // Mbtb write trace
 ){}
 
@@ -238,10 +233,6 @@ trait HasMdpBaseTableParameters extends HasMdpParameters{
   def BaseAlignBankIdxLen:    Int    = log2Ceil(BaseNumAlignBanks)
   def BaseWriteBufferSize:    Int    = mdpBaseTableParameters.WriteBufferSize
   def BaseReplacer:           String = mdpBaseTableParameters.Replacer
-
-  // Base table
-  def BaseSetIdxWidth: Int = 8
-  def BaseTakenCtrWidth:Int = mdpBaseTableParameters.TakenCntWidth
 }
 
 

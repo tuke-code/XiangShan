@@ -371,7 +371,7 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   val mdpUpdateFilter = (0 until StorePipelineWidth).map(i => {
     val update = Wire(Valid(new MdpUpdate))
     val predictFromStatic = rollbackLqWb(i).bits.loadPred.bits.static
-    update.valid := rollbackLqWb(i).valid && rollbackLqWb(i).bits.loadPred.valid
+    update.valid       := rollbackLqWb(i).valid
     update.bits.pc     := rollbackLqWb(i).bits.pc
     update.bits.ftqIdx := rollbackLqWb(i).bits.ftqPtr
     update.bits.ftqOffset := rollbackLqWb(i).bits.ftqOffset
@@ -379,8 +379,10 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
     update.bits.distance   := update.bits.getDistance(rollbackLqWb(i).bits.robIdx,stRobIdx(i))
     update
   })
-
   io.mdpUpdateOldest := Mux1H(oldestOH, mdpUpdateFilter)
+  XSPerfAccumulate("mdp_update_from_loadQRAW",io.mdpUpdateOldest.valid)
+  XSPerfAccumulate("mdp_update_from_loadQRAW_WriteZero",io.mdpUpdateOldest.valid && io.mdpUpdateOldest.bits.updateIsWriteZero)
+  XSPerfAccumulate("mdp_update_from_loadQRAW_AllocateStrong",io.mdpUpdateOldest.valid && io.mdpUpdateOldest.bits.updateIsAllocateStrong)
 
   // perf cnt
   val canEnqCount = PopCount(io.query.map(_.req.fire))

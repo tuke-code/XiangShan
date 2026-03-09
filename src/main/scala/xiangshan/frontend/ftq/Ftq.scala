@@ -51,7 +51,6 @@ import xiangshan.frontend.bpu.BpuPredictionSource
 import xiangshan.frontend.bpu.BpuRedirectMeta
 import xiangshan.frontend.bpu.BpuResolveMeta
 import xiangshan.frontend.bpu.HalfAlignHelper
-import xiangshan.PhrInfo
 import xiangshan.mem.mdp.NewMdp.MdpResolveQueue
 
 class Ftq(implicit p: Parameters) extends FtqModule

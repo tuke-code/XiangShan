@@ -610,12 +610,14 @@ class Ifu(implicit p: Parameters) extends IfuModule
     for (i <- 0 until IBufferEnqueueWidth) { 
       // mdpPredInfo(i).valid //TODO:
       mdpPredInfo(i).valid := s3_alignPds(i).isLoad
-      mdpPredInfo(i).bits.static   := rawLoadPredInfo(i).valid
+      mdpPredInfo(i).bits.static   := ~rawLoadPredInfo(i).valid
       mdpPredInfo(i).bits.loadWait := rawLoadPredInfo(i).bits.loadWait && s3_alignPds(i).isLoad
       mdpPredInfo(i).bits.distance := rawLoadPredInfo(i).bits.distance
     }
     mdpPredInfo
   }
+  dontTouch(io.toIBuffer.bits.mdpPredictInfos)
+
   io.toIBuffer.bits.ftqPtr.zipWithIndex.foreach { case (ftqPtr, i) =>
     ftqPtr := Mux(s3_alignCompactInfo.selectBlock(i), s3_alignFetchBlock(1).ftqIdx, s3_alignFetchBlock(0).ftqIdx)
   }
