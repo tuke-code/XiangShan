@@ -815,7 +815,3 @@ class LowPowerIO(implicit p: Parameters) extends Bundle {
   val i_cpu_iso_en= Input(Bool())
   val i_cpu_sw_rst_n = Input(Bool())
 }
-
-class PhrInfo(implicit p: Parameters) extends XSBundle with HasPhrParameters{
-  val phr = new PhrAllFoldedHistories(AllFoldedHistoryInfo)
-}

@@ -1295,7 +1295,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
 
   val s2_fwd_mask_no_ubuffer = io.lsq.forward.forwardMask.asUInt | io.sbuffer.forwardMask.asUInt
   //来自前递就是mdp预测依赖成功，不来自前递就是mdp预测依赖失败
-  val s2_mdpPredictHit = (~s2_fwd_mask_no_ubuffer.asUInt & s2_in.mask) === 0.U && !io.lsq.forward.dataInvalid
+  val s2_mdpPredictHit = (~s2_fwd_mask_no_ubuffer & s2_in.mask) === 0.U && !io.lsq.forward.dataInvalid
   s2_out.mdpPredictStatuses := Mux(s2_mdpPredictHit,MdpPredictStatuses.DEPEND,MdpPredictStatuses.INDEPEND) 
   //TODO:: XSDebug
 
@@ -1541,10 +1541,11 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
 
   io.lsq.ldin.bits.uop := s3_out.bits.uop
 //  io.lsq.ldin.bits.uop.exceptionVec(loadAddrMisaligned) := Mux(s3_in.onlyMisalignException, false.B, s3_in.uop.exceptionVec(loadAddrMisaligned))
+
   io.mdpUpdate.valid := (!io.lsq.ldin.bits.rep_info.need_rep && io.lsq.ldin.bits.updateAddrValid 
                         && s3_out.bits.uop.loadPred.valid && ~s3_out.bits.uop.loadPred.bits.static)
-  io.mdpUpdate.bits.pc := s3_out.bits.uop.pc
-  io.mdpUpdate.bits.ftqIdx := s3_out.bits.uop.ftqPtr
+  io.mdpUpdate.bits.pc        := s3_out.bits.uop.pc
+  io.mdpUpdate.bits.ftqIdx    := s3_out.bits.uop.ftqPtr
   io.mdpUpdate.bits.ftqOffset := s3_out.bits.uop.ftqOffset
   //FIXME:少个了计数器弱化的情况？
   /*情况举例:  预测器	 依赖	   非依赖
@@ -1560,11 +1561,12 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
     MdpPredictStatuses.INDEPEND     -> MdpUpdateType.M_IW
   ))
   io.mdpUpdate.bits.updateType := Mux(s3_out.bits.uop.loadPred.bits.loadWait,fromMdpPredictDependency,fromMdpPredictNoDependency)
-  // assert(s3_out.bits.uop.loadPredict.valid && ~s3_out.bits.uop.loadPredict.bits.static 
-  //     && s3_out.bits.uop.loadPredict.bits.loadWait && ~s3_replay_select) //TODO:缺少一个正常指令的情况
-  //不需要distance
-  //s3_replay_select
-  io.mdpUpdate.bits.distance := 0.U
+  io.mdpUpdate.bits.distance := 0.U //MdpPredictStatuses.INDEPEND分配的是非依赖项，所以不需要distance
+
+  XSPerfAccumulate("loadU_status_depend", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.DEPEND)
+  XSPerfAccumulate("loadU_status_independ", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.INDEPEND)
+  XSPerfAccumulate("loadU_status_depend_other", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.DEPENDOT)
+  XSPerfAccumulate("loadU_status_null", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.NULL)
 
   val s3_revoke = s3_exception || io.lsq.ldin.bits.rep_info.need_rep || s3_mis_align || (s3_frm_mabuf && io.misalign_ldout.bits.rep_info.need_rep)
   io.lsq.ldld_nuke_query.revoke := s3_revoke

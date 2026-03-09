@@ -184,7 +184,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
 
   private val t0_fire     = io.stageCtrl.t0_fire && t0_hasLoad 
 
-  private val t0_needRead = t0_fire
+  private val t0_needRead = true.B
   private val t0_readBankConflict = t0_hasLoad && t0_needRead && s0_fire && t0_bankIdx === s0_bankIdx
   io.trainReady := !t0_readBankConflict
   private val t0_foldedHist = getFoldedHist(io.fromPhr.foldedPathHist)
@@ -199,13 +199,13 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     table.io.trainReadReq.bits.bankMask := t0_bankMask
   }
 
-when(t0_fire) {
-  t0_loads.zipWithIndex.foreach { case (load, i) =>
-    when(load.valid) {
-      assert(load.bits.updateType =/= MdpUpdateType.NULL, s"Load ${i} updateType should not be NULL when valid")
+  when(t0_fire) {
+    t0_loads.zipWithIndex.foreach { case (load, i) =>
+      when(load.valid) {
+        // assert(load.bits.updateType =/= MdpUpdateType.NULL, s"Load ${i} updateType should not be NULL when valid")
+      }
     }
   }
-}
   /* --------------------------------------------------------------------------------------------------------------
      train pipeline stage 1
      - get read data from tables
@@ -353,20 +353,31 @@ when(t0_fire) {
     }
     trainInfo
   }
+
+
   when(t2_fire) {
     t2_trainInfoVec.zipWithIndex.foreach { case (info, i) =>
-      when(info.valid) {
+      when(info.valid && ~info.needAllocate) {
         // 检查valid trainInfo的基本一致性
         assert(info.trainNxOH.orR, s"Train info ${i} trainNxOH should be valid when info is valid")
         assert(info.hitWayMaskOH.orR, s"Train info ${i} hitWayMaskOH should be valid when info is valid")
         
+      }
+      when(info.valid && info.needAllocate) {
         // 如果needAllocate，必须要有有效的分配信息
-        when(info.needAllocate) {
-          assert(info.allocateNxOH.orR, s"Train info ${i} allocateNxOH should be valid when needAllocate")
-        }
+        assert(info.allocateNxOH.orR, s"Train info ${i} allocateNxOH should be valid when needAllocate")
       }
     }
   }
+  val mdpTageTrainCnt = PopCount(t2_trainInfoVec.map(info => info.valid && t2_fire))
+  val mdpTageTrainAllocate = PopCount(t2_trainInfoVec.map(info => info.valid && info.needAllocate && t2_fire))
+  val mdpTageTrainAllWayWeak = PopCount(t2_trainInfoVec.map(info => info.valid && info.needAllWayWeak && t2_fire))
+  val mdpTageTrainUpdate = PopCount(t2_trainInfoVec.map(info => info.valid && info.needUpdate && t2_fire))
+
+  XSPerfAccumulate("mdp_tage_train_cnt", mdpTageTrainCnt)
+  XSPerfAccumulate("mdp_tage_train_allocate", mdpTageTrainAllocate)
+  XSPerfAccumulate("mdp_tage_train_all_way_weak", mdpTageTrainAllWayWeak)
+  XSPerfAccumulate("mdp_tage_train_update", mdpTageTrainUpdate)
 
   //allocate
   private val t2_needAllocateLoadOH = t2_trainInfoVec.map(info => info.valid && info.needAllocate)

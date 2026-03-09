@@ -46,8 +46,6 @@ class SQAddrModule(dataWidth: Int, numEntries: Int, numRead: Int, numWrite: Int,
     val forwardMdata = Input(Vec(numForward, UInt(dataWidth.W))) // addr
     val forwardDataMask = Input(Vec(numForward, UInt((VLEN/8).W))) // forward mask
     val forwardMmask = Output(Vec(numForward, Vec(numEntries, Bool()))) // cam result mask
-    // for Mdp predict check violation
-    val addrHitMmask = Output(Vec(numForward, Vec(numEntries, Bool())))
     // debug
     val debug_data = Output(Vec(numEntries, UInt(dataWidth.W)))
   })
@@ -84,12 +82,7 @@ class SQAddrModule(dataWidth: Int, numEntries: Int, numRead: Int, numWrite: Int,
     }
   }
   val addrHitMdata = io.forwardMdata
-  for (i <- 0 until numForward) {
-    for (j <- 0 until numEntries) {
-      io.addrHitMmask(i)(j) := addrHitMdata(i) === data(j)
-    }
-  }
-
+  
   // DataModuleTemplate should not be used when there're any write conflicts
   for (i <- 0 until numWrite) {
     for (j <- i+1 until numWrite) {

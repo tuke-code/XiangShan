@@ -385,9 +385,14 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   private val s2_s1Prediction = RegEnable(s1_prediction, s1_fire)
   private val s3_s1Prediction = RegEnable(s2_s1Prediction, s2_fire)
+  private val s2_s1MdpPred    = RegEnable(mdp.io.basePred, s1_fire)
+  private val s3_s1MdpPred    = RegEnable(mdp.io.basePred, s2_fire)
 
-  private val s3_mdpPrediction = RegEnable(mdp.io.prediction, s2_fire)
-  s3_override := s3_valid && !(s3_prediction === s3_s1Prediction)
+  private val s3_mdpPrediction = RegEnable(mdp.io.finalPred, s2_fire)
+  private val s3_mdpOverride   = !(s3_mdpPrediction=== s3_s1MdpPred) && s3_valid
+  dontTouch(s3_mdpOverride)
+  s3_override := s3_valid && (!(s3_prediction === s3_s1Prediction) || !(s3_mdpPrediction=== s3_s1MdpPred))
+  XSPerfAccumulate("finalPred_s3_Mdp", s3_override && !(s3_mdpPrediction=== s3_s1MdpPred))
 
   private val s2_phrMeta = RegEnable(phr.io.phrMeta, s1_fire)
   private val s3_phrMeta = RegEnable(s2_phrMeta, s2_fire)
@@ -427,12 +432,14 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   io.toFtq.prediction.valid := s1_valid && s2_ready || s3_override
   when(s3_override) {
     io.toFtq.prediction.bits.fromStage(s3_startPc, s3_prediction)
+    io.toFtq.prediction.bits.mdpPrediction := s3_mdpPrediction
   }.otherwise {
     io.toFtq.prediction.bits.fromStage(s1_startPc, s1_prediction)
+    io.toFtq.prediction.bits.mdpPrediction := mdp.io.basePred
   }
   io.toFtq.prediction.bits.s3Override := s3_override
   //
-  io.toFtq.prediction.bits.mdpPrediction := s3_mdpPrediction
+  
 
   // used for meta enqueue and s3 override
   private val s2_ftqPtr = RegEnable(io.fromFtq.bpuPtr, s1_fire)

@@ -34,12 +34,12 @@ import xiangshan.frontend.bpu.WriteReqBundle
 
 object TakenCounter extends SaturateCounterFactory {
   def width(implicit p: Parameters): Int =
-    p(XSCoreParamsKey).frontendParameters.bpuParameters.tageParameters.TakenCtrWidth
+    p(XSCoreParamsKey).frontendParameters.bpuParameters.mdpTageTableParameters.TakenCtrWidth
 }
 
 object UsefulCounter extends SaturateCounterFactory {
   def width(implicit p: Parameters): Int =
-    p(XSCoreParamsKey).frontendParameters.bpuParameters.tageParameters.UsefulCtrWidth
+    p(XSCoreParamsKey).frontendParameters.bpuParameters.mdpTageTableParameters.UsefulCtrWidth
 
   def Init(implicit p: Parameters): SaturateCounter =
     SaturateCounterInit(width, 0)
