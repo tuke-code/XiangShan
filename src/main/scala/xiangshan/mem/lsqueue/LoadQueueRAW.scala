@@ -367,6 +367,7 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   })
   io.rollback := allRedirect
 
+  dontTouch(rollbackLqWb)
   val oldestOH = Redirect.selectOldestRedirect(allRedirect)
   val mdpUpdateFilter = (0 until StorePipelineWidth).map(i => {
     val update = Wire(Valid(new MdpUpdate))

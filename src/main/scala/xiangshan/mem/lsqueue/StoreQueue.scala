@@ -31,6 +31,7 @@ import xiangshan.backend.decode.isa.bitfield.{Riscv32BitInst, XSInstBitFields}
 import xiangshan.backend.fu.FuConfig._
 import xiangshan.backend.fu.FuType
 import xiangshan.mem.Bundles._
+import xiangshan.mem.mdp.NewMdp.HasNewMdp
 import xiangshan.cache._
 import xiangshan.cache.{CMOReq, CMOResp, DCacheLineIO, DCacheWordIO, MemoryOpConstants}
 import difftest._
@@ -740,8 +741,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     // If SSID match, address not ready, mark it as addrInvalid
     // load_s2: generate addrInvalid
     val mdpFinalHitVec = Wire(Vec(StoreQueueSize,Bool()))
-    val EnableNewMdp = true
-    if(EnableNewMdp){
+    if(HasNewMdp.Enable){
       mdpFinalHitVec := mdpHitVec
     }else{
       mdpFinalHitVec := storeSetHitVec

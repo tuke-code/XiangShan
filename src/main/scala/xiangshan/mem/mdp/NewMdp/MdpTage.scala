@@ -471,6 +471,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
 
     table.io.resetUseful := t2_fire && usefulResetCtr.isSaturatePositive
   }
+  
   when(t2_fire) {
     when(usefulResetCtr.isSaturatePositive) {
       usefulResetCtr.resetZero()

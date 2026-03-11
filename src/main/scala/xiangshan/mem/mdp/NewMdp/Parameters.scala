@@ -235,7 +235,9 @@ trait HasMdpBaseTableParameters extends HasMdpParameters{
   def BaseReplacer:           String = mdpBaseTableParameters.Replacer
 }
 
-
+object HasNewMdp {
+  val Enable = true
+}
 
 object MdpPredictStatuses {
   val NULL = 0.U
@@ -255,4 +257,3 @@ object MdpUpdateType{
   val M_IS = 4.U(width.W) //Ni Strong
   val M_IW = 5.U(width.W) //Ni Weak
 }
-
