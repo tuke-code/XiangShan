@@ -35,7 +35,7 @@ import xiangshan.backend.fu.util.SdtrigExt
 import xiangshan.backend.exu.ExeUnitParams
 import xiangshan.mem.mdp._
 import xiangshan.mem.Bundles._
-import xiangshan.mem.mdp.NewMdp.{MdpUpdateType,MdpUpdate,MdpPredictStatuses}
+import xiangshan.mem.mdp.NewMdp.{MdpUpdateType,MdpUpdate,MdpPredictStatuses,HasNewMdp}
 import xiangshan.cache._
 import xiangshan.cache.wpu.ReplayCarry
 import xiangshan.cache.mmu._
@@ -1149,9 +1149,15 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
     Mux(Pbmt.isUncache(s2_pbmt), s2_in.mmio, s2_tlb_hit && s2_pmp.mmio)
 
   val s2_full_fwd      = Wire(Bool())
-  val s2_mem_amb       = s2_in.uop.storeSetHit &&
-                         io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid)
-
+  val s2_mem_amb       = {
+    if(HasNewMdp.Enable){
+      s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait &&
+      io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid)
+    }else{
+      s2_in.uop.storeSetHit &&
+      io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid)
+    }
+  }
   val s2_tlb_miss      = s2_in.tlbMiss
   val s2_fwd_fail      = io.lsq.forward.dataInvalid && RegNext(io.lsq.forward.valid)
   val s2_dcache_miss   = io.dcache.resp.bits.miss &&
@@ -1562,6 +1568,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   ))
   io.mdpUpdate.bits.updateType := Mux(s3_out.bits.uop.loadPred.bits.loadWait,fromMdpPredictDependency,fromMdpPredictNoDependency)
   io.mdpUpdate.bits.distance := 0.U //MdpPredictStatuses.INDEPEND分配的是非依赖项，所以不需要distance
+  dontTouch(io.mdpUpdate)
 
   XSPerfAccumulate("loadU_status_depend", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.DEPEND)
   XSPerfAccumulate("loadU_status_independ", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.INDEPEND)

@@ -40,6 +40,17 @@ class PreDecode(implicit p: Parameters) extends IfuModule with PreDecodeHelper {
     val resp: PreDecodeResp       = Output(new PreDecodeResp)
   }
   val io: PreDecodeIO = IO(new PreDecodeIO)
+  def isLoad(inst: UInt): Bool = {
+    def isRVC(inst: UInt): Bool = inst(1, 0) =/= 3.U
+    val isRVCLoad = {
+      val funct3 = inst(15, 13)
+      val op     = inst(1, 0)
+      (op === "b00".U || op === "b10".U) &&
+      (funct3 === "b001".U || funct3 === "b010".U || funct3 === "b011".U)
+    }
+    val isRVLoad = inst(6, 0) === "b0000011".U
+    Mux(isRVC(inst), isRVCLoad , isRVLoad)
+  }
 
   private val data     = io.req.bits.data
   private val rawInsts = VecInit((0 until IBufferEnqueueWidth).map(i => data(i)))
@@ -52,7 +63,7 @@ class PreDecode(implicit p: Parameters) extends IfuModule with PreDecodeHelper {
 
     io.resp.pd(i).valid := io.req.bits.instrValid(i)
     io.resp.pd(i).isRVC := io.req.bits.isRvc(i)
-    io.resp.pd(i).isLoad:= inst(6,0) === "b0000011".U
+    io.resp.pd(i).isLoad:= isLoad(inst)
     // for diff purpose only
     io.resp.pd(i).brAttribute := BranchAttribute.decode(inst, io.req.valid)
 

@@ -362,6 +362,8 @@ class TageBaseTableAlignBank(
   private val s1_startPc          = RegEnable(s0_startPc, s0_fire)
   private val s1_crossPage        = RegEnable(s0_crossPage, s0_fire)
   private val s1_internalBankMask = RegEnable(s0_internalBankMask, s0_fire)
+  private val s1_setIdx = getSetIndex(s1_startPc)
+  private val s1_tag    = getTag(s1_startPc)
 
   private val s1_rawEntries = Mux1H(
     s1_internalBankMask,
@@ -371,36 +373,19 @@ class TageBaseTableAlignBank(
     s1_internalBankMask,
     internalBanks.map(_.io.read.resp.counters)
   )
-
-
-  /* --------------------------------------------------------------------------------------------------------------
-     stage 2
-     - 
-     -------------------------------------------------------------------------------------------------------------- */
-
-  private val s2_fire             = io.stageCtrl.s2_fire
-  private val s2_startPc          = RegEnable(s1_startPc, s1_fire)
-  private val s2_crossPage        = RegEnable(s1_crossPage, s1_fire)
-  private val s2_internalBankMask = RegEnable(s1_internalBankMask, s1_fire)
-  private val s2_rawEntries       = RegEnable(s1_rawEntries, s1_fire)
-  private val s2_rawCounters      = RegEnable(s1_rawCounters, s1_fire)
-
-  private val s2_setIdx = getSetIndex(s2_startPc)
-  private val s2_tag    = getTag(s2_startPc)
-
   // NOTE: when we calculate startPc in MainBtb top, we have selected whether lower bits should be masked
   //       (see s0_startPcVec)
   //       so here, if this alignBank is not the first alignBank of the fetch block, we'll get s2_alignedInstOffset = 0
   //       and, we'll do a (e.position >= 0) check later, which is always true
-  private val s2_alignedInstOffset = getAlignedInstOffset(s2_startPc)
+  private val s1_alignedInstOffset = getAlignedInstOffset(s1_startPc)
 
   // send resp
-  (r.resp.predictions zip r.resp.metas zip s2_rawEntries zip s2_rawCounters).foreach { case (((pred, meta), e), c) =>
+  (r.resp.predictions zip r.resp.metas zip s1_rawEntries zip s1_rawCounters).foreach { case (((pred, meta), e), c) =>
     // send rawHit for training
-    val rawHit = e.valid && e.tag === s2_tag
+    val rawHit = e.valid && e.tag === s1_tag
     // filter out branches before alignedInstOffset
     // also filter out all entries if crossPage to satisfy Ifu/ICache's requirement
-    val hit = rawHit && e.cfiPosition >= s2_alignedInstOffset && !s2_crossPage
+    val hit = rawHit && e.cfiPosition >= s1_alignedInstOffset && !s1_crossPage
     pred.valid            := hit
     pred.bits.static      := ~hit
     pred.bits.loadWait    := c.isPositive
@@ -413,9 +398,16 @@ class TageBaseTableAlignBank(
   }
 
   // add an alias for hitMask for later use & debug purpose
-  private val s2_hitMask = VecInit(r.resp.predictions.map(_.valid))
-  dontTouch(s2_hitMask)
+  private val s1_hitMask = VecInit(r.resp.predictions.map(_.valid))
+  dontTouch(s1_hitMask)
 
+  /* --------------------------------------------------------------------------------------------------------------
+     stage 2
+     - 
+     -------------------------------------------------------------------------------------------------------------- */
+
+  private val s2_fire             = io.stageCtrl.s2_fire
+  private val s2_startPc          = RegEnable(s1_startPc, s1_fire)
 
   /* --------------------------------------------------------------------------------------------------------------
     stage 3
@@ -510,12 +502,12 @@ class TageBaseTableAlignBank(
   }
 
   /* *** multi-hit detection & flush *** */
-  private val s2_multiHitMask = detectMultiHit(s2_hitMask, VecInit(s2_rawEntries.map(_.cfiPosition)))
+  private val s1_multiHitMask = detectMultiHit(s1_hitMask, VecInit(s1_rawEntries.map(_.cfiPosition)))
 
   internalBanks.zipWithIndex.foreach { case (b, i) =>
-    b.io.flush.req.valid        := s2_fire && s2_multiHitMask.orR && s2_internalBankMask(i)
-    b.io.flush.req.bits.setIdx  := s2_setIdx
-    b.io.flush.req.bits.wayMask := s2_multiHitMask
+    b.io.flush.req.valid        := s1_fire && s1_multiHitMask.orR && s1_internalBankMask(i)
+    b.io.flush.req.bits.setIdx  := s1_setIdx
+    b.io.flush.req.bits.wayMask := s1_multiHitMask
   }
 
 }
@@ -587,6 +579,8 @@ class MdpTageBaseTable(implicit p: Parameters) extends XSModule with HasMdpBaseT
     -------------------------------------------------------------------------------------------------------------- */
 
   s1_fire := io.stageCtrl.s1_fire
+  io.result := VecInit(alignBanks.flatMap(_.io.read.resp.predictions))
+  io.meta.entries := VecInit(alignBanks.map(_.io.read.resp.metas)) //TODO:
 
   /* --------------------------------------------------------------------------------------------------------------
     stage 2
@@ -594,8 +588,6 @@ class MdpTageBaseTable(implicit p: Parameters) extends XSModule with HasMdpBaseT
     -------------------------------------------------------------------------------------------------------------- */
 
   s2_fire := io.stageCtrl.s2_fire
-  io.result := VecInit(alignBanks.flatMap(_.io.read.resp.predictions))
-  io.meta.entries := VecInit(alignBanks.map(_.io.read.resp.metas)) //TODO:
 
   /* --------------------------------------------------------------------------------------------------------------
     stage 3

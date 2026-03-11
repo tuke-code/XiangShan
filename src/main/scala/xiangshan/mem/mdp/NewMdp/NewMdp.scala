@@ -59,10 +59,15 @@ class MdpResolveQueue(implicit p: Parameters) extends XSModule with HasMdpParame
 
   private val full = distanceBetween(enqPtr, deqPtr) >= (MdpResolveQueueSize - 4).U
 
-  private val mdpResolve = io.toMdpResolveUpdate
+  private val mdpResolve = WireDefault(io.toMdpResolveUpdate)
   mdpResolve.zipWithIndex.foreach { case (entry, i) =>
-    entry.valid := io.toMdpResolveUpdate(i).valid && io.toMdpResolveUpdate(i).bits.updateType =/= MdpPredictStatuses.NULL
+    entry.valid           := io.toMdpResolveUpdate(i).valid && io.toMdpResolveUpdate(i).bits.updateType =/= MdpPredictStatuses.NULL
+    entry.bits.updateType := io.toMdpResolveUpdate(i).bits.updateType
+    entry.bits.ftqIdx     := io.toMdpResolveUpdate(i).bits.ftqIdx
+    entry.bits.ftqOffset  := io.toMdpResolveUpdate(i).bits.ftqOffset
+    entry.bits.distance   := io.toMdpResolveUpdate(i).bits.distance
   }
+  dontTouch(mdpResolve)
 
   private val hit = mdpResolve.map { load =>
     mem.map(entry =>
@@ -185,7 +190,7 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
   }
   io.basePred := s1_prediction
   //s2 stage
-  private val s2_baseResult = base.io.result
+  private val s2_baseResult = RegEnable(base.io.result, stageCtrl.s1_fire)
   tage.io.fromBaseResult := s2_baseResult
 
   private val s2_tageResult = tage.io.result
@@ -194,16 +199,11 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
   private val s2_takenMask = VecInit(s2_baseResult.zip(s2_tageResult).map{ case(base, tage) =>
     (base.valid && base.bits.loadWait) || (tage.valid && tage.bits.loadWait)
   })
-  //s3 stage
-  private val s3_baseResult = RegEnable(s2_baseResult, io.stageCtrl.s3_fire)
-  private val s3_tageResult = RegEnable(s2_tageResult, io.stageCtrl.s3_fire)
-  private val s3_takenMask  = RegEnable(s2_takenMask, io.stageCtrl.s3_fire)
   //TODO:静态预测器
-  private val s3_prediction = {
+  private val s2_prediction = {
     val prediction = Wire(Vec(NumMdpResultEntries, Valid(new MdpPrediction)))
-    (s3_baseResult zip s3_tageResult zip prediction).map{ case ((base, tage), pred) =>
+    (s2_baseResult zip s2_tageResult zip prediction).map{ case ((base, tage), pred) =>
       pred.valid := Mux(tage.valid, true.B   , base.valid)
-      // pred.bits  := Mux(tage.valid, tage.bits, base.bits)
       pred.bits.cfiPosition := base.bits.cfiPosition
       pred.bits.static   := Mux(tage.valid, tage.bits.static, base.bits.static)
       pred.bits.loadWait := Mux(tage.valid, tage.bits.loadWait, base.bits.loadWait)
@@ -212,8 +212,10 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
     prediction
   }
 
+  io.finalPred := s2_prediction 
+  //s3 stage
+  private val s3_takenMask  = RegEnable(s2_takenMask , stageCtrl.s2_fire)
   base.io.s3_takenMask := s3_takenMask
-  io.finalPred := s3_prediction 
 
 
   //t0 stage 

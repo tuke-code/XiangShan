@@ -269,7 +269,6 @@ object Bundles {
     val lastUop = Bool()
     val numUops = UInt(log2Up(MaxUopSize).W) // rob need this
     val numWB = UInt(log2Up(MaxUopSize).W) // rob need this
-    val loadPred = Valid(new MdpPredictInfo)
     // rename
     val psrc = Vec(numSrc, UInt(PhyRegIdxWidth.W))
     val psrcVl = UInt(VlPhyRegIdxWidth.W)
@@ -281,6 +280,7 @@ object Bundles {
     val traceBlockInPipe = new TracePipe(IretireWidthEncoded)
     // Take snapshot at this CFI inst
     val snapshot = Bool()
+    val loadPred    = Valid(new MdpPredictInfo)
     val storeSetHit = Bool() // inst has been allocated an store set
     val waitForRobIdx = new RobPtr // store set predicted previous store robIdx
     // Load wait is needed
@@ -366,7 +366,6 @@ object Bundles {
     val rasAction = BranchAttribute.RasAction()
     // for mdp
     val loadPred = Valid(new MdpPredictInfo)
-
     val storeSetHit = Bool()
     val waitForRobIdx = new RobPtr
     val loadWaitBit = Bool()
@@ -468,6 +467,7 @@ object Bundles {
     val numLsElem = Option.when(params.isVecMemIQ)(NumLsElem())
     val rasAction = Option.when(params.needRasAction)(BranchAttribute.RasAction())
     // for mdp
+    val loadPred       = Option.when(params.isLdAddrIQ)(Valid(new MdpPredictInfo))
     val storeSetHit    = Option.when(params.isLdAddrIQ)(Bool())
     val waitForRobIdx  = Option.when(params.isLdAddrIQ)(new RobPtr)
     val loadWaitBit    = Option.when(params.isLdAddrIQ)(Bool())
@@ -1124,6 +1124,7 @@ object Bundles {
       this.ftqIdx        .foreach(_ := source.common.ftqIdx.get)
       this.ftqOffset     .foreach(_ := source.common.ftqOffset.get)
       this.predictInfo   .foreach(_ := source.common.predictInfo.get)
+      this.loadPred      .foreach(_ := source.common.loadPred.get)
       this.loadWaitBit   .foreach(_ := source.common.loadWaitBit.get)
       this.waitForRobIdx .foreach(_ := source.common.waitForRobIdx.get)
       this.storeSetHit   .foreach(_ := source.common.storeSetHit.get)
@@ -1149,6 +1150,7 @@ object Bundles {
       this.pdestVl       .foreach(_ := source.pdestVl.get)
       this.numLsElem     .foreach(_ := source.numLsElem.get)
       this.rasAction     .foreach(_ := source.rasAction.get)
+      this.loadPred      .foreach(_ := source.loadPred.get)
       this.storeSetHit   .foreach(_ := source.storeSetHit.get)
       this.waitForRobIdx .foreach(_ := source.waitForRobIdx.get)
       this.loadWaitBit   .foreach(_ := source.loadWaitBit.get)
