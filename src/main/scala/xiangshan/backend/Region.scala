@@ -714,7 +714,26 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     io.wbDataPathToCtrlBlock.delayedOldestExuRedirect.get.bits  := RegEnable(oldestExuRedirect.bits, oldestExuRedirect.valid)
   }
 
-  io.IQValidNumVec := issueQueues.filter(_.param.StdCnt == 0).map(_.io.validCntDeqVec).flatten
+  var staIQIdx = 0
+  val staIssueQueue = issueQueues.filter(_.param.StaCnt > 0)
+  val stdIssueQueue = issueQueues.filter(_.param.StdCnt > 0)
+  io.IQValidNumVec := issueQueues.filter(_.param.StdCnt == 0).map { case iq =>
+    if (iq.param.StaCnt > 0) {
+      // sta and std iq has 1 deq
+      val staCnt = staIssueQueue(staIQIdx).io.validCntDeqVec.head
+      val stdCnt = stdIssueQueue(staIQIdx).io.validCntDeqVec.head
+      staIQIdx = staIQIdx + 1
+      VecInit(Mux(stdCnt > staCnt, stdCnt, staCnt))
+    }
+    else if (iq.param.BrhCnt > 0 && iq.param.numDeq > 1) {
+      val allCnt = iq.io.validCntDeqVec(0) + iq.io.validCntDeqVec(1)
+      val aluAppendCnt = Mux(allCnt > 12.U, 2.U, Mux(allCnt > 8.U, 1.U, 0.U))
+      val aluCnt = Mux(allCnt > 8.U, allCnt + aluAppendCnt, iq.io.validCntDeqVec(0))
+      val bjuCnt = Mux(allCnt > 12.U, allCnt, iq.io.validCntDeqVec(1))
+      VecInit(aluCnt, bjuCnt)
+    }
+    else iq.io.validCntDeqVec
+  }.flatten
   io.og0Cancel := dataPath.io.og0Cancel
   io.diffVl.foreach(_ := dataPath.io.diffVl.get)
   io.lduWriteback.foreach(_.flatten.foreach(_.ready := true.B))
