@@ -392,7 +392,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_mdpOverride   = !(s3_mdpPrediction=== s3_s1MdpPred) && s3_valid
   dontTouch(s3_mdpOverride)
   s3_override := s3_valid && (!(s3_prediction === s3_s1Prediction) || !(s3_mdpPrediction === s3_s1MdpPred))
-  XSPerfAccumulate("finalPred_s3_Mdp", s3_override && !(s3_mdpPrediction=== s3_s1MdpPred))
+  XSPerfAccumulate("finalPred_s3_Mdp", s3_override && !(s3_mdpPrediction === s3_s1MdpPred))
 
   private val s2_phrMeta = RegEnable(phr.io.phrMeta, s1_fire)
   private val s3_phrMeta = RegEnable(s2_phrMeta, s2_fire)
