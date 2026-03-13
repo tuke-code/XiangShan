@@ -240,7 +240,7 @@ object HasNewMdp {
 }
 
 object MdpPredictStatuses {
-  val NULL = 0.U
+  val NULL     = 0.U
   val INDEPEND = 1.U //predict dependence,real independence
   val DEPEND   = 2.U //predict dependence,real dependence
   val DEPENDOT = 3.U //predict dependence,real dependence other addr
