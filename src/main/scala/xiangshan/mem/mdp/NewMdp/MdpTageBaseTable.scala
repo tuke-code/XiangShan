@@ -299,6 +299,7 @@ class TageBaseTableAlignBank(
     }
     class Write extends Bundle {
       class Req extends Bundle{
+        val needWrite = Bool()
         val startPc = new PrunedAddr(VAddrBits)
         val loads   = Vec(ResolveEntryLoadNumbers, Valid(new LoadInfo))
         val metas   = Vec(BaseNumWays, new MdpMetaEntry)
@@ -425,10 +426,11 @@ class TageBaseTableAlignBank(
   replacer.io.predictTouch.bits.wayMask := s3_takenMask.asUInt
 
   /* --------------------------------------------------------------------------------------------------------------
-   train stage 0
+   train stage 1
    - 
    -------------------------------------------------------------------------------------------------------------- */
   private val t1_fire             = w.req.valid
+  private val t1_needWrite        = w.req.bits.needWrite
   private val t1_startPc          = w.req.bits.startPc
   private val t1_loads            = w.req.bits.loads
   private val t1_meta             = w.req.bits.metas
@@ -444,7 +446,7 @@ class TageBaseTableAlignBank(
   private val t1_hit     = t1_hitMask.orR
 
   // Write entry only when there's a mispredict, and if:
-  private val t1_entryNeedWrite = t1_mispredictInfo.valid && !t1_hit
+  private val t1_entryNeedWrite = t1_mispredictInfo.valid && t1_needWrite && !t1_hit
 
   // Use hit wayMask if hit, else use replacer's victim way
   private val t1_entryWayMask = Mux(t1_hit, t1_hitMask, replacer.io.victim.wayMask)
@@ -481,14 +483,13 @@ class TageBaseTableAlignBank(
     val hitMask = t1_loads.map { load=>
       load.valid && load.bits.updateType =/= MdpUpdateType.NULL && meta.cfiPosition === load.bits.cfiPosition
     }
-    val counterUp = Mux1H(hitMask, t1_loads.map(~_.bits.updateType === MdpUpdateType.M_IS)) 
+    val counterUp = Mux1H(hitMask, t1_loads.map(_.bits.updateType === MdpUpdateType.M_IS)) 
     //M_IS -> N0 up  / M_AW or M_IW -> N0 down
 
     val entryOverridden = t1_entryNeedWrite && t1_entryWayMask(i)
 
     t1_counterWayMask(i) := entryOverridden || hitMask.reduce(_ || _)
     t1_newCounters(i)    := Mux(entryOverridden, UsefulCounter.InitStrong, meta.counter.getUpdate(counterUp))
-    //
   }
 
   // write counter anytime when needed
@@ -627,10 +628,11 @@ class MdpTageBaseTable(implicit p: Parameters) extends XSModule with HasMdpBaseT
   private val t1_writeAlignBankMask = t1_rotator.rotate(VecInit(UIntToOH(t1_writeAlignBankIdx).asBools))
 
   alignBanks.zipWithIndex.foreach { case (b, i) =>
-    b.io.write.req.valid         := t1_fire && t1_writeAlignBankMask(i)
-    b.io.write.req.bits.startPc  := t1_startPcVec(i)
-    b.io.write.req.bits.loads    := t1_loads
-    b.io.write.req.bits.metas    := t1_meta.entries(i)
+    b.io.write.req.valid          := t1_fire
+    b.io.write.req.bits.needWrite := t1_writeAlignBankMask(i)
+    b.io.write.req.bits.startPc   := t1_startPcVec(i)
+    b.io.write.req.bits.loads     := t1_loads
+    b.io.write.req.bits.metas     := t1_meta.entries(i)
     // see comments in MainBtbAlignBank.scala
     b.io.write.req.bits.mispredictInfo := t1_mispredictInfo
   }

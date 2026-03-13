@@ -1302,7 +1302,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   val s2_fwd_mask_no_ubuffer = io.lsq.forward.forwardMask.asUInt | io.sbuffer.forwardMask.asUInt
   //来自前递就是mdp预测依赖成功，不来自前递就是mdp预测依赖失败
   val s2_mdpPredictHit = (~s2_fwd_mask_no_ubuffer & s2_in.mask) === 0.U && !io.lsq.forward.dataInvalid
-  s2_out.mdpPredictStatuses := Mux(s2_mdpPredictHit,MdpPredictStatuses.DEPEND,MdpPredictStatuses.INDEPEND) 
+  dontTouch(s2_mdpPredictHit)
   //TODO:: XSDebug
 
   XSDebug(s2_fire, "[FWD LOAD RESP] pc %x fwd %x(%b) + %x(%b)\n",
@@ -1326,7 +1326,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   s2_out.miss                := s2_dcache_miss && s2_troublem
   s2_out.feedbacked          := false.B
   s2_out.uop.vpu.vstart      := Mux(s2_in.isLoadReplay || s2_in.isFastReplay, s2_in.uop.vpu.vstart, s2_in.vecVaddrOffset >> s2_in.uop.vpu.veew)
-
+  s2_out.mdpPredictStatuses  := Mux(s2_mdpPredictHit,MdpPredictStatuses.DEPEND,MdpPredictStatuses.INDEPEND) 
   // Generate replay signal caused by:
   // * st-ld violation check
   // * tlb miss
@@ -1548,8 +1548,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   io.lsq.ldin.bits.uop := s3_out.bits.uop
 //  io.lsq.ldin.bits.uop.exceptionVec(loadAddrMisaligned) := Mux(s3_in.onlyMisalignException, false.B, s3_in.uop.exceptionVec(loadAddrMisaligned))
 
-  io.mdpUpdate.valid := (!io.lsq.ldin.bits.rep_info.need_rep && io.lsq.ldin.bits.updateAddrValid 
-                        && s3_out.bits.uop.loadPred.valid && ~s3_out.bits.uop.loadPred.bits.static)
+  io.mdpUpdate.valid          := s3_out.valid && s3_out.bits.uop.loadPred.valid && ~s3_out.bits.uop.loadPred.bits.static
   io.mdpUpdate.bits.pc        := s3_out.bits.uop.pc
   io.mdpUpdate.bits.ftqIdx    := s3_out.bits.uop.ftqPtr
   io.mdpUpdate.bits.ftqOffset := s3_out.bits.uop.ftqOffset
@@ -1559,7 +1558,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
               预测器	依赖	  依赖不同地址 loadQRAW
               预测器	非依赖	非依赖
               预测器	非依赖	依赖 loadQRAW*/
-  val fromMdpPredictDependency = MuxLookup(s3_out.bits.mdpPredictStatuses, MdpUpdateType.NULL)(Seq(
+  val fromMdpPredictDependency   = MuxLookup(s3_out.bits.mdpPredictStatuses, MdpUpdateType.NULL)(Seq(
     MdpPredictStatuses.DEPEND       -> MdpUpdateType.M_IS,
     MdpPredictStatuses.INDEPEND     -> MdpUpdateType.M_AW
   ))
@@ -1568,7 +1567,6 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   ))
   io.mdpUpdate.bits.updateType := Mux(s3_out.bits.uop.loadPred.bits.loadWait,fromMdpPredictDependency,fromMdpPredictNoDependency)
   io.mdpUpdate.bits.distance := 0.U //MdpPredictStatuses.INDEPEND分配的是非依赖项，所以不需要distance
-  dontTouch(io.mdpUpdate)
 
   XSPerfAccumulate("loadU_status_depend", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.DEPEND)
   XSPerfAccumulate("loadU_status_independ", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.INDEPEND)
