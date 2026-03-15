@@ -11,7 +11,7 @@ on:
         description: Allow reusing emu from sibling performance directories with same commit and config
         required: false
         type: string
-        default: false
+        default: true
       benchmark_type:
         required: false
         type: string
@@ -100,8 +100,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ steps.set_test.outputs.commit_sha }}
-          fetch-depth: 0
-          submodules: true
+          fetch-depth: 1
+          submodules: false
 
       - name: Set env
         run: |
@@ -158,16 +158,30 @@ jobs:
             done
           fi
 
+          if [ -n "${{ inputs.custom_constantin }}" ]; then
+            mkdir -p "$SPEC_DIR"
+            cp "${{ inputs.custom_constantin }}" "$SPEC_DIR/constantin.txt"
+          fi
+
+          if [ -f "$SPEC_DIR/emu" ]; then
+            echo "NEED_BUILD_EMU=false" >> $GITHUB_ENV
+            echo "Found existing emu at $SPEC_DIR/emu, skip checkout and emu build."
+          else
+            echo "NEED_BUILD_EMU=true" >> $GITHUB_ENV
+            echo "No emu at $SPEC_DIR/emu, will checkout and build emu."
+          fi
+
       - name: Initialize submodules
-        if: ${{ inputs.benchmark_type != 'dry-run-test' }}
+        if: ${{ env.NEED_BUILD_EMU == 'true' }}
         run: make init
 
       - name: Clean Up
-        if: ${{ inputs.benchmark_type != 'dry-run-test' }}
+        if: ${{ env.NEED_BUILD_EMU == 'true' }}
         run: |
           python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --clean
 
       - name: Build EMU with DRAMsim3
+        if: ${{ env.NEED_BUILD_EMU == 'true' }}
         run: |
           if [ ! -e "$SPEC_DIR/emu" ]; then
             export NOOP_HOME=$GITHUB_WORKSPACE
@@ -196,11 +210,6 @@ jobs:
             if [ -f "$GITHUB_WORKSPACE/ready-to-run/riscv64-nemu-interpreter-so" ]; then
               cp $GITHUB_WORKSPACE/ready-to-run/riscv64-nemu-interpreter-so $SPEC_DIR/riscv64-nemu-interpreter-so
             fi
-          fi
-
-          if [ -n "${{ inputs.custom_constantin }}" ]; then
-            mkdir -p "$SPEC_DIR"
-            cp "${{ inputs.custom_constantin }}" "$SPEC_DIR/constantin.txt"
           fi
 
       - name: Run SPEC CPU checkpoints

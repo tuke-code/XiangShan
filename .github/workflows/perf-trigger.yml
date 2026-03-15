@@ -46,7 +46,7 @@ on:
         options:
           - false
           - true
-        default: false
+        default: true
       force_clean_spec_dir:
         description: Force recreate SPEC_DIR by deleting existing directory first
         required: false
