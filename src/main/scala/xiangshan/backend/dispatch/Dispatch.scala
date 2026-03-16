@@ -434,7 +434,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
         val thisIQReady = io.toIssueQueues(allIssueParams.take(iqidx(i)).map(_.numEnq).sum).ready
         val thatIQReady = io.toIssueQueues(allIssueParams.take(iqidx(j)).map(_.numEnq).sum).ready
         if (i == j) compareMatrix(i)(j) := false.B
-        else if (i < j) compareMatrix(i)(j) := thisIQReady && (issueQueueCount(exuidx(i)) < issueQueueCount(exuidx(j)) || !thatIQReady)
+        else if (i < j) compareMatrix(i)(j) := issueQueueCount(exuidx(i)) < issueQueueCount(exuidx(j))
         else compareMatrix(i)(j) := !compareMatrix(j)(i)
       }
     }
@@ -449,9 +449,11 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
       VecInit((0 until iqNum).map(j => takeReadyNum(j % takeNum)))
     })
     val IQReadyNum = PopCount((0 until iqNum).map(i => io.toIssueQueues(allIssueParams.take(iqidx(i)).map(_.numEnq).sum).ready))
+    val IQAllReady = (0 until iqNum).map(i => io.toIssueQueues(allIssueParams.take(iqidx(i)).map(_.numEnq).sum).ready).reduce(_ && _)
+    val IQSortHasNotReady = VecInit((0 until iqNum).map(i => IQSort(i / 2)))
     val minIQSel = Wire(Vec(renameWidth, Vec(issueQueueNum, Bool()))).suggestName(s"minIQSel_$suffix")
     for (i <- 0 until renameWidth){
-      val minIQSel_ith = IQSortReadyNum(IQReadyNum)(i % iqNum)
+      val minIQSel_ith = Mux(IQAllReady, IQSort(i % iqNum), IQSort((i / 2) % iqNum))
       for (j <- 0 until issueQueueNum){
         minIQSel(i)(j) := false.B
         if (iqidx.contains(j)){
@@ -460,10 +462,22 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
       }
     }
     minIQSelAll(needMultiExuidx) := minIQSel
+    val fuTypeIsAlu = VecInit(fromRename.map(x => x.valid && FuType.isAlu(x.bits.fuType)))
+    val fuTypeisBJU = VecInit(fromRename.map(x => x.valid && FuType.isBJU(x.bits.fuType)))
+    val fuTypeisLoad = VecInit(fromRename.map(x => x.valid && FuType.isLoad(x.bits.fuType)))
+    val fuTypeisStore = VecInit(fromRename.map(x => x.valid && FuType.isStore(x.bits.fuType)))
+    val uopSelIQUInt = VecInit(uopSelIQ.map(_.asUInt))
     if (backendParams.debugEn){
       dontTouch(compareMatrix)
       dontTouch(IQSort)
       dontTouch(minIQSel)
+      dontTouch(issueQueueCount)
+      dontTouch(needAppendIQValidNumVec)
+      dontTouch(fuTypeIsAlu)
+      dontTouch(fuTypeisBJU)
+      dontTouch(fuTypeisLoad)
+      dontTouch(fuTypeisStore)
+      dontTouch(uopSelIQUInt)
     }
   }
   }
