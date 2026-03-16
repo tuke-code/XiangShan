@@ -439,9 +439,11 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
       VecInit((0 until iqNum).map(j => takeReadyNum(j % takeNum)))
     })
     val IQReadyNum = PopCount((0 until iqNum).map(i => io.toIssueQueues(allIssueParams.take(iqidx(i)).map(_.numEnq).sum).ready))
+    val IQAllReady = (0 until iqNum).map(i => io.toIssueQueues(allIssueParams.take(iqidx(i)).map(_.numEnq).sum).ready).reduce(_ && _)
+    val IQSortHasNotReady = VecInit((0 until iqNum).map(i => IQSort(i / 2)))
     val minIQSel = Wire(Vec(renameWidth, Vec(issueQueueNum, Bool()))).suggestName(s"minIQSel_$suffix")
     for (i <- 0 until renameWidth){
-      val minIQSel_ith = IQSortReadyNum(IQReadyNum)(i % iqNum)
+      val minIQSel_ith = Mux(IQAllReady, IQSort, IQSortHasNotReady)(i % iqNum)
       for (j <- 0 until issueQueueNum){
         minIQSel(i)(j) := false.B
         if (iqidx.contains(j)){
