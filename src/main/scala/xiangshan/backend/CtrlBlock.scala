@@ -814,6 +814,7 @@ class CtrlBlockImp(
   io.robio.lsq <> rob.io.lsq
 
   io.diff_vl_rat .foreach(_ := rename.io.diff_vl_rat.get)
+  io.diffCommits .foreach(_ := rob.io.diffCommits.get)
 
   rob.io.debug_ls := io.robio.debug_ls
   rob.io.debugHeadLsIssue := io.robio.robHeadLsIssue
@@ -1014,6 +1015,7 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
     }
   })
   val diff_vl_rat  = if (params.basicDebugEn) Some(Vec(1, Output(UInt(PhyRegIdxWidth.W)))) else None
+  val diffCommits  = if (params.basicDebugEn) Some(Output(new DiffCommitIO)) else None
 
   val sqCanAccept = Input(Bool())
   val lqCanAccept = Input(Bool())

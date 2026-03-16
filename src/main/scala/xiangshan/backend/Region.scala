@@ -451,6 +451,7 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     dataPath.io.fromIntWb.get := wbDataPath.io.toIntPreg
     dataPath.io.fromPcTargetMem <> io.fromPcTargetMem.get
     dataPath.io.fromBypassNetwork := bypassNetwork.io.toDataPath
+    dataPath.io.diffCommits.foreach(_ := io.diffCommits.get)
 
     bypassNetwork.io.fromDataPath.int <> dataPath.io.toIntExu
     bypassNetwork.io.fromDataPath.rcData := dataPath.io.toBypassNetworkRCData
@@ -841,6 +842,7 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val fromPcTargetMem = Option.when(params.isIntSchd)(Flipped(new PcToDataPathIO(backendParams)))
   val diffVlRat = Option.when(backendParams.basicDebugEn && params.isVecSchd)(Input(Vec(1, UInt(log2Up(VlPhyRegs).W))))
   val diffVl = Option.when(backendParams.basicDebugEn && params.isVecSchd)(Output(UInt(VlData().dataWidth.W)))
+  val diffCommits = Option.when(backendParams.basicDebugEn && params.isIntSchd)(Input(new DiffCommitIO))
   val vlWriteBackInfoIn = new Bundle {
     val vlFromIntIsZero = Input(Bool())
     val vlFromIntIsVlmax = Input(Bool())

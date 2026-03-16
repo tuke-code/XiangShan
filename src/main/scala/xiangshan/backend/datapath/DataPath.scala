@@ -335,10 +335,30 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
     regCache.io.writePorts := io.fromBypassNetwork
 
     if (env.AlwaysBasicDiff || env.EnableDifftest) {
-      // Delay of PhyRegFile should be same as RenameTable
-      val difftest = DifftestModule(new DiffPhyIntRegState(intSchdParams.numPregs), delay = 2)
+      // Keep DiffPhyIntRegState for DiffCommitData generation in the difftest preprocessor
+      val phyDifftest = DifftestModule(new DiffPhyIntRegState(intSchdParams.numPregs), delay = 2)
+      phyDifftest.coreid := io.hartId
+      phyDifftest.value := intDiffReadData.get
+
+      // Architectural register file for difftest: 32 logical integer registers
+      // Only written on commit, only instantiated when difftest is enabled
+      val diffRegFile = RegInit(VecInit(Seq.fill(32)(0.U(XLEN.W))))
+      val diffCommitsIn = io.diffCommits.get
+      val numDiffCommitPorts = diffCommitsIn.commitValid.length
+      // Write to diffRegFile on commit (x0 is never written, stays 0)
+      for (i <- 0 until numDiffCommitPorts) {
+        val info = diffCommitsIn.info(i)
+        when(diffCommitsIn.isCommit && diffCommitsIn.commitValid(i) && info.rfWen && info.ldest =/= 0.U) {
+          diffRegFile(info.ldest) := intDiffReadData.get(info.pdest)
+        }
+      }
+      // Report architectural integer register state directly via diffRegFile.
+      // Use registered (pre-commit) state to match the timing of the old RAT-based approach:
+      // DiffArchIntRenameTable also read registered RAT (before current cycle's commits).
+      // getArchRegs in Preprocess skips xrf generation when it already exists here.
+      val difftest = DifftestModule(new DiffArchIntRegState, delay = 2)
       difftest.coreid := io.hartId
-      difftest.value := intDiffReadData.get
+      difftest.value := diffRegFile
 
       regCache.io.diffRcIdx.get.zip(io.diffRcIdx.get).foreach { case (sink, source) =>
         sink <> source
@@ -865,6 +885,7 @@ class DataPathIO()(implicit p: Parameters, params: BackendParams, param: SchdBlo
 
   val diffVlRat = Option.when(params.basicDebugEn && param.isVecSchd)(Input(Vec(1, UInt(log2Up(VlPhyRegs).W))))
   val diffVl = Option.when(params.basicDebugEn && param.isVecSchd)(Output(UInt(VlData().dataWidth.W)))
+  val diffCommits = Option.when(params.basicDebugEn && param.isIntSchd)(Input(new DiffCommitIO))
 
   val diffRcIdx = Option.when(params.basicDebugEn && param.needWriteRegCache)(Input(Vec(params.getExuRCWriteSize, new DiffRCIdx)))
 

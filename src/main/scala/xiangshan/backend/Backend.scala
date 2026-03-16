@@ -404,6 +404,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   }
 
   vecRegion.io.diffVlRat.foreach(_ := ctrlBlock.io.diff_vl_rat.get)
+  intRegion.io.diffCommits.foreach(_ := ctrlBlock.io.diffCommits.get)
   vecRegion.io.fromVecExcpMod.get.r := vecExcpMod.o.toVPRF.r
   vecRegion.io.fromVecExcpMod.get.w := vecExcpMod.o.toVPRF.w
 

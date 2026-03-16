@@ -259,10 +259,7 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
 
   io.debug_int_rat .foreach(_ := intRat.io.debug_rdata.get)
   if (env.AlwaysBasicDiff || env.EnableDifftest) {
-    // Delay of RenameTable should be same as PhyRegFile
-    val difftest = DifftestModule(new DiffArchIntRenameTable(IntPhyRegs), delay = 2)
-    difftest.coreid := io.hartId
-    difftest.value := intRat.io.diff_rdata.get
+    // DiffArchIntRenameTable removed: integer arch state now provided directly via diffRegFile in DataPath
   }
   intRat.io.readPorts <> io.intReadPorts.flatten
   intRat.io.redirect := io.redirect
