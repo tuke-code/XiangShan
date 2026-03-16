@@ -767,7 +767,7 @@ class Sbuffer(implicit p: Parameters)
   val hitResp = io.dcache.main_pipe_hit_resp
   val refillDone = io.dcache.refill_done
   assert(!(valid_mshr.asUInt.andR && hitResp.fire && hitResp.bits.miss), "(Sbuffer) mshr_buffer enq when it is full")
-  val deqOH_mshr = ptag_mshr.map(_ === (refillDone.bits.paddr >> OffsetWidth))
+  val deqOH_mshr = ptag_mshr.map(_ === (refillDone.bits.paddr >> OffsetWidth)) zip valid_mshr map {case (x, y) => x && y}
   for (i <- 0 until cacheParams.nMissEntries) {
     when (hitResp.fire && hitResp.bits.miss) {
       when (enqOH_mshr(i)) {
@@ -778,8 +778,8 @@ class Sbuffer(implicit p: Parameters)
     when (refillDone.valid && deqOH_mshr(i)) {
       valid_mshr(i) := false.B
     }
-    assert(!(refillDone.valid && deqOH_mshr(i) && !valid_mshr(i)), "(Sbuffer) mshr_buffer deq when it is not valid")
   }
+  assert(!(PopCount(deqOH_mshr) > 1.U && refillDone.valid), "(Sbuffer) Error: more than one mshr_buffer deq in the same cycle")
   
   for (i <- 0 until StoreBufferSize) {
     when(
