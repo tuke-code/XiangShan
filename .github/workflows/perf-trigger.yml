@@ -55,6 +55,24 @@ on:
           - false
           - true
         default: false
+      auto_rerun_on_failure:
+        description: Auto rerun the whole workflow when performance-test fails
+        required: false
+        type: choice
+        options:
+          - false
+          - true
+        default: true
+      max_workflow_reruns:
+        description: Max whole-workflow reruns (0 means unlimited)
+        required: false
+        type: string
+        default: '3'
+      rerun_attempt:
+        description: Internal rerun counter, do not change unless needed
+        required: false
+        type: string
+        default: '0'
       benchmarks:
         description: Specific benchmarks to run (comma-separated), leave empty to run all
         required: false
@@ -79,3 +97,56 @@ jobs:
         benchmarks: ${{ github.event.inputs.benchmarks }}
         servers: ${{ github.event.inputs.servers }}
         perf_report_dir: /nfs/home/cirunner/perf-report-prefetch2026
+
+  auto-rerun-trigger:
+    needs: performance-test
+    if: ${{ always() && needs.performance-test.result == 'failure' && github.event_name == 'workflow_dispatch' }}
+    runs-on: node
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch next rerun when enabled
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const inputs = context.payload.inputs || {};
+            const autoRerun = (inputs.auto_rerun_on_failure || 'true') === 'true';
+            const currentAttempt = parseInt(inputs.rerun_attempt || '0', 10);
+            const maxWorkflowReruns = parseInt(inputs.max_workflow_reruns || '0', 10);
+
+            if (!Number.isInteger(maxWorkflowReruns) || maxWorkflowReruns < 0) {
+              core.setFailed(`Invalid max_workflow_reruns: ${inputs.max_workflow_reruns}`);
+              return;
+            }
+
+            if (!Number.isInteger(currentAttempt) || currentAttempt < 0) {
+              core.setFailed(`Invalid rerun_attempt: ${inputs.rerun_attempt}`);
+              return;
+            }
+
+            if (!autoRerun) {
+              core.info('auto_rerun_on_failure=false, skip rerun dispatch.');
+              return;
+            }
+
+            if (maxWorkflowReruns > 0 && currentAttempt >= maxWorkflowReruns) {
+              core.info(`Reached rerun limit: ${currentAttempt}/${maxWorkflowReruns}.`);
+              return;
+            }
+
+            const nextAttempt = String(currentAttempt + 1);
+            const ref = (context.ref || '').replace('refs/heads/', '');
+
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'perf-trigger.yml',
+              ref,
+              inputs: {
+                ...inputs,
+                rerun_attempt: nextAttempt,
+              },
+            });
+
+            core.info(`Dispatched next workflow rerun: attempt ${nextAttempt}/${maxWorkflowReruns}.`);
