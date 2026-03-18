@@ -23,12 +23,12 @@ class PredictTagMatchResult(implicit p: Parameters) extends XSBundle with HasMdp
 }
 
 class TrainTagMatchResult(implicit p: Parameters) extends XSBundle with HasMdpTageTableParameters {
-  val hit:          Bool            = Bool()
-  val hitWayMaskOH: UInt            = UInt(MaxNumWays.W)
-  val wayFull:      Bool            = Bool()
-  val tag:          UInt            = UInt(TagWidth.W)
-  val usefulCtr:    SaturateCounter = UsefulCounter()
-  val distance :    UInt            = UInt(RobDistance.W)
+  val hit:                  Bool            = Bool()
+  val hitWayMaskOH:         UInt            = UInt(MaxNumWays.W)
+  val wayFull:              Bool            = Bool()
+  val tag:                  UInt            = UInt(TagWidth.W)
+  val usefulCtrs:           Vec[SaturateCounter] = Vec(MaxNumWays,UsefulCounter())
+  val distance :            UInt                 = UInt(RobDistance.W)
   val allWayWeakUsefulCtrs: Vec[SaturateCounter] = Vec(MaxNumWays,UsefulCounter())
 }
 
@@ -257,7 +257,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
         entry.valid && ~ctr.isSaturateNegative
       }.reduce(_ && _)
       result.tag          := tag
-      result.usefulCtr    := Mux1H(hitWayMaskOH, tableReadResp.usefulCtrs)
+      result.usefulCtrs   := tableReadResp.usefulCtrs
       result.distance     := Mux1H(hitWayMaskOH, tableReadResp.entries).distance
       result.allWayWeakUsefulCtrs := VecInit(tableReadResp.usefulCtrs.map(ctr => ctr.getDecrease())) //for AllWayWeakUsefulCtrs
       result
@@ -270,18 +270,19 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     val trainNxType      = WireDefault((LoadType.None).asTypeOf(new LoadTrainType))
     dontTouch(tageHitTableMask.asUInt.suggestName(s"t2_Load_${i}_hitTableMask"))
     val provider = Mux1H(longestHistTableOH.asUInt, tageTableTagMatchResults)
+    val rawUsefulCtr = Mux1H(provider.hitWayMaskOH, provider.usefulCtrs)
     val needAllocateWeak   = allocateNxType.isAllocateWeak
     val needAllocateStrong = allocateNxType.isAllocateStrong
-    val needAllWayWeak     = allocateNxType.isAllWayWeak
+    val needAllWayWeak     = trainNxType.isAllWayWeak
     val notNeedAllWayWeak  = tageHitTableMask.reduce(_ || _) && trainNxType.isAllWayWeak && VecInit(
-      provider.allWayWeakUsefulCtrs.map(ctr => ctr.isSaturateNegative)
+      provider.usefulCtrs.map(ctr => ctr.isSaturateNegative)
     ).reduce(_ && _)
-    val notNeedUpdate      = (((trainNxType.isStrong && provider.usefulCtr.isSaturatePositive) 
-                           ||  (trainNxType.isWeak   && provider.usefulCtr.isSaturateNegative)) 
+    val notNeedUpdate      = (((trainNxType.isStrong && rawUsefulCtr.isSaturatePositive) 
+                           ||  (trainNxType.isWeak   && rawUsefulCtr.isSaturateNegative)) 
                            && tageHitTableMask.reduce(_ || _)) || trainNxType.isNone
 
     val usefulCtrUpdate = trainNxType.isStrong || trainNxType.isWeak
-    val newUsefulCtr = provider.usefulCtr.getUpdate(increase = trainNxType.isStrong,en = usefulCtrUpdate)
+    val newUsefulCtr = rawUsefulCtr.getUpdate(increase = trainNxType.isStrong,en = usefulCtrUpdate)
 
     val trainInfo = Wire(new TrainInfo).suggestName(s"t2_Load_${i}_trainInfo")
     trainInfo.valid           := tageHitTableMask.reduce(_ || _) || needAllocateWeak || needAllocateStrong
@@ -379,16 +380,22 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   }
 
   dontTouch(VecInit(t2_trainInfoVec))
-  val mdpTageTrain = VecInit(t2_trainInfoVec.map(info => info.valid && t2_fire))
-  val mdpTageTrainAllocate = VecInit(t2_trainInfoVec.map(info => info.valid && info.needAllocate && t2_fire))
-  val mdpTageTrainAllWayWeak = VecInit(t2_trainInfoVec.map(info => info.valid && info.needAllWayWeak && t2_fire))
+  //TODO:精细化到每个维度的计数器
+  val mdpTageTrain            = VecInit(t2_trainInfoVec.map(info => info.valid && t2_fire))
+  val mdpTageTrainAllocate    = VecInit(t2_trainInfoVec.map(info => info.valid && t2_fire && info.needAllocate))
+  val mdpTageTrainAllWayWeak  = VecInit(t2_trainInfoVec.map(info => info.valid && t2_fire && info.needAllWayWeak))
   val mdpTageTrainUpdate = VecInit(t2_trainInfoVec.map(info => info.valid && info.needUpdate && t2_fire))
   val mdpTageTrainLoadsValidCnt = PopCount(t2_loads.map(load => load.valid  && t2_fire && (load.bits.updateType =/= MdpUpdateType.M_WZ 
-                                                                                        && load.bits.updateType =/= MdpUpdateType.NULL)))
+                                                                                       && load.bits.updateType =/= MdpUpdateType.NULL)))
   val mdpTageTrainLoadsAW = PopCount(t2_loads.map(load => load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AW))
   val mdpTageTrainLoadsAS = PopCount(t2_loads.map(load => load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AS))
   val mdpTageTrainLoadsIS = PopCount(t2_loads.map(load => load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IS))
   val mdpTageTrainLoadsIW = PopCount(t2_loads.map(load => load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IW))
+  val mdpTageTrainNeedWrite = VecInit(t2_trainInfoVec.map(info => 
+    info.valid && (info.needUpdate || info.needAllocate || info.needAllWayWeak) && t2_fire))
+
+  val mdpTageTrainSkipUpdate = VecInit(t2_trainInfoVec.map(info =>
+    info.valid && !info.needUpdate && !info.needAllocate && !info.needAllWayWeak && t2_fire))
 
   val mdpTageTrainCnt = PopCount(mdpTageTrain)
   val mdpTageTrainAllocateCnt = PopCount(mdpTageTrainAllocate)
@@ -407,14 +414,15 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   XSPerfAccumulate("mdp_tage_train_allocate", mdpTageTrainAllocateCnt)
   XSPerfAccumulate("mdp_tage_train_all_way_weak", mdpTageTrainAllWayWeakCnt)
   XSPerfAccumulate("mdp_tage_train_update", mdpTageTrainUpdateCnt)
-  
+  XSPerfAccumulate("mdp_tage_train_need_write", PopCount(mdpTageTrainNeedWrite))
+  XSPerfAccumulate("mdp_tage_train_skip_update", PopCount(mdpTageTrainSkipUpdate))
 
   //allocate
   private val t2_needAllocateLoadOH = t2_trainInfoVec.map(info => info.valid && info.needAllocate)
   
   when(t2_fire) {
     assert(PopCount(t2_needAllocateLoadOH) <= 1.U)
-  }
+  } //FIXME:
   private val t2_needAllocate          = t2_needAllocateLoadOH.reduce(_ || _)
   private val t2_allocateLoad          = Mux1H(t2_needAllocateLoadOH, t2_loads)
   private val t2_allocateLoadTrainInfo = Mux1H(t2_needAllocateLoadOH, t2_trainInfoVec)
@@ -470,13 +478,16 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       val hitMask = t2_trainInfoVec.map { info =>
         info.valid && info.needUpdate && info.trainNxOH(tableIdx) && info.hitWayMaskOH(wayIdx)
       }
+      val allocateMask = t2_trainInfoVec.map { info =>
+        info.valid && info.needAllocate && t2_allocate && t2_allocateTableOH(tableIdx) && t2_allocateWayOH(wayIdx)
+      }
       when(t2_fire) {
         assert(PopCount(hitMask) <= 1.U)
       }
       val updateEn = hitMask.reduce(_ || _)
       val allocateEn = t2_allocate && t2_allocateTableOH(tableIdx) && t2_allocateWayOH(wayIdx)
       val weakWayEn  = allWayNeedWeakMask.reduce(_ || _)
-      val allocateUsefulCtr = Mux1H(hitMask, t2_trainInfoVec).allocateUsefulCtr
+      val allocateUsefulCtr = Mux1H(allocateMask, t2_trainInfoVec).allocateUsefulCtr
       val updateEntry       = Mux1H(hitMask, t2_trainInfoVec).updateEntry
       val updateUsefulCtr   = Mux1H(hitMask, t2_trainInfoVec).updateUsefulCtr
       val weakWayUsefulCtr  = Mux1H(allWayNeedWeakMask, t2_trainInfoVec).AllWayWeakUsefulCtrs(wayIdx)
@@ -511,5 +522,6 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       usefulResetCtr.selfIncrease()
     }
   }
-  XSPerfAccumulate("t2_useful_reset", t2_fire && usefulResetCtr.isSaturatePositive)
+  XSPerfAccumulate("mdp_t2_useful_reset_need_allocate", t2_fire && t2_needAllocate && !t2_canAllocate)
+  XSPerfAccumulate("mdp_t2_useful_reset", t2_fire && usefulResetCtr.isSaturatePositive)
 }
