@@ -1003,6 +1003,8 @@ package object xiangshan {
     val BalanceDispatchPolicyStallVec = Value("BalanceDispatchPolicyStallVec")
     val BalanceDispatchPolicyStallLoad = Value("BalanceDispatchPolicyStallLoad")
     val BalanceDispatchPolicyStallStore = Value("BalanceDispatchPolicyStallStore")
+    val IQEnqPolicyStallIssued = Value("IQEnqPolicyStallIssued")
+    val IQEnqPolicyStall = Value("IQEnqPolicyStall")
     val IntIQFullStallAlu = Value("IntIQFullStallAlu")
     val IntIQFullStallBrh = Value("IntIQFullStallBrh")
     val IntIQFullStallOther = Value("IntIQFullStallOther")
