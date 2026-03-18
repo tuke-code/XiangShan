@@ -105,14 +105,19 @@ trait TopHelper extends HasMdpTageTableParameters {
   def getLongestHistTableIdx(hitTableMask: Seq[Bool]): UInt =
     OHToUInt(PriorityEncoderOH(hitTableMask.reverse).reverse)
 
-  def getFirstNonFullTableOH(longestHistTableOH: Seq[Bool], wayFullMask: Seq[Bool]): (UInt,Bool) = {
-    val longerThanLongest = (~((longestHistTableOH.asUInt - 1.U) | longestHistTableOH.asUInt))
-    val candidateMask = longerThanLongest & !wayFullMask.asUInt 
+  def getFirstNonFullTableOH(longestHistTableOH: Seq[Bool], wayFullMask: Seq[Bool]): (UInt, Bool) = {
+    val longerMask = Wire(UInt(longestHistTableOH.length.W))
+    when (longestHistTableOH.asUInt.orR) {
+      longerMask := ~(longestHistTableOH.asUInt - 1.U) << 1.U
+    } .otherwise {
+      longerMask := ~0.U(longestHistTableOH.length.W)
+    }
+    val candidateMask = longerMask & (~wayFullMask.asUInt) 
     val allocateOH = Mux(
       candidateMask.orR,
       PriorityEncoderOH(candidateMask),
-      PriorityEncoderOH(longerThanLongest) // 表全满了，就近分配
-    ) //FIXME:
+      0.U //未定义行为，不分配
+    ) 
     val canAllocate = candidateMask.orR
     (allocateOH, canAllocate)
   }

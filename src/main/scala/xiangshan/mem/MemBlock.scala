@@ -1845,6 +1845,13 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   XSPerfAccumulate("mdp_as_count", mdp_as_count)
   XSPerfAccumulate("mdp_is_count", mdp_is_count)
   XSPerfAccumulate("mdp_iw_count", mdp_iw_count)
+  val mdpPredictCnt        = PopCount(issueLda.map(load => load.fire && ~load.bits.loadPred.get.bits.static))
+  val mdpPredictLoadWait   = PopCount(issueLda.map(load => load.fire && ~load.bits.loadPred.get.bits.static && load.bits.loadPred.get.bits.loadWait))
+  val mdpPredictNoLoadWait = PopCount(issueLda.map(load => load.fire && ~load.bits.loadPred.get.bits.static && ~load.bits.loadPred.get.bits.loadWait))
+  XSPerfAccumulate("mdp_predict_count", mdpPredictCnt)
+  XSPerfAccumulate("mdp_predict_loadwait", mdpPredictLoadWait)
+  XSPerfAccumulate("mdp_predict_no_loadwait", mdpPredictNoLoadWait)
+
 
   val pfevent = Module(new PFEvent)
   pfevent.io.distribute_csr := csrCtrl.distribute_csr
