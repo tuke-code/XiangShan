@@ -988,7 +988,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     validVec.zip(issuedVec).zip(deqCanAcceptVec(0)).map { case ((a, b),c) => a && b && c }
   )
   private val entryIssuedCntDeq1 = PopCount(
-    validVec.zip(issuedVec).drop(params.numEnq).zip(deqCanAcceptVec.last).map { case ((a, b),c) => a && b && c }
+    validVec.zip(issuedVec).zip(deqCanAcceptVec.last).map { case ((a, b),c) => a && b && c }
   )
   protected val deqCanAcceptVecEnq: Seq[IndexedSeq[Bool]] = deqFuCfgs.map { fuCfgs: Seq[FuConfig] =>
     io.enq.map(_.bits.fuType).map(fuType =>
