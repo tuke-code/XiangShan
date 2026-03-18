@@ -421,7 +421,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
       u(iqidx) && FuType.FuTypeOrR(fromRename(i).bits.fuType, exuParams.fuConfigs.map(_.fuType)) && fromRename(i).fire
     })
     val selIQNumSat = Mux(selIQNum > 2.U, 2.U, selIQNum)
-    needAppendIQValidNumVec(iqDeqIdx) := selIQNumSat + RegNext(selIQNumSat)
+    needAppendIQValidNumVec(iqDeqIdx) := selIQNumSat + RegNext(selIQNumSat) + RegNext(RegNext(selIQNumSat))
   }}
   val issueQueueCount = VecInit(io.IQValidNumVec.zip(needAppendIQValidNumVec).map(x => x._1 + x._2))
   val minIQSelAll = Wire(Vec(needMultiExu.size, Vec(renameWidth, Vec(issueQueueNum, Bool()))))
