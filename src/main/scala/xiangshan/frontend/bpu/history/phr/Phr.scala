@@ -225,7 +225,7 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   private val mdpMetaPhrFolded = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
   AllFoldedHistoryInfo.foreach { info =>
     mdpMetaPhrFolded.getHistWithInfo(info).foldedHist :=
-      computeFoldedHist(predictHist, info.FoldedLength)(info.HistoryLength)
+      computeFoldedHist(mdpPredictHist, info.FoldedLength)(info.HistoryLength)
   }
   io.phrMeta.phrPtr     := s1_phrPtr
   io.phrMeta.phrLowBits := s1_phrValue(PathHashHighWidth - 1, 0)

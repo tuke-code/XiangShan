@@ -18,7 +18,7 @@ class MdpPredictInfo(implicit p: Parameters) extends XSBundle with HasMdpParamet
   val static   = Bool() // from static predictor
   val loadWait = Bool() // high : load is blocked
   val distance = UInt(RobDistance.W)
-  def getWaitStoreRobIdx(loadRobIdx: RobPtr): RobPtr = loadRobIdx - distance //FIXME: 遇到边界的越界
+  def getWaitStoreRobIdx(loadRobIdx: RobPtr): RobPtr = loadRobIdx - distance
   //loadRobIdx - distance = storeRobIdx
 }
 

@@ -73,6 +73,12 @@ class MdpTableWriteReq(implicit p: Parameters, info: MdpTageTableInfo) extends X
   val usefulCtrs:      Vec[SaturateCounter] = Vec(NumWays, UsefulCounter())
 }
 
+class MdpAllWayWeakReq(implicit p: Parameters, info: MdpTageTableInfo) extends XSBundle with HasMdpTageTableParameters{ 
+  val setIdx:          UInt                 = UInt(SetIdxWidth.W)
+  val bankIdx:         UInt                 = UInt(BankIdxWidth.W)
+  val usefulCtrs:      Vec[SaturateCounter] = Vec(NumWays, UsefulCounter())
+}
+
 class MdpTageFoldedHist(implicit p: Parameters, info: MdpTageTableInfo) extends XSBundle with HasMdpTageTableParameters{
   val forIdx: UInt = UInt(MaxSetIdxWidth.W) //TODO:
   val forTag: UInt = UInt(TagWidth.W)
@@ -96,6 +102,7 @@ class MdpTageTable(
     val predictReadResp = Output(new MdpTableReadResp)
     val trainReadResp   = Output(new MdpTableReadResp)
     val writeReq        = Flipped(Valid(new MdpTableWriteReq))
+    val allWayWeakReq   = Flipped(Valid(new MdpAllWayWeakReq))
     val resetUseful:     Bool                 = Input(Bool())
     val resetDone:       Bool                 = Output(Bool())
   })    
@@ -178,13 +185,19 @@ class MdpTageTable(
       val setIdx = readPort.bits.setIdx
       val entry  = readPort.bits.entry
       way.io.w.apply(valid, entry, setIdx, 1.U(1.W))
-      readPort.ready := way.io.w.req.ready && !way.io.r.req.valid
+      readPort.ready := way.io.w.req.ready && !way.io.r.req.valid && !io.allWayWeakReq.valid
 
       when(io.resetUseful) {
         ctrsPerWay.foreach(_.resetZero())
       }.elsewhen(readPort.fire) {
         ctrsPerWay(setIdx) := readPort.bits.usefulCtr
       }
+    }
+  }
+
+  when(io.allWayWeakReq.valid){
+    for(i <- 0 until NumWays){
+      usefulCtrs(io.allWayWeakReq.bits.bankIdx)(i)(io.allWayWeakReq.bits.setIdx) := io.allWayWeakReq.bits.usefulCtrs(i)
     }
   }
 
