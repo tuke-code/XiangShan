@@ -96,6 +96,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   val exuNum = allExuParams.size
   val maxIQSize = allIssueParams.map(_.numEntries).max
   val IQEnqSum = allIssueParams.map(_.numEnq).sum
+  val issueQueueNum = allIssueParams.size
 
   val io = IO(new Bundle {
     // from rename
@@ -155,6 +156,8 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     val robHeadNotReady = Input(Bool())
     val debugBlockBackward = Option.when(backendParams.debugEn)(Input(Bool()))
     val debugWaitForward   = Option.when(backendParams.debugEn)(Input(Bool()))
+    val debugIQValidNumVec = Option.when(backendParams.debugEn)(Vec(issueQueueNum, Input(UInt(maxIQSize.U.getWidth.W))))
+    val debugIQEnqHasIssuedVec = Option.when(backendParams.debugEn)(Vec(issueQueueNum, Input(Bool())))
     val debugTopDown = new Bundle {
       val fromRob = Flipped(new RobDispatchTopDownIO)
       val fromCore = new CoreDispatchTopDownIO
@@ -186,7 +189,6 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
 
   val renameWidth = io.fromRename.size
   val issueQueueCount = io.IQValidNumVec
-  val issueQueueNum = allIssueParams.size
   // int fp vec v0
   val numRegType = 4
   val idxRegTypeInt = allFuConfigs.map(x => {
@@ -963,26 +965,36 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   val fuMapIQReadyCntVec = fuTypeMapIQIdx.map { iqVec =>
     iqVec.map( iqidx => iqReadyVec(iqidx)).reduce(_ +& _)
   }
-  val fuMapTest = fuTypeMapIQIdx.zipWithIndex.foreach { case (iqVec,idx) =>
-    iqVec.map(iqidx => allIssueParams(iqidx).numEnq).sum
-    println(s"Dispatch: futype: ${idx} numenq: ${iqVec.map(iqidx => allIssueParams(iqidx).numEnq).sum}")
-  }
   val fuMapIQBandWidthVec = Wire(Vec(FuType.num, UInt(log2Ceil(IQEnqSum).W)))
-  fuMapIQBandWidthVec:= fuTypeMapIQIdx.map { iqVec =>
+  fuMapIQBandWidthVec := fuTypeMapIQIdx.map { iqVec =>
     iqVec.map( iqidx => allIssueParams(iqidx).numEnq).sum.asUInt
   }
+  val issueQueueSizeVec = Wire(Vec(issueQueueNum, UInt(maxIQSize.U.getWidth.W)))
+  issueQueueSizeVec := allIssueParams.map{ param =>
+    // Now only when iq has two clear entry, instruction can enq
+    (param.numEntries - 2).asUInt
+  }
+
   val fuTypes = fromRename.map(_.bits.fuType)
   val firedVec = fromRename.map(_.fire)
   val inValidVec = fromRename.map(_.valid)
   val inReadyVec = fromRename.map(_.ready)
+  val issueQueueNumVec = io.debugIQValidNumVec.getOrElse(VecInit(Seq.fill(RenameWidth)(0.U)))
+  val issueQueueEnqHasIssuedVec = io.debugIQEnqHasIssuedVec.getOrElse(VecInit(Seq.fill(RenameWidth)(0.U)))
   val fromRenameMapIQReadyCntVec = Wire(Vec(RenameWidth, UInt(log2Ceil(io.toIssueQueues.length).W)))
   val fromRenameMapIQBandWidthVec = Wire(Vec(RenameWidth, UInt(log2Ceil(IQEnqSum).W)))
+  val fromRenameMapIQValidNumVec = Wire(Vec(RenameWidth, UInt(maxIQSize.U.getWidth.W)))
+  val fromRenameMapIQSizeVec = Wire(Vec(RenameWidth, UInt(maxIQSize.U.getWidth.W)))
+  val fromRenameMapIQEnqHasIssuedVec = Wire(Vec(RenameWidth, Bool()))
   fromRenameMapIQReadyCntVec := fuTypes.map { fuType =>
     Mux1H(fuType, fuMapIQReadyCntVec )
   }
   fromRenameMapIQBandWidthVec := fuTypes.map { fuType =>
     Mux1H(fuType, fuMapIQBandWidthVec)
   }
+  fromRenameMapIQValidNumVec := (0 until RenameWidth).map{ idx => Mux1H(uopSelIQ(idx), issueQueueNumVec)}
+  fromRenameMapIQSizeVec := (0 until RenameWidth).map{ idx => Mux1H(uopSelIQ(idx), issueQueueSizeVec)}
+  fromRenameMapIQEnqHasIssuedVec := VecInit((0 until RenameWidth).map{idx => Mux1H(uopSelIQ(idx), issueQueueEnqHasIssuedVec)})
 
   val fuTypeCountVec = (0 until RenameWidth).map { i =>
     (0 until FuType.num).map { fid =>
@@ -998,12 +1010,21 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   }
   val fromRenameFutypeNotOverIQ = Wire(Vec(RenameWidth, Bool()))
   fromRenameFutypeNotOverIQ := (0 until RenameWidth).map{ idx =>
-    inValidVec(idx) && (fromRenameSameFuNumVec(idx) < fromRenameMapIQReadyCntVec(idx))
+    inValidVec(idx) && (fromRenameSameFuNumVec(idx) <= fromRenameMapIQReadyCntVec(idx))
   }
 
   val fromRenameFutypeOvecIQEnqBandwidth = Wire(Vec(RenameWidth, Bool()))
   fromRenameFutypeOvecIQEnqBandwidth := (0 until RenameWidth).map{ idx =>
     inValidVec(idx) && (fromRenameSameFuNumVec(idx) > fromRenameMapIQBandWidthVec(idx))
+  }
+
+  val fromRenameMapIQNotFull = Wire(Vec(RenameWidth, Bool()))
+  fromRenameMapIQNotFull := (0 until RenameWidth).map{ idx =>
+    inValidVec(idx) && (fromRenameMapIQValidNumVec(idx) <= fromRenameMapIQSizeVec(idx))
+  }
+  val fromRenameMapIQEnqHasIssuedNotFull = Wire(Vec(RenameWidth, Bool()))
+  fromRenameMapIQEnqHasIssuedNotFull := (0 until RenameWidth).map{ idx =>
+    fromRenameMapIQNotFull(idx) && fromRenameMapIQEnqHasIssuedVec(idx)
   }
 
   dontTouch(fromRenameMapIQReadyCntVec)
@@ -1012,6 +1033,12 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   dontTouch(fromRenameMapIQBandWidthVec)
   dontTouch(fromRenameFutypeOvecIQEnqBandwidth)
   dontTouch(fuMapIQBandWidthVec)
+  dontTouch(issueQueueSizeVec)
+  dontTouch(fromRenameMapIQValidNumVec)
+  dontTouch(fromRenameMapIQSizeVec)
+  dontTouch(fromRenameMapIQNotFull)
+  dontTouch(fromRenameMapIQEnqHasIssuedVec)
+  dontTouch(fromRenameMapIQEnqHasIssuedNotFull)
 
 
   // prepipe stall
@@ -1054,15 +1081,17 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     FuType.isStoreVstore(issueQueueStallFutype) -> BalanceDispatchPolicyStallStore.id.U ,
   ))
   val issueQueueStallReason = MuxCase(BackendOtherCoreStall.id.U, Seq(
-    fromRenameFutypeNotOverIQ(0)                -> balanceDispatchStallReason ,
-    FuType.isAlu(issueQueueStallFutype)         -> IntIQFullStallAlu.id.U     ,
-    FuType.isBJU(issueQueueStallFutype)         -> IntIQFullStallBrh.id.U     ,
-    FuType.isInt(issueQueueStallFutype)         -> IntIQFullStallOther.id.U   ,
-    FuType.isFArith(issueQueueStallFutype)      -> FpIQFullStall.id.U         ,
-    FuType.isVArith(issueQueueStallFutype)      -> VecIQFullStall.id.U        ,
-    FuType.isLoadVload(issueQueueStallFutype)   -> LoadIQFullStall.id.U       ,
-    FuType.isStoreVstore(issueQueueStallFutype) -> StoreIQFullStall.id.U      ,
-    issueQueueStall                             -> OtherIQFullStall.id.U      ,
+    fromRenameFutypeNotOverIQ(0)                -> balanceDispatchStallReason  ,
+    fromRenameMapIQEnqHasIssuedNotFull(0)       -> IQEnqPolicyStallIssued.id.U ,
+    fromRenameMapIQNotFull(0)                   -> IQEnqPolicyStall.id.U       ,
+    FuType.isAlu(issueQueueStallFutype)         -> IntIQFullStallAlu.id.U      ,
+    FuType.isBJU(issueQueueStallFutype)         -> IntIQFullStallBrh.id.U      ,
+    FuType.isInt(issueQueueStallFutype)         -> IntIQFullStallOther.id.U    ,
+    FuType.isFArith(issueQueueStallFutype)      -> FpIQFullStall.id.U          ,
+    FuType.isVArith(issueQueueStallFutype)      -> VecIQFullStall.id.U         ,
+    FuType.isLoadVload(issueQueueStallFutype)   -> LoadIQFullStall.id.U        ,
+    FuType.isStoreVstore(issueQueueStallFutype) -> StoreIQFullStall.id.U       ,
+    issueQueueStall                             -> OtherIQFullStall.id.U       ,
   ))
 
   val dispatchlsqStall = dispatchlsqBubbleVec.reduce(_ && _)
@@ -1093,7 +1122,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   val dispatchBubbleReasonVecReg = Reg(chiselTypeOf(io.stallReason.reason))
 
   //TODO explain
-  val dispatchBandWidthPolicyBubble = fromRenameFutypeOvecIQEnqBandwidth.reduce(_ || _)
+  val dispatchBandWidthPolicyBubble = PriorityMux(issueQueueStallVec, fromRenameFutypeOvecIQEnqBandwidth)
   val dispatchBandWidthPolicyBubbleFutype = PriorityMux(fromRenameFutypeOvecIQEnqBandwidth, fuTypes)
   val dispatchBandWidthPolicyBubbleReason = MuxCase(BackendOtherCoreStall.id.U, Seq(
     FuType.isLoadVload(dispatchBandWidthPolicyBubbleFutype)   -> LoadDispatchPolicyStall.id.U  ,
@@ -1101,18 +1130,23 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     dispatchBandWidthPolicyBubble                             -> OtherDispatchPolicyStall.id.U ,
   ))
 
+  val issueQueueEnqPolicyStallIssued = PriorityMux(issueQueueStallVec, fromRenameMapIQEnqHasIssuedNotFull)
+  val issueQueueEnqPolicyStall = PriorityMux(issueQueueStallVec, fromRenameMapIQNotFull)
+
   val issueQueueBubble = issueQueueStallVec.reduce(_ || _)
 
   val issueQueueBubbleReason = MuxCase(BackendOtherCoreStall.id.U, Seq(
-    balanceDispatchStall                        -> balanceDispatchStallReason ,
+    balanceDispatchStall                        -> balanceDispatchStallReason  ,
     dispatchBandWidthPolicyBubble               -> dispatchBandWidthPolicyBubbleReason ,
-    FuType.isAlu(issueQueueStallFutype)         -> IntIQFullStallAlu.id.U     ,
-    FuType.isBJU(issueQueueStallFutype)         -> IntIQFullStallBrh.id.U     ,
-    FuType.isInt(issueQueueStallFutype)         -> IntIQFullStallOther.id.U   ,
-    FuType.isFArith(issueQueueStallFutype)      -> FpIQFullStall.id.U         ,
-    FuType.isVArith(issueQueueStallFutype)      -> VecIQFullStall.id.U        ,
-    FuType.isLoadVload(issueQueueStallFutype)   -> LoadIQFullStall.id.U       ,
-    FuType.isStoreVstore(issueQueueStallFutype) -> StoreIQFullStall.id.U      ,
+    issueQueueEnqPolicyStallIssued              -> IQEnqPolicyStallIssued.id.U ,
+    issueQueueEnqPolicyStall                    -> IQEnqPolicyStall.id.U       ,
+    FuType.isAlu(issueQueueStallFutype)         -> IntIQFullStallAlu.id.U      ,
+    FuType.isBJU(issueQueueStallFutype)         -> IntIQFullStallBrh.id.U      ,
+    FuType.isInt(issueQueueStallFutype)         -> IntIQFullStallOther.id.U    ,
+    FuType.isFArith(issueQueueStallFutype)      -> FpIQFullStall.id.U          ,
+    FuType.isVArith(issueQueueStallFutype)      -> VecIQFullStall.id.U         ,
+    FuType.isLoadVload(issueQueueStallFutype)   -> LoadIQFullStall.id.U        ,
+    FuType.isStoreVstore(issueQueueStallFutype) -> StoreIQFullStall.id.U       ,
   ))
 
 
