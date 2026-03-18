@@ -353,9 +353,9 @@ case class L2CacheConfig
           "dcache",
           sets = 2 * p.dcacheParametersOpt.get.nSets / banks,
           ways = p.dcacheParametersOpt.get.nWays + 2,
-          pcBitOpt = if (enablePC) Some(64) else None,  // Enable PC field if needed
           aliasBitsOpt = p.dcacheParametersOpt.get.aliasBitsOpt,
           vaddrBitsOpt = Some(p.GPAddrBitsSv48x4 - log2Up(p.dcacheParametersOpt.get.blockBytes)),
+          pcBitOpt = if (enablePC) Some(p.GPAddrBitsSv48x4) else None,  // Enable PC field if needed
           isKeywordBitsOpt = p.dcacheParametersOpt.get.isKeywordBitsOpt
         )),
         reqField = Seq(utility.ReqSourceField()),
