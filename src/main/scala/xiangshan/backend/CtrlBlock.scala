@@ -742,7 +742,8 @@ class CtrlBlockImp(
   dispatch.io.singleStep := GatedValidRegNext(io.csrCtrl.singlestep)
   dispatch.io.debugBlockBackward.foreach(_ := rob.io.debugBlockBackward.get)
   dispatch.io.debugWaitForward.foreach(_ := rob.io.debugWaitForward.get)
-
+  dispatch.io.debugIQValidNumVec.foreach(_ := io.toDispatch.debugIQValidNumVec.get)
+  dispatch.io.debugIQEnqHasIssuedVec.foreach(_ := io.toDispatch.debugIQEnqHasIssuedVec.get)
   val toIssueBlockUops = Seq(io.toIssueBlock.intUops, io.toIssueBlock.fpUops, io.toIssueBlock.vfUops).flatten
   println(s"[CtrlBlock] toIssueBlockUops.size = ${toIssueBlockUops.size}")
   println(s"[CtrlBlock] io.toIssueBlock.intUops.size = ${io.toIssueBlock.intUops.size}")
@@ -886,6 +887,7 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
     val allIssueParams = backendParams.allIssueParams.filter(_.StdCnt == 0)
     val allExuParams = allIssueParams.map(_.exuBlockParams).flatten
     val exuNum = allExuParams.size
+    val IQNum = allIssueParams.size
     val maxIQSize = allIssueParams.map(_.numEntries).max
     val IQValidNumVec = Vec(exuNum, Input(UInt(maxIQSize.U.getWidth.W)))
     val og0Cancel = Input(ExuVec())
@@ -901,6 +903,8 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
       val vlFromVfIsZero   = Input(Bool())
       val vlFromVfIsVlmax  = Input(Bool())
     }
+    val debugIQValidNumVec = Option.when(backendParams.debugEn)(Vec(IQNum, Input(UInt(maxIQSize.U.getWidth.W))))
+    val debugIQEnqHasIssuedVec = Option.when(backendParams.debugEn)(Vec(IQNum, Input(Bool())))
   }
   val toDataPath = new Bundle {
     val flush = ValidIO(new Redirect)

@@ -233,6 +233,10 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   ctrlBlock.io.toDispatch.wakeUpFp  := fpRegion.io.wakeUpToDispatch
   ctrlBlock.io.toDispatch.wakeUpVec := vecRegion.io.wakeUpToDispatch
   ctrlBlock.io.toDispatch.IQValidNumVec := intRegion.io.IQValidNumVec ++ fpRegion.io.IQValidNumVec ++ vecRegion.io.IQValidNumVec
+  ctrlBlock.io.toDispatch.debugIQValidNumVec.foreach(_ := intRegion.io.debugIQValidNumVec.get ++
+    fpRegion.io.debugIQValidNumVec.get ++ vecRegion.io.debugIQValidNumVec.get)
+  ctrlBlock.io.toDispatch.debugIQEnqHasIssuedVec.foreach(_ := intRegion.io.debugIQEnqHasIssuedVec.get ++
+    fpRegion.io.debugIQEnqHasIssuedVec.get ++ vecRegion.io.debugIQEnqHasIssuedVec.get)
   ctrlBlock.io.toDispatch.ldCancel := io.mem.ldCancel
   // Todo: when add cross domain wake up, it is necessary to add assertions that fp and vec do not have 0 lat fu.
   ctrlBlock.io.toDispatch.og0Cancel := intRegion.io.og0Cancel
