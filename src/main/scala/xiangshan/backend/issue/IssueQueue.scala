@@ -204,7 +204,6 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
 
 
   val finalDeqSelValidVec = Wire(Vec(params.numDeq, Bool()))
-  dontTouch(finalDeqSelValidVec)
   val finalDeqSelOHVec    = Wire(Vec(params.numDeq, UInt(params.numEntries.W)))
 
   val validVec = VecInit(entries.io.valid.asBools)
@@ -219,7 +218,6 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   io.issuedVec := issuedVec
   io.canIssueVec := canIssueVec
   io.srcReadyVec := srcReadyVec
-  dontTouch(canIssueVec)
   val deqFirstIssueVec = entries.io.isFirstIssue
 
   val dataSources: Vec[Vec[DataSource]] = entries.io.dataSources
@@ -467,9 +465,6 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   deqCanIssue.zipWithIndex.foreach { case (req, i) =>
     req := canIssueMergeAllBusy(i) & VecInit(deqCanAcceptVec(i)).asUInt
   }
-  dontTouch(fuTypeVec)
-  dontTouch(canIssueMergeAllBusy)
-  dontTouch(deqCanIssue)
 
   if (params.numDeq == 2) {
     require(params.deqFuSame || params.deqFuDiff, "The 2 deq ports need to be identical or completely different")
@@ -943,11 +938,6 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     sink.bits := source.bits
   }
   io.deqOg1Payload := entries.io.deqOg1Payload
-  if(backendParams.debugEn) {
-    dontTouch(deqDelay)
-    dontTouch(io.deqDelay)
-    dontTouch(deqBeforeDly)
-  }
   io.wakeupToIQ.zipWithIndex.foreach { case (wakeup, i) =>
     if (wakeUpQueues(i).nonEmpty) {
       wakeup.valid := wakeUpQueues(i).get.io.deq.valid
@@ -988,31 +978,35 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   private val enqHasIssuedRegNext = validVecRegNext.zip(issuedVecRegNext).take(params.numEnq).map(x => x._1 & x._2).reduce(_ | _)
   private val enqEntryValidCnt = PopCount(validVec.take(params.numEnq))
   private val othersValidCnt = PopCount(validVec.drop(params.numEnq))
-  private val enqEntryValidCntDeq0 = PopCount(
-    validVec.take(params.numEnq).zip(deqCanAcceptVec(0).take(params.numEnq)).map { case (a, b) => a && b }
+  private val entryValidCntDeq0 = PopCount(
+    validVec.zip(deqCanAcceptVec(0)).map { case (a, b) => a && b }
   )
-  private val othersValidCntDeq0 = PopCount(
-    validVec.drop(params.numEnq).zip(deqCanAcceptVec(0).drop(params.numEnq)).map { case (a, b) => a && b }
+  private val entryValidCntDeq1 = PopCount(
+    validVec.zip(deqCanAcceptVec.last).map { case (a, b) => a && b }
   )
-  private val enqEntryValidCntDeq1 = PopCount(
-    validVec.take(params.numEnq).zip(deqCanAcceptVec.last.take(params.numEnq)).map { case (a, b) => a && b }
+  private val entryIssuedCntDeq0 = PopCount(
+    validVec.zip(issuedVec).zip(deqCanAcceptVec(0)).map { case ((a, b),c) => a && b && c }
   )
-  private val othersValidCntDeq1 = PopCount(
-    validVec.drop(params.numEnq).zip(deqCanAcceptVec.last.drop(params.numEnq)).map { case (a, b) => a && b }
+  private val entryIssuedCntDeq1 = PopCount(
+    validVec.zip(issuedVec).drop(params.numEnq).zip(deqCanAcceptVec.last).map { case ((a, b),c) => a && b && c }
   )
   protected val deqCanAcceptVecEnq: Seq[IndexedSeq[Bool]] = deqFuCfgs.map { fuCfgs: Seq[FuConfig] =>
     io.enq.map(_.bits.fuType).map(fuType =>
       FuType.FuTypeOrR(fuType, fuCfgs.map(_.fuType)))
   }
-  protected val enqValidCntDeq0 = PopCount(io.enq.map(_.fire).zip(deqCanAcceptVecEnq(0)).map { case (a, b) => a && b })
-  protected val enqValidCntDeq1 = PopCount(io.enq.map(_.fire).zip(deqCanAcceptVecEnq.last).map { case (a, b) => a && b })
   val finalSuccess = if (param.needSnResp) io.snResp.get.map(_.finalSuccess)
                      else if (param.needS2Resp) io.s2Resp.get.map(_.finalSuccess)
                      else if (param.needS0Resp) io.s0Resp.get.map(_.finalSuccess)
                      else if (param.needOg2Resp) io.og2Resp.get.map(_.finalSuccess)
                      else io.og1Resp.map(_.finalSuccess)
-  io.validCntDeqVec.head := enqEntryValidCntDeq0 +& othersValidCntDeq0 - finalSuccess.head // validCntDeqVec(0)
-  io.validCntDeqVec.last := enqEntryValidCntDeq1 +& othersValidCntDeq1 - finalSuccess.last // validCntDeqVec(1)
+  val og1RespIsFinal = !param.needSnResp && !param.needS2Resp && !param.needS0Resp && !param.needOg2Resp
+  val issuedCnt0 = Mux(entryIssuedCntDeq0 > 3.U, 3.U, entryIssuedCntDeq0)
+  val issuedCnt1 = Mux(entryIssuedCntDeq1 > 3.U, 3.U, entryIssuedCntDeq1)
+  val finalResp0 = og1RespIsFinal.B & deqBeforeDly.head.valid
+  val finalResp1 = og1RespIsFinal.B & deqBeforeDly.last.valid
+  // valid counter -> uopSelIQ has 3 pipe latancy, sub deq
+  io.validCntDeqVec.head := entryValidCntDeq0 - issuedCnt0 - finalResp0
+  io.validCntDeqVec.last := entryValidCntDeq1 - issuedCnt1 - finalResp1
   private val othersLeftOneCaseVec = Wire(Vec(params.numEntries - params.numEnq, UInt((params.numEntries - params.numEnq).W)))
   othersLeftOneCaseVec.zipWithIndex.foreach { case (leftone, i) =>
     leftone := ~(1.U((params.numEntries - params.numEnq).W) << i)
@@ -1038,6 +1032,23 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       1.U,
       Mux1H(wakeupFuLatencySeqs(deqPortIdx) map { case (k, v) => (fuType(k.id), v.U) })
     )
+  }
+
+  if (backendParams.debugEn) {
+    dontTouch(deqDelay)
+    dontTouch(io.deqDelay)
+    dontTouch(deqBeforeDly)
+    dontTouch(entryValidCntDeq0)
+    dontTouch(entryValidCntDeq1)
+    dontTouch(issuedCnt0)
+    dontTouch(issuedCnt1)
+    dontTouch(finalResp0)
+    dontTouch(finalResp1)
+    dontTouch(finalDeqSelValidVec)
+    dontTouch(canIssueVec)
+    dontTouch(fuTypeVec)
+    dontTouch(canIssueMergeAllBusy)
+    dontTouch(deqCanIssue)
   }
 
   // issue perf counter
