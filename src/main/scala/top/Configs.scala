@@ -598,20 +598,11 @@ class FuzzConfig(dummy: Int = 0) extends CHIFuzzConfig(dummy) with DeprecatedCon
 
 class TLConfig(n: Int = 1) extends Config(
   L3CacheConfig("16MB", inclusive = false, banks = 4, ways = 16)
-    ++ L2CacheConfig("1MB", inclusive = true, banks = 4)
-    ++ WithNKBL1D(64, ways = 4)
-    ++ new BaseConfig(n)
-)
-class DefaultConfig(n: Int = 1) extends TLConfig(n) with DeprecatedConfigWarning
-
-class DefaultConfigWithNL(n: Int = 1) extends Config(
-  L3CacheConfig("16MB", inclusive = false, banks = 4, ways = 16)
     ++ L2CacheConfig("1MB", inclusive = true, banks = 4, nl = true, enablePC = true)
     ++ WithNKBL1D(64, ways = 4)
     ++ new BaseConfig(n)
 )
-
-
+class DefaultConfig(n: Int = 1) extends TLConfig(n) with DeprecatedConfigWarning
 class TLCVMConfig(n: Int = 1) extends Config(
   new CVMCompile
     ++ new TLConfig(n)
@@ -629,17 +620,11 @@ class WithCHI extends Config((_, _, _) => {
 })
 
 class CHIConfig(n: Int = 1) extends Config(
-  L2CacheConfig("1MB", inclusive = true, banks = 4, tp = false)
+  L2CacheConfig("1MB", inclusive = true, banks = 4, tp = false, nl = true, enablePC = true)
     ++ new TLConfig(n)
     ++ new WithCHI
 )
 class KunminghuV2Config(n: Int = 1) extends CHIConfig(n) with DeprecatedConfigWarning
-
-class KunminghuV2WithNLConfig(n: Int = 1) extends Config(
-  L2CacheConfig("1MB", inclusive = true, banks = 4, tp = false, nl = true, enablePC = true)
-    ++ new DefaultConfig(n)
-    ++ new WithCHI
-)
 
 class CHIMinimalConfig(n: Int = 1) extends Config(
   L2CacheConfig("128KB", inclusive = true, banks = 1, tp = false)
