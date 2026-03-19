@@ -431,6 +431,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     val iqidx = allIssueParams.map(_.exuBlockParams.map(_.fuConfigs).flatten.toSet.toSeq).zipWithIndex.filter{x => fus.toSet.subsetOf(x._1.toSet)}.map(_._2)
     println(s"[Dispatch] ${fus.map(_.name)};iqidx:$iqidx;exuIdx:$exuidx")
     val compareMatrix = Wire(Vec(iqNum, Vec(iqNum, Bool()))).suggestName(s"compareMatrix_$suffix")
+    val IQIsReady = Wire(Vec(iqNum, Bool())).suggestName(s"IQIsReady_$suffix")
     for (i <- 0 until iqNum) {
       for (j <- 0 until iqNum) {
         val thisIQReady = io.toIssueQueues(allIssueParams.take(iqidx(i)).map(_.numEnq).sum).ready
@@ -439,6 +440,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
         else if (i < j) compareMatrix(i)(j) := issueQueueCount(exuidx(i)) < issueQueueCount(exuidx(j))
         else compareMatrix(i)(j) := !compareMatrix(j)(i)
       }
+      IQIsReady(i) := issueQueueCount(exuidx(i)) > (allIssueParams(iqidx(i)).numEntries - 4).U
     }
     val IQSort = Reg(Vec(iqNum, Vec(iqNum, Bool()))).suggestName(s"IQSort_$suffix}")
     for (i <- 0 until iqNum){
@@ -451,7 +453,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
       VecInit((0 until iqNum).map(j => takeReadyNum(j % takeNum)))
     })
     val IQReadyNum = PopCount((0 until iqNum).map(i => io.toIssueQueues(allIssueParams.take(iqidx(i)).map(_.numEnq).sum).ready))
-    val IQAllReady = (0 until iqNum).map(i => io.toIssueQueues(allIssueParams.take(iqidx(i)).map(_.numEnq).sum).ready).reduce(_ && _)
+    val IQAllReady = IQIsReady.reduce(_ && _)
     val IQSortHasNotReady = VecInit((0 until iqNum).map(i => IQSort(i / 2)))
     val minIQSel = Wire(Vec(renameWidth, Vec(issueQueueNum, Bool()))).suggestName(s"minIQSel_$suffix")
     for (i <- 0 until renameWidth){
