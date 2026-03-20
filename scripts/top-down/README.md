@@ -4,37 +4,115 @@
 
 ## 使用方法
 
-``` shell
+Top-down 分析工具目录结构如下：
+
+```shell
+# tree top-down
+top-down
+├── configs.py
+├── draw.py
+├── README.md
+├── resources
+│   └── spec06_rv64gcb_o2_20m.json
+├── top_down.py
+└── utils.py
+
+1 directories, 6 files
+```
+
+### top_down.py 使用方法
+
+`top_down.py` 是 Top-down 分析的主程序，用法如下：
+
+```shell
 # python top_down.py --help
 usage: generate top-down results
 
 optional arguments:
   -h, --help            show this help message and exit
-  -s STAT_DIR, --stat-dir STAT_DIR
-                        stat output directory
-  -j JSON, --json JSON  specify json file
+  -b BASE_STAT_DIR, --base-stat-dir BASE_STAT_DIR
+                        base stat output directory (required)
+  -r REF_STAT_DIR, --ref-stat-dir REF_STAT_DIR
+                        ref stat output directory (optional)
+  -j JSON, --json JSON  specify json file (required)
+  --base-issue BASE_ISSUE
+                        base issue width (required when both --base-stat-dir and --ref-stat-dir are provided)
+  --ref-issue REF_ISSUE
+                        ref issue width (required when both --base-stat-dir and --ref-stat-dir are provided)
+  --base-label BASE_LABEL
+                        label prefix for base (default: BASE)
+  --ref-label REF_LABEL
+                        label prefix for ref (default: REF)
 ```
 
-举例：
+使用示例如下：
 
-``` shell
-# python top_down.py -s <...>/SPEC06_EmuTasks_1021_0.3_c157cf -j resources/spec06_rv64gcb_o2_20m.json
-# python top_down.py -s <...>/SPEC06_EmuTasks_1215_allbump -j <...>/spec06_rv64gcb_O3_20m_gcc12.2.0-intFpcOff-jeMalloc/checkpoint-0-0-0/cluster-0-0.json
+```shell
+# python top_down.py -b <...>/SPEC06_EmuTasks_1021_0.3_c157cf -j resources/spec06_rv64gcb_o2_20m.json
+# python top_down.py -b <...>/base_perf_report -r <...>/ref_perf_report -j <...>/checkpoint.json --base-issue 6 --ref-issue 8 --base-label Base --ref-label Feature1
 ```
 
 脚本运行结束后，会生成 `results` 目录：
 
-``` shell
+```shell
 # tree results
 results
-├── result.png
-├── results.csv
-└── results-weighted.csv
+├── result_backend.png
+├── result_custom.png
+├── result_frontend.png
+├── result_mem.png
+├── results_base.csv
+├── results_ref.csv
+├── results-weighted_base.csv
+├── results-weighted_ref.csv
+└── result_total.png
 
-0 directories, 3 files
+0 directories, 9 files
 ```
 
-其中，`result.png` 为 top-down 堆叠条形统计图，`results.csv` 为各采样点的 top-down 计数器，`results-weighted.csv` 为各子项的加权 top-down 计数器。
+其中：
+
+- `result_total.png` 为 Top-down 总体粗粒度聚合堆叠条形图，用于展示各 benchmark 在整体视角下的瓶颈构成。
+- `result_frontend.png`、`result_backend.png`、`result_mem.png` 和 `result_custom.png` 分别对前端、后端、访存及自定义子维度进行进一步拆分，便于从特定维度开展更细粒度的瓶颈分析。
+- `results_base.csv` 与 `results_ref.csv` 保存原始统计结果，按采样点记录各 Top-down 计数器数值。
+- `results-weighted_base.csv` 与 `results-weighted_ref.csv` 则基于原始统计结果，结合各采样点对应权重完成加权汇总，可用于人工检查、后续分析或重新绘图。
+
+### config.py 使用方法
+
+`configs.py` 是 Top-down 分析工具的配置文件，主要可配置项包括：
+
+- **自定义子维度**：用户可在 `configs.py` 中修改 `xs_custom_rename_map`，以将部分阻塞归因重新聚类并生成对应图表。具体格式可参考其他子维度的重命名映射，例如 `xs_frontend_rename_map`。
+- **benchmark_list**：用户可通过配置 `benchmark_list` 选择部分 checkpoint 子项进行单独绘图分析；若未额外指定，则默认对全部 checkpoint 作图。`INT_ONLY` 和 `FP_ONLY` 可用于快速筛选仅整数或仅浮点 benchmark。
+- **xx_ANALYSE**：用户可通过配置此类选项，关闭部分子维度的绘图分析。
+
+### draw.py 使用方法
+
+`draw.py` 是 Top-down 分析工具的绘图脚本，主要用于基于已生成的 `results-weighted.csv` 直接绘图。用法如下：
+
+```shell
+# python3 draw.py --help
+usage: draw top-down stacked bar chart (base/ref weighted csv)
+
+options:
+  -h, --help            show this help message and exit
+  -b BASE_WEIGHTED_CSV, --base-weighted-csv BASE_WEIGHTED_CSV
+                        base weighted csv path (default: results/results-weighted_base.csv)
+  -r REF_WEIGHTED_CSV, --ref-weighted-csv REF_WEIGHTED_CSV
+                        ref weighted csv path (default: results/results-weighted_ref.csv)
+  --base-label BASE_LABEL
+                        base label (default: BASE)
+  --ref-label REF_LABEL
+                        ref label (default: REF)
+```
+
+使用示例如下：
+
+```shell
+# python3 draw.py --base-label Base --ref-label Feature1
+# python3 draw.py -b <...>/xxxresults-weighted_base.csv -r <...>/xxxresults-weighted_ref.csv --base-label Base --ref-label Feature1
+```
+
+---
 
 # <div id="Top-down-Analysis-Tool">Top-down Analysis Tool</div>
 
@@ -42,34 +120,110 @@ This directory contains analysis tool for top-down. After running checkpoints by
 
 ## Usage
 
-``` shell
+The directory structure of the Top-down analysis tool is shown below:
+
+```shell
+# tree top-down
+top-down
+├── configs.py
+├── draw.py
+├── README.md
+├── resources
+│   └── spec06_rv64gcb_o2_20m.json
+├── top_down.py
+└── utils.py
+
+1 directories, 6 files
+```
+
+### How to use top_down.py
+
+`top_down.py` is the main entry of the Top-down analysis tool. Its usage is as follows:
+
+```shell
 # python top_down.py --help
 usage: generate top-down results
 
 optional arguments:
   -h, --help            show this help message and exit
-  -s STAT_DIR, --stat-dir STAT_DIR
-                        stat output directory
-  -j JSON, --json JSON  specify json file
+  -b BASE_STAT_DIR, --base-stat-dir BASE_STAT_DIR
+                        base stat output directory (required)
+  -r REF_STAT_DIR, --ref-stat-dir REF_STAT_DIR
+                        ref stat output directory (optional)
+  -j JSON, --json JSON  specify json file (required)
+  --base-issue BASE_ISSUE
+                        base issue width (required when both --base-stat-dir and --ref-stat-dir are provided)
+  --ref-issue REF_ISSUE
+                        ref issue width (required when both --base-stat-dir and --ref-stat-dir are provided)
+  --base-label BASE_LABEL
+                        label prefix for base (default: BASE)
+  --ref-label REF_LABEL
+                        label prefix for ref (default: REF)
 ```
 
-Some examples:
+Example commands:
 
-``` shell
-# python top_down.py -s <...>/SPEC06_EmuTasks_1021_0.3_c157cf -j resources/spec06_rv64gcb_o2_20m.json
-# python top_down.py -s <...>/SPEC06_EmuTasks_1215_allbump -j <...>/spec06_rv64gcb_O3_20m_gcc12.2.0-intFpcOff-jeMalloc/checkpoint-0-0-0/cluster-0-0.json
+```shell
+# python top_down.py -b <...>/SPEC06_EmuTasks_1021_0.3_c157cf -j resources/spec06_rv64gcb_o2_20m.json
+# python top_down.py -b <...>/base_perf_report -r <...>/ref_perf_report -j <...>/checkpoint.json --base-issue 6 --ref-issue 8 --base-label Base --ref-label Feature1
 ```
 
-A `results` directory would be generated then:
+After execution, a `results` directory will be generated:
 
-``` shell
+```shell
 # tree results
 results
-├── result.png
-├── results.csv
-└── results-weighted.csv
+├── result_backend.png
+├── result_custom.png
+├── result_frontend.png
+├── result_mem.png
+├── results_base.csv
+├── results_ref.csv
+├── results-weighted_base.csv
+├── results-weighted_ref.csv
+└── result_total.png
 
-0 directories, 3 files
+0 directories, 9 files
 ```
 
-The `result.png` is a stacked bar chart of top-down. The `results.csv` contains per-checkpoint top-down counters. And the `results-weighted.csv` contains weighted counters for all sub tests.
+Among them:
+
+- `result_total.png` is the coarse-grained stacked bar chart for overall Top-down analysis, showing the bottleneck composition of each benchmark from a global perspective.
+- `result_frontend.png`, `result_backend.png`, `result_mem.png`, and `result_custom.png` further break down the frontend, backend, memory, and custom sub-dimensions, respectively, making it easier to perform fine-grained bottleneck analysis from specific viewpoints.
+- `results_base.csv` and `results_ref.csv` store the raw statistical results, recording the values of each Top-down counter at each sampling point.
+- `results-weighted_base.csv` and `results-weighted_ref.csv` provide weighted summaries based on the raw results and the corresponding weights of sampling points, and can be used for manual inspection, further analysis, or redrawing figures.
+
+### How to use configs.py
+
+`configs.py` is the configuration file of the Top-down analysis tool. The main configurable items include:
+
+- **Custom sub-dimensions**: Users can modify `xs_custom_rename_map` in `configs.py` to regroup selected stall attributions and generate customized plots. The format can refer to the rename maps of other sub-dimensions, such as `xs_frontend_rename_map`.
+- **benchmark_list**: Users can configure `benchmark_list` to select a subset of checkpoints for standalone plotting and analysis. If not specified, all checkpoints will be plotted by default. `INT_ONLY` and `FP_ONLY` can be used to quickly generate plots for integer-only or floating-point-only benchmarks.
+- **xx_ANALYSE**: Users can disable plotting for selected sub-dimensions through this type of option.
+
+### How to use draw.py
+
+`draw.py` is the plotting script of the Top-down analysis tool. It is mainly used to directly generate figures from the extracted `results-weighted.csv`. Its usage is as follows:
+
+```shell
+# python3 draw.py --help
+usage: draw top-down stacked bar chart (base/ref weighted csv)
+
+options:
+  -h, --help            show this help message and exit
+  -b BASE_WEIGHTED_CSV, --base-weighted-csv BASE_WEIGHTED_CSV
+                        base weighted csv path (default: results/results-weighted_base.csv)
+  -r REF_WEIGHTED_CSV, --ref-weighted-csv REF_WEIGHTED_CSV
+                        ref weighted csv path (default: results/results-weighted_ref.csv)
+  --base-label BASE_LABEL
+                        base label (default: BASE)
+  --ref-label REF_LABEL
+                        ref label (default: REF)
+```
+
+Example commands:
+
+```shell
+# python3 draw.py --base-label Base --ref-label Feature1
+# python3 draw.py -b <...>/xxxresults-weighted_base.csv -r <...>/xxxresults-weighted_ref.csv --base-label Base --ref-label Feature1
+```
