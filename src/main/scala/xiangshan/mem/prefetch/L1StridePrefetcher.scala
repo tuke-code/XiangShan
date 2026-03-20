@@ -84,7 +84,7 @@ class StrideMetaBundle(implicit p: Parameters) extends XSBundle with HasStridePr
     val new_stride = new_vaddr - pre_vaddr
     val new_stride_blk = block_addr(new_stride)
     // NOTE: for now, disable negtive stride
-    val stride_valid = new_stride_blk =/= 0.U && new_stride_blk =/= 1.U && new_stride(STRIDE_VADDR_BITS - 1) === 0.U
+    val stride_valid = new_stride_blk =/= 0.U && new_stride_blk =/= 1.U
     val stride_match = new_stride === stride
     val low_confidence = confidence <= 1.U
     val can_send_pf = stride_valid && stride_match && confidence === MAX_CONF.U
