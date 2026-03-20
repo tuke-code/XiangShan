@@ -803,6 +803,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
     val evict = s1_l1_alloc && (s1_l1_index === i.U)
     l1_pf_req_arb.io.in(i).valid := l1_array(i).can_send_pf(l1_valids(i)) && l1_array(i).sink === SINK_L1 && !evict
     l1_pf_req_arb.io.in(i).bits.req.paddr := l1_array(i).get_pf_addr()
+    l1_pf_req_arb.io.in(i).bits.req.vaddr := l1_array(i).get_pf_debug_vaddr()
     l1_pf_req_arb.io.in(i).bits.req.alias := l1_array(i).alias
     l1_pf_req_arb.io.in(i).bits.req.confidence := l1_array(i).confidence
     l1_pf_req_arb.io.in(i).bits.req.is_store := false.B
