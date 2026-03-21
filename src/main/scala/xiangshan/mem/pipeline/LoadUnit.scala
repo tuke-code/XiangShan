@@ -1151,7 +1151,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   val s2_full_fwd      = Wire(Bool())
   val s2_mem_amb       = {
     if(HasNewMdp.Enable){
-      s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait &&
+      s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait && ~s2_in.uop.loadPred.bits.static
       io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid)
     }else{
       s2_in.uop.storeSetHit &&
