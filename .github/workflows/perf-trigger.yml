@@ -34,6 +34,14 @@ on:
           - false
           - true
         default: true
+      dump_db:
+        description: Whether to dump db during performance test
+        required: false
+        type: choice
+        options:
+          - false
+          - true
+        default: false
       custom_constantin:
         description: Custom constantin.txt path, leave empty to use default one
         required: false
@@ -91,6 +99,7 @@ jobs:
         test_branch: ${{ github.event.inputs.test_branch }}
         benchmark_type: ${{ github.event.inputs.benchmark_type }}
         use_simfrontend: ${{ github.event.inputs.use_simfrontend }}
+        dump_db: ${{ github.event.inputs.dump_db }}
         custom_constantin: ${{ github.event.inputs.custom_constantin }}
         allow_neighbor_emu_reuse: ${{ github.event.inputs.allow_neighbor_emu_reuse }}
         force_clean_spec_dir: ${{ github.event.inputs.force_clean_spec_dir }}

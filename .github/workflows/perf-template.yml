@@ -22,6 +22,11 @@ on:
         required: false
         type: string
         default: true
+      dump_db:
+        description: Whether to dump db during performance test
+        required: false
+        type: string
+        default: false
       custom_constantin:
         description: Custom constantin.txt path, leave empty to use default one
         required: false
@@ -123,7 +128,11 @@ jobs:
             CONST_TAG=${CONST_BASENAME%.*}
             SPEC_TAG="-${CONST_TAG}"
           fi
-          
+
+          if [ "${{ inputs.dump_db }}" = "true" ]; then
+            SPEC_TAG="${SPEC_TAG}-db"
+          fi
+
           SPEC_DIR=${SPEC_PARENT_DIR}/cr${DATE}-${SHORT_SHA}${SPEC_TAG}
           if [ "${{ inputs.benchmark_type }}" = "dry-run-test" ]; then
             echo "dry-run-testing:"
@@ -215,7 +224,11 @@ jobs:
       - name: Run SPEC CPU checkpoints
         run: |
           cd $SCRIPTS_HOME/perf_trigger
+          if [ "${{ inputs.dump_db }}" = "true" ]; then
+            mkdir -p "$SPEC_DIR/build/"
+          fi
           SIM_FRONT_OPT=$([ "${{ inputs.use_simfrontend }}" = "true" ] && echo "--sim-front" || echo "")
+          DUMP_DB_OPT=$([ "${{ inputs.dump_db }}" = "true" ] && echo "--dump-db" || echo "")
           CONSTANTIN_OPT=$([ "${{ inputs.custom_constantin }}" ] && echo "--custom-constantin ${{ inputs.custom_constantin }}" || echo "")
           DRYRUN_OPT=$([ "${{ inputs.benchmark_type }}" = "dry-run-test" ] && echo "--dry-run" || echo "")
           python3 main.py --gcpt-path $CKPT_HOME --json-path $CKPT_JSON_PATH \
@@ -225,7 +238,7 @@ jobs:
             --server-list "$SERVER_LIST" \
             --nemu-so-path $SPEC_DIR/riscv64-nemu-interpreter-so \
             --log-level ${{ runner.debug && 'DEBUG' || 'INFO' }} \
-            --run $SIM_FRONT_OPT $CONSTANTIN_OPT $DRYRUN_OPT
+            --run $SIM_FRONT_OPT $DUMP_DB_OPT $CONSTANTIN_OPT $DRYRUN_OPT
 
       - name: Report SPEC CPU score
         if: always()
