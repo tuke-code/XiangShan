@@ -577,14 +577,8 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
     no_pending := !io.acquire_fired_by_pipe_reg
 
-    when(miss_req_pipe_reg_bits.isFromStore) {
-      req_store_mask := miss_req_pipe_reg_bits.store_mask
-      for (i <- 0 until blockRows) {
-        refill_and_store_data(i) := miss_req_pipe_reg_bits.store_data(rowBits * (i + 1) - 1, rowBits * i)
-      }
-    }.otherwise {
-      req_store_mask := 0.U
-    }
+    req_store_mask := Mux(miss_req_pipe_reg_bits.isFromStore, miss_req_pipe_reg_bits.store_mask, 0.U)
+
     full_overwrite := miss_req_pipe_reg_bits.isFromStore && miss_req_pipe_reg_bits.full_overwrite
 
     when (!miss_req_pipe_reg_bits.isFromAMO) {
@@ -607,6 +601,23 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     refill_start_time := GTimer()
   }
 
+  val refill_and_store_data_update = Wire(Vec(blockRows, UInt(rowBits.W)))
+
+  when (io.miss_req_pipe_reg.alloc && !io.miss_req_pipe_reg.cancel && miss_req_pipe_reg_bits.isFromStore) {
+    for (i <- 0 until blockRows) {
+        refill_and_store_data(i) := miss_req_pipe_reg_bits.store_data(rowBits * (i + 1) - 1, rowBits * i)
+    }
+  }.elsewhen (io.miss_req_pipe_reg.merge && !io.miss_req_pipe_reg.cancel && miss_req_pipe_reg_bits.isFromStore) {
+      for (i <- 0 until blockRows) {
+        val store_mask_temp = miss_req_pipe_reg_bits.store_mask.grouped(rowBytes)(i).asBools
+        val store_data_temp = (miss_req_pipe_reg_bits.store_data.grouped(8).grouped(rowBytes).toSeq)(i)
+        refill_and_store_data(i) := VecInit((0 until rowBytes).map(k =>
+          Mux(store_mask_temp(k), store_data_temp(k), refill_and_store_data_update(i).grouped(8)(k)))).asUInt
+      }
+  }.elsewhen (io.mem_grant.fire) {
+    refill_and_store_data := refill_and_store_data_update
+  }
+
   when (io.miss_req_pipe_reg.merge && !io.miss_req_pipe_reg.cancel) {
     assert(RegNext(secondary_fire) || RegNext(RegNext(primary_fire)), "after 1 cycle of secondary_fire or 2 cycle of primary_fire, entry will be merged")
     assert(miss_req_pipe_reg_bits.req_coh.state <= req.req_coh.state || (prefetch && !access))
@@ -627,13 +638,8 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
       evict_BtoT_way := false.B
       req.addr := get_block_addr(miss_req_pipe_reg_bits.addr)
       req_store_mask := req_store_mask | miss_req_pipe_reg_bits.store_mask
-      for (i <- 0 until blockRows) {
-        val store_mask_temp = miss_req_pipe_reg_bits.store_mask.grouped(rowBytes)(i).asBools
-        val store_data_temp = (miss_req_pipe_reg_bits.store_data.grouped(8).grouped(rowBytes).toSeq)(i)
-        refill_and_store_data(i) := VecInit((0 until rowBytes).map(k => 
-          Mux(store_mask_temp(k), store_data_temp(k), refill_and_store_data(i).grouped(8)(k)))).asUInt
-      }
-      full_overwrite := miss_req_pipe_reg_bits.isFromStore && miss_req_pipe_reg_bits.full_overwrite
+
+      full_overwrite := full_overwrite || miss_req_pipe_reg_bits.full_overwrite
       assert(is_alias_match(req.vaddr, miss_req_pipe_reg_bits.vaddr), "alias bits should be the same when merging store")
     }
 
@@ -651,51 +657,27 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   }
 
   // merge data refilled by l2 and store data, update miss queue entry, gen refill_req
-  val new_data = Wire(Vec(blockRows, UInt(rowBits.W)))
-  val new_mask = Wire(Vec(blockRows, UInt(rowBytes.W)))
+  val new_mask = VecInit(req_store_mask.grouped(rowBytes))
   // merge refilled data and store data (if needed)
   def mergePutData(old_data: UInt, new_data: UInt, wmask: UInt): UInt = {
     val full_wmask = FillInterleaved(8, wmask)
     (~full_wmask & old_data | full_wmask & new_data)
   }
-  for (i <- 0 until blockRows) {
-    // new_data(i) := req.store_data(rowBits * (i + 1) - 1, rowBits * i)
-    new_data(i) := refill_and_store_data(i)
-    // we only need to merge data for Store
-    new_mask(i) := Mux(req.isFromStore, req_store_mask(rowBytes * (i + 1) - 1, rowBytes * i), 0.U)
-  }
 
   val hasData = RegInit(true.B)
   val isDirty = RegInit(false.B)
   io.wfi.wfiSafe := GatedValidRegNext(no_pending && io.wfi.wfiReq)
+
   when (io.mem_grant.fire) {
     w_grantfirst := true.B
     grant_param := io.mem_grant.bits.param
     when (edge.hasData(io.mem_grant.bits)) {
-      // GrantData
-      when (isKeyword) {
-       for (i <- 0 until beatRows) {
-         val idx = ((refill_count << log2Floor(beatRows)) + i.U) ^ 4.U
-         val grant_row = io.mem_grant.bits.data(rowBits * (i + 1) - 1, rowBits * i)
-         refill_and_store_data(idx) := mergePutData(grant_row, new_data(idx), new_mask(idx))
-        }
-      }
-      .otherwise{
-       for (i <- 0 until beatRows) {
-         val idx = (refill_count << log2Floor(beatRows)) + i.U
-         val grant_row = io.mem_grant.bits.data(rowBits * (i + 1) - 1, rowBits * i)
-         refill_and_store_data(idx) := mergePutData(grant_row, new_data(idx), new_mask(idx))
-        }
-      }
       w_grantlast := w_grantlast || refill_done
       no_pending := no_pending || refill_done
       hasData := true.B
     }.otherwise {
       // Grant
       assert(full_overwrite)
-      for (i <- 0 until blockRows) {
-        refill_and_store_data(i) := new_data(i)
-      }
       w_grantlast := true.B
       no_pending := true.B
       hasData := false.B
@@ -713,6 +695,38 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
       val overflow = refill_end_time < refill_start_time || (time_delta >> LATENCY_WIDTH).orR
       refill_latency := Mux(overflow, 0.U, time_delta)
     }
+  }
+
+
+      // for (i <- 0 until beatRows) {
+      //   val base_idx = (refill_count << log2Floor(beatRows)) + i.U
+      //   val idx = Mux(isKeyword, base_idx ^ 4.U, base_idx)
+      //   val grant_row = io.mem_grant.bits.data(rowBits * (i + 1) - 1, rowBits * i)
+      //   refill_and_store_data_update(idx) := mergePutData(grant_row, refill_and_store_data(idx), new_mask(idx))
+      // }
+  // when (io.mem_grant.fire && edge.hasData(io.mem_grant.bits)) {
+  //   for (i <- 0 until beatRows) {
+  //     refill_and_store_data_update(i) := mergePutData(grant_data_grouped(i), refill_and_store_data(i),
+  //                                                     new_mask(i) | Fill(rowBytes, isKeyword))
+  //     refill_and_store_data_update(i + beatRows) := mergePutData(grant_data_grouped(i), refill_and_store_data(i + beatRows),
+  //                                                                new_mask(i + beatRows) | Fill(rowBytes, !isKeyword))
+  //   }
+  // }.otherwise {
+  //   refill_and_store_data_update := refill_and_store_data
+  // }
+  val grant_data_grouped = io.mem_grant.bits.data.grouped(rowBits)
+  val lowHalf_refill = refill_count === 0.U && !isKeyword || refill_count =/= 0.U && isKeyword
+  for (i <- 0 until beatRows) {
+    refill_and_store_data_update(i) := Mux(
+      io.mem_grant.fire && edge.hasData(io.mem_grant.bits) && lowHalf_refill,
+      mergePutData(grant_data_grouped(i), refill_and_store_data(i), new_mask(i)),
+      refill_and_store_data(i)
+    )
+    refill_and_store_data_update(i + beatRows) := Mux(
+      io.mem_grant.fire && edge.hasData(io.mem_grant.bits) && !lowHalf_refill,
+      mergePutData(grant_data_grouped(i), refill_and_store_data(i + beatRows), new_mask(i + beatRows)),
+      refill_and_store_data(i + beatRows)
+    )
   }
 
   when (io.mem_finish.fire) {
@@ -758,7 +772,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   def before_data_refill_can_merge(new_req: MissReqWoStoreData): Bool = {
     data_not_refilled && new_req.isFromLoad ||
-    data_not_refilled && new_req.isFromStore && alloc_is_store
+    !io.mem_grant.fire && data_not_refilled && new_req.isFromStore && alloc_is_store
   }
 
   // Note that late prefetch will be ignored
