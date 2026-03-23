@@ -276,6 +276,11 @@ FRONTEND_RTL_DIR   = $(FRONTEND_BUILD_DIR)/rtl
 FRONTENDTOP        = top.FrontendTopMain
 FRONTEND_TOP_V     = $(FRONTEND_RTL_DIR)/FrontendTop.$(RTL_SUFFIX)
 
+MEMBLOCK_BUILD_DIR = ./build-memblock
+MEMBLOCK_RTL_DIR   = $(MEMBLOCK_BUILD_DIR)/rtl
+MEMBLOCKTOP        = top.MemBlockTopMain
+MEMBLOCK_TOP_V     = $(MEMBLOCK_RTL_DIR)/MemBlockTop.$(RTL_SUFFIX)
+
 $(FRONTEND_TOP_V): $(SCALA_FILE)
 	mkdir -p $(@D)
 	$(TIME_CMD) mill -i $(MILL_BUILD_ARGS) xiangshan.runMain $(FRONTENDTOP) \
@@ -289,6 +294,20 @@ endif
 frontend: $(FRONTEND_TOP_V)
 
 .PHONY: frontend
+
+$(MEMBLOCK_TOP_V): $(SCALA_FILE)
+	mkdir -p $(@D)
+	$(TIME_CMD) mill -i $(MILL_BUILD_ARGS) xiangshan.runMain $(MEMBLOCKTOP) \
+		--target-dir $(@D) --config $(CONFIG) --issue $(ISSUE) \
+		--num-cores $(NUM_CORES) $(TOPMAIN_ARGS)
+ifeq ($(CHISEL_TARGET),systemverilog)
+	@{ git log -n 1; git diff; } | sed 's/^/\/\// ' > $(dir $@).__diff__
+	@cat $(dir $@).__diff__ $@ > $(dir $@).__out__ && mv $(dir $@).__out__ $@
+endif
+
+memblock: $(MEMBLOCK_TOP_V)
+
+.PHONY: memblock
 
 verilog: $(call docker-deps,$(TOP_V))
 
