@@ -275,11 +275,13 @@ FRONTEND_BUILD_DIR = ./build-frontend
 FRONTEND_RTL_DIR   = $(FRONTEND_BUILD_DIR)/rtl
 FRONTENDTOP        = top.FrontendTopMain
 FRONTEND_TOP_V     = $(FRONTEND_RTL_DIR)/FrontendTop.$(RTL_SUFFIX)
+FRONTEND_PYLIB     = $(FRONTEND_BUILD_DIR)/pylib/libUTFrontend.so
 
 MEMBLOCK_BUILD_DIR = ./build-memblock
 MEMBLOCK_RTL_DIR   = $(MEMBLOCK_BUILD_DIR)/rtl
 MEMBLOCKTOP        = top.MemBlockTopMain
 MEMBLOCK_TOP_V     = $(MEMBLOCK_RTL_DIR)/MemBlockTop.$(RTL_SUFFIX)
+MEMBLOCK_PYLIB     = $(MEMBLOCK_BUILD_DIR)/pylib/libUTMemBlock.so
 
 $(FRONTEND_TOP_V): $(SCALA_FILE)
 	mkdir -p $(@D)
@@ -291,8 +293,16 @@ ifeq ($(CHISEL_TARGET),systemverilog)
 	@cat $(dir $@).__diff__ $@ > $(dir $@).__out__ && mv $(dir $@).__out__ $@
 endif
 
-frontend: $(FRONTEND_TOP_V)
-
+$(FRONTEND_PYLIB): $(FRONTEND_TOP_V)
+	time picker export $(dir $<)ClockGate.sv --sname Frontend \
+		--filelist $(dir $<)/filelist.f \
+		--lang python --autobuild true --cp_lib true \
+		--sim verilator --access-mode MEM_DIRECT \
+		--tdir $(FRONTEND_BUILD_DIR)/pylib/Frontend \
+		-w $(FRONTEND_BUILD_DIR)/frontend.fst \
+		--coverage \
+		-V "--output-split;20000;--no-timing"
+frontend: $(FRONTEND_PYLIB)
 .PHONY: frontend
 
 $(MEMBLOCK_TOP_V): $(SCALA_FILE)
@@ -305,8 +315,16 @@ ifeq ($(CHISEL_TARGET),systemverilog)
 	@cat $(dir $@).__diff__ $@ > $(dir $@).__out__ && mv $(dir $@).__out__ $@
 endif
 
-memblock: $(MEMBLOCK_TOP_V)
-
+$(MEMBLOCK_PYLIB): $(MEMBLOCK_TOP_V)
+	time picker export $(dir $<)ClockGate.sv --sname MemBlock \
+		--filelist $(dir $<)filelist.f \
+		--lang python --autobuild true --cp_lib true \
+		--sim verilator --access-mode MEM_DIRECT \
+		--tdir $(MEMBLOCK_BUILD_DIR)/pylib/MemBlock \
+		-w $(MEMBLOCK_BUILD_DIR)/memblock.fst \
+		--coverage \
+		-V "--output-split;20000;--no-timing;--threads;8"
+memblock: $(MEMBLOCK_PYLIB)
 .PHONY: memblock
 
 verilog: $(call docker-deps,$(TOP_V))
