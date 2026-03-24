@@ -64,9 +64,10 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val s0_startPc = io.startPc
 
   private val s0_foldedHist = getFoldedHist(io.fromPhr.foldedPathHist)
-  private val s0_setIdx = VecInit((tables zip s0_foldedHist).map { case (table, hist) =>
-    table.getSetIndex(s0_startPc, hist.forIdx)
-  })
+  private val s0_setIdx     = Wire(Vec(NumTables, UInt(MaxSetIdxWidth.W)))
+  tables.zip(s0_foldedHist).zipWithIndex.foreach { case ((table, hist), tableIdx) =>
+    s0_setIdx(tableIdx) := table.getSetIndex(s0_startPc, hist.forIdx).pad(MaxSetIdxWidth)
+  }
 
   // currently all tables share the same bank index
   private val s0_bankIdx  = tables.head.getBankIndex(s0_startPc)
@@ -74,7 +75,7 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
 
   tables.zipWithIndex.foreach { case (table, tableIdx) =>
     table.io.predictReadReq.valid         := s0_fire
-    table.io.predictReadReq.bits.setIdx   := s0_setIdx(tableIdx)
+    table.io.predictReadReq.bits.setIdx   := s0_setIdx(tableIdx)(table.io.predictReadReq.bits.setIdx.getWidth - 1, 0)
     table.io.predictReadReq.bits.bankMask := s0_bankMask
   }
 
@@ -213,14 +214,15 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val debug_readBankConflict = io.debug_trainValid && t0_readBankConflict
 
   private val t0_foldedHist = getFoldedHist(io.fromPhr.foldedPathHistForTrain)
-  private val t0_setIdx = VecInit((tables zip t0_foldedHist).map { case (table, hist) =>
-    table.getSetIndex(t0_startPc, hist.forIdx)
-  })
+  private val t0_setIdx     = Wire(Vec(NumTables, UInt(MaxSetIdxWidth.W)))
+  tables.zip(t0_foldedHist).zipWithIndex.foreach { case ((table, hist), tableIdx) =>
+    t0_setIdx(tableIdx) := table.getSetIndex(t0_startPc, hist.forIdx).pad(MaxSetIdxWidth)
+  }
   dontTouch(t0_setIdx)
 
   tables.zipWithIndex.foreach { case (table, tableIdx) =>
     table.io.trainReadReq.valid         := t0_fire && t0_needRead
-    table.io.trainReadReq.bits.setIdx   := t0_setIdx(tableIdx)
+    table.io.trainReadReq.bits.setIdx   := t0_setIdx(tableIdx)(table.io.trainReadReq.bits.setIdx.getWidth - 1, 0)
     table.io.trainReadReq.bits.bankMask := t0_bankMask
   }
 
