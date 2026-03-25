@@ -313,6 +313,151 @@ class DcacheClientEBundle(Bundle):
     bits_sink = Signal()
 
 
+class TlbCsrBundle(Bundle):
+    """MemBlock `tlbCsr` 输入接口。"""
+
+    satp_mode = Signal()
+    satp_asid = Signal()
+    satp_ppn = Signal()
+    satp_changed = Signal()
+    vsatp_mode = Signal()
+    vsatp_asid = Signal()
+    vsatp_ppn = Signal()
+    vsatp_changed = Signal()
+    hgatp_mode = Signal()
+    hgatp_vmid = Signal()
+    hgatp_ppn = Signal()
+    hgatp_changed = Signal()
+    mbmc_BME = Signal()
+    mbmc_CMODE = Signal()
+    mbmc_BCLEAR = Signal()
+    mbmc_BMA = Signal()
+    priv_mxr = Signal()
+    priv_sum = Signal()
+    priv_vmxr = Signal()
+    priv_vsum = Signal()
+    priv_virt = Signal()
+    priv_virt_changed = Signal()
+    priv_spvp = Signal()
+    priv_imode = Signal()
+    priv_dmode = Signal()
+    mPBMTE = Signal()
+    hPBMTE = Signal()
+    pmm_mseccfg = Signal()
+    pmm_menvcfg = Signal()
+    pmm_henvcfg = Signal()
+    pmm_hstatus = Signal()
+    pmm_senvcfg = Signal()
+
+
+class CsrCtrlBundle(Bundle):
+    """MemBlock `csrCtrl` 输入接口。"""
+
+    pf_ctrl_l1I_pf_enable = Signal()
+    pf_ctrl_l2_pf_enable = Signal()
+    pf_ctrl_l1D_pf_enable = Signal()
+    pf_ctrl_l1D_pf_train_on_hit = Signal()
+    pf_ctrl_l1D_pf_enable_agt = Signal()
+    pf_ctrl_l1D_pf_enable_pht = Signal()
+    pf_ctrl_l1D_pf_active_threshold = Signal()
+    pf_ctrl_l1D_pf_active_stride = Signal()
+    pf_ctrl_l1D_pf_enable_stride = Signal()
+    pf_ctrl_l2_pf_store_only = Signal()
+    pf_ctrl_l2_pf_recv_enable = Signal()
+    pf_ctrl_l2_pf_pbop_enable = Signal()
+    pf_ctrl_l2_pf_vbop_enable = Signal()
+    pf_ctrl_l2_pf_tp_enable = Signal()
+    pf_ctrl_l2_pf_delay_latency = Signal()
+    bp_ctrl_ubtbEnable = Signal()
+    bp_ctrl_abtbEnable = Signal()
+    bp_ctrl_mbtbEnable = Signal()
+    bp_ctrl_tageEnable = Signal()
+    bp_ctrl_scEnable = Signal()
+    bp_ctrl_ittageEnable = Signal()
+    sbuffer_timeout = Signal()
+    ldld_vio_check_enable = Signal()
+    cache_error_enable = Signal()
+    uncache_write_outstanding_enable = Signal()
+    hd_misalign_st_enable = Signal()
+    hd_misalign_ld_enable = Signal()
+    power_down_enable = Signal()
+    flush_l2_enable = Signal()
+    distribute_csr_w_valid = Signal()
+    distribute_csr_w_bits_addr = Signal()
+    distribute_csr_w_bits_data = Signal()
+    frontend_trigger_tUpdate_valid = Signal()
+    frontend_trigger_tUpdate_bits_addr = Signal()
+    frontend_trigger_tUpdate_bits_tdata_matchType = Signal()
+    frontend_trigger_tUpdate_bits_tdata_select = Signal()
+    frontend_trigger_tUpdate_bits_tdata_timing = Signal()
+    frontend_trigger_tUpdate_bits_tdata_action = Signal()
+    frontend_trigger_tUpdate_bits_tdata_chain = Signal()
+    frontend_trigger_tUpdate_bits_tdata_execute = Signal()
+    frontend_trigger_tUpdate_bits_tdata_store = Signal()
+    frontend_trigger_tUpdate_bits_tdata_load = Signal()
+    frontend_trigger_tUpdate_bits_tdata_tdata2 = Signal()
+    frontend_trigger_tEnableVec_0 = Signal()
+    frontend_trigger_tEnableVec_1 = Signal()
+    frontend_trigger_tEnableVec_2 = Signal()
+    frontend_trigger_tEnableVec_3 = Signal()
+    frontend_trigger_debugMode = Signal()
+    frontend_trigger_triggerCanRaiseBpExp = Signal()
+    mem_trigger_tUpdate_valid = Signal()
+    mem_trigger_tUpdate_bits_addr = Signal()
+    mem_trigger_tUpdate_bits_tdata_matchType = Signal()
+    mem_trigger_tUpdate_bits_tdata_select = Signal()
+    mem_trigger_tUpdate_bits_tdata_timing = Signal()
+    mem_trigger_tUpdate_bits_tdata_action = Signal()
+    mem_trigger_tUpdate_bits_tdata_chain = Signal()
+    mem_trigger_tUpdate_bits_tdata_store = Signal()
+    mem_trigger_tUpdate_bits_tdata_load = Signal()
+    mem_trigger_tUpdate_bits_tdata_tdata2 = Signal()
+    mem_trigger_tEnableVec_0 = Signal()
+    mem_trigger_tEnableVec_1 = Signal()
+    mem_trigger_tEnableVec_2 = Signal()
+    mem_trigger_tEnableVec_3 = Signal()
+    mem_trigger_debugMode = Signal()
+    mem_trigger_triggerCanRaiseBpExp = Signal()
+    fsIsOff = Signal()
+
+
+class MockCSRInterface:
+    """MemBlock CSR 相关输入口 mock，默认工作在 M-mode。"""
+
+    MODE_M = 3
+
+    def __init__(self) -> None:
+        self.tlb_csr = TlbCsrBundle.from_prefix("io_ooo_to_mem_tlbCsr_")
+        self.csr_ctrl = CsrCtrlBundle.from_prefix("io_ooo_to_mem_csrCtrl_")
+
+    def bind(self, dut):
+        """绑定 CSR 相关 DUT 输入口。"""
+
+        self.tlb_csr.bind(dut)
+        self.csr_ctrl.bind(dut)
+        return self
+
+    def reset(self) -> None:
+        """恢复默认 CSR 配置。"""
+
+        self._drive_zero()
+        self.set_m_mode()
+
+    def set_m_mode(self) -> None:
+        """默认配置为非虚拟化的 M-mode。"""
+
+        self.tlb_csr.priv_virt.value = 0
+        self.tlb_csr.priv_virt_changed.value = 0
+        self.tlb_csr.priv_imode.value = self.MODE_M
+        self.tlb_csr.priv_dmode.value = self.MODE_M
+
+    def _drive_zero(self) -> None:
+        for _, signal in self.tlb_csr.all_signals():
+            signal.value = 0
+        for _, signal in self.csr_ctrl.all_signals():
+            signal.value = 0
+
+
 class MockOuterBufferMemory:
     """外部内存缓冲区简化模型。"""
 
@@ -578,6 +723,9 @@ class MemBlockEnv:
         self.dut = dut
 
         self.redirect = RedirectBundle.from_prefix("io_redirect_").bind(dut)
+        self.mock_csr = MockCSRInterface().bind(dut)
+        self.tlb_csr = self.mock_csr.tlb_csr
+        self.csr_ctrl = self.mock_csr.csr_ctrl
 
         self.lsq_enq_meta = LsqEnqMetaBundle.from_prefix("io_ooo_to_mem_enqLsq_").bind(dut)
         self.lsq_enq_req = BundleList(LsqEnqReqBundle, "io_ooo_to_mem_enqLsq_req_#_", LSQ_ENQ_PORTS)
@@ -641,6 +789,7 @@ class MemBlockEnv:
     def idle_inputs(self) -> None:
         """将 env 管理的输入口恢复到空闲值。"""
 
+        self.mock_csr.reset()
         self.redirect.drive_idle()
         self.lsq_enq_meta.drive_idle()
         for bundle in self.lsq_enq_req:

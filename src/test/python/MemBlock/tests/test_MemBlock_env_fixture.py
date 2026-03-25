@@ -18,12 +18,15 @@ def test_api_MemBlock_env_create(env):
     assert env.dut is not None
     assert env.mock_outer_buffer is not None
     assert env.mock_dcache_client is not None
+    assert env.mock_csr is not None
 
 
 def test_api_MemBlock_env_has_core_bundles(env):
     """验证核心 Bundle 分组齐全。"""
 
     assert hasattr(env, "redirect")
+    assert hasattr(env, "tlb_csr")
+    assert hasattr(env, "csr_ctrl")
     assert hasattr(env, "lsq_enq_meta")
     assert hasattr(env, "lsq_enq_req")
     assert hasattr(env, "lsq_enq_resp")
@@ -166,3 +169,12 @@ def test_api_MemBlock_env_idle_inputs_restores_default(env):
     assert env.outer_tl_d.valid.value == 0
     assert env.dcache_b.valid.value == 0
     assert env.dcache_d.valid.value == 0
+
+
+def test_api_MemBlock_env_csr_mock_default_m_mode(env):
+    """验证 CSR mock 默认配置为非虚拟化 M-mode。"""
+
+    assert env.tlb_csr.priv_virt.value == 0
+    assert env.tlb_csr.priv_virt_changed.value == 0
+    assert env.tlb_csr.priv_imode.value == 3
+    assert env.tlb_csr.priv_dmode.value == 3
