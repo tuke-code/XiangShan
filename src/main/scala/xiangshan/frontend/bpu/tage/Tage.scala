@@ -32,6 +32,11 @@ import xiangshan.frontend.bpu.TageTableInfo
  * This module is the implementation of the TAGE (TAgged GEometric history length predictor).
  */
 class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters with TopHelper with HalfAlignHelper {
+  class WideTableReadResp extends TageBundle {
+    val entries:    Vec[TageEntry]       = Vec(MaxNumWays, new TageEntry)
+    val usefulCtrs: Vec[SaturateCounter] = Vec(MaxNumWays, UsefulCounter())
+  }
+
   class TageIO(implicit p: Parameters) extends BasePredictorIO {
     val fromPhr:     PhrToTageIO         = new PhrToTageIO
     val fromMainBtb: MainBtbToTageIO     = new MainBtbToTageIO
@@ -55,6 +60,14 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
 
   /* *** reset *** */
   io.sramResetDone := tables.map(_.io.sramResetDone).reduce(_ && _)
+
+  private def widenTableReadResp(resp: TableReadResp, tableIdx: Int): WideTableReadResp = {
+    val padWays  = MaxNumWays - TableInfos(tableIdx).NumWays
+    val wideResp = Wire(new WideTableReadResp)
+    wideResp.entries := VecInit(resp.entries.toSeq ++ Seq.fill(padWays)(0.U.asTypeOf(new TageEntry)))
+    wideResp.usefulCtrs := VecInit(resp.usefulCtrs.toSeq ++ Seq.fill(padWays)(UsefulCounter.WeakPositive))
+    wideResp
+  }
 
   /* --------------------------------------------------------------------------------------------------------------
      predict pipeline stage 0
