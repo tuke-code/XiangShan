@@ -11,7 +11,6 @@ MemBlock 基础测试环境。
 
 import os
 import sys
-from collections import deque
 
 import pytest
 
@@ -26,6 +25,8 @@ for _path in (_PYLIB, _HERE):
 
 
 from toffee import Bundle, BundleList, Signal, SignalList, Signals
+
+from memory_model import MemoryModel
 
 
 LOAD_PIPELINE_WIDTH = 3
@@ -128,13 +129,64 @@ class IntIssueBundle(Bundle):
         self.bits_sqIdx_value.value = 0
 
 
-class IntWritebackBundle(Bundle):
-    """整数 writeback 单 lane 接口。"""
+class IntWritebackBundle:
+    """整数 writeback 单 lane 的可选信号封装。"""
 
-    ready = Signal()
-    valid = Signal()
-    bits_robIdx_flag = Signal()
-    bits_robIdx_value = Signal()
+    OPTIONAL_SIGNAL_MAP = {
+        "ready": "ready",
+        "valid": "valid",
+        "bits_data_0": "bits_data_0",
+        "bits_pdest": "bits_pdest",
+        "bits_intWen": "bits_intWen",
+        "bits_fpWen": "bits_fpWen",
+        "bits_robIdx_flag": "bits_robIdx_flag",
+        "bits_robIdx_value": "bits_robIdx_value",
+        "bits_lqIdx_flag": "bits_lqIdx_flag",
+        "bits_lqIdx_value": "bits_lqIdx_value",
+        "bits_sqIdx_flag": "bits_sqIdx_flag",
+        "bits_sqIdx_value": "bits_sqIdx_value",
+        "bits_isFromLoadUnit": "bits_isFromLoadUnit",
+        "bits_debug_isMMIO": "bits_debug_isMMIO",
+        "bits_debug_isNCIO": "bits_debug_isNCIO",
+        "bits_debug_isPerfCnt": "bits_debug_isPerfCnt",
+        "bits_debug_paddr": "bits_debug_paddr",
+        "bits_debug_vaddr": "bits_debug_vaddr",
+    }
+
+    def __init__(self, prefix: str, dut) -> None:
+        self._prefix = prefix
+        self._dut = dut
+        for attr_name, suffix in self.OPTIONAL_SIGNAL_MAP.items():
+            setattr(self, attr_name, self._bind_optional(suffix))
+        self.bits_exception_vec = [self._bind_optional(f"bits_exceptionVec_{idx}") for idx in range(24)]
+
+    def _bind_optional(self, suffix: str):
+        return getattr(self._dut, f"{self._prefix}{suffix}", None)
+
+    def _signal_attr(self, name: str) -> str:
+        if name in {"ready", "valid"}:
+            return name
+        return f"bits_{name}"
+
+    def connected(self, name: str) -> bool:
+        signal = getattr(self, self._signal_attr(name), None)
+        return signal is not None
+
+    def read(self, name: str, default=None):
+        signal = getattr(self, self._signal_attr(name), None)
+        if signal is None:
+            return default
+        return int(signal.value)
+
+    def set_ready(self, value: int = 1) -> None:
+        if self.ready is not None:
+            self.ready.value = value
+
+    def read_exception_bits(self) -> list[int]:
+        bits = []
+        for signal in self.bits_exception_vec:
+            bits.append(0 if signal is None else int(signal.value))
+        return bits
 
 
 class MemStatusBundle(Bundle):
@@ -736,11 +788,12 @@ class MemBlockEnv:
             bundle.bind(dut)
 
         self.issue = BundleList(IntIssueBundle, "io_ooo_to_mem_intIssue_#_0_", INT_ISSUE_PORTS)
-        self.writeback = BundleList(IntWritebackBundle, "io_mem_to_ooo_intWriteback_#_0_", INT_WRITEBACK_PORTS)
         for bundle in self.issue:
             bundle.bind(dut)
-        for bundle in self.writeback:
-            bundle.bind(dut)
+        self.writeback = [
+            IntWritebackBundle(f"io_mem_to_ooo_intWriteback_{idx}_0_", dut)
+            for idx in range(INT_WRITEBACK_PORTS)
+        ]
 
         self.mem_status = MemStatusBundle.from_dict(
             {
@@ -770,17 +823,21 @@ class MemBlockEnv:
         self.dcache_d = DcacheClientDBundle.from_prefix("auto_inner_dcache_client_out_d_").bind(dut)
         self.dcache_e = DcacheClientEBundle.from_prefix("auto_inner_dcache_client_out_e_").bind(dut)
 
-        self.mock_outer_buffer = MockOuterBufferMemory(self.outer_tl_a, self.outer_tl_d)
-        self.mock_dcache_client = MockDcacheClient(
+        self.memory = MemoryModel(
+            dut,
+            self.outer_tl_a,
+            self.outer_tl_d,
             self.dcache_a,
             self.dcache_b,
             self.dcache_c,
             self.dcache_d,
             self.dcache_e,
+            writebacks=self.writeback,
         )
+        self.mock_outer_buffer = self.memory
+        self.mock_dcache_client = self.memory
 
-        self.dut.StepRis(self.mock_outer_buffer.on_outer_buffer_edge)
-        self.dut.StepRis(self.mock_dcache_client.on_dcache_client_edge)
+        self.dut.StepRis(self.memory.on_memory_edge)
 
         self.dut.reset.value = 0
         self.dut.io_hartId.value = 0
@@ -796,23 +853,22 @@ class MemBlockEnv:
             bundle.drive_idle()
         for bundle in self.issue:
             bundle.drive_idle()
-        self.outer_tl_d.drive_idle()
-        self.dcache_b.drive_idle()
-        self.dcache_d.drive_idle()
+        self.memory.drive_idle()
 
     def Step(self, cycles: int = 1) -> None:
         """推进 DUT 时钟。"""
 
         if cycles < 0:
             raise ValueError(f"cycles 必须非负，当前值为 {cycles}")
-        self.dut.Step(cycles)
+        for _ in range(cycles):
+            self.dut.Step(1)
+            self.memory.after_cycle()
 
     def reset(self, cycles: int = 10, settle_cycles: int = 5) -> None:
         """执行同步复位，并清空 mock 内部状态。"""
 
         self.idle_inputs()
-        self.mock_outer_buffer.reset()
-        self.mock_dcache_client.reset()
+        self.memory.reset_runtime_state()
         self.dut.reset.value = 1
         self.Step(cycles)
         self.dut.reset.value = 0
@@ -822,23 +878,37 @@ class MemBlockEnv:
     def inject_outer_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
         """向 outer buffer D 通道注入一笔响应。"""
 
-        self.mock_outer_buffer.enqueue_response(delay_cycles=delay_cycles, **kwargs)
+        self.memory.enqueue_outer_response(delay_cycles=delay_cycles, **kwargs)
 
     def inject_dcache_b_response(self, delay_cycles: int = 0, **kwargs) -> None:
         """向 DCache B 通道注入一笔响应。"""
 
-        self.mock_dcache_client.enqueue_b_response(delay_cycles=delay_cycles, **kwargs)
+        self.memory.enqueue_b_response(delay_cycles=delay_cycles, **kwargs)
 
     def inject_dcache_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
         """向 DCache D 通道注入一笔响应。"""
 
-        self.mock_dcache_client.enqueue_d_response(delay_cycles=delay_cycles, **kwargs)
+        self.memory.enqueue_d_response(delay_cycles=delay_cycles, **kwargs)
+
+    def drain_writebacks(self, max_cycles: int = 200) -> None:
+        """推进若干周期直到待校验 writeback 全部收敛。"""
+
+        for _ in range(max_cycles):
+            if self.memory.outstanding_expected_count == 0 and self.memory.outstanding_transaction_count == 0:
+                return
+            self.Step(1)
+        raise TimeoutError("等待 MemoryModel 收敛超时")
+
+    def check_no_outstanding_transactions(self) -> None:
+        """检查没有残留的 MemoryModel 事务与待校验项。"""
+
+        assert self.memory.outstanding_expected_count == 0, "仍有未校验的 load writeback"
+        assert self.memory.outstanding_transaction_count == 0, "仍有未完成的 TL 事务"
 
     def clear_callbacks(self) -> None:
         """移除 env 注册的 StepRis 回调。"""
 
-        self.dut.xclock.RemoveStepRisCbByDesc(self.mock_outer_buffer.on_outer_buffer_edge.__name__)
-        self.dut.xclock.RemoveStepRisCbByDesc(self.mock_dcache_client.on_dcache_client_edge.__name__)
+        self.dut.xclock.RemoveStepRisCbByDesc(self.memory.on_memory_edge.__name__)
 
     def Finish(self) -> None:
         """释放 DUT 资源。"""

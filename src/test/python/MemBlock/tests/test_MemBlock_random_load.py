@@ -2,9 +2,10 @@
 """
 MemBlock 随机 load 流量测试。
 
-本用例按 `lsq enqueue -> issue` 的顺序发起 100 个随机标量 load：
+本用例按 `lsq enqueue -> issue` 的顺序发起随机标量 load：
   1. 先向 `enqLsq[0]` 提交一条 load，显式分配 `lqIdx`
   2. 再把同一条指令的 `lqIdx/sqIdx` 送到 `intIssue[0]`
+  3. 通过 `MemoryModel` 预加载数据并校验 `mem_to_ooo.intWriteback`
 """
 
 from dataclasses import dataclass
@@ -17,7 +18,7 @@ RANDOM_SEED = 20260324
 RANDOM_LOAD_COUNT = 1000
 VIRTUAL_LOAD_QUEUE_SIZE = 72
 OBSERVE_WRITEBACK_CYCLES = 4
-FINAL_DRAIN_CYCLES = 16
+FINAL_DRAIN_CYCLES = 64
 RESET_CYCLES = 20
 BACKEND_RESET_SYNC_CYCLES = 200
 
@@ -49,12 +50,6 @@ def _ptr_inc(ptr: QueuePtr, size: int, step: int = 1) -> QueuePtr:
             value = 0
             flag ^= 0x1
     return QueuePtr(flag=flag, value=value)
-
-
-def _count_writeback(env) -> int:
-    """统计当前拍整数写回脉冲数。"""
-
-    return sum(int(bundle.valid.value) for bundle in env.writeback)
 
 
 def _wait_backend_reset_deassert(env, must_observe_assert: bool) -> None:
@@ -191,28 +186,66 @@ def _issue_scalar_load(env, req_id: int, addr: int, lq_ptr: QueuePtr, sq_ptr: Qu
     env.idle_inputs()
 
 
+def test_api_MemBlock_single_preloaded_load_data_check(env):
+    """
+    预加载一笔 64-bit 数据，并检查单笔 load 写回结果。
+
+    检查点：
+      - `MemoryModel.preload_u64` 能向 backing store 预装数据
+      - MemBlock 发起 load 后，`mem_to_ooo.intWriteback` 的 `robIdx/pdest/data` 与期望一致
+    """
+
+    req_id = 0
+    load_addr = 0x1000
+    expected_data = 0x1122334455667788
+
+    stream_state = _reset_env_and_state(env)
+    env.memory.preload_u64(load_addr, expected_data)
+
+    _enqueue_scalar_load(env, req_id, stream_state.next_lq_ptr, stream_state.sq_ptr)
+    _issue_scalar_load(env, req_id, load_addr, stream_state.next_lq_ptr, stream_state.sq_ptr)
+    env.memory.expect_load(
+        rob_idx_flag=0,
+        rob_idx_value=req_id,
+        pdest=req_id % 64,
+        addr=load_addr,
+        size=8,
+        mask=0xFF,
+    )
+
+    env.drain_writebacks(max_cycles=200)
+
+    assert env.memory.completed_loads == 1, "单笔预加载 load 未完成数据校验"
+    env.check_no_outstanding_transactions()
+
+
 def test_api_MemBlock_random_1000_load_requests(env):
     """
     按 `lsq -> issue` 顺序连续发起 1000 个随机 load 请求。
 
     检查点：
       - 1000 个随机 load 请求均能按 LSQ 分配后再 issue 的顺序连续发起
-      - 在流量过程中可观察到 writeback 脉冲
+      - 长流量过程中能够观测到来自 MemBlock 的 writeback
       - 连续流量结束后 `issue[0]` 与 `lqCanAccept` 仍保持可用
     """
 
     rng = random.Random(RANDOM_SEED)
-    writeback_pulses = 0
+    requests = []
 
     # 用例仅在开始前做一次 reset，同一轮流量中不再插入计划性 reset。
     stream_state = _reset_env_and_state(env)
+    env.memory.strict_writeback_check = False
 
     for req_id in range(RANDOM_LOAD_COUNT):
+        addr = rng.randrange(0, 1 << 20) << 3
+        env.memory.preload_u64(addr, rng.getrandbits(64))
+        requests.append((req_id, addr))
+
+    for req_id, random_addr in requests:
         assert int(env.dut.io_reset_backend.value) == 0, (
             f"连续流量过程中 backend 在请求 {req_id} 前重新进入 reset"
         )
 
-        random_addr = rng.randrange(0, 1 << 20) << 3
         current_lq_ptr = stream_state.next_lq_ptr
 
         _enqueue_scalar_load(env, req_id, current_lq_ptr, stream_state.sq_ptr)
@@ -220,17 +253,14 @@ def test_api_MemBlock_random_1000_load_requests(env):
 
         for _ in range(OBSERVE_WRITEBACK_CYCLES):
             env.Step(1)
-            writeback_pulses += _count_writeback(env)
 
         stream_state = StreamState(
             next_lq_ptr=_ptr_inc(stream_state.next_lq_ptr, VIRTUAL_LOAD_QUEUE_SIZE),
             sq_ptr=stream_state.sq_ptr,
         )
 
-    for _ in range(FINAL_DRAIN_CYCLES):
-        env.Step(1)
-        writeback_pulses += _count_writeback(env)
+    env.Step(FINAL_DRAIN_CYCLES)
 
     assert env.issue[0].ready.value == 1, "随机 load 流结束后 `issue[0]` 不再 ready"
     assert env.lsq_status.lqCanAccept.value == 1, "随机 load 流结束后 `lqCanAccept` 变为 0"
-    assert writeback_pulses > 0, "1000 个随机 load 过程中未观察到任何 writeback 脉冲"
+    assert env.memory.writeback_events > 0, "1000 个随机 load 过程中未观察到任何 writeback"

@@ -2,7 +2,7 @@
 """
 MemBlockEnv 冒烟测试。
 
-这些测试只验证 env 自身、Bundle 绑定和 Mock 的工作状态，
+这些测试只验证 env 自身、Bundle 绑定和 MemoryModel 的工作状态，
 不依赖 MemBlock 的具体功能实现。
 """
 
@@ -12,10 +12,11 @@ from MemBlock_api import api_MemBlock_reset, api_MemBlock_step
 
 
 def test_api_MemBlock_env_create(env):
-    """验证 env、dut 和 mock 能正常创建。"""
+    """验证 env、dut 和 MemoryModel 能正常创建。"""
 
     assert env is not None
     assert env.dut is not None
+    assert env.memory is not None
     assert env.mock_outer_buffer is not None
     assert env.mock_dcache_client is not None
     assert env.mock_csr is not None
@@ -110,28 +111,28 @@ def test_api_MemBlock_env_mem_status_access(env):
 
 
 def test_api_MemBlock_env_outer_buffer_mock_ready(env):
-    """验证 outer buffer mock 会持续驱动 TL-A ready。"""
+    """验证 MemoryModel 会持续驱动 outer TL-A ready。"""
 
     env.Step(1)
     assert env.outer_tl_a.ready.value == 1
-    stats = env.mock_outer_buffer.stats
-    assert stats["pending_count"] == 0
-    assert stats["active_count"] == 0
+    stats = env.memory.stats
+    assert stats["pending_outer_d_count"] == 0
+    assert stats["active_outer_d_count"] == 0
 
 
 def test_api_MemBlock_env_outer_buffer_mock_response_queue(env):
-    """验证 outer buffer mock 支持排队注入响应。"""
+    """验证 MemoryModel 支持排队注入 outer D 响应。"""
 
     env.inject_outer_d_response(delay_cycles=3, opcode=4, source=2, data=0x55AA)
-    assert env.mock_outer_buffer.stats["pending_count"] == 1
+    assert env.memory.stats["pending_outer_d_count"] == 1
     env.Step(3)
-    stats = env.mock_outer_buffer.stats
-    assert stats["pending_count"] + stats["active_count"] <= 1
+    stats = env.memory.stats
+    assert stats["pending_outer_d_count"] + stats["active_outer_d_count"] <= 1
     assert env.outer_tl_a.ready.value == 1
 
 
 def test_api_MemBlock_env_dcache_client_mock_ready(env):
-    """验证 dcache client mock 会持续驱动 ready 信号。"""
+    """验证 MemoryModel 会持续驱动 dcache ready 信号。"""
 
     env.Step(1)
     assert env.dcache_a.ready.value == 1
@@ -140,17 +141,24 @@ def test_api_MemBlock_env_dcache_client_mock_ready(env):
 
 
 def test_api_MemBlock_env_dcache_client_mock_response_queue(env):
-    """验证 dcache client mock 支持 B/D 通道排队注入。"""
+    """验证 MemoryModel 支持 B/D 通道排队注入。"""
 
     env.inject_dcache_b_response(delay_cycles=2, opcode=6, source=1, address=0x1000)
     env.inject_dcache_d_response(delay_cycles=2, opcode=1, source=1, sink=3, data=0x1234)
-    stats = env.mock_dcache_client.stats
+    stats = env.memory.stats
     assert stats["pending_b_count"] == 1
     assert stats["pending_d_count"] == 1
     env.Step(2)
-    stats = env.mock_dcache_client.stats
+    stats = env.memory.stats
     assert stats["pending_b_count"] + stats["active_b_count"] <= 1
     assert stats["pending_d_count"] + stats["active_d_count"] <= 1
+
+
+def test_api_MemBlock_env_memory_preload_access(env):
+    """验证 MemoryModel preload/read 接口可用。"""
+
+    env.memory.preload_u64(0x1000, 0x1122334455667788)
+    assert env.memory.read(0x1000, 8) == 0x1122334455667788
 
 
 def test_api_MemBlock_env_idle_inputs_restores_default(env):
