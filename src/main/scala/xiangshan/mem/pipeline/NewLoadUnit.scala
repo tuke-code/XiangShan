@@ -962,7 +962,8 @@ class LoadUnitS2(param: ExeUnitParams)(
   afForwardDenied := mshrForwardDenied || tldForwardDenied
   hweForwardCorrupt := mshrForwardCorrupt || tldForwardCorrupt
 
-  val dcacheFullForward = io.mshrForwardResp.valid || io.tldForwardResp.valid
+  val dcacheFullForward = (~(io.mshrForwardResp.bits.forwardMask.asUInt) & in.mask) === 0.U ||
+                          io.tldForwardResp.valid
   val uncacheFullForward = (~io.uncacheForwardResp.bits.forwardMask.asUInt & in.mask) === 0.U && !sqDataInvalid
   val storeFullForward = (~storeForwardMask & in.mask) === 0.U && !sqDataInvalid
   val fullForward = storeFullForward || dcacheFullForward
