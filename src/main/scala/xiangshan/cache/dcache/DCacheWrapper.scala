@@ -31,7 +31,7 @@ import xiangshan._
 import xiangshan.backend.rob.{RobDebugRollingIO, RobPtr}
 import xiangshan.cache.wpu._
 import xiangshan.mem.prefetch._
-import xiangshan.mem.Bundles.SbufferForward
+import xiangshan.mem.Bundles.SbufferForwardReq
 import xiangshan.mem.{AddPipelineReg, HasL1PrefetchSourceParameter, HasMemBlockParameters, LqPtr, MemorySize}
 
 // DCache specific parameters
@@ -684,6 +684,7 @@ class DCacheForwardReqS1(implicit p: Parameters) extends DCacheBundle {
 class DCacheForwardResp(implicit p: Parameters) extends DCacheBundle {
   val matchInvalid = Bool()
   val forwardData = Vec((VLEN/8), UInt(8.W))
+  val forwardMask = Vec((VLEN/8), Bool())
   // denied and corrupt are only valid when forwarding matches
   val denied = Bool()
   val corrupt = Bool()
@@ -746,7 +747,7 @@ class DCacheToLsuIO(implicit p: Parameters) extends DCacheBundle {
   val forward_D = Flipped(Vec(LoadPipelineWidth, new DCacheForward))
   val forward_mshr = Flipped(Vec(LoadPipelineWidth, new DCacheForward))
   // If a store is miss and accepted by mshr, Sbuffer releases the entry and mshr provides corresponding st-ld forwarding data.
-  val forward_mshrStData = Flipped(Vec(LoadPipelineWidth, new SbufferForward))
+  val forward_mshrStData = Flipped(Vec(LoadPipelineWidth, new SbufferForwardReq))
 }
 
 class DCacheTopDownIO(implicit p: Parameters) extends DCacheBundle {
@@ -1328,6 +1329,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     s2Resp.valid := RegNext(s1RespValid)
     s2Resp.bits.matchInvalid := false.B
     s2Resp.bits.forwardData := RegEnable(s1RespForwardData.asTypeOf(s2Resp.bits.forwardData), s1ReqValid)
+    s2Resp.bits.forwardMask := VecInit(Seq.fill(VLEN / 8)(RegNext(s1RespValid)))
     s2Resp.bits.denied := RegEnable(bus.d.bits.denied, s1ReqValid)
     s2Resp.bits.corrupt := RegEnable(bus.d.bits.corrupt, s1ReqValid)
   }
@@ -1535,7 +1537,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   // forward missqueue
   missQueue.io.forward <> io.lsu.forward_mshr
   // If a store is miss and accepted by mshr, Sbuffer releases the entry and mshr provides corresponding st-ld forwarding data.
-  missQueue.io.forward_stData <> io.lsu.forward_mshrStData
+  missQueue.io.forward_stData := io.lsu.forward_mshrStData
 
   // refill to load queue
  // io.lsu.lsq <> missQueue.io.refill_to_ldq
