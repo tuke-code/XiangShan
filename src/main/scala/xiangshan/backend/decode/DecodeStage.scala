@@ -309,8 +309,8 @@ class DecodeStage(implicit p: Parameters) extends XSModule
   // bad pseculation  (rabwalk)
   val debugRedirect = RegEnable(io.redirect.bits, io.redirect.valid)
   val recStall      = io.fromRob.isResumeVType
-  val ctrlRecStall  = debugRedirect.debugIsCtrl
-  val mvioRecStall  = debugRedirect.debugIsMemVio
+  val ctrlRecStall  = debugRedirect.debugIsCtrl && recStall
+  val mvioRecStall  = debugRedirect.debugIsMemVio && recStall
   val otherRecStall = recStall && !(ctrlRecStall || mvioRecStall)
 
 
