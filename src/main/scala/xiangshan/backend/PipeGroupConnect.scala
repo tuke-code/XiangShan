@@ -74,8 +74,12 @@ class PipelineStallReason(reasonW: Int) extends Module {
   val currentPipeStallReg = RegNext(io.currentPipeStall)
   val currentPipeStallReasonReg = RegNext(io.currentPipeStallReason)
 
-  // todo current pipe bubble
-  // todo seperate bubble stall here(with class)
+  /** Attention : as `rename` and `decode` themselves
+   do not generate bubbles, no special handling has been added for them
+   for now.
+   *
+   * Special care is needed if this stage may generate its own bubble in later cases
+   */
 
   val currentPipeBubbleReg = RegNext(io.currentPipeBubble)
   val currentPipeBubbleReasonReg = RegNext(io.currentPipeBubbleReason)

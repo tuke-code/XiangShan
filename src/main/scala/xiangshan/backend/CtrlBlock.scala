@@ -605,7 +605,7 @@ class CtrlBlockImp(
     rename.io.validVec(i) := decodePipeRename(i).valid
     rename.io.isFusionVec(i) := false.B
     rename.io.fusionCross2FtqVec(i) := false.B
-    decode.io.debugOutValid.get(i) := decodePipeRename(i).valid
+    decode.io.debugOutValid.foreach{ validVec => validVec(i) := decodePipeRename(i).valid}
   }
 
   for (i <- 0 until RenameWidth - 1) {
@@ -697,7 +697,7 @@ class CtrlBlockImp(
   // pipeline between rename and dispatch
   PipeGroupConnect(renameOut, dispatch.io.fromRename, s1_s3_redirect.valid, dispatch.io.toRenameAllFire, "renamePipeDispatch")
 
-  rename.io.debugOutValidVec.get := dispatch.io.fromRename.map(_.valid)
+  rename.io.debugOutValidVec.foreach(_ := dispatch.io.fromRename.map(_.valid))
 
 
   dispatch.io.redirect := s1_s3_redirect

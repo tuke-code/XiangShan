@@ -891,8 +891,6 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
 
   private val canAccept = !hasValidInstr || !hasSpecialInstr && io.enqRob.canAccept
 
-  // TODO explain
-  val isWaitForwardorBlockBackwardVec = VecInit(((isWaitForward.asUInt | isBlockBackward.asUInt)<<1)(renameWidth - 1, 0).asBools)
   val isWaitForwardOrBlockBackward = isWaitForward.asUInt.orR || isBlockBackward.asUInt.orR
   val hasSpecialInst = io.debugBlockBackward.getOrElse(false.B) || io.debugWaitForward.getOrElse(false.B)
   val renameFireCnt = PopCount(fromRename.map(_.fire))
@@ -933,15 +931,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     else (io.fromRename(i-1).fire && !io.fromRename(i).valid && io.fromRename(i-1).bits.debug.get.fusionNum =/= 0.U)
   }
 
-//  val dispatchPolicyStallMatrix = allIssueParams.zipWithIndex.map { case (issue, iqidx) => {
-//    val result = uopSelIQMatrix.map(_(iqidx)).map(x => x > issue.numEnq.U)
-//    result
-//  }}.transpose
-//  val dispatchPolicyStallVec = VecInit(dispatchPolicyStallMatrix.zip(fromRename).map{ case (blockList, uop) =>
-//    // TODO: explain
-//    val block = blockList.reduce(_ || _)
-//    uop.valid && block
-//  })
+  // Topdown collect start
 
   temp = 0
   val iqReadyVec = allIssueParams.map{ case issue =>
@@ -979,13 +969,17 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   val firedVec = fromRename.map(_.fire)
   val inValidVec = fromRename.map(_.valid)
   val inReadyVec = fromRename.map(_.ready)
-  val issueQueueNumVec = io.debugIQValidNumVec.getOrElse(VecInit(Seq.fill(RenameWidth)(0.U)))
-  val issueQueueEnqHasIssuedVec = io.debugIQEnqHasIssuedVec.getOrElse(VecInit(Seq.fill(RenameWidth)(0.U)))
+  val issueQueueNumVec = io.debugIQValidNumVec.getOrElse(VecInit(Seq.fill(issueQueueNum)(0.U)))
+  val issueQueueEnqHasIssuedVec = io.debugIQEnqHasIssuedVec.getOrElse(VecInit(Seq.fill(issueQueueNum)(0.U)))
+
+
   val fromRenameMapIQReadyCntVec = Wire(Vec(RenameWidth, UInt(log2Ceil(io.toIssueQueues.length).W)))
   val fromRenameMapIQBandWidthVec = Wire(Vec(RenameWidth, UInt(log2Ceil(IQEnqSum).W)))
   val fromRenameMapIQValidNumVec = Wire(Vec(RenameWidth, UInt(maxIQSize.U.getWidth.W)))
   val fromRenameMapIQSizeVec = Wire(Vec(RenameWidth, UInt(maxIQSize.U.getWidth.W)))
   val fromRenameMapIQEnqHasIssuedVec = Wire(Vec(RenameWidth, Bool()))
+
+
   fromRenameMapIQReadyCntVec := fuTypes.map { fuType =>
     Mux1H(fuType, fuMapIQReadyCntVec )
   }
@@ -1005,41 +999,44 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   }
 
   val fromRenameSameFuNumVec = Wire(Vec(RenameWidth, UInt(log2Ceil(RenameWidth).W)))
+  val fromRenameFutypeNotOverIQ = Wire(Vec(RenameWidth, Bool()))
+  val fromRenameFutypeOvecIQEnqBandwidth = Wire(Vec(RenameWidth, Bool()))
+  val fromRenameMapIQNotFull = Wire(Vec(RenameWidth, Bool()))
+  val fromRenameMapIQEnqHasIssuedNotFull = Wire(Vec(RenameWidth, Bool()))
+
   for( i <- 0 until RenameWidth) {
     fromRenameSameFuNumVec(i) := Mux1H(fuTypes(i), fuTypeCountVec(i))
   }
-  val fromRenameFutypeNotOverIQ = Wire(Vec(RenameWidth, Bool()))
+  // compare futype num and port ready count num
   fromRenameFutypeNotOverIQ := (0 until RenameWidth).map{ idx =>
     inValidVec(idx) && (fromRenameSameFuNumVec(idx) <= fromRenameMapIQReadyCntVec(idx))
   }
 
-  val fromRenameFutypeOvecIQEnqBandwidth = Wire(Vec(RenameWidth, Bool()))
   fromRenameFutypeOvecIQEnqBandwidth := (0 until RenameWidth).map{ idx =>
     inValidVec(idx) && (fromRenameSameFuNumVec(idx) > fromRenameMapIQBandWidthVec(idx))
   }
 
-  val fromRenameMapIQNotFull = Wire(Vec(RenameWidth, Bool()))
   fromRenameMapIQNotFull := (0 until RenameWidth).map{ idx =>
     inValidVec(idx) && (fromRenameMapIQValidNumVec(idx) <= fromRenameMapIQSizeVec(idx))
   }
-  val fromRenameMapIQEnqHasIssuedNotFull = Wire(Vec(RenameWidth, Bool()))
+
   fromRenameMapIQEnqHasIssuedNotFull := (0 until RenameWidth).map{ idx =>
     fromRenameMapIQNotFull(idx) && fromRenameMapIQEnqHasIssuedVec(idx)
   }
-
-  dontTouch(fromRenameMapIQReadyCntVec)
-  dontTouch(fromRenameSameFuNumVec)
-  dontTouch(fromRenameFutypeNotOverIQ)
-  dontTouch(fromRenameMapIQBandWidthVec)
-  dontTouch(fromRenameFutypeOvecIQEnqBandwidth)
-  dontTouch(fuMapIQBandWidthVec)
-  dontTouch(issueQueueSizeVec)
-  dontTouch(fromRenameMapIQValidNumVec)
-  dontTouch(fromRenameMapIQSizeVec)
-  dontTouch(fromRenameMapIQNotFull)
-  dontTouch(fromRenameMapIQEnqHasIssuedVec)
-  dontTouch(fromRenameMapIQEnqHasIssuedNotFull)
-
+  if (backendParams.debugEn) {
+    dontTouch(fromRenameMapIQReadyCntVec)
+    dontTouch(fromRenameSameFuNumVec)
+    dontTouch(fromRenameFutypeNotOverIQ)
+    dontTouch(fromRenameMapIQBandWidthVec)
+    dontTouch(fromRenameFutypeOvecIQEnqBandwidth)
+    dontTouch(fuMapIQBandWidthVec)
+    dontTouch(issueQueueSizeVec)
+    dontTouch(fromRenameMapIQValidNumVec)
+    dontTouch(fromRenameMapIQSizeVec)
+    dontTouch(fromRenameMapIQNotFull)
+    dontTouch(fromRenameMapIQEnqHasIssuedVec)
+    dontTouch(fromRenameMapIQEnqHasIssuedNotFull)
+  }
 
   // prepipe stall
   val renameStall  = !inValidVec.reduce(_ || _)
@@ -1068,6 +1065,13 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     (robStall || lsqStall)                                                   -> RobStall.id.U             ,
   ))
 
+  /** BalanceDispatchStall or Bubble: IQ can enq, but fail to dispatch cause stall/bubble
+   *  - like: Alu IQ now has 4 ready enq port, and dispatch get 3 alu instructions. However,
+   *  some alu instruction fail to dispatch and cause stall
+   *  - TODO: Since the statistics here are collected by the same `FuType`, the accounting may be imprecise for
+   *  instructions that share an IQ. However, such cases are relatively rare for now, and they are currently
+   *  misattributed to `IQFull`.
+   */
   val issueQueueStall = issueQueueStallVec(0)
   val issueQueueStallFutype = PriorityMux(issueQueueStallVec, fuTypes)
   val balanceDispatchStall = PriorityMux(issueQueueStallVec, fromRenameFutypeNotOverIQ)
@@ -1112,16 +1116,21 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     specialInstructionStall -> specialInstructionStallReason ,
   ))
 
-  // todo exchage bundle
-  // current bubble
+  /** current pipe bubble : dispatch or after dispatch cause not first instruction stall including:
+   *  - Dispatch Policy bubble: bandwidth, balance
+   *  - issuequeue full: full, not full but cannot enter
+   *  - dispatch lsq cannot enter
+   *  - special instruction: wait forward block backward
+   */
   val dispatchBubble = !inReadyVec.reduce(_ && _) && !dispatchStall
   val dispatchBubbleReason       = Wire(chiselTypeOf(io.stallReason.reason(0)))
   val dispatchBubbleValid        = WireInit(VecInit.fill(renameWidth)(false.B))
-//  val dispatchBubbleReasonVec    = Wire(chiselTypeOf(io.stallReason.reason))
   val dispatchBubbleValidReg     = RegInit(VecInit.fill(renameWidth)(false.B))
   val dispatchBubbleReasonVecReg = Reg(chiselTypeOf(io.stallReason.reason))
 
-  //TODO explain
+  /** DispatchBandWidthPolicyBubble: For specific futype: dispatch width over IQ enq width cause dispatch bubble
+   *  - like: load IQ only has 6 enq width , 8 loads cause 2 bubble in dispatch
+   */
   val dispatchBandWidthPolicyBubble = PriorityMux(issueQueueStallVec, fromRenameFutypeOvecIQEnqBandwidth)
   val dispatchBandWidthPolicyBubbleFutype = PriorityMux(fromRenameFutypeOvecIQEnqBandwidth, fuTypes)
   val dispatchBandWidthPolicyBubbleReason = MuxCase(BackendOtherCoreStall.id.U, Seq(
@@ -1130,6 +1139,10 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     dispatchBandWidthPolicyBubble                             -> OtherDispatchPolicyStall.id.U ,
   ))
 
+  /** IssueQueue Stall has two type:(select iq stall and has no other not stall iq can accept this futype)
+   *  - IQ full : IQ has less then 2 empty entries
+   *  - IQ Not full but cannot enter : IQ has >= 2 empty entries but cannot enter(not trans or enq issued)
+   */
   val issueQueueEnqPolicyStallIssued = PriorityMux(issueQueueStallVec, fromRenameMapIQEnqHasIssuedNotFull)
   val issueQueueEnqPolicyStall = PriorityMux(issueQueueStallVec, fromRenameMapIQNotFull)
 
@@ -1149,7 +1162,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     FuType.isStoreVstore(issueQueueStallFutype) -> StoreIQFullStall.id.U       ,
   ))
 
-
+  /** Dispatch lsq Bubble : lsq cannot enter */
   val dispatchlsqBubble = dispatchlsqBubbleVec.reduce(_ || _)
   val dispatchlsqBubbleFutype = PriorityMux(dispatchlsqBubbleVec , fuTypes)
   val dispatchlsqBubbleReason = MuxCase(NoStall.id.U, Seq(
@@ -1157,6 +1170,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     FuType.isStoreVstore(dispatchlsqBubbleFutype) -> StoreIQFullStall.id.U ,
   ))
 
+  /** Special Instruction bubble: wait forward or block backward */
   val specialInstructionBubbleVec = VecInit((blockedByWaitForward zip notBlockedByPrevious).map{case (a,b) => a | !b })
   val specialInstructionBubbleReason = SpecialInsts.id.U
 
@@ -1183,14 +1197,18 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   dispatchPriorityBubbleReasonidx := PriorityEncoder(dispatchPriorityBubbleVec)
   dispatchBubbleReason := allDispatchReasonVec(dispatchPriorityBubbleReasonidx)
 
-  dontTouch(dispatchPriorityBubbleidx)
-  dontTouch(dispatchPriorityBubbleReasonidx)
-  dontTouch(dispatchBubbleReason)
-  dontTouch(dispatchStall)
-  dontTouch(issueQueueStallVec)
+  if (backendParams.debugEn){
+    dontTouch(dispatchPriorityBubbleidx)
+    dontTouch(dispatchPriorityBubbleReasonidx)
+    dontTouch(dispatchBubbleReason)
+    dontTouch(dispatchStall)
+    dontTouch(issueQueueStallVec)
+  }
 
-  // next cycle bubble store until all fire
-  // all fire cannot have bubble at current cycle
+  /** next cycle bubble store until all fire
+   * - In later cycles, a bubble may override an earlier bubble once it becomes valid
+   * - however, when `allFire` occurs, any existing bubble must reflect the original cause that first generated it
+   */
   for (i <- 0 until RenameWidth) {
     when(io.redirect.valid || io.toRenameAllFire){
       dispatchBubbleValidReg(i) := false.B
@@ -1230,11 +1248,11 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     ))
 
 
-    // prepipe bubble and current pipe bubble will not happen together
     // prepipe bubble release
     val prePipeBubbleRelease = renameBubble && !inValid && !dispatchBubbleValidReg(idx)
     val prePipeBubbleReason = inReason
 
+    // current pipe bubble release
     val currentPipeBubbleRelease = !inValid && dispatchBubbleValidReg(idx)
     val currentPipeBubbleReason = dispatchBubbleReasonVecReg(idx)
 

@@ -750,7 +750,7 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
   }
 
 
-  val issueQueueValidNumVec: Vec[UInt] = io.debugIQValidNumVec.get
+  val issueQueueValidNumVec: Vec[UInt] = io.debugIQValidNumVec.getOrElse(VecInit(Seq.fill(io.IQNum)(0.U)))
   issueQueues.filter(_.param.StdCnt == 0).zip(issueQueueValidNumVec).foreach{ case (issueQueue, validNum) =>
     validNum := PopCount(issueQueue.io.validVec)
   }
@@ -758,7 +758,7 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     issueQueueValidNumVec(sta) := Mux(staValidNum(i) > stdValidNum(i), staValidNum(i), stdValidNum(i))
   }
 
-  val issueQueueEnqHasIssuedVec : Vec[Bool] = io.debugIQEnqHasIssuedVec.get
+  val issueQueueEnqHasIssuedVec : Vec[Bool] = io.debugIQEnqHasIssuedVec.getOrElse(VecInit(Seq.fill(io.IQNum)(false.B)))
   issueQueues.filter(_.param.StdCnt == 0).zip(issueQueueEnqHasIssuedVec).foreach{ case (issueQueue, enqIssued) =>
     enqIssued := andVec(issueQueue.io.issuedVec, issueQueue.io.validVec).take(issueQueue.param.numEnq).reduce(_ & _)
   }

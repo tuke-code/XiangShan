@@ -348,9 +348,10 @@ class DecodeStage(implicit p: Parameters) extends XSModule
     frontendBubbleValidVec(i) := bubbleStore.io.outReasonValid
     frontendBubbleReasonVec(i) := bubbleStore.io.outReason
   }
-
-  dontTouch(frontendBubbleValidVec)
-  dontTouch(frontendBubbleReasonVec)
+  if (backendParams.debugEn){
+    dontTouch(frontendBubbleValidVec)
+    dontTouch(frontendBubbleReasonVec)
+  }
   // current pipe
   // current stall
 
@@ -361,6 +362,8 @@ class DecodeStage(implicit p: Parameters) extends XSModule
   ))
 
   // current bubble
+  /** Attention: Special care is needed if this stage may generate its own bubble in later cases
+   */
   val decodeBubble = false.B
   val decodeBubbleReason = 0.U
 

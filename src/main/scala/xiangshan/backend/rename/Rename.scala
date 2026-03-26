@@ -932,7 +932,8 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   ))
 
   // current pipe bubble
-  // Attention: rename does not generate bubble itself
+  /** Attention: Special care is needed if this stage may generate its own bubble in later cases
+   */
   val renameBubble = false.B
   val renameBubbleReason = 0.U
 
