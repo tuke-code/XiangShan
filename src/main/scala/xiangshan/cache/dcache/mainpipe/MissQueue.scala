@@ -36,7 +36,7 @@ import xiangshan._
 import xiangshan.mem.LqPtr
 import xiangshan.mem.prefetch._
 import xiangshan.mem.trace._
-import xiangshan.mem.Bundles.SbufferForward
+import xiangshan.mem.Bundles.SbufferForwardReq
 import freechips.rocketchip.util.UIntToAugmentedUInt
 
 class MissReqWoStoreData(implicit p: Parameters) extends DCacheBundle {
@@ -1071,7 +1071,8 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     val forward = Flipped(Vec(LoadPipelineWidth, new DCacheForward))
     val forwardS1PAddrMatch = Output(Vec(LoadPipelineWidth, Bool()))
     // If a store is miss and accepted by mshr, Sbuffer releases the entry and mshr provides corresponding st-ld forwarding data.
-    val forward_stData = Flipped(Vec(LoadPipelineWidth, new SbufferForward))
+    // Note: the resp of this st-ld forwarding is merged into io.forward.S2Resp interface
+    val forward_stData = Flipped(Vec(LoadPipelineWidth, new SbufferForwardReq))
     val l2_pf_store_only = Input(Bool())
 
     val memSetPattenDetected = Output(Bool())
@@ -1186,7 +1187,6 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     val s1ReqValid = RegNext(s0ReqValid)
     val s1Req = RegEnable(s0Req, s0ReqValid)
     val mshrIdOH = UIntToOH(s1Req.mshrId)
-
     val s1BeatMatchVec  = VecInit(forwardInfo_vec.map{ case info =>
       Mux(paddrFwd(i)(log2Up(refillBytes)).asBool,
         info.lastbeat_valid,
@@ -1194,28 +1194,26 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     )})
     val s1RespValid = s1ReqValid && (s1SelectOH(i) & s1BeatMatchVec.asUInt).orR
 
-    forward.s2Resp.valid := RegNext(s1RespValid)
+    // store-load forwarding (from io.forward_stData)
+    val s1ReqValid_stLdFwd = RegNext(io.forward_stData(i).s0Req.valid)
+    val s1RespMask_stLdFwd = Mux1H(paddrFwd_selOH(i),
+          s1ForwardInfo(i).store_mask.grouped(VLENB).map(x => Mux(s1ForwardInfo(i).isFromStore, x, 0.U)))
+    val s1RespValid_stLdFwd = s1ReqValid_stLdFwd && s1SelectOH(i).orR
+
+    val s2Resp_Valid = RegNext(s1RespValid)
+    val s2Resp_stLdFwd_Valid = RegNext(s1RespValid_stLdFwd)
+
+    forward.s2Resp.valid := s2Resp_Valid || s2Resp_stLdFwd_Valid
     forward.s2Resp.bits.matchInvalid := false.B
-    forward.s2Resp.bits.forwardData := RegEnable(s1RespDataFwd(i).asTypeOf(forward.s2Resp.bits.forwardData), s1ReqValid)
+    forward.s2Resp.bits.forwardData := RegEnable(s1RespDataFwd(i).asTypeOf(forward.s2Resp.bits.forwardData),
+                                                 s1ReqValid || s1ReqValid_stLdFwd)
+    forward.s2Resp.bits.forwardMask := VecInit((0 until VLENB).map(k =>
+      Mux(s2Resp_Valid, true.B, RegEnable(s1RespMask_stLdFwd(k), s1RespValid_stLdFwd) && s2Resp_stLdFwd_Valid)
+    ))
     forward.s2Resp.bits.denied := RegEnable(s1ForwardInfo(i).denied, s1ReqValid)
     forward.s2Resp.bits.corrupt := RegEnable(s1ForwardInfo(i).corrupt, s1ReqValid)
     io.forwardS1PAddrMatch(i) := s1ReqValid && (mshrIdOH & s1PaddrMatchVec(i).asUInt).orR
     XSError(((s1SelectOH(i) - 1.U) & s1SelectOH(i)).orR && s1RespValid, "multi mshr hit when forward!\n")
-  }
-
-  io.forward_stData.zipWithIndex.foreach { case (forward, i) =>
-    val s1ReqValid_stLdFwd = RegNext(forward.s0Req.valid)
-
-    val s1RespMask_stLdFwd = Mux1H(paddrFwd_selOH(i),
-          s1ForwardInfo(i).store_mask.grouped(VLENB).map(x => Mux(s1ForwardInfo(i).isFromStore, x, 0.U)))
-    val s1RespValid_stLdFwd = s1ReqValid_stLdFwd && s1SelectOH(i).orR
-    
-    forward.s2Resp.valid := RegNext(s1RespValid_stLdFwd)
-    for (k <- 0 until VLENB) {
-      forward.s2Resp.bits.forwardData(k) := RegEnable(s1RespDataFwd(i)(8 * k + 7, 8 * k), s1RespValid_stLdFwd) 
-      forward.s2Resp.bits.forwardMask(k) := RegEnable(s1RespMask_stLdFwd(k), s1RespValid_stLdFwd) && forward.s2Resp.valid
-    }
-    forward.s2Resp.bits.matchInvalid := false.B
   }
     
   assert(RegNext(PopCount(secondary_ready_vec) <= 1.U || !io.req.valid))
