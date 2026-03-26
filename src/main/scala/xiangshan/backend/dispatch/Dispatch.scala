@@ -417,11 +417,14 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   val needAppendIQValidNumVec = Wire(Vec(exuNum, UInt(RenameWidth.U.getWidth.W)))
   allExuParams.zipWithIndex.map { case (exuParams, iqDeqIdx) => {
     val iqidx = allIssueParams.indexWhere(_.exuBlockParams.contains(exuParams))
+    val selIQNumReg = PopCount(uopSelIQ.zipWithIndex.map { case (u, i) =>
+      RegNext(u(iqidx) && FuType.FuTypeOrR(fromRename(i).bits.fuType, exuParams.fuConfigs.map(_.fuType)) && fromRename(i).fire)
+    })
     val selIQNum = PopCount(uopSelIQ.zipWithIndex.map { case (u, i) =>
-      u(iqidx) && FuType.FuTypeOrR(fromRename(i).bits.fuType, exuParams.fuConfigs.map(_.fuType)) && fromRename(i).fire
+      u(iqidx) && FuType.FuTypeOrR(fromRename(i).bits.fuType, exuParams.fuConfigs.map(_.fuType))
     })
     val selIQNumSat = Mux(selIQNum > 2.U, 2.U, selIQNum)
-    needAppendIQValidNumVec(iqDeqIdx) := selIQNumSat + RegNext(selIQNumSat) + RegNext(RegNext(selIQNumSat))
+    needAppendIQValidNumVec(iqDeqIdx) := selIQNumSat + selIQNumReg + RegNext(selIQNumReg)
   }}
   val issueQueueCount = VecInit(io.IQValidNumVec.zip(needAppendIQValidNumVec).map(x => x._1 + x._2))
   val minIQSelAll = Wire(Vec(needMultiExu.size, Vec(renameWidth, Vec(issueQueueNum, Bool()))))
