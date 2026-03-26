@@ -1249,7 +1249,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
 
 
     // prepipe bubble release
-    val prePipeBubbleRelease = renameBubble && !inValid && !dispatchBubbleValidReg(idx)
+    val prePipeBubbleRelease = renameBubble && !inValid && (inReason =/= NoStall.id.U)
     val prePipeBubbleReason = inReason
 
     // current pipe bubble release
