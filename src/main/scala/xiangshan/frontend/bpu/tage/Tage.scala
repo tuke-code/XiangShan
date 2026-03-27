@@ -26,7 +26,6 @@ import utility.XSPerfHistogram
 import xiangshan.frontend.bpu.BasePredictor
 import xiangshan.frontend.bpu.BasePredictorIO
 import xiangshan.frontend.bpu.HalfAlignHelper
-import xiangshan.frontend.bpu.SaturateCounter
 import xiangshan.frontend.bpu.TageTableInfo
 
 /**
