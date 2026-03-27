@@ -151,8 +151,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // We limit the distance between BP and IF and stall counts of BP train so that branch update can be written back to
   // BPU
   io.fromBpu.prediction.ready := distanceBetween(bpuPtr(0), commitPtr(0)) < FtqSize.U &&
-    distanceBetween(bpuPtr(0), ifuPtr(0)) < BpRunAheadDistance.U &&
-    bpTrainStallCnt < BpTrainStallLimit.U
+    (distanceBetween(bpuPtr(0), ifuPtr(0)) < BpRunAheadDistance.U || bpTrainStallCnt < BpTrainStallLimit.U)
   io.fromBpu.meta.ready := true.B
 
   private val prediction = io.fromBpu.prediction
