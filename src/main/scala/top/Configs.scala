@@ -332,6 +332,8 @@ case class L2CacheConfig
   inclusive: Boolean = true,
   banks: Int = 1,
   tp: Boolean = true,
+  nl: Boolean = false,        // Next-Line Prefetcher switch
+  enablePC: Boolean = false,  // Enable PC field for L1Param
   enableFlush: Boolean = false
 ) extends Config((site, here, up) => {
   case XSTileKey =>
@@ -353,6 +355,7 @@ case class L2CacheConfig
           ways = p.dcacheParametersOpt.get.nWays + 2,
           aliasBitsOpt = p.dcacheParametersOpt.get.aliasBitsOpt,
           vaddrBitsOpt = Some(p.GPAddrBitsSv48x4 - log2Up(p.dcacheParametersOpt.get.blockBytes)),
+          pcBitOpt = if (enablePC) Some(p.GPAddrBitsSv48x4) else None,  // Enable PC field if needed
           isKeywordBitsOpt = p.dcacheParametersOpt.get.isKeywordBitsOpt
         )),
         reqField = Seq(utility.ReqSourceField()),
@@ -365,6 +368,7 @@ case class L2CacheConfig
         enablePoison = true,
         prefetch = Seq(BOPParameters()) ++
           (if (tp) Seq(TPParameters()) else Nil) ++
+          (if (nl) Seq(NLParameters()) else Nil) ++
           (if (p.prefetcher.nonEmpty) Seq(PrefetchReceiverParams()) else Nil),
         enableL2Flush = enableFlush,
         enablePerf = !site(DebugOptionsKey).FPGAPlatform && site(DebugOptionsKey).EnablePerfDebug,
@@ -594,12 +598,11 @@ class FuzzConfig(dummy: Int = 0) extends CHIFuzzConfig(dummy) with DeprecatedCon
 
 class TLConfig(n: Int = 1) extends Config(
   L3CacheConfig("16MB", inclusive = false, banks = 4, ways = 16)
-    ++ L2CacheConfig("1MB", inclusive = true, banks = 4)
+    ++ L2CacheConfig("1MB", inclusive = true, banks = 4, nl = true, enablePC = true)
     ++ WithNKBL1D(64, ways = 4)
     ++ new BaseConfig(n)
 )
 class DefaultConfig(n: Int = 1) extends TLConfig(n) with DeprecatedConfigWarning
-
 class TLCVMConfig(n: Int = 1) extends Config(
   new CVMCompile
     ++ new TLConfig(n)
@@ -617,7 +620,7 @@ class WithCHI extends Config((_, _, _) => {
 })
 
 class CHIConfig(n: Int = 1) extends Config(
-  L2CacheConfig("2MB", inclusive = true, banks = 4, tp = false)
+  L2CacheConfig("2MB", inclusive = true, banks = 4, tp = false, nl = true, enablePC = true)
     ++ new TLConfig(n)
     ++ new WithCHI
 )
