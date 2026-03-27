@@ -402,7 +402,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
    * we add a sanity check to make sure the above assumption holds
    */
   assert(
-    !(!s2_doubleline && (s2_metaCorrupt(1) || s2_dataCorrupt(1))),
+    !(s2_valid && !s2_doubleline && (s2_metaCorrupt(1) || s2_dataCorrupt(1))),
     "meta or data corrupt detected on line 1 but s2_doubleline is false.B"
   )
 
