@@ -21,6 +21,7 @@ OBSERVE_WRITEBACK_CYCLES = 4
 FINAL_DRAIN_CYCLES = 64
 RESET_CYCLES = 20
 BACKEND_RESET_SYNC_CYCLES = 200
+PER_REQUEST_DRAIN_CYCLES = 256
 
 
 @dataclass(frozen=True)
@@ -183,6 +184,7 @@ def _issue_scalar_load(env, req_id: int, addr: int, lq_ptr: QueuePtr, sq_ptr: Qu
     dut.io_ooo_to_mem_intIssue_0_0_bits_lqIdx_value.value = lq_ptr.value
 
     env.Step(1)
+    env.note_load_issued((req_id >> 9) & 0x1, req_id & 0x1FF)
     env.idle_inputs()
 
 
@@ -221,11 +223,11 @@ def test_api_MemBlock_single_preloaded_load_data_check(env):
 
 def test_api_MemBlock_random_1000_load_requests(env):
     """
-    按 `lsq -> issue` 顺序连续发起 1000 个随机 load 请求。
+    按 `lsq -> issue` 顺序持续推进 1000 个随机 load 请求。
 
     检查点：
-      - 1000 个随机 load 请求均能按 LSQ 分配后再 issue 的顺序连续发起
-      - 长流量过程中能够观测到来自 MemBlock 的 writeback
+      - 1000 个随机 load 请求均能按 LSQ 分配后再 issue 的顺序推进
+      - `pendingPtr` 随 load 完成推进后，后续请求可继续执行
       - 连续流量结束后 `issue[0]` 与 `lqCanAccept` 仍保持可用
     """
 
@@ -234,7 +236,6 @@ def test_api_MemBlock_random_1000_load_requests(env):
 
     # 用例仅在开始前做一次 reset，同一轮流量中不再插入计划性 reset。
     stream_state = _reset_env_and_state(env)
-    env.memory.strict_writeback_check = False
 
     for req_id in range(RANDOM_LOAD_COUNT):
         addr = rng.randrange(0, 1 << 20) << 3
@@ -250,17 +251,23 @@ def test_api_MemBlock_random_1000_load_requests(env):
 
         _enqueue_scalar_load(env, req_id, current_lq_ptr, stream_state.sq_ptr)
         _issue_scalar_load(env, req_id, random_addr, current_lq_ptr, stream_state.sq_ptr)
-
-        for _ in range(OBSERVE_WRITEBACK_CYCLES):
-            env.Step(1)
+        env.memory.expect_load(
+            rob_idx_flag=(req_id >> 9) & 0x1,
+            rob_idx_value=req_id & 0x1FF,
+            pdest=req_id % 64,
+            addr=random_addr,
+            size=8,
+            mask=0xFF,
+        )
+        env.drain_writebacks(max_cycles=PER_REQUEST_DRAIN_CYCLES)
+        assert env.memory.completed_loads == req_id + 1, f"请求 {req_id} 未在限定周期内完成"
 
         stream_state = StreamState(
             next_lq_ptr=_ptr_inc(stream_state.next_lq_ptr, VIRTUAL_LOAD_QUEUE_SIZE),
             sq_ptr=stream_state.sq_ptr,
         )
 
-    env.Step(FINAL_DRAIN_CYCLES)
-
     assert env.issue[0].ready.value == 1, "随机 load 流结束后 `issue[0]` 不再 ready"
     assert env.lsq_status.lqCanAccept.value == 1, "随机 load 流结束后 `lqCanAccept` 变为 0"
-    assert env.memory.writeback_events > 0, "1000 个随机 load 过程中未观察到任何 writeback"
+    assert env.memory.completed_loads == RANDOM_LOAD_COUNT, "1000 个随机 load 未全部完成校验"
+    env.check_no_outstanding_transactions()

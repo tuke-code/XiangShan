@@ -11,6 +11,8 @@ MemBlock 基础测试环境。
 
 import os
 import sys
+from collections import defaultdict, deque
+from dataclasses import dataclass
 
 import pytest
 
@@ -33,6 +35,65 @@ LOAD_PIPELINE_WIDTH = 3
 LSQ_ENQ_PORTS = 8
 INT_ISSUE_PORTS = 7
 INT_WRITEBACK_PORTS = 7
+ROB_SIZE = 512
+
+
+@dataclass(frozen=True)
+class RobIndex:
+    """ROB 指针。"""
+
+    flag: int
+    value: int
+
+
+class PendingPtrDriver:
+    """根据 load 完成情况推进 `io_ooo_to_mem_lsqio_pendingPtr`。"""
+
+    def __init__(self, dut, rob_size: int = ROB_SIZE) -> None:
+        self.dut = dut
+        self.rob_size = rob_size
+        self._signal_flag = getattr(dut, "io_ooo_to_mem_lsqio_pendingPtr_flag", None)
+        self._signal_value = getattr(dut, "io_ooo_to_mem_lsqio_pendingPtr_value", None)
+        self._signal_scommit = getattr(dut, "io_ooo_to_mem_lsqio_scommit", None)
+        self.reset()
+
+    def reset(self) -> None:
+        self.pending_ptr = RobIndex(flag=0, value=0)
+        self._issued = deque()
+        self._completed = defaultdict(int)
+
+    def drive(self) -> None:
+        if self._signal_flag is not None:
+            self._signal_flag.value = self.pending_ptr.flag
+        if self._signal_value is not None:
+            self._signal_value.value = self.pending_ptr.value
+        if self._signal_scommit is not None:
+            self._signal_scommit.value = 0
+
+    def note_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        self._issued.append(RobIndex(flag=rob_idx_flag, value=rob_idx_value))
+
+    def note_completed(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        self._completed[RobIndex(flag=rob_idx_flag, value=rob_idx_value)] += 1
+
+    def advance(self) -> None:
+        while self._issued:
+            head = self._issued[0]
+            if self._completed[head] == 0:
+                return
+            self._completed[head] -= 1
+            if self._completed[head] == 0:
+                del self._completed[head]
+            self._issued.popleft()
+            self.pending_ptr = self._inc(self.pending_ptr)
+
+    def _inc(self, ptr: RobIndex) -> RobIndex:
+        value = ptr.value + 1
+        flag = ptr.flag
+        if value >= self.rob_size:
+            value = 0
+            flag ^= 0x1
+        return RobIndex(flag=flag, value=value)
 
 
 class RedirectBundle(Bundle):
@@ -773,6 +834,7 @@ class MemBlockEnv:
 
     def __init__(self, dut) -> None:
         self.dut = dut
+        self.pending_ptr = PendingPtrDriver(dut)
 
         self.redirect = RedirectBundle.from_prefix("io_redirect_").bind(dut)
         self.mock_csr = MockCSRInterface().bind(dut)
@@ -854,6 +916,7 @@ class MemBlockEnv:
         for bundle in self.issue:
             bundle.drive_idle()
         self.memory.drive_idle()
+        self.pending_ptr.drive()
 
     def Step(self, cycles: int = 1) -> None:
         """推进 DUT 时钟。"""
@@ -861,19 +924,32 @@ class MemBlockEnv:
         if cycles < 0:
             raise ValueError(f"cycles 必须非负，当前值为 {cycles}")
         for _ in range(cycles):
+            self.pending_ptr.drive()
             self.dut.Step(1)
             self.memory.after_cycle()
+            if int(self.dut.reset.value) or int(self.dut.io_reset_backend.value):
+                self.pending_ptr.reset()
+                continue
+            for rob_idx in self.memory.drain_completed_robs():
+                self.pending_ptr.note_completed(rob_idx.flag, rob_idx.value)
+            self.pending_ptr.advance()
 
     def reset(self, cycles: int = 10, settle_cycles: int = 5) -> None:
         """执行同步复位，并清空 mock 内部状态。"""
 
         self.idle_inputs()
         self.memory.reset_runtime_state()
+        self.pending_ptr.reset()
         self.dut.reset.value = 1
         self.Step(cycles)
         self.dut.reset.value = 0
         self.idle_inputs()
         self.Step(settle_cycles)
+
+    def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        """登记一笔已完成握手的 load issue，用于推进 `pendingPtr`。"""
+
+        self.pending_ptr.note_issued(rob_idx_flag, rob_idx_value)
 
     def inject_outer_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
         """向 outer buffer D 通道注入一笔响应。"""

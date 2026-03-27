@@ -122,6 +122,7 @@ class MemoryModel:
         self._inflight_grants = {}
 
         self._expected_loads = defaultdict(deque)
+        self._completed_rob_indices = deque()
         self.strict_writeback_check = True
         self.completed_loads = 0
         self.writeback_events = 0
@@ -169,6 +170,7 @@ class MemoryModel:
         self._active_d = None
         self._inflight_grants.clear()
         self._expected_loads.clear()
+        self._completed_rob_indices.clear()
         self.drive_idle()
 
     def reset(self) -> None:
@@ -473,6 +475,7 @@ class MemoryModel:
             if not self._expected_loads[rob_idx]:
                 if self.strict_writeback_check:
                     raise AssertionError(f"观测到未登记的 load writeback: robIdx={rob_idx}")
+                self._completed_rob_indices.append(rob_idx)
                 continue
 
             expected = self._expected_loads[rob_idx].popleft()
@@ -499,8 +502,16 @@ class MemoryModel:
                     f"load writeback 异常位非 0: robIdx={rob_idx}, exceptionVec={exception_bits}"
                 )
             self.completed_loads += 1
+            self._completed_rob_indices.append(rob_idx)
             if not self._expected_loads[rob_idx]:
                 del self._expected_loads[rob_idx]
+
+    def drain_completed_robs(self) -> list[RobIndex]:
+        """取出自上次调用以来已完成的 load ROB 索引。"""
+
+        completed = list(self._completed_rob_indices)
+        self._completed_rob_indices.clear()
+        return completed
 
     def _in_reset(self) -> bool:
         return bool(_signal_value(self.dut.reset, 0) or _signal_value(self.dut.io_reset_backend, 0))
