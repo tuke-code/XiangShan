@@ -1,0 +1,1161 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>香山处理器 LSQ 监控可视化系统</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Inter:wght@400;600;700&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #e2e8f0;
+        }
+        
+        .mono {
+            font-family: 'JetBrains Mono', monospace;
+        }
+        
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(148, 163, 184, 0.1);
+            border-radius: 12px;
+        }
+        
+        .queue-entry {
+            transition: all 0.3s ease;
+        }
+        
+        .queue-entry:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.3);
+        }
+        
+        .status-active {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+        
+        .status-pending {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        }
+        
+        .status-blocked {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+        }
+        
+        .status-allocated {
+            background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+        }
+        
+        .pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: .5; }
+        }
+        
+        .flow-line {
+            stroke-dasharray: 5,5;
+            animation: dash 20s linear infinite;
+        }
+        
+        @keyframes dash {
+            to { stroke-dashoffset: -100; }
+        }
+        
+        .metric-card {
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.1) 0%, rgba(147, 51, 234, 0.1) 100%);
+            border-left: 4px solid #3b82f6;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-track {
+            background: rgba(148, 163, 184, 0.1);
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+            background: rgba(148, 163, 184, 0.3);
+            border-radius: 3px;
+        }
+        
+        .glow {
+            box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+        }
+    </style>
+</head>
+<body class="min-h-screen p-4">
+    <!-- Header -->
+    <header class="mb-6">
+        <div class="glass-panel p-6">
+            <div class="flex items-center justify-between">
+                <div class="flex items-center space-x-4">
+                    <div class="w-12 h-12 bg-gradient-to-br from-blue-500 to-purple-600 rounded-lg flex items-center justify-center">
+                        <i class="fas fa-microchip text-2xl text-white"></i>
+                    </div>
+                    <div>
+                        <h1 class="text-2xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+                            香山处理器 LSQ 监控可视化系统
+                        </h1>
+                        <p class="text-slate-400 text-sm">XiangShan Processor Load-Store Queue Monitor</p>
+                    </div>
+                </div>
+                <div class="flex items-center space-x-6">
+                    <div class="text-center">
+                        <div class="text-3xl font-bold text-green-400 mono" id="clock-cycle">0</div>
+                        <div class="text-xs text-slate-500">时钟周期</div>
+                    </div>
+                    <div class="flex space-x-2">
+                        <button onclick="toggleSimulation()" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center space-x-2">
+                            <i class="fas fa-play" id="play-icon"></i>
+                            <span id="play-text">开始模拟</span>
+                        </button>
+                        <button onclick="resetSimulation()" class="px-4 py-2 bg-slate-600 hover:bg-slate-700 rounded-lg transition-colors">
+                            <i class="fas fa-redo"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Dashboard -->
+    <div class="grid grid-cols-12 gap-4 mb-6">
+        <!-- LSQ Overview -->
+        <div class="col-span-12 lg:col-span-3">
+            <div class="glass-panel p-4 h-full">
+                <h2 class="text-lg font-semibold mb-4 flex items-center">
+                    <i class="fas fa-sitemap mr-2 text-blue-400"></i>
+                    LSQ 架构概览
+                </h2>
+                <div class="space-y-3">
+                    <div class="metric-card p-3 rounded-lg">
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-slate-400">VirtualLoadQueue</span>
+                            <span class="text-lg font-bold text-blue-400 mono" id="vlq-size">0/64</span>
+                        </div>
+                        <div class="w-full bg-slate-700 h-2 rounded-full mt-2">
+                            <div class="bg-blue-500 h-2 rounded-full transition-all" style="width: 0%" id="vlq-bar"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card p-3 rounded-lg">
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-slate-400">LoadQueueReplay</span>
+                            <span class="text-lg font-bold text-purple-400 mono" id="lqr-size">0/48</span>
+                        </div>
+                        <div class="w-full bg-slate-700 h-2 rounded-full mt-2">
+                            <div class="bg-purple-500 h-2 rounded-full transition-all" style="width: 0%" id="lqr-bar"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card p-3 rounded-lg">
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-slate-400">StoreQueue</span>
+                            <span class="text-lg font-bold text-green-400 mono" id="sq-size">0/48</span>
+                        </div>
+                        <div class="w-full bg-slate-700 h-2 rounded-full mt-2">
+                            <div class="bg-green-500 h-2 rounded-full transition-all" style="width: 0%" id="sq-bar"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card p-3 rounded-lg">
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-slate-400">LoadQueueRAR</span>
+                            <span class="text-lg font-bold text-yellow-400 mono" id="lqrar-size">0/32</span>
+                        </div>
+                        <div class="w-full bg-slate-700 h-2 rounded-full mt-2">
+                            <div class="bg-yellow-500 h-2 rounded-full transition-all" style="width: 0%" id="lqrar-bar"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="metric-card p-3 rounded-lg">
+                        <div class="flex justify-between items-center">
+                            <span class="text-sm text-slate-400">LoadQueueRAW</span>
+                            <span class="text-lg font-bold text-red-400 mono" id="lqraw-size">0/32</span>
+                        </div>
+                        <div class="w-full bg-slate-700 h-2 rounded-full mt-2">
+                            <div class="bg-red-500 h-2 rounded-full transition-all" style="width: 0%" id="lqraw-bar"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Real-time Charts -->
+        <div class="col-span-12 lg:col-span-9">
+            <div class="glass-panel p-4 h-full">
+                <h2 class="text-lg font-semibold mb-4 flex items-center">
+                    <i class="fas fa-chart-line mr-2 text-green-400"></i>
+                    实时性能监控
+                </h2>
+                <div class="grid grid-cols-2 gap-4 h-64">
+                    <div>
+                        <canvas id="throughputChart"></canvas>
+                    </div>
+                    <div>
+                        <canvas id="violationChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Queue Details -->
+    <div class="grid grid-cols-12 gap-4 mb-6">
+        <!-- VirtualLoadQueue -->
+        <div class="col-span-12 lg:col-span-6">
+            <div class="glass-panel p-4">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-semibold flex items-center">
+                        <i class="fas fa-stream mr-2 text-blue-400"></i>
+                        VirtualLoadQueue
+                    </h3>
+                    <div class="flex space-x-2">
+                        <span class="px-2 py-1 bg-blue-500/20 text-blue-400 rounded text-xs">Allocated</span>
+                        <span class="px-2 py-1 bg-green-500/20 text-green-400 rounded text-xs">Committed</span>
+                    </div>
+                </div>
+                <div class="overflow-x-auto scrollbar-thin">
+                    <div class="flex space-x-2" id="vlq-entries" style="min-width: max-content;">
+                        <!-- Dynamic entries will be inserted here -->
+                    </div>
+                </div>
+                <div class="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
+                    <div class="bg-slate-800/50 p-2 rounded">
+                        <div class="text-slate-400">入队速率</div>
+                        <div class="text-blue-400 font-bold mono" id="vlq-enq-rate">0 instr/cycle</div>
+                    </div>
+                    <div class="bg-slate-800/50 p-2 rounded">
+                        <div class="text-slate-400">出队速率</div>
+                        <div class="text-green-400 font-bold mono" id="vlq-deq-rate">0 instr/cycle</div>
+                    </div>
+                    <div class="bg-slate-800/50 p-2 rounded">
+                        <div class="text-slate-400">平均延迟</div>
+                        <div class="text-yellow-400 font-bold mono" id="vlq-avg-lat">0 cycles</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- LoadQueueReplay -->
+        <div class="col-span-12 lg:col-span-6">
+            <div class="glass-panel p-4">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-semibold flex items-center">
+                        <i class="fas fa-redo mr-2 text-purple-400"></i>
+                        LoadQueueReplay
+                    </h3>
+                    <div class="flex space-x-2 text-xs">
+                        <span class="px-2 py-1 bg-purple-500/20 text-purple-400 rounded">Scheduled</span>
+                        <span class="px-2 py-1 bg-red-500/20 text-red-400 rounded">Blocking</span>
+                    </div>
+                </div>
+                <div class="overflow-x-auto scrollbar-thin">
+                    <div class="flex space-x-2" id="lqr-entries" style="min-width: max-content;">
+                        <!-- Dynamic entries will be inserted here -->
+                    </div>
+                </div>
+                <div class="mt-4">
+                    <div class="text-xs text-slate-400 mb-2">重发原因分布</div>
+                    <div class="grid grid-cols-5 gap-1 text-xs" id="replay-causes">
+                        <div class="bg-slate-800/50 p-1 rounded text-center">
+                            <div class="text-red-400">C_MA</div>
+                            <div class="mono" id="cause-ma">0</div>
+                        </div>
+                        <div class="bg-slate-800/50 p-1 rounded text-center">
+                            <div class="text-orange-400">C_TM</div>
+                            <div class="mono" id="cause-tm">0</div>
+                        </div>
+                        <div class="bg-slate-800/50 p-1 rounded text-center">
+                            <div class="text-yellow-400">C_FF</div>
+                            <div class="mono" id="cause-ff">0</div>
+                        </div>
+                        <div class="bg-slate-800/50 p-1 rounded text-center">
+                            <div class="text-blue-400">C_DR</div>
+                            <div class="mono" id="cause-dr">0</div>
+                        </div>
+                        <div class="bg-slate-800/50 p-1 rounded text-center">
+                            <div class="text-purple-400">C_DM</div>
+                            <div class="mono" id="cause-dm">0</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- StoreQueue and Violation Detection -->
+    <div class="grid grid-cols-12 gap-4 mb-6">
+        <!-- StoreQueue -->
+        <div class="col-span-12 lg:col-span-6">
+            <div class="glass-panel p-4">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-semibold flex items-center">
+                        <i class="fas fa-save mr-2 text-green-400"></i>
+                        StoreQueue
+                    </h3>
+                    <div class="flex space-x-2 text-xs">
+                        <span class="px-2 py-1 bg-blue-500/20 text-blue-400 rounded">AddrValid</span>
+                        <span class="px-2 py-1 bg-green-500/20 text-green-400 rounded">DataValid</span>
+                        <span class="px-2 py-1 bg-purple-500/20 text-purple-400 rounded">Committed</span>
+                    </div>
+                </div>
+                <div class="overflow-x-auto scrollbar-thin">
+                    <div class="flex space-x-2" id="sq-entries" style="min-width: max-content;">
+                        <!-- Dynamic entries will be inserted here -->
+                    </div>
+                </div>
+                <div class="mt-4 grid grid-cols-4 gap-2 text-xs">
+                    <div class="bg-slate-800/50 p-2 rounded text-center">
+                        <div class="text-slate-400">Forward请求</div>
+                        <div class="text-blue-400 font-bold mono" id="sq-fwd-req">0</div>
+                    </div>
+                    <div class="bg-slate-800/50 p-2 rounded text-center">
+                        <div class="text-slate-400">Forward成功</div>
+                        <div class="text-green-400 font-bold mono" id="sq-fwd-succ">0</div>
+                    </div>
+                    <div class="bg-slate-800/50 p-2 rounded text-center">
+                        <div class="text-slate-400">MMIO Store</div>
+                        <div class="text-yellow-400 font-bold mono" id="sq-mmio">0</div>
+                    </div>
+                    <div class="bg-slate-800/50 p-2 rounded text-center">
+                        <div class="text-slate-400">NonCacheable</div>
+                        <div class="text-red-400 font-bold mono" id="sq-nc">0</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Violation Detection -->
+        <div class="col-span-12 lg:col-span-6">
+            <div class="glass-panel p-4">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-lg font-semibold flex items-center">
+                        <i class="fas fa-exclamation-triangle mr-2 text-yellow-400"></i>
+                        违例检测监控
+                    </h3>
+                    <div class="flex space-x-2">
+                        <button onclick="showRARDetails()" class="px-3 py-1 bg-yellow-500/20 text-yellow-400 rounded text-xs hover:bg-yellow-500/30 transition">
+                            RAR详情
+                        </button>
+                        <button onclick="showRAWDetails()" class="px-3 py-1 bg-red-500/20 text-red-400 rounded text-xs hover:bg-red-500/30 transition">
+                            RAW详情
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-4">
+                    <!-- RAR Violation -->
+                    <div class="bg-slate-800/30 p-3 rounded-lg">
+                        <h4 class="text-sm font-semibold text-yellow-400 mb-2">LoadQueueRAR (读后读违例)</h4>
+                        <div class="space-y-2">
+                            <div class="flex justify-between text-xs">
+                                <span class="text-slate-400">已分配项</span>
+                                <span class="mono text-yellow-400" id="lqrar-allocated">0</span>
+                            </div>
+                            <div class="flex justify-between text-xs">
+                                <span class="text-slate-400">Released标记</span>
+                                <span class="mono text-red-400" id="lqrar-released">0</span>
+                            </div>
+                            <div class="flex justify-between text-xs">
+                                <span class="text-slate-400">违例次数</span>
+                                <span class="mono text-orange-400" id="lqrar-violations">0</span>
+                            </div>
+                        </div>
+                        <div class="mt-3 overflow-x-auto scrollbar-thin">
+                            <div class="flex space-x-1" id="lqrar-entries"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- RAW Violation -->
+                    <div class="bg-slate-800/30 p-3 rounded-lg">
+                        <h4 class="text-sm font-semibold text-red-400 mb-2">LoadQueueRAW (写后读违例)</h4>
+                        <div class="space-y-2">
+                            <div class="flex justify-between text-xs">
+                                <span class="text-slate-400">已分配项</span>
+                                <span class="mono text-red-400" id="lqraw-allocated">0</span>
+                            </div>
+                            <div class="flex justify-between text-xs">
+                                <span class="text-slate-400">等待Store</span>
+                                <span class="mono text-orange-400" id="lqraw-waiting">0</span>
+                            </div>
+                            <div class="flex justify-between text-xs">
+                                <span class="text-slate-400">违例次数</span>
+                                <span class="mono text-red-400" id="lqraw-violations">0</span>
+                            </div>
+                        </div>
+                        <div class="mt-3 overflow-x-auto scrollbar-thin">
+                            <div class="flex space-x-1" id="lqraw-entries"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Data Flow Visualization -->
+    <div class="glass-panel p-4 mb-6">
+        <h2 class="text-lg font-semibold mb-4 flex items-center">
+            <i class="fas fa-project-diagram mr-2 text-purple-400"></i>
+            数据流可视化
+        </h2>
+        <div class="relative h-64 bg-slate-800/30 rounded-lg overflow-hidden" id="dataflow-container">
+            <svg class="w-full h-full" id="dataflow-svg">
+                <!-- Dynamic SVG content will be inserted here -->
+            </svg>
+        </div>
+        <div class="mt-4 flex justify-center space-x-6 text-xs">
+            <div class="flex items-center">
+                <div class="w-3 h-3 bg-blue-500 rounded-full mr-2"></div>
+                <span class="text-slate-400">Load指令流</span>
+            </div>
+            <div class="flex items-center">
+                <div class="w-3 h-3 bg-green-500 rounded-full mr-2"></div>
+                <span class="text-slate-400">Store指令流</span>
+            </div>
+            <div class="flex items-center">
+                <div class="w-3 h-3 bg-yellow-500 rounded-full mr-2"></div>
+                <span class="text-slate-400">Forward数据</span>
+            </div>
+            <div class="flex items-center">
+                <div class="w-3 h-3 bg-red-500 rounded-full mr-2"></div>
+                <span class="text-slate-400">违例检测</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- Event Log -->
+    <div class="glass-panel p-4">
+        <div class="flex justify-between items-center mb-4">
+            <h2 class="text-lg font-semibold flex items-center">
+                <i class="fas fa-list-alt mr-2 text-slate-400"></i>
+                事件日志
+            </h2>
+            <div class="flex space-x-2">
+                <button onclick="clearLog()" class="px-3 py-1 bg-slate-700 hover:bg-slate-600 rounded text-xs transition">
+                    清空日志
+                </button>
+                <select id="log-filter" class="bg-slate-700 text-xs rounded px-2 py-1 border-none">
+                    <option value="all">全部事件</option>
+                    <option value="enqueue">入队事件</option>
+                    <option value="violation">违例事件</option>
+                    <option value="replay">重发事件</option>
+                </select>
+            </div>
+        </div>
+        <div class="h-48 overflow-y-auto scrollbar-thin bg-slate-900/50 rounded-lg p-3" id="event-log">
+            <!-- Dynamic log entries will be inserted here -->
+        </div>
+    </div>
+
+    <script>
+        // Global state
+        let simulationRunning = false;
+        let clockCycle = 0;
+        let simulationInterval;
+        
+        // Queue configurations
+        const QUEUE_CONFIGS = {
+            vlq: { size: 64, name: 'VirtualLoadQueue' },
+            lqr: { size: 48, name: 'LoadQueueReplay' },
+            sq: { size: 48, name: 'StoreQueue' },
+            lqrar: { size: 32, name: 'LoadQueueRAR' },
+            lqraw: { size: 32, name: 'LoadQueueRAW' }
+        };
+        
+        // Queue states
+        const queues = {
+            vlq: [],
+            lqr: [],
+            sq: [],
+            lqrar: [],
+            lqraw: []
+        };
+        
+        // Statistics
+        const stats = {
+            vlq: { enq: 0, deq: 0, totalLatency: 0 },
+            sq: { fwdReq: 0, fwdSucc: 0, mmio: 0, nc: 0 },
+            lqrar: { violations: 0 },
+            lqraw: { violations: 0 },
+            replay: { causes: { ma: 0, tm: 0, ff: 0, dr: 0, dm: 0, wf: 0, bc: 0, rar: 0, raw: 0, nk: 0, mf: 0 } }
+        };
+        
+        // Initialize Charts
+        let throughputChart, violationChart;
+        
+        function initCharts() {
+            const throughputCtx = document.getElementById('throughputChart').getContext('2d');
+            throughputChart = new Chart(throughputCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Load吞吐',
+                        data: [],
+                        borderColor: '#3b82f6',
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        tension: 0.4
+                    }, {
+                        label: 'Store吞吐',
+                        data: [],
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#94a3b8', font: { size: 10 } }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#94a3b8', font: { size: 9 } },
+                            grid: { color: 'rgba(148, 163, 184, 0.1)' }
+                        },
+                        y: {
+                            ticks: { color: '#94a3b8', font: { size: 9 } },
+                            grid: { color: 'rgba(148, 163, 184, 0.1)' }
+                        }
+                    }
+                }
+            });
+            
+            const violationCtx = document.getElementById('violationChart').getContext('2d');
+            violationChart = new Chart(violationCtx, {
+                type: 'bar',
+                data: {
+                    labels: ['RAR违例', 'RAW违例', 'Store预测错', 'TLB Miss', 'DCache Miss'],
+                    datasets: [{
+                        label: '事件次数',
+                        data: [0, 0, 0, 0, 0],
+                        backgroundColor: [
+                            'rgba(234, 179, 8, 0.7)',
+                            'rgba(239, 68, 68, 0.7)',
+                            'rgba(168, 85, 247, 0.7)',
+                            'rgba(249, 115, 22, 0.7)',
+                            'rgba(59, 130, 246, 0.7)'
+                        ]
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            labels: { color: '#94a3b8', font: { size: 10 } }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            ticks: { color: '#94a3b8', font: { size: 9 } },
+                            grid: { color: 'rgba(148, 163, 184, 0.1)' }
+                        },
+                        y: {
+                            ticks: { color: '#94a3b8', font: { size: 9 } },
+                            grid: { color: 'rgba(148, 163, 184, 0.1)' }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Initialize queues with empty entries
+        function initQueues() {
+            for (let i = 0; i < QUEUE_CONFIGS.vlq.size; i++) {
+                queues.vlq.push({
+                    allocated: false,
+                    committed: false,
+                    isvec: false,
+                    age: 0
+                });
+            }
+            
+            for (let i = 0; i < QUEUE_CONFIGS.lqr.size; i++) {
+                queues.lqr.push({
+                    allocated: false,
+                    scheduled: false,
+                    blocking: false,
+                    cause: null,
+                    strict: false,
+                    age: 0
+                });
+            }
+            
+            for (let i = 0; i < QUEUE_CONFIGS.sq.size; i++) {
+                queues.sq.push({
+                    allocated: false,
+                    addrvalid: false,
+                    datavalid: false,
+                    committed: false,
+                    pending: false,
+                    nc: false,
+                    mmio: false,
+                    age: 0
+                });
+            }
+            
+            for (let i = 0; i < QUEUE_CONFIGS.lqrar.size; i++) {
+                queues.lqrar.push({
+                    allocated: false,
+                    released: false,
+                    paddr: null,
+                    age: 0
+                });
+            }
+            
+            for (let i = 0; i < QUEUE_CONFIGS.lqraw.size; i++) {
+                queues.lqraw.push({
+                    allocated: false,
+                    paddr: null,
+                    mask: null,
+                    age: 0
+                });
+            }
+        }
+        
+        // Render queue entries
+        function renderQueueEntries() {
+            // VirtualLoadQueue
+            const vlqContainer = document.getElementById('vlq-entries');
+            vlqContainer.innerHTML = '';
+            let vlqCount = 0;
+            queues.vlq.forEach((entry, idx) => {
+                if (entry.allocated) {
+                    vlqCount++;
+                    const div = document.createElement('div');
+                    div.className = `queue-entry w-12 h-16 rounded-lg flex flex-col items-center justify-center text-xs ${
+                        entry.committed ? 'status-active' : 'status-allocated'
+                    }`;
+                    div.innerHTML = `
+                        <div class="font-bold">${idx}</div>
+                        <div class="text-[8px]">${entry.committed ? 'C' : 'A'}</div>
+                    `;
+                    div.title = `Entry ${idx}: ${entry.committed ? 'Committed' : 'Allocated'}`;
+                    vlqContainer.appendChild(div);
+                }
+            });
+            document.getElementById('vlq-size').textContent = `${vlqCount}/${QUEUE_CONFIGS.vlq.size}`;
+            document.getElementById('vlq-bar').style.width = `${(vlqCount / QUEUE_CONFIGS.vlq.size) * 100}%`;
+            
+            // LoadQueueReplay
+            const lqrContainer = document.getElementById('lqr-entries');
+            lqrContainer.innerHTML = '';
+            let lqrCount = 0;
+            queues.lqr.forEach((entry, idx) => {
+                if (entry.allocated) {
+                    lqrCount++;
+                    const div = document.createElement('div');
+                    let statusClass = 'status-allocated';
+                    if (entry.scheduled) statusClass = 'status-active';
+                    else if (entry.blocking) statusClass = 'status-blocked';
+                    
+                    div.className = `queue-entry w-12 h-16 rounded-lg flex flex-col items-center justify-center text-xs ${statusClass}`;
+                    div.innerHTML = `
+                        <div class="font-bold">${idx}</div>
+                        <div class="text-[8px]">${entry.cause || '-'}</div>
+                    `;
+                    div.title = `Entry ${idx}: Cause=${entry.cause}, Blocking=${entry.blocking}, Scheduled=${entry.scheduled}`;
+                    lqrContainer.appendChild(div);
+                }
+            });
+            document.getElementById('lqr-size').textContent = `${lqrCount}/${QUEUE_CONFIGS.lqr.size}`;
+            document.getElementById('lqr-bar').style.width = `${(lqrCount / QUEUE_CONFIGS.lqr.size) * 100}%`;
+            
+            // StoreQueue
+            const sqContainer = document.getElementById('sq-entries');
+            sqContainer.innerHTML = '';
+            let sqCount = 0;
+            queues.sq.forEach((entry, idx) => {
+                if (entry.allocated) {
+                    sqCount++;
+                    const div = document.createElement('div');
+                    let statusClass = 'status-allocated';
+                    if (entry.committed) statusClass = 'status-active';
+                    else if (entry.addrvalid && entry.datavalid) statusClass = 'status-pending';
+                    
+                    div.className = `queue-entry w-12 h-16 rounded-lg flex flex-col items-center justify-center text-xs ${statusClass}`;
+                    div.innerHTML = `
+                        <div class="font-bold">${idx}</div>
+                        <div class="text-[8px]">${entry.addrvalid ? 'A' : ''}${entry.datavalid ? 'D' : ''}${entry.committed ? 'C' : ''}</div>
+                    `;
+                    div.title = `Entry ${idx}: Addr=${entry.addrvalid}, Data=${entry.datavalid}, Committed=${entry.committed}`;
+                    sqContainer.appendChild(div);
+                }
+            });
+            document.getElementById('sq-size').textContent = `${sqCount}/${QUEUE_CONFIGS.sq.size}`;
+            document.getElementById('sq-bar').style.width = `${(sqCount / QUEUE_CONFIGS.sq.size) * 100}%`;
+            
+            // LoadQueueRAR
+            const lqrarContainer = document.getElementById('lqrar-entries');
+            lqrarContainer.innerHTML = '';
+            let lqrarCount = 0;
+            let lqrarReleased = 0;
+            queues.lqrar.forEach((entry, idx) => {
+                if (entry.allocated) {
+                    lqrarCount++;
+                    if (entry.released) lqrarReleased++;
+                    const div = document.createElement('div');
+                    div.className = `w-6 h-6 rounded ${entry.released ? 'bg-red-500' : 'bg-yellow-500'} flex items-center justify-center text-[8px] font-bold`;
+                    div.textContent = idx;
+                    div.title = `Entry ${idx}: Released=${entry.released}`;
+                    lqrarContainer.appendChild(div);
+                }
+            });
+            document.getElementById('lqrar-size').textContent = `${lqrarCount}/${QUEUE_CONFIGS.lqrar.size}`;
+            document.getElementById('lqrar-bar').style.width = `${(lqrarCount / QUEUE_CONFIGS.lqrar.size) * 100}%`;
+            document.getElementById('lqrar-allocated').textContent = lqrarCount;
+            document.getElementById('lqrar-released').textContent = lqrarReleased;
+            
+            // LoadQueueRAW
+            const lqrawContainer = document.getElementById('lqraw-entries');
+            lqrawContainer.innerHTML = '';
+            let lqrawCount = 0;
+            queues.lqraw.forEach((entry, idx) => {
+                if (entry.allocated) {
+                    lqrawCount++;
+                    const div = document.createElement('div');
+                    div.className = 'w-6 h-6 rounded bg-red-500 flex items-center justify-center text-[8px] font-bold';
+                    div.textContent = idx;
+                    div.title = `Entry ${idx}`;
+                    lqrawContainer.appendChild(div);
+                }
+            });
+            document.getElementById('lqraw-size').textContent = `${lqrawCount}/${QUEUE_CONFIGS.lqraw.size}`;
+            document.getElementById('lqraw-bar').style.width = `${(lqrawCount / QUEUE_CONFIGS.lqraw.size) * 100}%`;
+            document.getElementById('lqraw-allocated').textContent = lqrawCount;
+        }
+        
+        // Update statistics display
+        function updateStats() {
+            document.getElementById('vlq-enq-rate').textContent = `${(stats.vlq.enq / Math.max(clockCycle, 1)).toFixed(2)} instr/cycle`;
+            document.getElementById('vlq-deq-rate').textContent = `${(stats.vlq.deq / Math.max(clockCycle, 1)).toFixed(2)} instr/cycle`;
+            document.getElementById('vlq-avg-lat').textContent = `${stats.vlq.enq > 0 ? Math.round(stats.vlq.totalLatency / stats.vlq.enq) : 0} cycles`;
+            
+            document.getElementById('sq-fwd-req').textContent = stats.sq.fwdReq;
+            document.getElementById('sq-fwd-succ').textContent = stats.sq.fwdSucc;
+            document.getElementById('sq-mmio').textContent = stats.sq.mmio;
+            document.getElementById('sq-nc').textContent = stats.sq.nc;
+            
+            document.getElementById('lqrar-violations').textContent = stats.lqrar.violations;
+            document.getElementById('lqraw-violations').textContent = stats.lqraw.violations;
+            
+            document.getElementById('cause-ma').textContent = stats.replay.causes.ma;
+            document.getElementById('cause-tm').textContent = stats.replay.causes.tm;
+            document.getElementById('cause-ff').textContent = stats.replay.causes.ff;
+            document.getElementById('cause-dr').textContent = stats.replay.causes.dr;
+            document.getElementById('cause-dm').textContent = stats.replay.causes.dm;
+        }
+        
+        // Add log entry
+        function addLogEntry(type, message) {
+            const logContainer = document.getElementById('event-log');
+            const entry = document.createElement('div');
+            entry.className = 'mb-2 p-2 rounded text-xs font-mono';
+            
+            const timestamp = `[${clockCycle.toString().padStart(6, '0')}]`;
+            
+            switch(type) {
+                case 'enqueue':
+                    entry.className += ' bg-blue-500/20 text-blue-300';
+                    break;
+                case 'violation':
+                    entry.className += ' bg-red-500/20 text-red-300';
+                    break;
+                case 'replay':
+                    entry.className += ' bg-purple-500/20 text-purple-300';
+                    break;
+                case 'forward':
+                    entry.className += ' bg-green-500/20 text-green-300';
+                    break;
+                default:
+                    entry.className += ' bg-slate-700/50 text-slate-300';
+            }
+            
+            entry.textContent = `${timestamp} ${message}`;
+            logContainer.insertBefore(entry, logContainer.firstChild);
+            
+            // Keep only last 50 entries
+            while (logContainer.children.length > 50) {
+                logContainer.removeChild(logContainer.lastChild);
+            }
+        }
+        
+        // Clear log
+        function clearLog() {
+            document.getElementById('event-log').innerHTML = '';
+        }
+        
+        // Simulation step
+        function simulationStep() {
+            clockCycle++;
+            document.getElementById('clock-cycle').textContent = clockCycle;
+            
+            // Simulate random events
+            
+            // 1. VirtualLoadQueue operations
+            if (Math.random() < 0.3) {
+                // Enqueue
+                const emptyIdx = queues.vlq.findIndex(e => !e.allocated);
+                if (emptyIdx !== -1) {
+                    queues.vlq[emptyIdx].allocated = true;
+                    queues.vlq[emptyIdx].committed = false;
+                    queues.vlq[emptyIdx].age = clockCycle;
+                    stats.vlq.enq++;
+                    addLogEntry('enqueue', `VirtualLoadQueue: Load指令入队 entry=${emptyIdx}`);
+                }
+            }
+            
+            // Commit
+            queues.vlq.forEach((entry, idx) => {
+                if (entry.allocated && !entry.committed && Math.random() < 0.2) {
+                    entry.committed = true;
+                    stats.vlq.deq++;
+                    stats.vlq.totalLatency += clockCycle - entry.age;
+                    addLogEntry('enqueue', `VirtualLoadQueue: Load指令提交 entry=${idx}`);
+                }
+            });
+            
+            // Dequeue (remove committed entries at head)
+            if (queues.vlq[0].committed && Math.random() < 0.3) {
+                queues.vlq[0].allocated = false;
+                queues.vlq[0].committed = false;
+            }
+            
+            // 2. StoreQueue operations
+            if (Math.random() < 0.25) {
+                const emptyIdx = queues.sq.findIndex(e => !e.allocated);
+                if (emptyIdx !== -1) {
+                    queues.sq[emptyIdx].allocated = true;
+                    queues.sq[emptyIdx].addrvalid = false;
+                    queues.sq[emptyIdx].datavalid = false;
+                    queues.sq[emptyIdx].committed = false;
+                    queues.sq[emptyIdx].age = clockCycle;
+                    addLogEntry('enqueue', `StoreQueue: Store指令入队 entry=${emptyIdx}`);
+                }
+            }
+            
+            // Update store states
+            queues.sq.forEach((entry, idx) => {
+                if (entry.allocated) {
+                    if (!entry.addrvalid && Math.random() < 0.3) {
+                        entry.addrvalid = true;
+                    }
+                    if (!entry.datavalid && Math.random() < 0.3) {
+                        entry.datavalid = true;
+                    }
+                    if (entry.addrvalid && entry.datavalid && !entry.committed && Math.random() < 0.2) {
+                        entry.committed = true;
+                        addLogEntry('enqueue', `StoreQueue: Store指令提交 entry=${idx}`);
+                    }
+                }
+            });
+            
+            // Forward requests
+            if (Math.random() < 0.4) {
+                stats.sq.fwdReq++;
+                const validStores = queues.sq.filter(e => e.allocated && e.addrvalid);
+                if (validStores.length > 0 && Math.random() < 0.7) {
+                    stats.sq.fwdSucc++;
+                    addLogEntry('forward', `StoreQueue: 数据前递成功`);
+                }
+            }
+            
+            // 3. LoadQueueReplay operations
+            if (Math.random() < 0.15) {
+                const emptyIdx = queues.lqr.findIndex(e => !e.allocated);
+                if (emptyIdx !== -1) {
+                    queues.lqr[emptyIdx].allocated = true;
+                    queues.lqr[emptyIdx].scheduled = false;
+                    queues.lqr[emptyIdx].blocking = true;
+                    
+                    const causes = ['MA', 'TM', 'FF', 'DR', 'DM', 'WF', 'BC', 'RAR', 'RAW', 'NK', 'MF'];
+                    const cause = causes[Math.floor(Math.random() * causes.length)];
+                    queues.lqr[emptyIdx].cause = cause;
+                    stats.replay.causes[cause.toLowerCase()]++;
+                    
+                    addLogEntry('replay', `LoadQueueReplay: Load需要重发 entry=${emptyIdx} cause=C_${cause}`);
+                }
+            }
+            
+            // Wake up and schedule
+            queues.lqr.forEach((entry, idx) => {
+                if (entry.allocated && entry.blocking && Math.random() < 0.3) {
+                    entry.blocking = false;
+                }
+                if (entry.allocated && !entry.blocking && !entry.scheduled && Math.random() < 0.4) {
+                    entry.scheduled = true;
+                    addLogEntry('replay', `LoadQueueReplay: Load被调度重发 entry=${idx}`);
+                }
+                if (entry.allocated && entry.scheduled && Math.random() < 0.3) {
+                    // Complete replay
+                    entry.allocated = false;
+                    entry.scheduled = false;
+                    entry.blocking = false;
+                }
+            });
+            
+            // 4. RAR violation detection
+            if (Math.random() < 0.2) {
+                const emptyIdx = queues.lqrar.findIndex(e => !e.allocated);
+                if (emptyIdx !== -1) {
+                    queues.lqrar[emptyIdx].allocated = true;
+                    queues.lqrar[emptyIdx].released = false;
+                    queues.lqrar[emptyIdx].age = clockCycle;
+                }
+            }
+            
+            queues.lqrar.forEach((entry, idx) => {
+                if (entry.allocated && !entry.released && Math.random() < 0.15) {
+                    entry.released = true;
+                    addLogEntry('violation', `LoadQueueRAR: 检测到Release entry=${idx}`);
+                }
+                if (entry.allocated && entry.released && Math.random() < 0.1) {
+                    stats.lqrar.violations++;
+                    addLogEntry('violation', `LoadQueueRAR: 读后读违例 detected!`);
+                }
+            });
+            
+            // 5. RAW violation detection
+            if (Math.random() < 0.2) {
+                const emptyIdx = queues.lqraw.findIndex(e => !e.allocated);
+                if (emptyIdx !== -1) {
+                    queues.lqraw[emptyIdx].allocated = true;
+                    queues.lqraw[emptyIdx].age = clockCycle;
+                }
+            }
+            
+            if (Math.random() < 0.1) {
+                const validEntries = queues.lqraw.filter(e => e.allocated);
+                if (validEntries.length > 0) {
+                    stats.lqraw.violations++;
+                    addLogEntry('violation', `LoadQueueRAW: 写后读违例 detected!`);
+                }
+            }
+            
+            // Update charts every 10 cycles
+            if (clockCycle % 10 === 0) {
+                updateCharts();
+            }
+            
+            renderQueueEntries();
+            updateStats();
+            updateDataFlow();
+        }
+        
+        // Update charts
+        function updateCharts() {
+            const labels = throughputChart.data.labels;
+            const loadData = throughputChart.data.datasets[0].data;
+            const storeData = throughputChart.data.datasets[1].data;
+            
+            labels.push(clockCycle);
+            loadData.push(stats.vlq.enq);
+            storeData.push(queues.sq.filter(e => e.allocated).length);
+            
+            if (labels.length > 20) {
+                labels.shift();
+                loadData.shift();
+                storeData.shift();
+            }
+            
+            throughputChart.update();
+            
+            // Update violation chart
+            violationChart.data.datasets[0].data = [
+                stats.lqrar.violations,
+                stats.lqraw.violations,
+                stats.replay.causes.ma,
+                stats.replay.causes.tm,
+                stats.replay.causes.dm
+            ];
+            violationChart.update();
+        }
+        
+        // Data flow visualization
+        function updateDataFlow() {
+            const svg = document.getElementById('dataflow-svg');
+            svg.innerHTML = '';
+            
+            const width = svg.clientWidth;
+            const height = svg.clientHeight;
+            
+            // Draw nodes
+            const nodes = [
+                { x: 50, y: height/2, label: 'Dispatch', color: '#3b82f6' },
+                { x: 200, y: height/3, label: 'VLQ', color: '#3b82f6' },
+                { x: 200, y: 2*height/3, label: 'SQ', color: '#10b981' },
+                { x: 350, y: height/3, label: 'LQR', color: '#a855f7' },
+                { x: 350, y: 2*height/3, label: 'RAW', color: '#ef4444' },
+                { x: 500, y: height/2, label: 'LoadUnit', color: '#3b82f6' }
+            ];
+            
+            nodes.forEach(node => {
+                const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                circle.setAttribute('cx', node.x);
+                circle.setAttribute('cy', node.y);
+                circle.setAttribute('r', 25);
+                circle.setAttribute('fill', node.color);
+                circle.setAttribute('opacity', '0.7');
+                svg.appendChild(circle);
+                
+                const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+                text.setAttribute('x', node.x);
+                text.setAttribute('y', node.y + 5);
+                text.setAttribute('text-anchor', 'middle');
+                text.setAttribute('fill', 'white');
+                text.setAttribute('font-size', '10');
+                text.setAttribute('font-weight', 'bold');
+                text.textContent = node.label;
+                svg.appendChild(text);
+            });
+            
+            // Draw animated flow lines
+            const flows = [
+                { from: 0, to: 1, color: '#3b82f6', active: Math.random() < 0.5 },
+                { from: 0, to: 2, color: '#10b981', active: Math.random() < 0.5 },
+                { from: 1, to: 3, color: '#a855f7', active: Math.random() < 0.3 },
+                { from: 1, to: 4, color: '#ef4444', active: Math.random() < 0.2 },
+                { from: 2, to: 4, color: '#f59e0b', active: Math.random() < 0.4 },
+                { from: 3, to: 5, color: '#a855f7', active: Math.random() < 0.3 },
+                { from: 4, to: 5, color: '#ef4444', active: Math.random() < 0.2 }
+            ];
+            
+            flows.forEach((flow, idx) => {
+                if (flow.active) {
+                    const fromNode = nodes[flow.from];
+                    const toNode = nodes[flow.to];
+                    
+                    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+                    line.setAttribute('x1', fromNode.x);
+                    line.setAttribute('y1', fromNode.y);
+                    line.setAttribute('x2', toNode.x);
+                    line.setAttribute('y2', toNode.y);
+                    line.setAttribute('stroke', flow.color);
+                    line.setAttribute('stroke-width', '2');
+                    line.setAttribute('class', 'flow-line');
+                    svg.appendChild(line);
+                    
+                    // Animated particle
+                    const particle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+                    particle.setAttribute('r', 4);
+                    particle.setAttribute('fill', flow.color);
+                    
+                    const animate = document.createElementNS('http://www.w3.org/2000/svg', 'animateMotion');
+                    animate.setAttribute('dur', '1s');
+                    animate.setAttribute('repeatCount', 'indefinite');
+                    animate.setAttribute('path', `M${fromNode.x},${fromNode.y} L${toNode.x},${toNode.y}`);
+                    
+                    particle.appendChild(animate);
+                    svg.appendChild(particle);
+                }
+            });
+        }
+        
+        // Toggle simulation
+        function toggleSimulation() {
+            simulationRunning = !simulationRunning;
+            const playIcon = document.getElementById('play-icon');
+            const playText = document.getElementById('play-text');
+            
+            if (simulationRunning) {
+                playIcon.className = 'fas fa-pause';
+                playText.textContent = '暂停模拟';
+                simulationInterval = setInterval(simulationStep, 500);
+            } else {
+                playIcon.className = 'fas fa-play';
+                playText.textContent = '开始模拟';
+                clearInterval(simulationInterval);
+            }
+        }
+        
+        // Reset simulation
+        function resetSimulation() {
+            simulationRunning = false;
+            clearInterval(simulationInterval);
+            document.getElementById('play-icon').className = 'fas fa-play';
+            document.getElementById('play-text').textContent = '开始模拟';
+            
+            clockCycle = 0;
+            document.getElementById('clock-cycle').textContent = '0';
+            
+            // Reset queues
+            queues.vlq = [];
+            queues.lqr = [];
+            queues.sq = [];
+            queues.lqrar = [];
+            queues.lqraw = [];
+            
+            // Reset stats
+            stats.vlq = { enq: 0, deq: 0, totalLatency: 0 };
+            stats.sq = { fwdReq: 0, fwdSucc: 0, mmio: 0, nc: 0 };
+            stats.lqrar = { violations: 0 };
+            stats.lqraw = { violations: 0 };
+            stats.replay.causes = { ma: 0, tm: 0, ff: 0, dr: 0, dm: 0, wf: 0, bc: 0, rar: 0, raw: 0, nk: 0, mf: 0 };
+            
+            initQueues();
+            renderQueueEntries();
+            updateStats();
+            clearLog();
+            
+            // Reset charts
+            throughputChart.data.labels = [];
+            throughputChart.data.datasets[0].data = [];
+            throughputChart.data.datasets[1].data = [];
+            throughputChart.update();
+            
+            violationChart.data.datasets[0].data = [0, 0, 0, 0, 0];
+            violationChart.update();
+        }
+        
+        // Show RAR details
+        function showRARDetails() {
+            alert('RAR (Read-After-Read) 违例检测详情:\n\n' +
+                  '功能: 检测多核环境下load-to-load违例\n' +
+                  '机制: 当DCache收到Probe请求时标记release\n' +
+                  '后续load查询到release标记即发生违例\n\n' +
+                  `当前已分配: ${queues.lqrar.filter(e => e.allocated).length}\n` +
+                  `Released标记: ${queues.lqrar.filter(e => e.allocated && e.released).length}\n` +
+                  `违例次数: ${stats.lqrar.violations}`);
+        }
+        
+        // Show RAW details
+        function showRAWDetails() {
+            alert('RAW (Read-After-Write) 违例检测详情:\n\n' +
+                  '功能: 检测store-to-load forwarding违例\n' +
+                  '机制: Store地址计算完成后查询后续load\n' +
+                  '发现地址重叠且load已执行则发生违例\n\n' +
+                  `当前已分配: ${queues.lqraw.filter(e => e.allocated).length}\n` +
+                  `违例次数: ${stats.lqraw.violations}`);
+        }
+        
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            initCharts();
+            initQueues();
+            renderQueueEntries();
+            updateStats();
+            updateDataFlow();
+            
+            // Initial log entry
+            addLogEntry('info', 'LSQ监控系统已初始化');
+            addLogEntry('info', '点击"开始模拟"启动仿真');
+        });
+    </script>
+</body>
+</html>
