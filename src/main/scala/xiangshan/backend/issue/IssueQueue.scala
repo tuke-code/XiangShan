@@ -994,6 +994,12 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   private val entryValidCntDeq1 = PopCount(
     validVec.zip(deqCanAcceptVec.last).map { case (a, b) => a && b }
   )
+  private val entryValidCanIssueCntDeq0 = PopCount(
+    validVec.zip(deqCanAcceptVec(0)).zip(canIssueVec).map { case ((a, b), c) => a && b && c }
+  )
+  private val entryValidCanIssueCntDeq1 = PopCount(
+    validVec.zip(deqCanAcceptVec.last).zip(canIssueVec).map { case ((a, b), c) => a && b && c }
+  )
   private val entryIssuedCntDeq0 = PopCount(
     validVec.zip(issuedVec).zip(deqCanAcceptVec(0)).map { case ((a, b), c) => a && b && c }
   )
@@ -1015,8 +1021,8 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   val finalResp0 = og1RespIsFinal.B & deqBeforeDly.head.valid
   val finalResp1 = og1RespIsFinal.B & deqBeforeDly.last.valid
   // valid counter -> uopSelIQ has 3 pipe latancy, sub deq
-  io.validCntDeqVec.head := entryValidCntDeq0 - issuedCnt0 - finalResp0
-  io.validCntDeqVec.last := entryValidCntDeq1 - issuedCnt1 - finalResp1
+  io.validCntDeqVec.head := entryValidCanIssueCntDeq0
+  io.validCntDeqVec.last := entryValidCanIssueCntDeq1
   private val othersLeftOneCaseVec = Wire(Vec(params.numEntries - params.numEnq, UInt((params.numEntries - params.numEnq).W)))
   othersLeftOneCaseVec.zipWithIndex.foreach { case (leftone, i) =>
     leftone := ~(1.U((params.numEntries - params.numEnq).W) << i)
