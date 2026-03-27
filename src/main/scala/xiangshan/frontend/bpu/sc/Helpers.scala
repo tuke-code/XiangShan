@@ -19,7 +19,6 @@ import chisel3._
 import chisel3.util._
 import scala.math.min
 import utility.ParallelXOR
-import xiangshan.HasXSParameter
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.FoldedHistoryInfo
 import xiangshan.frontend.bpu.PhrHelper

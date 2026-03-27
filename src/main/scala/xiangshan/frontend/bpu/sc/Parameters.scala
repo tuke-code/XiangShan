@@ -90,7 +90,6 @@ trait HasScParameters extends HasBpuParameters {
   def MinThreshold: Int = (NumTables + 5) << 6
   def MaxThreshold: Int = min((NumTables * 63) << 4, (1 << ThresholdWidth) - 1)
 
-  def WriteBufferSize: Int = scParameters.WriteBufferSize
-  def TotalSumWidth: Int = CtrWidth + 1 + log2Ceil(NumPathTables + NumGlobalTables + NumBiasTable) // +1 for counter * 2
-  def EnableScTrace: Boolean = scParameters.EnableScTrace
+  def WriteBufferSize: Int     = scParameters.WriteBufferSize
+  def EnableScTrace:   Boolean = scParameters.EnableScTrace
 }
