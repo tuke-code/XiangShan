@@ -230,7 +230,6 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
 
   // Ifu-ICache
   ifu.io.fromICache <> icache.io.toIfu
-  ifu.io.toICache <> icache.io.fromIfu
 
   // ICache-Backend
   icache.io.csrPfEnable := RegNext(csrCtrl.pf_ctrl.l1I_pf_enable)
@@ -362,8 +361,8 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
   XSPerfAccumulate(
     "fetchedCacheLines",
     Mux(
-      icache.io.toIfu.fetchResp.fire,
-      Mux(icache.io.toIfu.fetchResp.bits.doubleline, 2.U, 1.U),
+      icache.io.toIfu.fetchResp.s1.fire,
+      Mux(icache.io.toIfu.fetchResp.s1.bits.doubleline, 2.U, 1.U),
       0.U
     )
   )

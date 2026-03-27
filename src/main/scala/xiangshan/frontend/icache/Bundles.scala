@@ -184,23 +184,32 @@ class ReplacerVictimBundle(implicit p: Parameters) extends ICacheBundle {
 /* ***** MainPipe ***** */
 // ICache(MainPipe) -> IFU
 class ICacheRespBundle(implicit p: Parameters) extends ICacheBundle {
-  val doubleline:         Bool            = Bool()
-  val vAddr:              Vec[PrunedAddr] = Vec(PortNumber, PrunedAddr(VAddrBits))
-  val data:               UInt            = UInt(blockBits.W)
-  val maybeRvcMap:        UInt            = UInt(MaxInstNumPerBlock.W)
-  val pAddr:              PrunedAddr      = PrunedAddr(PAddrBits)
-  val exception:          ExceptionType   = new ExceptionType
-  val pmpMmio:            Bool            = Bool()
-  val itlbPbmt:           UInt            = UInt(Pbmt.width.W)
-  val isBackendException: Bool            = Bool()
-  /* NOTE: GPAddrBits(=50bit) is not enough for gpAddr here, refer to PR#3795
-   * Sv48*4 only allows 50bit gpAddr, when software violates this requirement
-   * it needs to fill the mtval2 register with the full XLEN(=64bit) gpAddr,
-   * PAddrBitsMax(=56bit currently) is required for the frontend datapath due to the itlb ppn length limitation
-   * (cases 56<x<=64 are handled by the backend datapath)
-   */
-  val gpAddr:            PrunedAddr = PrunedAddr(PAddrBitsMax)
-  val isForVSnonLeafPTE: Bool       = Bool()
+  class S1 extends Bundle {
+    val doubleline:         Bool            = Bool()
+    val vAddr:              Vec[PrunedAddr] = Vec(PortNumber, PrunedAddr(VAddrBits))
+    val data:               UInt            = UInt(blockBits.W)
+    val maybeRvcMap:        UInt            = UInt(MaxInstNumPerBlock.W)
+    val pAddr:              PrunedAddr      = PrunedAddr(PAddrBits)
+    val exception:          ExceptionType   = new ExceptionType
+    val pmpMmio:            Bool            = Bool()
+    val itlbPbmt:           UInt            = UInt(Pbmt.width.W)
+    val isBackendException: Bool            = Bool()
+    /* NOTE: GPAddrBits(=50bit) is not enough for gpAddr here, refer to PR#3795
+     * Sv48*4 only allows 50bit gpAddr, when software violates this requirement
+     * it needs to fill the mtval2 register with the full XLEN(=64bit) gpAddr,
+     * PAddrBitsMax(=56bit currently) is required for the frontend datapath due to the itlb ppn length limitation
+     * (cases 56<x<=64 are handled by the backend datapath)
+     */
+    val gpAddr:            PrunedAddr = PrunedAddr(PAddrBitsMax)
+    val isForVSnonLeafPTE: Bool       = Bool()
+  }
+  // For timing, we need to send parity check excetions in S2 stage
+  class S2 extends Bundle {
+    val eccException: ExceptionType = new ExceptionType
+  }
+
+  val s1: DecoupledIO[S1] = DecoupledIO(new S1)
+  val s2: DecoupledIO[S2] = DecoupledIO(new S2)
 }
 
 class MainPipeToIfuIO(implicit p: Parameters) extends ICacheBundle {

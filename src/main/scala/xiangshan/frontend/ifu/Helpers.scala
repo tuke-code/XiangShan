@@ -48,11 +48,11 @@ trait IfuHelper extends HasIfuParameters {
     val ShiftRight3 = 3.U(2.W)
   }
 
-  def iCacheMatchAssert(fromICache: Valid[ICacheRespBundle], fetchBlock: Vec[FetchBlockInfo]): Unit =
-    when(fromICache.valid) {
+  def iCacheMatchAssert(fromICache: ICacheRespBundle, fetchBlock: Vec[FetchBlockInfo]): Unit =
+    when(fromICache.s1.valid) {
       assert(
-        fromICache.bits.vAddr(0) === fetchBlock(0).startVAddr &&
-          fromICache.bits.doubleline === fetchBlock(0).doubleline,
+        fromICache.s1.bits.vAddr(0) === fetchBlock(0).startVAddr &&
+          fromICache.s1.bits.doubleline === fetchBlock(0).doubleline,
         "On ICache resp.valid, VAddr must match IFU fetchBlock.VAddr"
       )
     }

@@ -115,14 +115,10 @@ class FtqToICacheIO(implicit p: Parameters) extends FrontendBundle {
 }
 
 class ICacheToIfuIO(implicit p: Parameters) extends FrontendBundle {
-  val fetchResp:  Valid[ICacheRespBundle] = Valid(new ICacheRespBundle)
-  val topdown:    ICacheTopdownInfo       = Output(new ICacheTopdownInfo)
-  val perf:       ICachePerfInfo          = Output(new ICachePerfInfo)
-  val fetchReady: Bool                    = Output(Bool())
-}
-
-class IfuToICacheIO(implicit p: Parameters) extends FrontendBundle {
-  val stall: Bool = Output(Bool())
+  val fetchResp:  ICacheRespBundle  = new ICacheRespBundle
+  val topdown:    ICacheTopdownInfo = Output(new ICacheTopdownInfo)
+  val perf:       ICachePerfInfo    = Output(new ICachePerfInfo)
+  val fetchReady: Bool              = Output(Bool())
 }
 
 class IfuToInstrUncacheIO(implicit p: Parameters) extends FrontendBundle {

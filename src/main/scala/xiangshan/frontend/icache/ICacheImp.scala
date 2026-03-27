@@ -36,7 +36,6 @@ import xiangshan.WfiReqBundle
 import xiangshan.cache.mmu.TlbRequestIO
 import xiangshan.frontend.FtqToICacheIO
 import xiangshan.frontend.ICacheToIfuIO
-import xiangshan.frontend.IfuToICacheIO
 
 class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParameters with HasPerfEvents {
   class ICacheIO(implicit p: Parameters) extends ICacheBundle {
@@ -48,8 +47,7 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
     val softPrefetchReq: Vec[Valid[SoftIfetchPrefetchBundle]] =
       Vec(backendParams.LduCnt, Flipped(Valid(new SoftIfetchPrefetchBundle)))
     // IFU
-    val toIfu:   ICacheToIfuIO = new ICacheToIfuIO
-    val fromIfu: IfuToICacheIO = Flipped(new IfuToICacheIO)
+    val toIfu: ICacheToIfuIO = new ICacheToIfuIO
     // PMP: magic number 2: mainPipe & prefetchPipe both need a Pmp check
     val pmp: Vec[PmpCheckBundle] = Vec(2, new PmpCheckBundle)
     // iTLB
@@ -190,7 +188,6 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
 
   mainPipe.io.flush        := io.fromFtq.redirectFlush
   mainPipe.io.flushFromBpu := io.fromFtq.flushFromBpu
-  mainPipe.io.respStall    := io.fromIfu.stall
   mainPipe.io.eccEnable    := eccEnable
   mainPipe.io.hartId       := io.hartId
   mainPipe.io.missResp     := missUnit.io.resp
@@ -219,8 +216,8 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
 
   // perf
   io.toIfu.perf.hits         := mainPipe.io.perf.rawHits
-  io.toIfu.perf.isDoubleLine := mainPipe.io.resp.bits.doubleline
-  io.toIfu.perf.exception    := mainPipe.io.resp.bits.exception
+  io.toIfu.perf.isDoubleLine := mainPipe.io.resp.s1.bits.doubleline
+  io.toIfu.perf.exception    := mainPipe.io.resp.s1.bits.exception
 
   // topdown perf
   // when mainPipe is handling a miss, it will create a bubble in Ifu pipe
@@ -255,10 +252,10 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
 
   val perfEvents: Seq[(String, Bool)] = Seq(
     (
-      "icache_miss_cnt",                                                   // count misses when:
-      mainPipe.io.resp.valid && (                                          // response is sent to Ifu, and
-        !mainPipe.io.perf.rawHits(0) ||                                    // port 0 miss, or
-          mainPipe.io.resp.bits.doubleline && !mainPipe.io.perf.rawHits(1) // port 1 is needed and miss
+      "icache_miss_cnt",                                                      // count misses when:
+      mainPipe.io.resp.s1.valid && (                                          // response is sent to Ifu, and
+        !mainPipe.io.perf.rawHits(0) ||                                       // port 0 miss, or
+          mainPipe.io.resp.s1.bits.doubleline && !mainPipe.io.perf.rawHits(1) // port 1 is needed and miss
       )
     ),
     ("icache_miss_penalty", mainPipe.io.perf.pendingMiss) // count penalty cycles when mainPipe is handling a miss

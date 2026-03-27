@@ -120,15 +120,22 @@ class ICacheMeta(implicit p: Parameters) extends IfuBundle with HasICacheParamet
 
   def isUncache: Bool = pmpMmio || Pbmt.isUncache(itlbPbmt)
 
-  def fromICacheResp(fromICache: ICacheRespBundle): ICacheMeta = {
-    exception          := fromICache.exception
-    pmpMmio            := fromICache.pmpMmio
-    itlbPbmt           := fromICache.itlbPbmt
-    isBackendException := fromICache.isBackendException
-    pAddr              := fromICache.pAddr
-    gpAddr             := fromICache.gpAddr
-    isForVSnonLeafPTE  := fromICache.isForVSnonLeafPTE
+  def fromICacheS1Resp(fromICache: ICacheRespBundle): ICacheMeta = {
+    exception          := fromICache.s1.bits.exception
+    pmpMmio            := fromICache.s1.bits.pmpMmio
+    itlbPbmt           := fromICache.s1.bits.itlbPbmt
+    isBackendException := fromICache.s1.bits.isBackendException
+    pAddr              := fromICache.s1.bits.pAddr
+    gpAddr             := fromICache.s1.bits.gpAddr
+    isForVSnonLeafPTE  := fromICache.s1.bits.isForVSnonLeafPTE
     this
+  }
+
+  def fromICacheS2Resp(fromICache: ICacheRespBundle): ICacheMeta = {
+    val result = WireInit(this)
+    // tlb/pmp exception has higher priority than parity check
+    result.exception := this.exception || fromICache.s2.bits.eccException
+    result
   }
 }
 

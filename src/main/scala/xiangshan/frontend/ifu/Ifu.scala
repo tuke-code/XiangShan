@@ -36,7 +36,6 @@ import xiangshan.frontend.FtqToIfuIO
 import xiangshan.frontend.ICacheToIfuIO
 import xiangshan.frontend.IfuToBackendIO
 import xiangshan.frontend.IfuToFtqIO
-import xiangshan.frontend.IfuToICacheIO
 import xiangshan.frontend.IfuToInstrUncacheIO
 import xiangshan.frontend.InstrUncacheToIfuIO
 import xiangshan.frontend.PreDecodeInfo
@@ -58,9 +57,8 @@ class Ifu(implicit p: Parameters) extends IfuModule
     val fromFtq: FtqToIfuIO = Flipped(new FtqToIfuIO)
     val toFtq:   IfuToFtqIO = new IfuToFtqIO
 
-    // ICache: response / stall
+    // ICache: response
     val fromICache: ICacheToIfuIO = Flipped(new ICacheToIfuIO)
-    val toICache:   IfuToICacheIO = new IfuToICacheIO
 
     // Uncache: mmio request / response
     val toUncache:   IfuToInstrUncacheIO = new IfuToInstrUncacheIO
@@ -96,7 +94,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
 
   // alias
   private val (toFtq, fromFtq)              = (io.toFtq, io.fromFtq)
-  private val fromICache                    = io.fromICache.fetchResp
+  private val icacheResp                    = io.fromICache.fetchResp
   private val (toUncache, fromUncache)      = (io.toUncache.req, io.fromUncache.resp)
   private val (preDecoderIn, preDecoderOut) = (preDecoder.io.req, preDecoder.io.resp)
   private val (checkerIn, checkerOutStage1, checkerOutStage2) =
@@ -186,19 +184,19 @@ class Ifu(implicit p: Parameters) extends IfuModule
   s1_flushFromBpu(0) := fromFtq.flushFromBpu.shouldFlushByStage3(s1_fetchBlock(0).ftqIdx, s1_firstValid)
   s1_flushFromBpu(1) := fromFtq.flushFromBpu.shouldFlushByStage3(s1_fetchBlock(1).ftqIdx, s1_secondValid)
 
-  private val s1_iCacheRespValid = fromICache.valid
-
-  s1_fire  := s1_valid && s2_ready && s1_iCacheRespValid
+  s1_fire  := s1_valid && s2_ready && icacheResp.s1.valid
   s1_ready := s1_fire || !s1_valid
 
-  io.toICache.stall := !s2_ready
-  iCacheMatchAssert(fromICache, s1_fetchBlock)
+  // ready to receive ICache s1 resp if Ifu s2 is ready
+  icacheResp.s1.ready := s2_ready
 
-  private val s1_maybeRvcMap = fromICache.bits.maybeRvcMap
-  private val s1_icacheMeta  = VecInit.tabulate(FetchPorts)(i => Wire(new ICacheMeta).fromICacheResp(fromICache.bits))
+  // pre-silicon check: icache responded VAddr should match with ifu requested
+  iCacheMatchAssert(icacheResp, s1_fetchBlock)
+
+  private val s1_maybeRvcMap = icacheResp.s1.bits.maybeRvcMap
+  private val s1_icacheMeta  = VecInit.tabulate(FetchPorts)(i => Wire(new ICacheMeta).fromICacheS1Resp(icacheResp))
   private val s1_maybeRvc    = Cat(s1_maybeRvcMap, s1_maybeRvcMap) >> s1_fetchBlock(0).startVAddr(5, 1)
-  private val s1_rawData     = fromICache.bits.data
-  private val s1_perfInfo    = io.fromICache.perf
+  private val s1_rawData     = icacheResp.s1.bits.data
   private val s1_firstHasException = s1_icacheMeta(0).exception.hasException
 
   instrBoundary.io.req.valid                 := s1_valid
@@ -300,8 +298,10 @@ class Ifu(implicit p: Parameters) extends IfuModule
 
   private val s2_prevShiftSelect = UIntToMask(s2_prevIBufEnqPtr.value(1, 0), IfuAlignWidth)
 
-  s2_fire  := s2_valid && s3_ready
+  s2_fire  := s2_valid && s3_ready && icacheResp.s2.valid
   s2_ready := s2_fire || !s2_valid
+
+  icacheResp.s2.ready := s3_ready
 
   private val s2_instrCompactInfo = RegEnable(instrCompactInfo, s1_fire)
   private val s2_instrCount       = RegEnable(s1_realInstrCount, s1_fire)
@@ -423,6 +423,9 @@ class Ifu(implicit p: Parameters) extends IfuModule
   s2_alignFetchBlock(0).predTakenIdx.bits := s2_fetchBlock(0).predTakenIdx.bits + s2_prevIBufEnqPtr.value(1, 0)
   s2_alignFetchBlock(1).predTakenIdx.bits := s2_fetchBlock(1).predTakenIdx.bits + s2_prevIBufEnqPtr.value(1, 0)
 
+  // receive ICache parity check exceptions
+  private val s2_icacheMetaOut = VecInit(s2_icacheMeta.map(_.fromICacheS2Resp(icacheResp)))
+
   /* *****************************************************************************
    * IFU Stage 3
    * - handle MMIO instruction
@@ -454,7 +457,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s3_alignIsPredTaken  = RegEnable(s2_alignIsPredTaken, s2_fire)
   private val s3_alignInstrData    = RegEnable(s2_realAlignInstrData, s2_fire)
   private val s3_alignInstrValid   = RegEnable(s2_alignInstrValid, s2_fire)
-  private val s3_icacheMeta        = RegEnable(s2_icacheMeta, s2_fire)
+  private val s3_icacheMeta        = RegEnable(s2_icacheMetaOut, s2_fire)
   private val s3_alignCompactInfo  = RegEnable(s2_alignCompactInfo, s2_fire)
   private val isFirstInstr         = RegInit(true.B)
   when(isFirstInstr && io.toIBuffer.fire) {
@@ -822,7 +825,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   perfAnalyzer.io.ifuPerfCtrl.backendRedirect  := backendRedirect
   perfAnalyzer.io.ifuPerfCtrl.ifuWbRedirect    := wbRedirect.valid
   perfAnalyzer.io.ifuPerfCtrl.fromBpuFlush     := s0_flushFromBpu(0) || s1_flushFromBpu(0) // FIXME
-  perfAnalyzer.io.ifuPerfCtrl.fromICacheBubble := s1_valid && !s1_iCacheRespValid
+  perfAnalyzer.io.ifuPerfCtrl.fromICacheBubble := s1_valid && !icacheResp.s1.valid
 
   perfAnalyzer.io.topdownIn.icacheTopdown          := io.fromICache.topdown
   perfAnalyzer.io.topdownIn.ftqTopdown             := io.fromFtq.req.bits.topdownInfo
