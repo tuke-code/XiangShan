@@ -281,6 +281,8 @@ MEMBLOCK_BUILD_DIR = ./build-memblock
 MEMBLOCK_RTL_DIR   = $(MEMBLOCK_BUILD_DIR)/rtl
 MEMBLOCKTOP        = top.MemBlockTopMain
 MEMBLOCK_TOP_V     = $(MEMBLOCK_RTL_DIR)/MemBlockTop.$(RTL_SUFFIX)
+MEMBLOCK_LSQWRAPPER_V = $(MEMBLOCK_RTL_DIR)/LsqWrapper.sv
+MEMBLOCK_INTERNAL_YAML = $(MEMBLOCK_BUILD_DIR)/LsqWrapper_internal.yaml
 MEMBLOCK_PYLIB     = $(MEMBLOCK_BUILD_DIR)/pylib/libUTMemBlock.so
 
 $(FRONTEND_TOP_V): $(SCALA_FILE)
@@ -315,11 +317,19 @@ ifeq ($(CHISEL_TARGET),systemverilog)
 	@cat $(dir $@).__diff__ $@ > $(dir $@).__out__ && mv $(dir $@).__out__ $@
 endif
 
-$(MEMBLOCK_PYLIB): $(MEMBLOCK_TOP_V)
+$(MEMBLOCK_INTERNAL_YAML): $(MEMBLOCK_TOP_V) $(MEMBLOCK_LSQWRAPPER_V) scripts/generate_picker_internal_yaml.py
+	python3 scripts/generate_picker_internal_yaml.py \
+		--module LsqWrapper \
+		--scope MemBlock.inner_lsq \
+		--input $(MEMBLOCK_LSQWRAPPER_V) \
+		--output $@
+
+$(MEMBLOCK_PYLIB): $(MEMBLOCK_TOP_V) $(MEMBLOCK_INTERNAL_YAML)
 	time picker export $(dir $<)ClockGate.sv --sname MemBlock \
 		--filelist $(dir $<)filelist.f \
 		--lang python --autobuild true --cp_lib true \
 		--sim verilator --access-mode MEM_DIRECT \
+		--internal=$(MEMBLOCK_INTERNAL_YAML) \
 		--tdir $(MEMBLOCK_BUILD_DIR)/pylib/MemBlock \
 		-w $(MEMBLOCK_BUILD_DIR)/memblock.fst \
 		--coverage \
