@@ -415,11 +415,12 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   val needAppendIQValidNumVec = Wire(Vec(exuNum, UInt(RenameWidth.U.getWidth.W)))
   allExuParams.zipWithIndex.map { case (exuParams, iqDeqIdx) => {
     val iqidx = allIssueParams.indexWhere(_.exuBlockParams.contains(exuParams))
+    val iqEnqIdx = allIssueParams.take(iqidx).map(_.numEnq).sum
     val selIQNumReg = PopCount(uopSelIQ.zipWithIndex.map { case (u, i) =>
       RegNext(u(iqidx) && FuType.FuTypeOrR(fromRename(i).bits.fuType, exuParams.fuConfigs.map(_.fuType)) && fromRename(i).fire)
     })
     val selIQNum = PopCount(uopSelIQ.zipWithIndex.map { case (u, i) =>
-      u(iqidx) && FuType.FuTypeOrR(fromRename(i).bits.fuType, exuParams.fuConfigs.map(_.fuType))
+      u(iqidx) && FuType.FuTypeOrR(fromRename(i).bits.fuType, exuParams.fuConfigs.map(_.fuType)) && io.toIssueQueues(iqEnqIdx).ready
     })
     needAppendIQValidNumVec(iqDeqIdx) := selIQNum
   }}
