@@ -33,6 +33,12 @@ def test_api_MemBlock_env_has_core_bundles(env):
     assert hasattr(env, "lsq_enq_resp")
     assert hasattr(env, "issue")
     assert hasattr(env, "writeback")
+    assert hasattr(env, "store_data_inputs")
+    assert hasattr(env, "store_addr_inputs")
+    assert hasattr(env, "store_mask_inputs")
+    assert hasattr(env, "store_addr_re_inputs")
+    assert hasattr(env, "sbuffer_writes")
+    assert hasattr(env, "sq_shadow_entries")
     assert hasattr(env, "mem_status")
     assert hasattr(env, "lsq_status")
     assert hasattr(env, "outer_tl_a")
@@ -46,6 +52,12 @@ def test_api_MemBlock_env_has_core_bundles(env):
     assert len(env.lsq_enq_resp) == 8
     assert len(env.issue) == 7
     assert len(env.writeback) == 7
+    assert len(env.store_data_inputs) == 2
+    assert len(env.store_addr_inputs) == 2
+    assert len(env.store_mask_inputs) == 2
+    assert len(env.store_addr_re_inputs) == 2
+    assert len(env.sbuffer_writes) == 2
+    assert len(env.sq_shadow_entries) == 56
 
 
 def test_api_MemBlock_env_step_and_reset(env):
@@ -170,6 +182,7 @@ def test_api_MemBlock_env_idle_inputs_restores_default(env):
     env.outer_tl_d.valid.value = 1
     env.dcache_b.valid.value = 1
     env.dcache_d.valid.value = 1
+    env.dut.io_ooo_to_mem_flushSb.value = 1
     env.idle_inputs()
     assert env.redirect.valid.value == 0
     assert env.lsq_enq_meta.need_alloc[3].value == 0
@@ -177,6 +190,7 @@ def test_api_MemBlock_env_idle_inputs_restores_default(env):
     assert env.outer_tl_d.valid.value == 0
     assert env.dcache_b.valid.value == 0
     assert env.dcache_d.valid.value == 0
+    assert env.dut.io_ooo_to_mem_flushSb.value == 0
 
 
 def test_api_MemBlock_env_csr_mock_default_m_mode(env):
@@ -186,3 +200,28 @@ def test_api_MemBlock_env_csr_mock_default_m_mode(env):
     assert env.tlb_csr.priv_virt_changed.value == 0
     assert env.tlb_csr.priv_imode.value == 3
     assert env.tlb_csr.priv_dmode.value == 3
+
+
+def test_api_MemBlock_env_flush_store_buffers_noop(env):
+    """空闲状态下 sfence+flushSb 应能快速返回并完成 drain 校验。"""
+
+    api_MemBlock_reset(env, cycles=2, max_cycles=20)
+    observed_barriers = []
+    original_step = env.Step
+
+    def _recording_step(cycles=1):
+        observed_barriers.append(
+            (
+                int(env.dut.io_ooo_to_mem_sfence_valid.value),
+                int(env.dut.io_ooo_to_mem_flushSb.value),
+            )
+        )
+        return original_step(cycles)
+
+    env.Step = _recording_step
+    result = env.flush_store_buffers_and_wait(max_cycles=20, settle_cycles=1)
+    env.Step = original_step
+    assert (1, 1) in observed_barriers
+    assert env.dut.io_ooo_to_mem_sfence_valid.value == 0
+    assert env.dut.io_ooo_to_mem_flushSb.value == 0
+    assert result["drain_event_count"] == 0

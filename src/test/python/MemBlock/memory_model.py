@@ -5,9 +5,18 @@ MemBlock 统一内存模型。
 该模型统一接管：
   1. `outer buffer` / `uncache` TileLink 端口
   2. `dcache client` TileLink-C 端口
-  3. `mem_to_ooo.intWriteback` 数据校验
+  3. `mem_to_ooo.intWriteback` load 数据校验
+  4. store shadow / drain 观测
 
-当前实现只支持全 load 场景；若观测到 store/AMO/其他未覆盖事务，直接失败。
+在线校验只针对 load：
+  - load writeback 到达时先缓存结果
+  - 等待测试侧通知该 load 已提交 (`lqDeq`) 后，再按 ROB 边界推进 `goldenmem`
+  - 仅在 commit 视图上比较 load 结果
+
+store 不做在线 compare：
+  - 通过 SQ shadow、storeAddr/storeData/storeMask 观测 store 元数据
+  - 通过 `io_sbuffer` 与 outer Put 记录最终 drain 写出
+  - 测试结束后统一校验 drain-out 数据与最终 `goldenmem` 一致
 """
 
 from __future__ import annotations
@@ -40,14 +49,7 @@ DEFAULT_OUTER_DELAY = 100
 DEFAULT_DCACHE_DELAY_MIN = 32
 DEFAULT_DCACHE_DELAY_MAX = 100
 DEFAULT_DELAY_SEED = 20260330
-
-
-def _is_connected(signal) -> bool:
-    try:
-        signal.value
-    except AttributeError:
-        return False
-    return True
+STORE_DATA_WIDTH_BYTES = 16
 
 
 def _signal_value(signal, default=None):
@@ -67,20 +69,65 @@ class RobIndex:
 
 @dataclass
 class ExpectedLoad:
-    """一笔待校验的 load 写回。"""
+    """一笔待校验的 load。"""
 
     rob_idx: RobIndex
     pdest: int
     addr: int
     size: int
     mask: int
-    expected_data: int
+    expected_data: int | None = None
     expected_int_wen: int = 1
     expect_exception: bool = False
 
 
+@dataclass
+class ObservedLoadWriteback:
+    """已观测、待在 commit 边界上比对的 load writeback。"""
+
+    data: int
+    pdest: int
+    int_wen: int
+    exception_bits: list[int]
+
+
+@dataclass
+class PendingStore:
+    """按 SQ slot 跟踪的一笔 store。"""
+
+    sq_idx: int
+    rob_idx: RobIndex | None = None
+    addr: int | None = None
+    data: int | None = None
+    mask: int = 0
+    width_bytes: int = STORE_DATA_WIDTH_BYTES
+    allocated: bool = False
+    addr_valid: bool = False
+    data_valid: bool = False
+    committed: bool = False
+    completed: bool = False
+    nc: bool = False
+    mmio: bool = False
+    mem_back_type_mm: bool = False
+    has_exception: bool = False
+    retired: bool = False
+
+    @property
+    def ready_for_retire(self) -> bool:
+        return (
+            self.committed
+            and self.addr_valid
+            and self.data_valid
+            and self.addr is not None
+            and self.data is not None
+            and self.mask != 0
+            and not self.mmio
+            and not self.has_exception
+        )
+
+
 class MemoryModel:
-    """MemBlock 全 load 场景统一内存模型。"""
+    """MemBlock load compare + store drain 统一模型。"""
 
     def __init__(
         self,
@@ -93,11 +140,18 @@ class MemoryModel:
         dcache_d,
         dcache_e,
         writebacks=None,
+        store_data_inputs=None,
+        store_addr_inputs=None,
+        store_mask_inputs=None,
+        store_addr_re_inputs=None,
+        sq_shadow_entries=None,
+        sbuffer_writes=None,
         outer_delay: int = DEFAULT_OUTER_DELAY,
         grant_delay_min: int = DEFAULT_DCACHE_DELAY_MIN,
         grant_delay_max: int = DEFAULT_DCACHE_DELAY_MAX,
         release_ack_delay: int = 1,
         delay_seed: int = DEFAULT_DELAY_SEED,
+        rob_size: int = 512,
     ) -> None:
         self.dut = dut
         self.outer_a = outer_a
@@ -108,10 +162,17 @@ class MemoryModel:
         self.dcache_d = dcache_d
         self.dcache_e = dcache_e
         self.writebacks = list(writebacks or [])
+        self.store_data_inputs = list(store_data_inputs or [])
+        self.store_addr_inputs = list(store_addr_inputs or [])
+        self.store_mask_inputs = list(store_mask_inputs or [])
+        self.store_addr_re_inputs = list(store_addr_re_inputs or [])
+        self.sq_shadow_entries = list(sq_shadow_entries or [])
+        self.sbuffer_writes = list(sbuffer_writes or [])
         self.outer_delay = outer_delay
         self.grant_delay_min = grant_delay_min
         self.grant_delay_max = grant_delay_max
         self.release_ack_delay = release_ack_delay
+        self.rob_size = rob_size
         self._delay_rng = random.Random(delay_seed)
 
         self.memory = {}
@@ -130,7 +191,14 @@ class MemoryModel:
         self._inflight_grants = {}
 
         self._expected_loads = defaultdict(deque)
+        self._observed_load_writebacks = defaultdict(deque)
+        self._issued_loads = deque()
+        self._committed_load_budget = defaultdict(int)
         self._completed_rob_indices = deque()
+
+        self.pending_stores: dict[int, PendingStore] = {}
+        self.drain_log: list[dict] = []
+
         self.strict_writeback_check = True
         self.completed_loads = 0
         self.writeback_events = 0
@@ -138,45 +206,37 @@ class MemoryModel:
 
         self.outer_request_count = 0
         self.outer_response_count = 0
+        self.outer_write_request_count = 0
         self.dcache_a_request_count = 0
         self.dcache_c_request_count = 0
         self.dcache_e_request_count = 0
         self.dcache_b_response_count = 0
         self.dcache_d_response_count = 0
+        self.sbuffer_drain_count = 0
 
         self.drive_idle()
 
     def _sample_dcache_delay(self) -> int:
-        """为 dcache load 请求采样访问延迟。"""
-
         low = min(self.grant_delay_min, self.grant_delay_max)
         high = max(self.grant_delay_min, self.grant_delay_max)
         return self._delay_rng.randint(low, high)
 
     def attach_writebacks(self, writebacks) -> None:
-        """绑定 writeback 端口列表。"""
-
         self.writebacks = list(writebacks)
         self.drive_writeback_ready()
 
     def drive_idle(self) -> None:
-        """驱动模型输出通道为空闲。"""
-
         self.outer_d.drive_idle()
         self.dcache_b.drive_idle()
         self.dcache_d.drive_idle()
         self.drive_writeback_ready()
 
     def drive_writeback_ready(self) -> None:
-        """保持 writeback ready 恒高。"""
-
         for bundle in self.writebacks:
             if hasattr(bundle, "set_ready"):
                 bundle.set_ready(1)
 
     def reset_runtime_state(self) -> None:
-        """清理运行态，不清空预加载内存内容。"""
-
         self._pending_outer_d.clear()
         self._active_outer_d = None
         self._pending_b.clear()
@@ -185,12 +245,15 @@ class MemoryModel:
         self._active_d = None
         self._inflight_grants.clear()
         self._expected_loads.clear()
+        self._observed_load_writebacks.clear()
+        self._issued_loads.clear()
+        self._committed_load_budget.clear()
         self._completed_rob_indices.clear()
+        self.pending_stores.clear()
+        self.drain_log.clear()
         self.drive_idle()
 
     def reset(self) -> None:
-        """完全复位模型，包括预加载内存。"""
-
         self.memory.clear()
         self._next_sink = 1
         self.completed_loads = 0
@@ -198,22 +261,20 @@ class MemoryModel:
         self.failed_transactions = 0
         self.outer_request_count = 0
         self.outer_response_count = 0
+        self.outer_write_request_count = 0
         self.dcache_a_request_count = 0
         self.dcache_c_request_count = 0
         self.dcache_e_request_count = 0
         self.dcache_b_response_count = 0
         self.dcache_d_response_count = 0
+        self.sbuffer_drain_count = 0
         self.reset_runtime_state()
 
     def preload_bytes(self, base_addr: int, data: bytes) -> None:
-        """按字节预加载内存。"""
-
         for offset, value in enumerate(data):
             self.memory[base_addr + offset] = value & 0xFF
 
     def preload_u64(self, addr: int, value: int) -> None:
-        """按小端预加载一个 64-bit 数据。"""
-
         self.preload_bytes(addr, int(value & ((1 << 64) - 1)).to_bytes(8, "little"))
 
     def fill_random(
@@ -223,8 +284,6 @@ class MemoryModel:
         seed: int,
         line_bytes: int = DEFAULT_CACHELINE_BYTES,
     ) -> None:
-        """按 cacheline 粒度随机填充内存。"""
-
         if addr_end < addr_start:
             raise ValueError("addr_end 不能小于 addr_start")
         rng = random.Random(seed)
@@ -237,16 +296,12 @@ class MemoryModel:
             )
 
     def read(self, addr: int, size: int) -> int:
-        """按小端读取内存。"""
-
         value = 0
         for offset in range(size):
             value |= (self.memory.get(addr + offset, 0) & 0xFF) << (offset * 8)
         return value
 
     def read_masked(self, addr: int, mask: int, width_bytes: int = 8) -> int:
-        """按字节掩码读取内存并打包到低位。"""
-
         value = 0
         out_offset = 0
         for byte_idx in range(width_bytes):
@@ -257,9 +312,12 @@ class MemoryModel:
         return value
 
     def read_cacheline(self, block_addr: int, line_bytes: int = DEFAULT_CACHELINE_BYTES) -> bytes:
-        """读取一个 cacheline。"""
-
         return bytes(self.memory.get(block_addr + idx, 0) & 0xFF for idx in range(line_bytes))
+
+    def apply_masked_write(self, addr: int, data: int, mask: int, width_bytes: int) -> None:
+        for byte_idx in range(width_bytes):
+            if (mask >> byte_idx) & 0x1:
+                self.memory[addr + byte_idx] = (data >> (byte_idx * 8)) & 0xFF
 
     def expect_load(
         self,
@@ -270,8 +328,6 @@ class MemoryModel:
         size: int = 8,
         mask: int | None = None,
     ) -> ExpectedLoad:
-        """登记一笔待校验的 load。"""
-
         width_mask = (1 << size) - 1
         effective_mask = width_mask if mask is None else mask
         expected = ExpectedLoad(
@@ -280,21 +336,27 @@ class MemoryModel:
             addr=addr,
             size=size,
             mask=effective_mask,
-            expected_data=self.read_masked(addr, effective_mask, width_bytes=size),
         )
         self._expected_loads[expected.rob_idx].append(expected)
         return expected
 
+    def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        self._issued_loads.append(RobIndex(flag=rob_idx_flag, value=rob_idx_value))
+
+    def note_load_commits(self, commit_count: int) -> None:
+        for _ in range(max(0, int(commit_count))):
+            if not self._issued_loads:
+                return
+            rob_idx = self._issued_loads.popleft()
+            self._committed_load_budget[rob_idx] += 1
+            self._try_complete_loads(rob_idx)
+
     @property
     def outstanding_expected_count(self) -> int:
-        """返回待校验 load 数。"""
-
         return sum(len(items) for items in self._expected_loads.values())
 
     @property
     def outstanding_transaction_count(self) -> int:
-        """返回未完成 TL 事务数。"""
-
         return (
             len(self._pending_outer_d)
             + (1 if self._active_outer_d is not None else 0)
@@ -307,11 +369,10 @@ class MemoryModel:
 
     @property
     def stats(self) -> dict:
-        """统计信息。"""
-
         return {
             "outer_request_count": self.outer_request_count,
             "outer_response_count": self.outer_response_count,
+            "outer_write_request_count": self.outer_write_request_count,
             "dcache_a_request_count": self.dcache_a_request_count,
             "dcache_c_request_count": self.dcache_c_request_count,
             "dcache_e_request_count": self.dcache_e_request_count,
@@ -327,6 +388,9 @@ class MemoryModel:
             "outstanding_expected_count": self.outstanding_expected_count,
             "completed_loads": self.completed_loads,
             "writeback_events": self.writeback_events,
+            "pending_store_count": len(self.pending_stores),
+            "drain_log_count": len(self.drain_log),
+            "sbuffer_drain_count": self.sbuffer_drain_count,
         }
 
     def enqueue_outer_response(
@@ -342,8 +406,6 @@ class MemoryModel:
         corrupt: int = 0,
         delay_cycles: int | None = None,
     ) -> None:
-        """兼容接口：手工注入一笔 outer D 响应。"""
-
         delay = self.outer_delay if delay_cycles is None else delay_cycles
         self._pending_outer_d.append(
             {
@@ -372,8 +434,6 @@ class MemoryModel:
         corrupt: int = 0,
         delay_cycles: int | None = None,
     ) -> None:
-        """兼容接口：手工注入一笔 B 响应。"""
-
         delay = self._sample_dcache_delay() if delay_cycles is None else delay_cycles
         self._pending_b.append(
             {
@@ -404,8 +464,6 @@ class MemoryModel:
         corrupt: int = 0,
         delay_cycles: int | None = None,
     ) -> None:
-        """兼容接口：手工注入一笔 D 响应。"""
-
         delay = self._sample_dcache_delay() if delay_cycles is None else delay_cycles
         self._pending_d.append(
             {
@@ -431,8 +489,6 @@ class MemoryModel:
         )
 
     def on_memory_edge(self, cycle: int) -> None:
-        """驱动模型总线接口。"""
-
         self._cycle = cycle
         self._drive_request_readies()
         if self._in_reset():
@@ -446,8 +502,6 @@ class MemoryModel:
         self._service_d_channel()
 
     def after_cycle(self) -> None:
-        """在每个周期推进后处理 reset 与 writeback。"""
-
         self.drive_writeback_ready()
         if self._in_reset():
             if not self._runtime_reset_active:
@@ -456,11 +510,10 @@ class MemoryModel:
             return
 
         self._runtime_reset_active = False
+        self._observe_store_events()
         self.check_writebacks()
 
     def check_writebacks(self) -> None:
-        """校验当前拍 writeback。"""
-
         for bundle in self.writebacks:
             if not getattr(bundle, "connected", lambda name: False)("valid"):
                 continue
@@ -493,40 +546,221 @@ class MemoryModel:
                 self._completed_rob_indices.append(rob_idx)
                 continue
 
-            expected = self._expected_loads[rob_idx].popleft()
-            observed_data = bundle.read("data_0", 0)
-            observed_pdest = bundle.read("pdest", expected.pdest)
-            observed_int_wen = bundle.read("intWen", expected.expected_int_wen)
-            exception_bits = bundle.read_exception_bits()
-            if observed_pdest != expected.pdest:
-                raise AssertionError(
-                    f"load writeback pdest 不匹配: robIdx={rob_idx}, expected={expected.pdest}, observed={observed_pdest}"
+            self._observed_load_writebacks[rob_idx].append(
+                ObservedLoadWriteback(
+                    data=bundle.read("data_0", 0),
+                    pdest=bundle.read("pdest", 0),
+                    int_wen=bundle.read("intWen", 0),
+                    exception_bits=bundle.read_exception_bits(),
                 )
-            if observed_int_wen != expected.expected_int_wen:
-                raise AssertionError(
-                    f"load writeback intWen 不匹配: robIdx={rob_idx}, expected={expected.expected_int_wen}, observed={observed_int_wen}"
-                )
-            if observed_data != expected.expected_data:
-                raise AssertionError(
-                    "load writeback data 不匹配: "
-                    f"robIdx={rob_idx}, addr=0x{expected.addr:x}, "
-                    f"expected=0x{expected.expected_data:x}, observed=0x{observed_data:x}"
-                )
-            if any(exception_bits) and not expected.expect_exception:
-                raise AssertionError(
-                    f"load writeback 异常位非 0: robIdx={rob_idx}, exceptionVec={exception_bits}"
-                )
-            self.completed_loads += 1
+            )
             self._completed_rob_indices.append(rob_idx)
-            if not self._expected_loads[rob_idx]:
-                del self._expected_loads[rob_idx]
+            self._try_complete_loads(rob_idx)
 
     def drain_completed_robs(self) -> list[RobIndex]:
-        """取出自上次调用以来已完成的 load ROB 索引。"""
-
         completed = list(self._completed_rob_indices)
         self._completed_rob_indices.clear()
         return completed
+
+    def finalize_and_check_drain(self) -> dict:
+        expected_visible_store_count = sum(1 for store in self.pending_stores.values() if store.ready_for_retire)
+        self._retire_all_ready_stores()
+        if expected_visible_store_count and not self.drain_log:
+            raise AssertionError("存在已提交 store，但测试结束时未观测到任何 drain 写出事件")
+
+        drained_memory = {}
+        touched_addresses = set()
+        for event in self.drain_log:
+            self._apply_masked_write_to_dict(
+                drained_memory,
+                event["addr"],
+                event["data"],
+                event["mask"],
+                event["width_bytes"],
+            )
+            for byte_idx in range(event["width_bytes"]):
+                if (event["mask"] >> byte_idx) & 0x1:
+                    touched_addresses.add(event["addr"] + byte_idx)
+
+        mismatches = []
+        for addr in sorted(touched_addresses):
+            if drained_memory.get(addr, 0) != self.memory.get(addr, 0):
+                mismatches.append(
+                    (
+                        addr,
+                        self.memory.get(addr, 0),
+                        drained_memory.get(addr, 0),
+                    )
+                )
+        if mismatches:
+            addr, expected, observed = mismatches[0]
+            raise AssertionError(
+                "drain 数据与 goldenmem 不一致: "
+                f"addr=0x{addr:x}, expected=0x{expected:x}, observed=0x{observed:x}"
+            )
+
+        return {
+            "drain_event_count": len(self.drain_log),
+            "touched_byte_count": len(touched_addresses),
+        }
+
+    def _try_complete_loads(self, rob_idx: RobIndex) -> None:
+        while (
+            self._committed_load_budget.get(rob_idx, 0) > 0
+            and self._expected_loads.get(rob_idx)
+            and self._observed_load_writebacks.get(rob_idx)
+        ):
+            expected = self._expected_loads[rob_idx].popleft()
+            observed = self._observed_load_writebacks[rob_idx].popleft()
+            self._committed_load_budget[rob_idx] -= 1
+            if self._committed_load_budget[rob_idx] == 0:
+                del self._committed_load_budget[rob_idx]
+
+            self._retire_stores_before_boundary(expected.rob_idx)
+            expected_data = (
+                expected.expected_data
+                if expected.expected_data is not None
+                else self.read_masked(expected.addr, expected.mask, width_bytes=expected.size)
+            )
+            if observed.pdest != expected.pdest:
+                raise AssertionError(
+                    f"load writeback pdest 不匹配: robIdx={rob_idx}, expected={expected.pdest}, observed={observed.pdest}"
+                )
+            if observed.int_wen != expected.expected_int_wen:
+                raise AssertionError(
+                    "load writeback intWen 不匹配: "
+                    f"robIdx={rob_idx}, expected={expected.expected_int_wen}, observed={observed.int_wen}"
+                )
+            if observed.data != expected_data:
+                raise AssertionError(
+                    "load writeback data 不匹配: "
+                    f"robIdx={rob_idx}, addr=0x{expected.addr:x}, "
+                    f"expected=0x{expected_data:x}, observed=0x{observed.data:x}"
+                )
+            if any(observed.exception_bits) and not expected.expect_exception:
+                raise AssertionError(
+                    f"load writeback 异常位非 0: robIdx={rob_idx}, exceptionVec={observed.exception_bits}"
+                )
+            self.completed_loads += 1
+            if not self._expected_loads[rob_idx]:
+                del self._expected_loads[rob_idx]
+            if not self._observed_load_writebacks.get(rob_idx):
+                self._observed_load_writebacks.pop(rob_idx, None)
+
+    def _retire_stores_before_boundary(self, load_rob_idx: RobIndex) -> None:
+        candidates = []
+        boundary = self._rob_rank(load_rob_idx)
+        for store in self.pending_stores.values():
+            if not store.retired and store.ready_for_retire and store.rob_idx is not None:
+                if self._rob_rank(store.rob_idx) <= boundary:
+                    candidates.append(store)
+        candidates.sort(key=lambda item: (self._rob_rank(item.rob_idx), item.sq_idx))
+        for store in candidates:
+            self.apply_masked_write(store.addr, store.data, store.mask, store.width_bytes)
+            store.retired = True
+
+    def _retire_all_ready_stores(self) -> None:
+        candidates = [store for store in self.pending_stores.values() if not store.retired and store.ready_for_retire]
+        candidates.sort(
+            key=lambda item: (
+                self._rob_rank(item.rob_idx) if item.rob_idx is not None else -1,
+                item.sq_idx,
+            )
+        )
+        for store in candidates:
+            self.apply_masked_write(store.addr, store.data, store.mask, store.width_bytes)
+            store.retired = True
+
+    def _observe_store_events(self) -> None:
+        self._observe_sq_shadow()
+        self._observe_store_addr()
+        self._observe_store_addr_re()
+        self._observe_store_mask()
+        self._observe_store_data()
+        self._observe_sbuffer_writes()
+
+    def _observe_sq_shadow(self) -> None:
+        for sq_idx, entry in enumerate(self.sq_shadow_entries):
+            allocated = bool(entry.read("allocated", 0))
+            rob_idx = RobIndex(
+                flag=entry.read("robIdx_flag", 0),
+                value=entry.read("robIdx_value", 0),
+            )
+            store = self.pending_stores.get(sq_idx)
+            if store is None or (allocated and store.rob_idx is not None and store.rob_idx != rob_idx):
+                store = PendingStore(sq_idx=sq_idx, rob_idx=rob_idx if allocated else None)
+                self.pending_stores[sq_idx] = store
+
+            store.allocated = allocated
+            if allocated:
+                store.rob_idx = rob_idx
+                store.addr_valid = bool(entry.read("addrvalid", store.addr_valid))
+                store.data_valid = bool(entry.read("datavalid", store.data_valid))
+                store.committed = bool(entry.read("committed", store.committed))
+                store.completed = bool(entry.read("completed", store.completed))
+                store.nc = bool(entry.read("nc", store.nc))
+            else:
+                store.allocated = False
+
+    def _observe_store_addr(self) -> None:
+        for lane in self.store_addr_inputs:
+            if lane.read("valid", 0) == 0:
+                continue
+            sq_idx = lane.read("sqIdx_value", 0)
+            store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+            store.addr = lane.read("paddr", store.addr if store.addr is not None else 0)
+            store.addr_valid = not bool(lane.read("miss", 0))
+            store.nc = bool(lane.read("nc", store.nc))
+
+    def _observe_store_addr_re(self) -> None:
+        for lane in self.store_addr_re_inputs:
+            if lane.read("updateAddrValid", 0) == 0:
+                continue
+            sq_idx = lane.read("sqIdx_value", 0)
+            store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+            store.mmio = bool(lane.read("mmio", store.mmio))
+            store.mem_back_type_mm = bool(lane.read("memBackTypeMM", store.mem_back_type_mm))
+            store.has_exception = bool(lane.read("hasException", store.has_exception))
+
+    def _observe_store_mask(self) -> None:
+        for lane in self.store_mask_inputs:
+            if lane.read("valid", 0) == 0:
+                continue
+            sq_idx = lane.read("sqIdx_value", 0)
+            store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+            store.mask = lane.read("mask", store.mask)
+
+    def _observe_store_data(self) -> None:
+        for lane in self.store_data_inputs:
+            if lane.read("valid", 0) == 0:
+                continue
+            sq_idx = lane.read("sqIdx_value", 0)
+            store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+            store.data = lane.read("data", store.data if store.data is not None else 0)
+            store.data_valid = True
+            store.width_bytes = STORE_DATA_WIDTH_BYTES
+
+    def _observe_sbuffer_writes(self) -> None:
+        for lane_idx, lane in enumerate(self.sbuffer_writes):
+            if lane.read("valid", 0) == 0 or lane.read("ready", 0) == 0:
+                continue
+            if lane.read("wline", 0):
+                raise AssertionError("当前 MemoryModel 暂不支持 wline store drain 校验")
+            if lane.read("vecValid", 0):
+                raise AssertionError("当前 MemoryModel 暂不支持 vector store drain 校验")
+
+            self.sbuffer_drain_count += 1
+            self.drain_log.append(
+                {
+                    "channel": "sbuffer",
+                    "lane": lane_idx,
+                    "addr": lane.read("addr", 0),
+                    "data": lane.read("data", 0),
+                    "mask": lane.read("mask", 0),
+                    "width_bytes": STORE_DATA_WIDTH_BYTES,
+                    "cycle": self._cycle,
+                }
+            )
 
     def _in_reset(self) -> bool:
         return bool(_signal_value(self.dut.reset, 0) or _signal_value(self.dut.io_reset_backend, 0))
@@ -542,21 +776,50 @@ class MemoryModel:
             return
 
         opcode = int(self.outer_a.bits_opcode.value)
-        if opcode != TL_A_GET:
-            raise AssertionError(f"outer buffer 仅支持 Get，请求 opcode={opcode}")
+        size = int(self.outer_a.bits_size.value)
+        source = int(self.outer_a.bits_source.value)
+        addr = int(self.outer_a.bits_address.value)
+        width_bytes = max(1, 1 << size)
 
         self.outer_request_count += 1
-        size = 1 << int(self.outer_a.bits_size.value)
-        addr = int(self.outer_a.bits_address.value)
-        data = self.read(addr, size)
-        self.enqueue_outer_response(
-            opcode=TL_D_ACCESS_ACK_DATA,
-            size=int(self.outer_a.bits_size.value),
-            source=int(self.outer_a.bits_source.value),
-            request_source=int(self.outer_a.bits_source.value),
-            data=data,
-            corrupt=0,
-        )
+        if opcode == TL_A_GET:
+            data = self.read(addr, width_bytes)
+            self.enqueue_outer_response(
+                opcode=TL_D_ACCESS_ACK_DATA,
+                size=size,
+                source=source,
+                request_source=source,
+                data=data,
+                corrupt=0,
+            )
+            return
+
+        if opcode in (TL_A_PUT_FULL, TL_A_PUT_PARTIAL):
+            self.outer_write_request_count += 1
+            mask = int(self.outer_a.bits_mask.value)
+            if opcode == TL_A_PUT_FULL:
+                mask = (1 << width_bytes) - 1
+            self.drain_log.append(
+                {
+                    "channel": "outer",
+                    "addr": addr,
+                    "data": int(self.outer_a.bits_data.value),
+                    "mask": mask,
+                    "width_bytes": width_bytes,
+                    "cycle": self._cycle,
+                }
+            )
+            self.enqueue_outer_response(
+                opcode=TL_D_ACCESS_ACK,
+                size=size,
+                source=source,
+                request_source=source,
+                data=0,
+                corrupt=0,
+            )
+            return
+
+        raise AssertionError(f"outer buffer 未支持的请求 opcode={opcode}")
 
     def _capture_dcache_requests(self) -> None:
         if self.dcache_a.valid.value and self.dcache_a.ready.value:
@@ -742,3 +1005,13 @@ class MemoryModel:
         if self._next_sink == 0:
             self._next_sink = 1
         return sink
+
+    def _rob_rank(self, rob_idx: RobIndex | None) -> int:
+        if rob_idx is None:
+            return -1
+        return rob_idx.flag * self.rob_size + rob_idx.value
+
+    def _apply_masked_write_to_dict(self, backing: dict, addr: int, data: int, mask: int, width_bytes: int) -> None:
+        for byte_idx in range(width_bytes):
+            if (mask >> byte_idx) & 0x1:
+                backing[addr + byte_idx] = (data >> (byte_idx * 8)) & 0xFF

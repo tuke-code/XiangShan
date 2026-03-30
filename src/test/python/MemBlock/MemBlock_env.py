@@ -49,6 +49,9 @@ LOAD_PIPELINE_WIDTH = 3
 LSQ_ENQ_PORTS = 8
 INT_ISSUE_PORTS = 7
 INT_WRITEBACK_PORTS = 7
+STORE_PIPELINE_WIDTH = 2
+SBUFFER_WRITE_PORTS = 2
+STORE_QUEUE_SIZE = 56
 ROB_SIZE = 512
 
 
@@ -262,6 +265,91 @@ class IntWritebackBundle:
         for signal in self.bits_exception_vec:
             bits.append(0 if signal is None else int(signal.value))
         return bits
+
+
+class OptionalSignalBundle:
+    """为内建调试/观测信号提供统一 `connected/read` 接口。"""
+
+    SIGNAL_MAP = {}
+
+    def __init__(self, prefix: str, dut) -> None:
+        self._prefix = prefix
+        self._dut = dut
+        for attr_name, suffix in self.SIGNAL_MAP.items():
+            setattr(self, attr_name, getattr(dut, f"{prefix}{suffix}", None))
+
+    def connected(self, name: str) -> bool:
+        return getattr(self, name, None) is not None
+
+    def read(self, name: str, default=None):
+        signal = getattr(self, name, None)
+        if signal is None:
+            return default
+        return int(signal.value)
+
+
+class StoreDataInputBundle(OptionalSignalBundle):
+    SIGNAL_MAP = {
+        "valid": "valid",
+        "sqIdx_value": "bits_sqIdx_value",
+        "fuType": "bits_fuType",
+        "fuOpType": "bits_fuOpType",
+        "data": "bits_data",
+    }
+
+
+class StoreAddrInputBundle(OptionalSignalBundle):
+    SIGNAL_MAP = {
+        "valid": "valid",
+        "sqIdx_value": "bits_uop_sqIdx_value",
+        "paddr": "bits_paddr",
+        "miss": "bits_miss",
+        "nc": "bits_nc",
+    }
+
+
+class StoreMaskInputBundle(OptionalSignalBundle):
+    SIGNAL_MAP = {
+        "valid": "valid",
+        "sqIdx_value": "bits_sqIdx_value",
+        "mask": "bits_mask",
+    }
+
+
+class StoreAddrReInputBundle(OptionalSignalBundle):
+    SIGNAL_MAP = {
+        "updateAddrValid": "updateAddrValid",
+        "sqIdx_value": "uop_sqIdx_value",
+        "mmio": "mmio",
+        "memBackTypeMM": "memBackTypeMM",
+        "hasException": "hasException",
+    }
+
+
+class SbufferWriteBundle(OptionalSignalBundle):
+    SIGNAL_MAP = {
+        "ready": "ready",
+        "valid": "valid",
+        "addr": "bits_addr",
+        "data": "bits_data",
+        "mask": "bits_mask",
+        "wline": "bits_wline",
+        "vecValid": "bits_vecValid",
+    }
+
+
+class StoreQueueShadowEntry(OptionalSignalBundle):
+    def __init__(self, index: int, dut) -> None:
+        self._index = index
+        self._dut = dut
+        self.allocated = getattr(dut, f"MemBlock_inner_lsq_storeQueue_allocated_{index}", None)
+        self.addrvalid = getattr(dut, f"MemBlock_inner_lsq_storeQueue_addrvalid_{index}", None)
+        self.datavalid = getattr(dut, f"MemBlock_inner_lsq_storeQueue_datavalid_{index}", None)
+        self.committed = getattr(dut, f"MemBlock_inner_lsq_storeQueue_committed_{index}", None)
+        self.completed = getattr(dut, f"MemBlock_inner_lsq_storeQueue_completed_{index}", None)
+        self.nc = getattr(dut, f"MemBlock_inner_lsq_storeQueue_nc_{index}", None)
+        self.robIdx_flag = getattr(dut, f"MemBlock_inner_lsq_storeQueue_uop_{index}_robIdx_flag", None)
+        self.robIdx_value = getattr(dut, f"MemBlock_inner_lsq_storeQueue_uop_{index}_robIdx_value", None)
 
 
 class MemStatusBundle(Bundle):
@@ -870,6 +958,30 @@ class MemBlockEnv:
             IntWritebackBundle(f"io_mem_to_ooo_intWriteback_{idx}_0_", dut)
             for idx in range(INT_WRITEBACK_PORTS)
         ]
+        self.store_data_inputs = [
+            StoreDataInputBundle(f"MemBlock_inner_lsq_io_std_storeDataIn_{idx}_", dut)
+            for idx in range(STORE_PIPELINE_WIDTH)
+        ]
+        self.store_addr_inputs = [
+            StoreAddrInputBundle(f"MemBlock_inner_lsq_io_sta_storeAddrIn_{idx}_", dut)
+            for idx in range(STORE_PIPELINE_WIDTH)
+        ]
+        self.store_mask_inputs = [
+            StoreMaskInputBundle(f"MemBlock_inner_lsq_io_sta_storeMaskIn_{idx}_", dut)
+            for idx in range(STORE_PIPELINE_WIDTH)
+        ]
+        self.store_addr_re_inputs = [
+            StoreAddrReInputBundle(f"MemBlock_inner_lsq_io_sta_storeAddrInRe_{idx}_", dut)
+            for idx in range(STORE_PIPELINE_WIDTH)
+        ]
+        self.sbuffer_writes = [
+            SbufferWriteBundle(f"MemBlock_inner_lsq_io_sbuffer_{idx}_", dut)
+            for idx in range(SBUFFER_WRITE_PORTS)
+        ]
+        self.sq_shadow_entries = [
+            StoreQueueShadowEntry(idx, dut)
+            for idx in range(STORE_QUEUE_SIZE)
+        ]
 
         self.mem_status = MemStatusBundle.from_dict(
             {
@@ -909,6 +1021,12 @@ class MemBlockEnv:
             self.dcache_d,
             self.dcache_e,
             writebacks=self.writeback,
+            store_data_inputs=self.store_data_inputs,
+            store_addr_inputs=self.store_addr_inputs,
+            store_mask_inputs=self.store_mask_inputs,
+            store_addr_re_inputs=self.store_addr_re_inputs,
+            sq_shadow_entries=self.sq_shadow_entries,
+            sbuffer_writes=self.sbuffer_writes,
         )
         self.mock_outer_buffer = self.memory
         self.mock_dcache_client = self.memory
@@ -929,6 +1047,16 @@ class MemBlockEnv:
             bundle.drive_idle()
         for bundle in self.issue:
             bundle.drive_idle()
+        if hasattr(self.dut, "io_ooo_to_mem_flushSb"):
+            self.dut.io_ooo_to_mem_flushSb.value = 0
+        if hasattr(self.dut, "io_ooo_to_mem_sfence_valid"):
+            self.dut.io_ooo_to_mem_sfence_valid.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_rs1.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_rs2.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_addr.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_id.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_hv.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_hg.value = 0
         self.memory.drive_idle()
         self.pending_ptr.drive()
 
@@ -944,6 +1072,7 @@ class MemBlockEnv:
             if int(self.dut.reset.value) or int(self.dut.io_reset_backend.value):
                 self.pending_ptr.reset()
                 continue
+            self.memory.note_load_commits(int(self.mem_status.lqDeq.value))
             for rob_idx in self.memory.drain_completed_robs():
                 self.pending_ptr.note_completed(rob_idx.flag, rob_idx.value)
             self.pending_ptr.advance()
@@ -964,6 +1093,7 @@ class MemBlockEnv:
         """登记一笔已完成握手的 load issue，用于推进 `pendingPtr`。"""
 
         self.pending_ptr.note_issued(rob_idx_flag, rob_idx_value)
+        self.memory.note_load_issued(rob_idx_flag, rob_idx_value)
 
     def inject_outer_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
         """向 outer buffer D 通道注入一笔响应。"""
@@ -988,6 +1118,33 @@ class MemBlockEnv:
                 return
             self.Step(1)
         raise TimeoutError("等待 MemoryModel 收敛超时")
+
+    def flush_store_buffers_and_wait(self, max_cycles: int = 200, settle_cycles: int = 4) -> dict:
+        """触发 `sfence + flushSb`，并等待 sbuffer/uncache drain 结束。"""
+
+        if not hasattr(self.dut, "io_ooo_to_mem_flushSb"):
+            raise AttributeError("当前 DUT 未导出 `io_ooo_to_mem_flushSb`")
+
+        if hasattr(self.dut, "io_ooo_to_mem_sfence_valid"):
+            self.dut.io_ooo_to_mem_sfence_valid.value = 1
+            self.dut.io_ooo_to_mem_sfence_bits_rs1.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_rs2.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_addr.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_id.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_hv.value = 0
+            self.dut.io_ooo_to_mem_sfence_bits_hg.value = 0
+        self.dut.io_ooo_to_mem_flushSb.value = 1
+        self.Step(1)
+        if hasattr(self.dut, "io_ooo_to_mem_sfence_valid"):
+            self.dut.io_ooo_to_mem_sfence_valid.value = 0
+        self.dut.io_ooo_to_mem_flushSb.value = 0
+
+        for _ in range(max_cycles):
+            if int(self.mem_status.sbIsEmpty.value):
+                self.Step(settle_cycles)
+                return self.memory.finalize_and_check_drain()
+            self.Step(1)
+        raise TimeoutError("等待 sbuffer drain 结束超时")
 
     def check_no_outstanding_transactions(self) -> None:
         """检查没有残留的 MemoryModel 事务与待校验项。"""

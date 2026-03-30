@@ -1,0 +1,67 @@
+[*]
+[*] GTKWave Analyzer v3.3.116 (w)1999-2023 BSI
+[*] Thu Mar 26 09:11:42 2026
+[*]
+[dumpfile] "(null)"
+[savefile] "/nfs/home/majiuyue/XiangShan/src/test/python/MemBlock/memblock.gtkw"
+[timestart] 0
+[size] 2892 1352
+[pos] -1 -1
+*-6.900000 71 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+[treeopen] TOP.
+[treeopen] TOP.MemBlock_top.
+[treeopen] TOP.MemBlock_top.MemBlock.
+[treeopen] TOP.MemBlock_top.MemBlock.inner_lsq.
+[treeopen] TOP.MemBlock_top.MemBlock.inner_lsq.loadQueue.
+[treeopen] TOP.MemBlock_top.MemBlock.inner_lsq.loadQueue.uncacheBuffer.
+[sst_width] 653
+[signals_width] 667
+[sst_expanded] 1
+[sst_vpaned_height] 415
+@28
+TOP.MemBlock_top.MemBlock.clock
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_0_valid
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_1_valid
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_2_valid
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_3_valid
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_4_valid
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_5_valid
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_6_valid
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_7_valid
+@22
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_0_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_1_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_2_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_3_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_4_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_5_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_6_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_7_bits_robIdx_value[8:0]
+@28
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_lsqio_pendingPtr_flag
+TOP.MemBlock_top.MemBlock.inner_lsq.loadQueue.uncacheBuffer.entries_0.req_valid
+TOP.MemBlock_top.MemBlock.inner_lsq.loadQueue.uncacheBuffer.entries_1.req_valid
+@22
+TOP.MemBlock_top.MemBlock.inner_lsq.loadQueue.uncacheBuffer.io_rob_pendingPtr_value[8:0]
+@28
+TOP.MemBlock_top.MemBlock.inner_lsq.loadQueue.uncacheBuffer.io_uncache_req_valid
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_0_0_ready
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_1_0_ready
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_2_0_ready
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_3_0_ready
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_4_0_ready
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_5_0_ready
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_6_0_ready
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_vecWriteback_0_0_ready
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_vecWriteback_1_0_ready
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_0_0_valid
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_1_0_valid
+@29
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_2_0_valid
+@28
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_3_0_valid
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_4_0_valid
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_5_0_valid
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_6_0_valid
+[pattern_trace] 1
+[pattern_trace] 0

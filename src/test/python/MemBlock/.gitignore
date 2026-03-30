@@ -1,2 +1,4 @@
 *.fst
 *.dat
+*.fst.hier
+.nfs*
