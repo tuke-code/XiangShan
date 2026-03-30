@@ -317,12 +317,10 @@ ifeq ($(CHISEL_TARGET),systemverilog)
 	@cat $(dir $@).__diff__ $@ > $(dir $@).__out__ && mv $(dir $@).__out__ $@
 endif
 
-# $(MEMBLOCK_INTERNAL_YAML): $(MEMBLOCK_TOP_V) $(MEMBLOCK_LSQWRAPPER_V) scripts/generate_picker_internal_yaml.py
-# 	python3 scripts/generate_picker_internal_yaml.py \
-# 		--module LsqWrapper \
-# 		--scope MemBlock.inner_lsq \
-# 		--input $(MEMBLOCK_LSQWRAPPER_V) \
-# 		--output $@
+$(MEMBLOCK_INTERNAL_YAML): $(MEMBLOCK_LSQWRAPPER_V) scripts/generate_memblock_internal_yaml.py scripts/generate_picker_internal_yaml.py
+	python3 scripts/generate_memblock_internal_yaml.py \
+		--wrapper $(MEMBLOCK_LSQWRAPPER_V) \
+		--output $@
 
 $(MEMBLOCK_PYLIB): $(MEMBLOCK_TOP_V) $(MEMBLOCK_INTERNAL_YAML)
 	time picker export $(dir $<)ClockGate.sv --sname MemBlock \

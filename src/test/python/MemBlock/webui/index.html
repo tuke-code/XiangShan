@@ -250,7 +250,7 @@
                         <div class="text-xs uppercase tracking-[0.3em] text-slate-400">MemBlock / LSQ / Web UI</div>
                         <h1 class="mt-2 text-2xl font-semibold lg:text-3xl">分端点实时观测面板</h1>
                         <p class="mt-1 text-sm text-slate-400">
-                            各板块使用独立 WebSocket endpoint 更新。VLQ / SQ / 违例细粒度项为 shadow 或 degraded 视图。
+                            各板块使用独立 WebSocket endpoint 更新。VLQ / SQ / Replay 优先显示 direct state，缺失时退回 shadow / degraded 视图。
                         </p>
                     </div>
                     <div class="flex flex-wrap gap-2" id="connection-pills"></div>
@@ -299,7 +299,7 @@
                                     <option value="NC">NC</option>
                                 </select>
                             </div>
-                            <div class="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                            <div class="grid gap-2 sm:grid-cols-2 lg:grid-cols-[1fr_1fr_auto_auto]">
                                 <select id="filter-source" class="rounded-xl border border-slate-600 bg-slate-900/70 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-sky-400">
                                     <option value="">source: all</option>
                                     <option value="enq">enq</option>
@@ -308,6 +308,14 @@
                                     <option value="nc">nc</option>
                                     <option value="writeback">writeback</option>
                                     <option value="retire">retire</option>
+                                </select>
+                                <select id="filter-state" class="rounded-xl border border-slate-600 bg-slate-900/70 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-sky-400">
+                                    <option value="">state: all</option>
+                                    <option value="enqueued">enqueued</option>
+                                    <option value="scheduled">scheduled</option>
+                                    <option value="blocking">blocking</option>
+                                    <option value="writeback">writeback</option>
+                                    <option value="retired">retired</option>
                                 </select>
                                 <button onclick="applyTraceFilters()" class="rounded-xl bg-slate-700 px-3 py-2 text-sm transition hover:bg-slate-600">应用过滤</button>
                                 <button onclick="clearTraceFilters()" class="rounded-xl bg-slate-800 px-3 py-2 text-sm transition hover:bg-slate-700">清空过滤</button>
@@ -323,7 +331,7 @@
             <div class="metric-tile">
                 <div class="flex items-center justify-between">
                     <div class="text-sm text-slate-300">VirtualLoadQueue</div>
-                    <span class="badge badge-shadow">shadow</span>
+                    <span class="badge badge-shadow" id="badge-vlq">shadow</span>
                 </div>
                 <div class="mono mt-3 text-2xl font-bold text-sky-300" id="vlq-size">0/72</div>
                 <div class="metric-bar mt-3"><div id="vlq-bar" class="bg-sky-400" style="width:0%"></div></div>
@@ -332,7 +340,7 @@
             <div class="metric-tile">
                 <div class="flex items-center justify-between">
                     <div class="text-sm text-slate-300">LoadQueueReplay</div>
-                    <span class="badge bg-sky-500/10 text-sky-300">direct</span>
+                    <span class="badge bg-sky-500/10 text-sky-300" id="badge-lqr">direct</span>
                 </div>
                 <div class="mono mt-3 text-2xl font-bold text-violet-300" id="lqr-size">0/72</div>
                 <div class="metric-bar mt-3"><div id="lqr-bar" class="bg-violet-400" style="width:0%"></div></div>
@@ -341,7 +349,7 @@
             <div class="metric-tile">
                 <div class="flex items-center justify-between">
                     <div class="text-sm text-slate-300">StoreQueue</div>
-                    <span class="badge badge-shadow">shadow</span>
+                    <span class="badge badge-shadow" id="badge-sq">shadow</span>
                 </div>
                 <div class="mono mt-3 text-2xl font-bold text-emerald-300" id="sq-size">0/56</div>
                 <div class="metric-bar mt-3"><div id="sq-bar" class="bg-emerald-400" style="width:0%"></div></div>
@@ -350,7 +358,7 @@
             <div class="metric-tile">
                 <div class="flex items-center justify-between">
                     <div class="text-sm text-slate-300">LoadQueueRAR</div>
-                    <span class="badge badge-degraded">degraded</span>
+                    <span class="badge badge-degraded" id="badge-rar">degraded</span>
                 </div>
                 <div class="mono mt-3 text-2xl font-bold text-amber-300" id="lqrar-size">0/72</div>
                 <div class="metric-bar mt-3"><div id="lqrar-bar" class="bg-amber-400" style="width:0%"></div></div>
@@ -359,7 +367,7 @@
             <div class="metric-tile">
                 <div class="flex items-center justify-between">
                     <div class="text-sm text-slate-300">LoadQueueRAW</div>
-                    <span class="badge badge-degraded">degraded</span>
+                    <span class="badge badge-degraded" id="badge-raw">degraded</span>
                 </div>
                 <div class="mono mt-3 text-2xl font-bold text-rose-300" id="lqraw-size">0/32</div>
                 <div class="metric-bar mt-3"><div id="lqraw-bar" class="bg-rose-400" style="width:0%"></div></div>
@@ -424,7 +432,7 @@
                 <div class="panel-title">
                     <div>
                         <h2 class="text-lg font-semibold">VirtualLoadQueue</h2>
-                        <div class="mt-1 text-xs text-slate-400">影子队列，由 enq/deq / replay 相关 I/O 推断</div>
+                        <div class="mt-1 text-xs text-slate-400">优先显示 direct state，缺失时由 enq/deq / replay 相关 I/O 推断</div>
                     </div>
                     <span class="status-pill disconnected" id="status-vlq">vlq</span>
                 </div>
@@ -473,7 +481,7 @@
                 <div class="panel-title">
                     <div>
                         <h2 class="text-lg font-semibold">StoreQueue</h2>
-                        <div class="mt-1 text-xs text-slate-400">影子队列，由 enq / addr-valid / data-valid / commit / deq 信号恢复</div>
+                        <div class="mt-1 text-xs text-slate-400">优先显示 direct state，缺失时由 enq / addr-valid / data-valid / commit / deq 信号恢复</div>
                     </div>
                     <span class="status-pill disconnected" id="status-sq">sq</span>
                 </div>
@@ -670,6 +678,7 @@
                 rob_idx: document.getElementById('filter-rob').value.trim(),
                 cause: document.getElementById('filter-cause').value,
                 source: document.getElementById('filter-source').value,
+                state: document.getElementById('filter-state').value,
             };
         }
         function applyTraceFilters() { sendControl('set_filters', { filters: readTraceFilters() }); }
@@ -704,6 +713,7 @@
             document.getElementById('filter-rob').value = filters.rob_idx || '';
             document.getElementById('filter-cause').value = filters.cause || '';
             document.getElementById('filter-source').value = filters.source || '';
+            document.getElementById('filter-state').value = filters.state || '';
         }
 
         function renderControlMeta(extra = null) {
@@ -749,6 +759,29 @@
             return reasons.length ? `[${quality}] ${reasons[0]}` : `[${quality}]`;
         }
 
+        function renderMetricBadge(id, quality) {
+            const node = document.getElementById(id);
+            if (!node) {
+                return;
+            }
+            const nextQuality = quality || 'unknown';
+            node.textContent = nextQuality;
+            node.className = 'badge';
+            if (nextQuality === 'direct') {
+                node.classList.add('bg-sky-500/10', 'text-sky-300');
+                return;
+            }
+            if (nextQuality === 'derived' || nextQuality === 'shadow') {
+                node.classList.add('badge-shadow');
+                return;
+            }
+            if (nextQuality === 'mixed') {
+                node.classList.add('bg-amber-500/10', 'text-amber-300');
+                return;
+            }
+            node.classList.add('badge-degraded');
+        }
+
         function renderOverview() {
             if (!PAGE.overview) {
                 return;
@@ -785,6 +818,12 @@
             document.getElementById('sq-bar').style.width = percent(sqUsed, sqSize);
             document.getElementById('lqrar-bar').style.width = percent(rarUsed, rarSize);
             document.getElementById('lqraw-bar').style.width = percent(rawUsed, rawSize);
+
+            renderMetricBadge('badge-vlq', PAGE.vlq && (PAGE.vlq.is_shadow ? 'shadow' : PAGE.vlq.data_quality));
+            renderMetricBadge('badge-lqr', PAGE.replay && (PAGE.replay.entries_quality || PAGE.replay.data_quality));
+            renderMetricBadge('badge-sq', PAGE.sq && (PAGE.sq.is_shadow ? 'shadow' : PAGE.sq.data_quality));
+            renderMetricBadge('badge-rar', PAGE.violations && PAGE.violations.data_quality);
+            renderMetricBadge('badge-raw', PAGE.violations && PAGE.violations.data_quality);
         }
 
         function queueClass(entry, type) {
@@ -842,6 +881,11 @@
             if (detail.mask !== undefined) lines.push(`mask: ${hexText(detail.mask)}`);
             if (detail.is_vec !== undefined) lines.push(`isVec: ${detail.is_vec}`);
             if (detail.is_128bit !== undefined) lines.push(`is128b: ${detail.is_128bit}`);
+            if (detail.addrvalid !== undefined) lines.push(`addrvalid: ${detail.addrvalid}`);
+            if (detail.datavalid !== undefined) lines.push(`datavalid: ${detail.datavalid}`);
+            if (detail.committed !== undefined) lines.push(`committed: ${detail.committed}`);
+            if (detail.completed !== undefined) lines.push(`completed: ${detail.completed}`);
+            if (detail.nc !== undefined) lines.push(`nc: ${detail.nc}`);
             if (detail.nc_with_data !== undefined) lines.push(`ncWithData: ${detail.nc_with_data}`);
             if (detail.mmio !== undefined) lines.push(`mmio: ${detail.mmio}`);
             if (detail.handled_by_mshr !== undefined) lines.push(`handledByMSHR: ${detail.handled_by_mshr}`);
@@ -927,7 +971,17 @@
             renderQueueStrip('sq-entries', PAGE.sq.entries, 'sq', (entry) => `
                 <div class="mono text-sm font-bold">${entry.index}</div>
                 <div class="mt-1 text-[10px] uppercase">${entry.addrvalid ? 'A' : ''}${entry.datavalid ? 'D' : ''}${entry.committed ? 'C' : ''}</div>
-            `);
+            `, (entry) => formatQueueDetail(entry.detail || {
+                source: PAGE.sq.is_shadow ? 'shadow' : 'direct',
+                sq_idx: { flag: 0, value: entry.index },
+                addrvalid: entry.addrvalid,
+                datavalid: entry.datavalid,
+                committed: entry.committed,
+                nc: entry.nc,
+                mmio: entry.mmio,
+                completed: entry.completed,
+                is_vec: entry.is_vec,
+            }));
             document.getElementById('sq-fwd-req').textContent = PAGE.sq.stats.fwd_req;
             document.getElementById('sq-fwd-succ').textContent = PAGE.sq.stats.fwd_succ;
             document.getElementById('sq-mmio').textContent = PAGE.sq.stats.mmio;
@@ -944,7 +998,7 @@
                 <div class="mono text-sm font-bold">${entry.index}</div>
                 <div class="mt-1 text-[10px] uppercase">${entry.cause || '--'}</div>
             `, (entry) => formatQueueDetail(entry.detail));
-            document.getElementById('lqr-summary').textContent = `${qualityText(PAGE.replay)} replay_all=${PAGE.replay.replay_all}, topdown=${PAGE.replay.topdown.rob_head_tlb_replay}`;
+            document.getElementById('lqr-summary').textContent = `${qualityText(PAGE.replay)} entries=${PAGE.replay.entries_quality || PAGE.replay.data_quality}, replay_all=${PAGE.replay.replay_all}, topdown=${PAGE.replay.topdown.rob_head_tlb_replay}`;
 
             const causeContainer = document.getElementById('replay-causes');
             causeContainer.innerHTML = '';

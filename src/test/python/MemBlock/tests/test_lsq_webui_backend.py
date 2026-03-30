@@ -158,6 +158,11 @@ def _make_raw(cycle: int = 0):
             }
             for idx in range(7)
         ],
+        "direct": {
+            "vlq": {"available": False, "entries": []},
+            "lqr": {"available": False, "entries": []},
+            "sq": {"available": False, "entries": []},
+        },
         "perf_values": [0] * 36,
     }
 
@@ -346,6 +351,114 @@ def test_lsq_webui_tracker_builds_trace_payload_and_quality_metadata():
     vlq_payload = tracker.topic_payload("vlq", {"running": False, "step_cycles": 1, "tick_ms": 100, "last_raw": second})
     assert vlq_payload["data_quality"] == "derived"
     assert vlq_payload["degraded_reasons"]
+
+
+def test_lsq_webui_tracker_prefers_direct_queue_state_when_available():
+    tracker = LsqStateTracker()
+
+    raw = _make_raw(cycle=3)
+    raw["enq"]["need_alloc"][0] = 0x3
+    raw["enq"]["req"][0]["valid"] = 1
+    raw["enq"]["resp"][0]["lq_idx"] = {"flag": 0, "value": 5}
+    raw["enq"]["resp"][0]["sq_idx"] = {"flag": 0, "value": 7}
+    raw["replay_lanes"][0]["valid"] = 1
+    raw["replay_lanes"][0]["ready"] = 1
+    raw["replay_lanes"][0]["sched_index"] = 9
+
+    raw["direct"]["vlq"] = {
+        "available": True,
+        "entries": [
+            {
+                "index": idx,
+                "allocated": idx == 12,
+                "request": {
+                    "source": "direct",
+                    "lq_idx": {"flag": 0, "value": idx},
+                    "rob_idx": {"flag": 1, "value": 21},
+                    "uop_idx": 3,
+                    "is_vec": 0,
+                }
+                if idx == 12
+                else None,
+            }
+            for idx in range(VLQ_SIZE)
+        ],
+    }
+    raw["direct"]["lqr"] = {
+        "available": True,
+        "entries": [
+            {
+                "index": idx,
+                "allocated": idx == 18,
+                "scheduled": idx == 18,
+                "blocking": False,
+                "cause": "DM",
+                "detail": {
+                    "source": "direct",
+                    "sched_index": idx,
+                    "cause": "DM",
+                    "lq_idx": {"flag": 0, "value": 12},
+                    "sq_idx": {"flag": 0, "value": 7},
+                    "rob_idx": {"flag": 1, "value": 21},
+                    "uop_idx": 3,
+                    "pdest": 19,
+                    "vaddr": 0x812340,
+                    "is_vec": 0,
+                    "is_128bit": 0,
+                }
+                if idx == 18
+                else None,
+            }
+            for idx in range(LQR_SIZE)
+        ],
+    }
+    raw["direct"]["sq"] = {
+        "available": True,
+        "entries": [
+            {
+                "index": idx,
+                "allocated": idx == 22,
+                "addrvalid": idx == 22,
+                "datavalid": idx == 22,
+                "committed": False,
+                "completed": False,
+                "nc": True,
+                "is_vec": False,
+                "detail": {
+                    "source": "direct",
+                    "sq_idx": {"flag": 0, "value": idx},
+                    "rob_idx": {"flag": 1, "value": 21},
+                    "uop_idx": 4,
+                    "pdest": 8,
+                    "nc": True,
+                    "is_vec": False,
+                }
+                if idx == 22
+                else None,
+            }
+            for idx in range(SQ_SIZE)
+        ],
+    }
+
+    tracker.update(raw)
+
+    assert tracker.vlq_entries[5]["allocated"] is False
+    assert tracker.vlq_entries[12]["allocated"] is True
+    assert tracker.vlq_entries[12]["request"]["rob_idx"] == {"flag": 1, "value": 21}
+    assert tracker.lqr_entries[9]["allocated"] is False
+    assert tracker.lqr_entries[18]["allocated"] is True
+    assert tracker.lqr_entries[18]["cause"] == "DM"
+    assert tracker.sq_entries[7]["allocated"] is False
+    assert tracker.sq_entries[22]["allocated"] is True
+    assert tracker.sq_entries[22]["nc"] is True
+
+    vlq_payload = tracker.topic_payload("vlq", {"running": False, "step_cycles": 1, "tick_ms": 100, "last_raw": raw})
+    sq_payload = tracker.topic_payload("sq", {"running": False, "step_cycles": 1, "tick_ms": 100, "last_raw": raw})
+    replay_payload = tracker.topic_payload("replay", {"running": False, "step_cycles": 1, "tick_ms": 100, "last_raw": raw})
+
+    assert vlq_payload["data_quality"] == "direct"
+    assert sq_payload["data_quality"] == "direct"
+    assert replay_payload["entries_quality"] == "direct"
 
 
 def test_lsq_webui_topic_publisher_only_publishes_on_change():

@@ -61,6 +61,13 @@ def _ptr_iter(prev: tuple[int, int], curr: tuple[int, int], size: int) -> list[i
     return indices
 
 
+def _decode_cause_mask(mask: int) -> str | None:
+    for idx, label in enumerate(CAUSE_LABELS):
+        if mask & (1 << idx):
+            return label
+    return None
+
+
 class SignalReader:
     """Read LSQ-related internal signals from DUT."""
 
@@ -76,6 +83,9 @@ class SignalReader:
         except Exception:
             return default
 
+    def _has_signal(self, name: str) -> bool:
+        return getattr(self.dut, name, None) is not None
+
     def _read_ptr(self, prefix: str) -> dict[str, int]:
         return {
             "flag": self._read(f"{prefix}_flag"),
@@ -87,6 +97,96 @@ class SignalReader:
             "flag": self._read(f"{prefix}_{name}_flag"),
             "value": self._read(f"{prefix}_{name}_value"),
         }
+
+    def _read_direct_vlq(self) -> dict[str, Any]:
+        prefix = "MemBlock_inner_lsq_loadQueue_virtualLoadQueue"
+        available = self._has_signal(f"{prefix}_allocated_0")
+        entries = []
+        if available:
+            for idx in range(VLQ_SIZE):
+                allocated = self._read(f"{prefix}_allocated_{idx}")
+                entries.append(
+                    {
+                        "index": idx,
+                        "allocated": allocated,
+                        "request": {
+                            "source": "direct",
+                            "lq_idx": {"flag": 0, "value": idx},
+                            "rob_idx": self._read_ptr(f"{prefix}_robIdx_{idx}"),
+                            "uop_idx": self._read(f"{prefix}_uopIdx_{idx}"),
+                            "is_vec": self._read(f"{prefix}_isvec_{idx}"),
+                        }
+                        if allocated
+                        else None,
+                    }
+                )
+        return {"available": available, "entries": entries}
+
+    def _read_direct_lqr(self) -> dict[str, Any]:
+        prefix = "MemBlock_inner_lsq_loadQueue_loadQueueReplay"
+        available = self._has_signal(f"{prefix}_allocated_0")
+        entries = []
+        if available:
+            for idx in range(LQR_SIZE):
+                allocated = self._read(f"{prefix}_allocated_{idx}")
+                cause_mask = self._read(f"{prefix}_cause_{idx}")
+                entries.append(
+                    {
+                        "index": idx,
+                        "allocated": allocated,
+                        "scheduled": self._read(f"{prefix}_scheduled_{idx}"),
+                        "blocking": self._read(f"{prefix}_blocking_{idx}"),
+                        "cause": _decode_cause_mask(cause_mask),
+                        "detail": {
+                            "source": "direct",
+                            "sched_index": idx,
+                            "cause": _decode_cause_mask(cause_mask),
+                            "lq_idx": self._read_ptr(f"{prefix}_uop_{idx}_lqIdx"),
+                            "sq_idx": self._read_ptr(f"{prefix}_uop_{idx}_sqIdx"),
+                            "rob_idx": self._read_ptr(f"{prefix}_uop_{idx}_robIdx"),
+                            "uop_idx": self._read(f"{prefix}_uop_{idx}_uopIdx"),
+                            "pdest": self._read(f"{prefix}_uop_{idx}_pdest"),
+                            "vaddr": self._read(f"{prefix}_debug_vaddr_{idx}"),
+                            "is_vec": self._read(f"{prefix}_vecReplay_{idx}_isvec"),
+                            "is_128bit": self._read(f"{prefix}_vecReplay_{idx}_is128bit"),
+                        }
+                        if allocated
+                        else None,
+                    }
+                )
+        return {"available": available, "entries": entries}
+
+    def _read_direct_sq(self) -> dict[str, Any]:
+        prefix = "MemBlock_inner_lsq_storeQueue"
+        available = self._has_signal(f"{prefix}_allocated_0")
+        entries = []
+        if available:
+            for idx in range(SQ_SIZE):
+                allocated = self._read(f"{prefix}_allocated_{idx}")
+                entries.append(
+                    {
+                        "index": idx,
+                        "allocated": allocated,
+                        "addrvalid": self._read(f"{prefix}_addrvalid_{idx}"),
+                        "datavalid": self._read(f"{prefix}_datavalid_{idx}"),
+                        "committed": self._read(f"{prefix}_committed_{idx}"),
+                        "completed": self._read(f"{prefix}_completed_{idx}"),
+                        "nc": self._read(f"{prefix}_nc_{idx}"),
+                        "is_vec": self._read(f"{prefix}_isVec_{idx}"),
+                        "detail": {
+                            "source": "direct",
+                            "sq_idx": {"flag": 0, "value": idx},
+                            "rob_idx": self._read_ptr(f"{prefix}_uop_{idx}_robIdx"),
+                            "uop_idx": self._read(f"{prefix}_uop_{idx}_uopIdx"),
+                            "pdest": self._read(f"{prefix}_uop_{idx}_pdest"),
+                            "nc": self._read(f"{prefix}_nc_{idx}"),
+                            "is_vec": self._read(f"{prefix}_isVec_{idx}"),
+                        }
+                        if allocated
+                        else None,
+                    }
+                )
+        return {"available": available, "entries": entries}
 
     def read(self, cycle: int) -> dict[str, Any]:
         enq_req = []
@@ -244,6 +344,12 @@ class SignalReader:
                 }
             )
 
+        direct = {
+            "vlq": self._read_direct_vlq(),
+            "lqr": self._read_direct_lqr(),
+            "sq": self._read_direct_sq(),
+        }
+
         return {
             "cycle": cycle,
             "overview": {
@@ -297,6 +403,7 @@ class SignalReader:
             "nc_out_lanes": nc_out_lanes,
             "perf_values": perf_values,
             "writeback_lanes": writeback_lanes,
+            "direct": direct,
         }
 
 
@@ -316,6 +423,7 @@ class LsqStateTracker:
     def reset(self) -> None:
         self.cycle = 0
         self.overview = {}
+        self.direct_state_available = {"vlq": False, "sq": False, "replay_entries": False}
         self.vlq_entries = [
             {"index": idx, "allocated": False, "committed": False, "age": 0, "request": None, "retire_at": None}
             for idx in range(VLQ_SIZE)
@@ -628,6 +736,94 @@ class LsqStateTracker:
         for key, value in detail.items():
             if value is not None:
                 entry["detail"][key] = copy.deepcopy(value)
+
+    def _apply_direct_vlq(self, direct: dict[str, Any]) -> None:
+        self.direct_state_available["vlq"] = bool(direct.get("available"))
+        if not self.direct_state_available["vlq"]:
+            return
+        for idx, src in enumerate(direct.get("entries", [])):
+            entry = self.vlq_entries[idx]
+            if src.get("allocated"):
+                request = copy.deepcopy(src.get("request"))
+                entry.update(
+                    {
+                        "allocated": True,
+                        "committed": False,
+                        "age": entry["age"] or self.cycle,
+                        "request": request,
+                        "retire_at": None,
+                    }
+                )
+            else:
+                entry.update({"allocated": False, "committed": False, "age": 0, "request": None, "retire_at": None})
+
+    def _apply_direct_lqr(self, direct: dict[str, Any]) -> None:
+        self.direct_state_available["replay_entries"] = bool(direct.get("available"))
+        if not self.direct_state_available["replay_entries"]:
+            return
+        for idx, src in enumerate(direct.get("entries", [])):
+            entry = self.lqr_entries[idx]
+            if src.get("allocated"):
+                entry.update(
+                    {
+                        "allocated": True,
+                        "scheduled": bool(src.get("scheduled")),
+                        "blocking": bool(src.get("blocking")),
+                        "cause": src.get("cause"),
+                        "lane": entry.get("lane"),
+                        "source": "direct",
+                        "detail": copy.deepcopy(src.get("detail")),
+                        "retire_at": None,
+                    }
+                )
+            else:
+                entry.update(
+                    {
+                        "allocated": False,
+                        "scheduled": False,
+                        "blocking": False,
+                        "cause": None,
+                        "lane": None,
+                        "source": None,
+                        "detail": None,
+                        "retire_at": None,
+                    }
+                )
+
+    def _apply_direct_sq(self, direct: dict[str, Any]) -> None:
+        self.direct_state_available["sq"] = bool(direct.get("available"))
+        if not self.direct_state_available["sq"]:
+            return
+        for idx, src in enumerate(direct.get("entries", [])):
+            entry = self.sq_entries[idx]
+            if src.get("allocated"):
+                entry.update(
+                    {
+                        "allocated": True,
+                        "addrvalid": bool(src.get("addrvalid")),
+                        "datavalid": bool(src.get("datavalid")),
+                        "committed": bool(src.get("committed")),
+                        "mmio": False,
+                        "nc": bool(src.get("nc")),
+                        "age": entry["age"] or self.cycle,
+                        "detail": copy.deepcopy(src.get("detail")),
+                        "retire_at": None,
+                    }
+                )
+            else:
+                entry.update(
+                    {
+                        "allocated": False,
+                        "addrvalid": False,
+                        "datavalid": False,
+                        "committed": False,
+                        "mmio": False,
+                        "nc": False,
+                        "age": 0,
+                        "detail": None,
+                        "retire_at": None,
+                    }
+                )
 
     def update(self, raw: dict[str, Any]) -> None:
         self.cycle = raw["cycle"]
@@ -975,6 +1171,11 @@ class LsqStateTracker:
                 self.history[key] = self.history[key][-HISTORY_LIMIT:]
             self._perf_sample_cycle = self.cycle
 
+        direct = raw.get("direct", {})
+        self._apply_direct_vlq(direct.get("vlq", {}))
+        self._apply_direct_lqr(direct.get("lqr", {}))
+        self._apply_direct_sq(direct.get("sq", {}))
+
         self._prev = copy.deepcopy(raw)
 
     def load_reset_snapshot(self, raw: dict[str, Any]) -> None:
@@ -984,6 +1185,10 @@ class LsqStateTracker:
         self.overview = copy.deepcopy(raw["overview"])
         self.topdown = copy.deepcopy(raw["debug_topdown"])
         self.perf_values = list(raw["perf_values"])
+        direct = raw.get("direct", {})
+        self._apply_direct_vlq(direct.get("vlq", {}))
+        self._apply_direct_lqr(direct.get("lqr", {}))
+        self._apply_direct_sq(direct.get("sq", {}))
         self._prev = copy.deepcopy(raw)
         self._prev_lq_deq_ptr = (raw["lq"]["deq_ptr"]["flag"], raw["lq"]["deq_ptr"]["value"])
         self._prev_sq_commit_ptr = (raw["sq"]["commit_ptr"]["flag"], raw["sq"]["commit_ptr"]["value"])
@@ -1001,10 +1206,16 @@ class LsqStateTracker:
         if topic == "overview":
             return "direct", []
         if topic == "vlq":
+            if self.direct_state_available["vlq"]:
+                return "direct", []
             return "derived", ["virtual load queue entries are reconstructed from enq/lqDeqPtr activity"]
         if topic == "sq":
+            if self.direct_state_available["sq"]:
+                return "direct", []
             return "derived", ["store queue entries are reconstructed from enq/store addr/store data signals"]
         if topic == "replay":
+            if self.direct_state_available["replay_entries"]:
+                return "mixed", ["replay queue entries are direct, but replay lane activity/history is still aggregated from io_replay/io_ldu_ldin/io_ncOut"]
             return "mixed", ["replay entries are aggregated from io_replay/io_ldu_ldin/io_ncOut rather than a direct replay queue state array"]
         if topic == "violations":
             return "derived", ["RAR/RAW entries are reconstructed from counters, release and lane side effects"]
@@ -1027,7 +1238,16 @@ class LsqStateTracker:
                 "overview": self.overview,
                 "data_quality": data_quality,
                 "degraded_reasons": degraded_reasons,
-                "degraded_features": ["vlq-shadow", "sq-shadow", "violations-shadow"],
+                "degraded_features": [
+                    feature
+                    for feature, available in (
+                        ("vlq-shadow", self.direct_state_available["vlq"]),
+                        ("sq-shadow", self.direct_state_available["sq"]),
+                        ("replay-shadow", self.direct_state_available["replay_entries"]),
+                    )
+                    if not available
+                ]
+                + ["violations-shadow"],
             }
         if topic == "vlq":
             allocated = sum(1 for entry in self.vlq_entries if entry["allocated"])
@@ -1036,7 +1256,7 @@ class LsqStateTracker:
                 avg_latency = round(self.vlq_stats["total_latency"] / self.vlq_stats["enq"])
             return {
                 "cycle": self.cycle,
-                "is_shadow": True,
+                "is_shadow": not self.direct_state_available["vlq"],
                 "size": VLQ_SIZE,
                 "allocated": allocated,
                 "entries": copy.deepcopy(self.vlq_entries),
@@ -1052,7 +1272,7 @@ class LsqStateTracker:
             allocated = sum(1 for entry in self.sq_entries if entry["allocated"])
             return {
                 "cycle": self.cycle,
-                "is_shadow": True,
+                "is_shadow": not self.direct_state_available["sq"],
                 "size": SQ_SIZE,
                 "allocated": allocated,
                 "entries": copy.deepcopy(self.sq_entries),
@@ -1064,6 +1284,7 @@ class LsqStateTracker:
             allocated = sum(1 for entry in self.lqr_entries if entry["allocated"])
             return {
                 "cycle": self.cycle,
+                "entries_quality": "direct" if self.direct_state_available["replay_entries"] else "derived",
                 "size": LQR_SIZE,
                 "allocated": allocated,
                 "entries": copy.deepcopy(self.lqr_entries),
