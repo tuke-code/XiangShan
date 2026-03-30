@@ -36,6 +36,10 @@ TL_D_RELEASE_ACK = 6
 
 DEFAULT_CACHELINE_BYTES = 64
 DEFAULT_DCACHE_BEAT_BYTES = 32
+DEFAULT_OUTER_DELAY = 100
+DEFAULT_DCACHE_DELAY_MIN = 32
+DEFAULT_DCACHE_DELAY_MAX = 100
+DEFAULT_DELAY_SEED = 20260330
 
 
 def _is_connected(signal) -> bool:
@@ -89,9 +93,11 @@ class MemoryModel:
         dcache_d,
         dcache_e,
         writebacks=None,
-        outer_delay: int = 2,
-        grant_delay: int = 2,
+        outer_delay: int = DEFAULT_OUTER_DELAY,
+        grant_delay_min: int = DEFAULT_DCACHE_DELAY_MIN,
+        grant_delay_max: int = DEFAULT_DCACHE_DELAY_MAX,
         release_ack_delay: int = 1,
+        delay_seed: int = DEFAULT_DELAY_SEED,
     ) -> None:
         self.dut = dut
         self.outer_a = outer_a
@@ -103,8 +109,10 @@ class MemoryModel:
         self.dcache_e = dcache_e
         self.writebacks = list(writebacks or [])
         self.outer_delay = outer_delay
-        self.grant_delay = grant_delay
+        self.grant_delay_min = grant_delay_min
+        self.grant_delay_max = grant_delay_max
         self.release_ack_delay = release_ack_delay
+        self._delay_rng = random.Random(delay_seed)
 
         self.memory = {}
         self._cycle = 0
@@ -137,6 +145,13 @@ class MemoryModel:
         self.dcache_d_response_count = 0
 
         self.drive_idle()
+
+    def _sample_dcache_delay(self) -> int:
+        """为 dcache load 请求采样访问延迟。"""
+
+        low = min(self.grant_delay_min, self.grant_delay_max)
+        high = max(self.grant_delay_min, self.grant_delay_max)
+        return self._delay_rng.randint(low, high)
 
     def attach_writebacks(self, writebacks) -> None:
         """绑定 writeback 端口列表。"""
@@ -359,7 +374,7 @@ class MemoryModel:
     ) -> None:
         """兼容接口：手工注入一笔 B 响应。"""
 
-        delay = self.grant_delay if delay_cycles is None else delay_cycles
+        delay = self._sample_dcache_delay() if delay_cycles is None else delay_cycles
         self._pending_b.append(
             {
                 "release_cycle": self._cycle + delay,
@@ -391,7 +406,7 @@ class MemoryModel:
     ) -> None:
         """兼容接口：手工注入一笔 D 响应。"""
 
-        delay = self.grant_delay if delay_cycles is None else delay_cycles
+        delay = self._sample_dcache_delay() if delay_cycles is None else delay_cycles
         self._pending_d.append(
             {
                 "release_cycle": self._cycle + delay,
@@ -574,10 +589,11 @@ class MemoryModel:
             beats = list(reversed(beats))
 
         sink = self._alloc_sink()
+        delay = self._sample_dcache_delay()
         self._inflight_grants[sink] = {"source": source, "opcode": opcode}
         self._pending_d.append(
             {
-                "release_cycle": self._cycle + self.grant_delay,
+                "release_cycle": self._cycle + delay,
                 "beats": deque(
                     [
                         {
