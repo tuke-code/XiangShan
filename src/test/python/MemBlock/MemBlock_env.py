@@ -14,14 +14,28 @@ import sys
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    class _PytestStub:
+        @staticmethod
+        def fixture(*_args, **_kwargs):
+            def _decorator(func):
+                return func
+
+            return _decorator
+
+    pytest = _PytestStub()
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", "..", ".."))
 _PYLIB = os.path.join(_REPO_ROOT, "build-memblock", "pylib")
+_TOFFEE_FALLBACK = os.path.abspath(
+    os.path.join(_REPO_ROOT, "..", "XSV", "contrib", "unitychip", "toffee")
+)
 
-for _path in (_PYLIB, _HERE):
+for _path in (_PYLIB, _HERE, _TOFFEE_FALLBACK):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 

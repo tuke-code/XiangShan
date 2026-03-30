@@ -11,7 +11,18 @@ MemBlock DUT 创建与基础 API。
 import os
 import sys
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    class _PytestStub:
+        @staticmethod
+        def fixture(*_args, **_kwargs):
+            def _decorator(func):
+                return func
+
+            return _decorator
+
+    pytest = _PytestStub()
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
