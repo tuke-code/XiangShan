@@ -45,7 +45,7 @@ _TESTS_PATH = _HERE / "tests"
 if str(_TESTS_PATH) not in sys.path:
     sys.path.insert(0, str(_TESTS_PATH))
 
-from test_MemBlock_random_load import test_api_MemBlock_random_1000_load_requests
+from test_MemBlock_random_load import test_api_MemBlock_random_io_1000_load_requests
 
 
 class ScenarioStopped(RuntimeError):
@@ -53,7 +53,7 @@ class ScenarioStopped(RuntimeError):
 
 
 class ScenarioEnvProxy:
-    """Proxy env used to reuse the existing random-load test case directly."""
+    """Proxy env used to reuse the existing random-io test case directly."""
 
     def __init__(self, service, env, generation: int) -> None:
         self._service = service
@@ -215,7 +215,7 @@ class MemBlockWebUIService:
         self._scenario_error = None
         self._driver_stop_event.clear()
         self._clear_driver_step_budget()
-        self._driver_task = asyncio.create_task(self._run_random_load_scenario(self._scenario_generation))
+        self._driver_task = asyncio.create_task(self._run_random_io_scenario(self._scenario_generation))
 
     async def _stop_scenario(self) -> None:
         driver_task = None
@@ -251,17 +251,17 @@ class MemBlockWebUIService:
             if not self._driver_sample_dirty:
                 break
 
-    def _run_random_load_scenario_sync(self, generation: int) -> None:
+    def _run_random_io_scenario_sync(self, generation: int) -> None:
         if self._loop is None:
             raise RuntimeError("event loop is not initialized")
         proxy = ScenarioEnvProxy(self, self.env, generation)
-        test_api_MemBlock_random_1000_load_requests(proxy)
+        test_api_MemBlock_random_io_1000_load_requests(proxy)
 
-    async def _run_random_load_scenario(self, generation: int) -> None:
+    async def _run_random_io_scenario(self, generation: int) -> None:
         error = None
         stopped = False
         try:
-            await asyncio.to_thread(self._run_random_load_scenario_sync, generation)
+            await asyncio.to_thread(self._run_random_io_scenario_sync, generation)
         except ScenarioStopped:
             stopped = True
         except Exception as exc:
