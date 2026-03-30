@@ -398,13 +398,16 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val t1_branchesScIdxVec  = WireInit(VecInit.fill(ResolveEntryBranchNumber)(0.U(log2Ceil(NumWays).W)))
   private val t1_branchesScIdxHitVec =
     WireInit(VecInit.fill(ResolveEntryBranchNumber)(false.B)) // if the branch cfi not in mbtbResult, do not train
-  private val t1_writeValidVec =
-    VecInit(t1_branches.zip(t1_branchesScIdxHitVec).map { case (b, hit) =>
-      b.valid && b.bits.attribute.isConditional && t1_fire && hit
-    })
-  private val t1_writeValid = t1_writeValidVec.reduce(_ || _)
   private val t1_writeTakenVec =
     VecInit(t1_branches.map(b => b.valid && b.bits.taken && b.bits.attribute.isConditional))
+  private val t1_writeValidVec =
+    VecInit(t1_branches.zip(t1_branchesScIdxHitVec).zip(t1_branchesScIdxVec).zip(t1_writeTakenVec).map {
+      case (((b, hit), predIdx), taken) =>
+        b.valid && b.bits.attribute.isConditional && t1_fire && hit &&
+        (!(t1_meta.scPred(predIdx) === taken) || !(t1_meta.useScPred(predIdx) &&
+          t1_meta.tagePredValid(predIdx) && t1_meta.scPred(predIdx) === t1_meta.tagePred(predIdx)))
+    })
+  private val t1_writeValid = t1_writeValidVec.reduce(_ || _)
 
   // During training, find the predicted scPred and lowBits values in the order of the predicted mbtbResult
   // MBTB may invalidate entry with larger idx during multihit, and the order needs to be reversed
