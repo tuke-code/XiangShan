@@ -45,7 +45,22 @@ _TESTS_PATH = _HERE / "tests"
 if str(_TESTS_PATH) not in sys.path:
     sys.path.insert(0, str(_TESTS_PATH))
 
-from test_MemBlock_random_load import test_api_MemBlock_random_io_1000_load_requests
+from test_MemBlock_random_load import (
+    test_api_MemBlock_mem_io_1000_load_requests,
+    test_api_MemBlock_random_io_1000_load_requests,
+)
+
+
+_SCENARIOS = {
+    "random_io": {
+        "label": "random_io",
+        "runner": test_api_MemBlock_random_io_1000_load_requests,
+    },
+    "mem_io": {
+        "label": "mem_io",
+        "runner": test_api_MemBlock_mem_io_1000_load_requests,
+    },
+}
 
 
 class ScenarioStopped(RuntimeError):
@@ -53,7 +68,7 @@ class ScenarioStopped(RuntimeError):
 
 
 class ScenarioEnvProxy:
-    """Proxy env used to reuse the existing random-io test case directly."""
+    """Proxy env used to reuse the selected test case directly."""
 
     def __init__(self, service, env, generation: int) -> None:
         self._service = service
@@ -156,6 +171,7 @@ class MemBlockWebUIService:
         self._scenario_done = False
         self._scenario_error: str | None = None
         self._scenario_generation = 0
+        self._scenario_name = "random_io"
 
     def service_state(self) -> dict[str, Any]:
         return {
@@ -163,6 +179,7 @@ class MemBlockWebUIService:
             "step_cycles": self.step_cycles,
             "tick_ms": self.tick_ms,
             "last_raw": self.last_raw,
+            "scenario_name": self._scenario_name,
             "scenario_started": self._scenario_started,
             "scenario_done": self._scenario_done,
             "scenario_error": self._scenario_error,
@@ -215,7 +232,10 @@ class MemBlockWebUIService:
         self._scenario_error = None
         self._driver_stop_event.clear()
         self._clear_driver_step_budget()
-        self._driver_task = asyncio.create_task(self._run_random_io_scenario(self._scenario_generation))
+        scenario_name = self._scenario_name
+        self._driver_task = asyncio.create_task(
+            self._run_selected_scenario(self._scenario_generation, scenario_name)
+        )
 
     async def _stop_scenario(self) -> None:
         driver_task = None
@@ -251,22 +271,36 @@ class MemBlockWebUIService:
             if not self._driver_sample_dirty:
                 break
 
-    def _run_random_io_scenario_sync(self, generation: int) -> None:
+    def _run_selected_scenario_sync(self, generation: int, scenario_name: str) -> None:
         if self._loop is None:
             raise RuntimeError("event loop is not initialized")
+        runner = _SCENARIOS[scenario_name]["runner"]
         proxy = ScenarioEnvProxy(self, self.env, generation)
-        test_api_MemBlock_random_io_1000_load_requests(proxy)
+        runner(proxy)
 
-    async def _run_random_io_scenario(self, generation: int) -> None:
+    async def _run_selected_scenario(self, generation: int, scenario_name: str) -> None:
         error = None
         stopped = False
         try:
-            await asyncio.to_thread(self._run_random_io_scenario_sync, generation)
+            await asyncio.to_thread(self._run_selected_scenario_sync, generation, scenario_name)
         except ScenarioStopped:
             stopped = True
         except Exception as exc:
             error = str(exc)
         await self._finish_scenario(generation, stopped=stopped, error=error)
+
+    async def set_scenario(self, scenario_name: str) -> None:
+        if scenario_name not in _SCENARIOS:
+            raise KeyError(f"unknown scenario: {scenario_name}")
+        changed = False
+        async with self._command_lock:
+            if self._scenario_name != scenario_name:
+                self._scenario_name = scenario_name
+                changed = True
+        if changed:
+            await self.reset()
+            return
+        await self._broadcast_control_state()
 
     async def _finish_scenario(
         self,
@@ -366,6 +400,11 @@ class MemBlockWebUIService:
             "tick_ms": self.tick_ms,
             "http_port": self.http_port,
             "ws_port": self.ws_port,
+            "scenario_name": self._scenario_name,
+            "scenarios": [
+                {"name": name, "label": data["label"]}
+                for name, data in _SCENARIOS.items()
+            ],
             "scenario_started": self._scenario_started,
             "scenario_done": self._scenario_done,
             "scenario_error": self._scenario_error,
@@ -440,6 +479,21 @@ class MemBlockWebUIService:
                     await self.reset()
                 elif command == "step":
                     await self.step_once(message.get("cycles"))
+                elif command == "set_scenario":
+                    scenario_name = message.get("scenario")
+                    if not isinstance(scenario_name, str):
+                        await self._send_json(
+                            websocket,
+                            {"type": "error", "message": "missing scenario name"},
+                        )
+                        continue
+                    try:
+                        await self.set_scenario(scenario_name)
+                    except KeyError:
+                        await self._send_json(
+                            websocket,
+                            {"type": "error", "message": f"unknown scenario: {scenario_name}"},
+                        )
                 else:
                     await self._send_json(
                         websocket,
