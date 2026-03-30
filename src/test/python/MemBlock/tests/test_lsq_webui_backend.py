@@ -139,6 +139,25 @@ def _make_raw(cycle: int = 0):
             }
             for idx in range(3)
         ],
+        "writeback_lanes": [
+            {
+                "lane": idx,
+                "valid": 0,
+                "ready": 1,
+                "rob_idx": _empty_lane_ptr(),
+                "lq_idx": _empty_lane_ptr(),
+                "sq_idx": _empty_lane_ptr(),
+                "pdest": 0,
+                "data": 0,
+                "int_wen": 0,
+                "is_from_load_unit": 0,
+                "is_mmio": 0,
+                "is_ncio": 0,
+                "paddr": 0,
+                "vaddr": 0,
+            }
+            for idx in range(7)
+        ],
         "perf_values": [0] * 36,
     }
 
@@ -292,6 +311,41 @@ def test_lsq_webui_tracker_reset_snapshot_clears_shadow_queues_and_counts():
     assert tracker.replay_lanes == []
     assert tracker.ldu_lanes == []
     assert tracker.nc_out_lanes == []
+
+
+def test_lsq_webui_tracker_builds_trace_payload_and_quality_metadata():
+    tracker = LsqStateTracker()
+
+    first = _make_raw(cycle=1)
+    first["enq"]["need_alloc"][0] = 0x1
+    first["enq"]["req"][0]["valid"] = 1
+    first["enq"]["req"][0]["rob_idx"] = {"flag": 1, "value": 9}
+    first["enq"]["resp"][0]["lq_idx"] = {"flag": 0, "value": 5}
+    tracker.update(first)
+
+    second = _make_raw(cycle=2)
+    second["replay_lanes"][0]["valid"] = 1
+    second["replay_lanes"][0]["ready"] = 1
+    second["replay_lanes"][0]["sched_index"] = 15
+    second["replay_lanes"][0]["lq_idx"] = {"flag": 0, "value": 5}
+    second["replay_lanes"][0]["rob_idx"] = {"flag": 1, "value": 9}
+    second["writeback_lanes"][1]["valid"] = 1
+    second["writeback_lanes"][1]["rob_idx"] = {"flag": 1, "value": 9}
+    second["writeback_lanes"][1]["lq_idx"] = {"flag": 0, "value": 5}
+    second["writeback_lanes"][1]["pdest"] = 23
+    tracker.update(second)
+
+    traces_payload = tracker.topic_payload("traces", {"trace_filters": {"lq_idx": "5"}})
+    assert traces_payload["data_quality"] == "mixed"
+    assert traces_payload["total_matching"] >= 1
+    trace = traces_payload["active_requests"][0]
+    assert trace["identifiers"]["lq_idx"] == {"flag": 0, "value": 5}
+    assert {event["type"] for event in trace["events"]} >= {"enq", "replay_fire", "writeback"}
+    assert trace["completed"] is True
+
+    vlq_payload = tracker.topic_payload("vlq", {"running": False, "step_cycles": 1, "tick_ms": 100, "last_raw": second})
+    assert vlq_payload["data_quality"] == "derived"
+    assert vlq_payload["degraded_reasons"]
 
 
 def test_lsq_webui_topic_publisher_only_publishes_on_change():

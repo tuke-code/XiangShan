@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import sys
 from collections import defaultdict
@@ -39,7 +40,7 @@ from lsq_webui_backend import LsqStateTracker, SignalReader, TopicPublisher
 
 _HERE = Path(__file__).resolve().parent
 _WEBUI_ROOT = _HERE / "webui"
-_TOPICS = {"overview", "vlq", "sq", "replay", "violations", "perf", "events"}
+_TOPICS = {"overview", "vlq", "sq", "replay", "violations", "perf", "events", "traces"}
 
 _TESTS_PATH = _HERE / "tests"
 if str(_TESTS_PATH) not in sys.path:
@@ -172,6 +173,22 @@ class MemBlockWebUIService:
         self._scenario_error: str | None = None
         self._scenario_generation = 0
         self._scenario_name = "random_io"
+        self.trace_filters: dict[str, str] = {}
+        self.run_until_condition: dict[str, str] | None = None
+        self.run_until_hit: dict[str, Any] | None = None
+
+    def _normalize_filters(self, filters: dict[str, Any] | None) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        if not isinstance(filters, dict):
+            return normalized
+        for key in ("sched_index", "lq_idx", "rob_idx", "cause", "source", "state"):
+            value = filters.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                normalized[key] = text
+        return normalized
 
     def service_state(self) -> dict[str, Any]:
         return {
@@ -183,6 +200,9 @@ class MemBlockWebUIService:
             "scenario_started": self._scenario_started,
             "scenario_done": self._scenario_done,
             "scenario_error": self._scenario_error,
+            "trace_filters": copy.deepcopy(self.trace_filters),
+            "run_until_condition": copy.deepcopy(self.run_until_condition),
+            "run_until_hit": copy.deepcopy(self.run_until_hit),
         }
 
     async def initialize(self) -> None:
@@ -258,6 +278,20 @@ class MemBlockWebUIService:
         self.cycle += 1
         self.last_raw = self.reader.read(self.cycle)
         self.tracker.update(self.last_raw)
+        if self.run_until_condition:
+            matches = self.tracker.matching_traces(self.run_until_condition, only_pending=True)
+            if matches:
+                trace = self.tracker._public_trace(matches[0])
+                self.running = False
+                self._driver_run_event.clear()
+                self._clear_driver_step_budget()
+                self.run_until_hit = {
+                    "cycle": self.cycle,
+                    "trace_id": trace["trace_id"],
+                    "label": trace["label"],
+                    "status": trace["status"],
+                }
+                self.run_until_condition = None
         self._driver_sample_dirty = True
         if self._driver_flush_task is None or self._driver_flush_task.done():
             self._driver_flush_task = asyncio.create_task(self._flush_driver_updates(generation))
@@ -300,6 +334,32 @@ class MemBlockWebUIService:
         if changed:
             await self.reset()
             return
+        await self._broadcast_control_state()
+
+    async def set_filters(self, filters: dict[str, Any] | None) -> None:
+        async with self._command_lock:
+            self.trace_filters = self._normalize_filters(filters)
+        await self._broadcast_all(force=True)
+        await self._broadcast_control_state()
+
+    async def clear_filters(self) -> None:
+        await self.set_filters({})
+
+    async def run_until(self, filters: dict[str, Any] | None = None) -> None:
+        async with self._command_lock:
+            actual_filters = self._normalize_filters(filters)
+            if not actual_filters:
+                actual_filters = copy.deepcopy(self.trace_filters)
+            if not actual_filters:
+                actual_filters = {"state": "writeback"}
+            self.run_until_condition = actual_filters
+            self.run_until_hit = None
+            if self._scenario_done:
+                self.running = False
+            else:
+                await self._ensure_scenario_started_locked()
+                self.running = True
+                self._driver_run_event.set()
         await self._broadcast_control_state()
 
     async def _finish_scenario(
@@ -350,6 +410,8 @@ class MemBlockWebUIService:
             self._scenario_started = False
             self._scenario_done = False
             self._scenario_error = None
+            self.run_until_hit = None
+            self.run_until_condition = None
             self.cycle = 0
             self.env.reset(cycles=self.reset_cycles, settle_cycles=1)
             self.last_raw = self.reader.read(self.cycle)
@@ -367,6 +429,7 @@ class MemBlockWebUIService:
                 self.running = False
                 self._driver_run_event.clear()
                 self._grant_driver_step_budget(actual_cycles)
+                self.run_until_hit = None
         await self._broadcast_control_state()
 
     async def play(self) -> None:
@@ -377,6 +440,7 @@ class MemBlockWebUIService:
                 await self._ensure_scenario_started_locked()
                 self.running = True
                 self._driver_run_event.set()
+                self.run_until_hit = None
         await self._broadcast_control_state()
 
     async def pause(self) -> None:
@@ -407,6 +471,9 @@ class MemBlockWebUIService:
             "scenario_started": self._scenario_started,
             "scenario_done": self._scenario_done,
             "scenario_error": self._scenario_error,
+            "trace_filters": copy.deepcopy(self.trace_filters),
+            "run_until_condition": copy.deepcopy(self.run_until_condition),
+            "run_until_hit": copy.deepcopy(self.run_until_hit),
         }
         if self._scenario_error is not None:
             payload["error"] = self._scenario_error
@@ -478,6 +545,8 @@ class MemBlockWebUIService:
                     await self.reset()
                 elif command == "step":
                     await self.step_once(message.get("cycles"))
+                elif command == "step_n":
+                    await self.step_once(message.get("cycles"))
                 elif command == "set_scenario":
                     scenario_name = message.get("scenario")
                     if not isinstance(scenario_name, str):
@@ -493,6 +562,12 @@ class MemBlockWebUIService:
                             websocket,
                             {"type": "error", "message": f"unknown scenario: {scenario_name}"},
                         )
+                elif command == "set_filters":
+                    await self.set_filters(message.get("filters"))
+                elif command == "clear_filters":
+                    await self.clear_filters()
+                elif command == "run_until":
+                    await self.run_until(message.get("filters"))
                 else:
                     await self._send_json(
                         websocket,

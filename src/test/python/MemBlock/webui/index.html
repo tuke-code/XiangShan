@@ -220,6 +220,20 @@
             transform: translateY(0);
         }
 
+        .trace-item {
+            border-radius: 14px;
+            border: 1px solid rgba(148, 163, 184, 0.16);
+            background: rgba(10, 23, 37, 0.84);
+            padding: 0.75rem;
+            cursor: pointer;
+            transition: border-color 0.12s ease, background 0.12s ease;
+        }
+
+        .trace-item.active {
+            border-color: rgba(77, 163, 255, 0.6);
+            background: rgba(18, 41, 64, 0.96);
+        }
+
         @media (max-width: 1024px) {
             .desktop-grid {
                 grid-template-columns: 1fr;
@@ -265,6 +279,39 @@
                             <button onclick="pauseSimulation()" class="rounded-xl bg-slate-700 px-4 py-2 text-sm transition hover:bg-slate-600">暂停</button>
                             <button onclick="stepSimulation()" class="rounded-xl bg-emerald-600 px-4 py-2 text-sm transition hover:bg-emerald-500">单步</button>
                             <button onclick="resetSimulation()" class="rounded-xl bg-rose-600 px-4 py-2 text-sm transition hover:bg-rose-500">复位</button>
+                        </div>
+                        <div class="mt-3 grid gap-2">
+                            <div class="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                                <input id="step-count" type="number" min="1" value="8" class="rounded-xl border border-slate-600 bg-slate-900/70 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-sky-400" />
+                                <button onclick="stepSimulationN()" class="rounded-xl bg-emerald-700 px-3 py-2 text-sm transition hover:bg-emerald-600">步进 N</button>
+                                <button onclick="runUntilFiltered()" class="rounded-xl bg-violet-700 px-3 py-2 text-sm transition hover:bg-violet-600">Run Until</button>
+                            </div>
+                            <div class="grid gap-2 sm:grid-cols-2">
+                                <input id="filter-sched" type="text" placeholder="schedIndex" class="rounded-xl border border-slate-600 bg-slate-900/70 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-sky-400" />
+                                <input id="filter-lq" type="text" placeholder="lqIdx" class="rounded-xl border border-slate-600 bg-slate-900/70 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-sky-400" />
+                                <input id="filter-rob" type="text" placeholder="robIdx" class="rounded-xl border border-slate-600 bg-slate-900/70 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-sky-400" />
+                                <select id="filter-cause" class="rounded-xl border border-slate-600 bg-slate-900/70 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-sky-400">
+                                    <option value="">cause: all</option>
+                                    <option value="TM">TM</option>
+                                    <option value="RAW">RAW</option>
+                                    <option value="DM">DM</option>
+                                    <option value="MA">MA</option>
+                                    <option value="NC">NC</option>
+                                </select>
+                            </div>
+                            <div class="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                                <select id="filter-source" class="rounded-xl border border-slate-600 bg-slate-900/70 px-3 py-2 text-sm text-slate-200 outline-none transition focus:border-sky-400">
+                                    <option value="">source: all</option>
+                                    <option value="enq">enq</option>
+                                    <option value="replay">replay</option>
+                                    <option value="ldu">ldu</option>
+                                    <option value="nc">nc</option>
+                                    <option value="writeback">writeback</option>
+                                    <option value="retire">retire</option>
+                                </select>
+                                <button onclick="applyTraceFilters()" class="rounded-xl bg-slate-700 px-3 py-2 text-sm transition hover:bg-slate-600">应用过滤</button>
+                                <button onclick="clearTraceFilters()" class="rounded-xl bg-slate-800 px-3 py-2 text-sm transition hover:bg-slate-700">清空过滤</button>
+                            </div>
                         </div>
                         <div class="mt-3 text-xs text-slate-500" id="control-meta">waiting control endpoint</div>
                     </div>
@@ -486,6 +533,29 @@
         <section class="panel p-5">
             <div class="panel-title">
                 <div>
+                    <h2 class="text-lg font-semibold">Trace Timeline</h2>
+                    <div class="mt-1 text-xs text-slate-400">按 `sched/lq/rob` 聚合 enq/replay/nc/writeback/retire 生命周期</div>
+                </div>
+                <span class="status-pill disconnected" id="status-traces">traces</span>
+            </div>
+            <div class="mt-4 grid gap-4 lg:grid-cols-[0.95fr_1.45fr]">
+                <div class="rounded-2xl border border-slate-700/50 bg-slate-950/35 p-3">
+                    <div class="flex items-center justify-between">
+                        <div class="text-xs uppercase tracking-[0.2em] text-slate-500">Active Requests</div>
+                        <div class="mono text-xs text-slate-400" id="trace-summary">waiting traces endpoint</div>
+                    </div>
+                    <div class="mt-3 space-y-2 max-h-[22rem] overflow-y-auto" id="trace-list"></div>
+                </div>
+                <div class="rounded-2xl border border-slate-700/50 bg-slate-950/35 p-3">
+                    <div class="text-xs uppercase tracking-[0.2em] text-slate-500">Selected Timeline</div>
+                    <div class="mt-3 max-h-[22rem] overflow-y-auto space-y-2" id="trace-detail"></div>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel p-5">
+            <div class="panel-title">
+                <div>
                     <h2 class="text-lg font-semibold">事件日志</h2>
                     <div class="mt-1 text-xs text-slate-400">由 `/ws/events` 单独增量推送</div>
                 </div>
@@ -500,15 +570,17 @@
     <div id="detail-tooltip" class="detail-tooltip hidden"></div>
 
     <script>
-        const ENDPOINTS = ['overview', 'vlq', 'sq', 'replay', 'violations', 'perf', 'events'];
+        const ENDPOINTS = ['overview', 'vlq', 'sq', 'replay', 'violations', 'perf', 'events', 'traces'];
         const PAGE = {
-            control: { connected: false, running: false, cycle: 0, tickMs: 100, scenarioName: 'random_io', scenarios: [] },
+            control: { connected: false, running: false, cycle: 0, tickMs: 100, scenarioName: 'random_io', scenarios: [], traceFilters: {}, runUntilCondition: null, runUntilHit: null },
             overview: null,
             vlq: null,
             sq: null,
             replay: null,
             violations: null,
             perf: null,
+            traces: null,
+            selectedTraceId: null,
             eventLog: [],
             connections: {},
             sockets: {}
@@ -586,7 +658,23 @@
         function pauseSimulation() { sendControl('pause'); }
         function resetSimulation() { sendControl('reset'); }
         function stepSimulation() { sendControl('step', { cycles: 1 }); }
+        function stepSimulationN() {
+            const cycles = Number(document.getElementById('step-count').value || 1);
+            sendControl('step_n', { cycles: Math.max(1, cycles) });
+        }
         function changeScenario(value) { sendControl('set_scenario', { scenario: value }); }
+        function readTraceFilters() {
+            return {
+                sched_index: document.getElementById('filter-sched').value.trim(),
+                lq_idx: document.getElementById('filter-lq').value.trim(),
+                rob_idx: document.getElementById('filter-rob').value.trim(),
+                cause: document.getElementById('filter-cause').value,
+                source: document.getElementById('filter-source').value,
+            };
+        }
+        function applyTraceFilters() { sendControl('set_filters', { filters: readTraceFilters() }); }
+        function clearTraceFilters() { sendControl('clear_filters'); }
+        function runUntilFiltered() { sendControl('run_until', { filters: readTraceFilters() }); }
 
         function renderScenarioSelector() {
             const select = document.getElementById('scenario-select');
@@ -609,15 +697,35 @@
             select.disabled = !PAGE.control.connected;
         }
 
+        function renderFilterInputs() {
+            const filters = PAGE.control.traceFilters || {};
+            document.getElementById('filter-sched').value = filters.sched_index || '';
+            document.getElementById('filter-lq').value = filters.lq_idx || '';
+            document.getElementById('filter-rob').value = filters.rob_idx || '';
+            document.getElementById('filter-cause').value = filters.cause || '';
+            document.getElementById('filter-source').value = filters.source || '';
+        }
+
         function renderControlMeta(extra = null) {
             document.getElementById('run-state').textContent = PAGE.control.running ? 'Running' : 'Paused';
             document.getElementById('clock-cycle').textContent = PAGE.control.cycle || 0;
             renderScenarioSelector();
+            renderFilterInputs();
+            const filterSummary = Object.entries(PAGE.control.traceFilters || {})
+                .map(([key, value]) => `${key}=${value}`)
+                .join(', ');
             document.getElementById('control-meta').textContent = PAGE.control.connected
-                ? `scenario=${PAGE.control.scenarioName}, tick=${PAGE.control.tickMs}ms`
+                ? `scenario=${PAGE.control.scenarioName}, tick=${PAGE.control.tickMs}ms${filterSummary ? `, filter=${filterSummary}` : ''}`
                 : 'waiting control endpoint';
             if (extra && extra.error) {
                 document.getElementById('control-meta').textContent = `error: ${extra.error}`;
+                return;
+            }
+            if (PAGE.control.runUntilCondition) {
+                document.getElementById('control-meta').textContent += `, runUntil=${Object.entries(PAGE.control.runUntilCondition).map(([key, value]) => `${key}=${value}`).join(', ')}`;
+            }
+            if (PAGE.control.runUntilHit) {
+                document.getElementById('control-meta').textContent += `, hit=${PAGE.control.runUntilHit.label}@${PAGE.control.runUntilHit.cycle}`;
             }
         }
 
@@ -632,6 +740,15 @@
             return payload && Number.isFinite(payload.size) ? payload.size : fallback;
         }
 
+        function qualityText(payload) {
+            if (!payload) {
+                return 'unknown';
+            }
+            const quality = payload.data_quality || 'unknown';
+            const reasons = payload.degraded_reasons || [];
+            return reasons.length ? `[${quality}] ${reasons[0]}` : `[${quality}]`;
+        }
+
         function renderOverview() {
             if (!PAGE.overview) {
                 return;
@@ -643,7 +760,7 @@
             document.getElementById('overview-sq-empty-full').textContent = `${overview.sq_empty} / ${overview.sq_full}`;
             document.getElementById('overview-rar-count').textContent = overview.rar_valid_count;
             document.getElementById('overview-no-uops').textContent = overview.no_uops_issued;
-            document.getElementById('overview-note').textContent = PAGE.overview.degraded_features.join(', ');
+            document.getElementById('overview-note').textContent = `${qualityText(PAGE.overview)} ${PAGE.overview.degraded_features.join(', ')}`.trim();
 
             const vlqUsed = PAGE.vlq ? PAGE.vlq.allocated : 0;
             const lqrUsed = PAGE.replay ? PAGE.replay.allocated : 0;
@@ -799,9 +916,7 @@
             document.getElementById('vlq-enq-rate').textContent = PAGE.vlq.stats.enq;
             document.getElementById('vlq-deq-rate').textContent = PAGE.vlq.stats.deq;
             document.getElementById('vlq-avg-lat').textContent = `${PAGE.vlq.stats.avg_latency} cycles`;
-            document.getElementById('vlq-summary').textContent = PAGE.vlq.is_shadow
-                ? 'shadow reconstruction from lsq i/o'
-                : 'direct';
+            document.getElementById('vlq-summary').textContent = qualityText(PAGE.vlq);
             renderOverview();
         }
 
@@ -817,9 +932,7 @@
             document.getElementById('sq-fwd-succ').textContent = PAGE.sq.stats.fwd_succ;
             document.getElementById('sq-mmio').textContent = PAGE.sq.stats.mmio;
             document.getElementById('sq-nc').textContent = PAGE.sq.stats.nc;
-            document.getElementById('sq-summary').textContent = PAGE.sq.is_shadow
-                ? 'shadow reconstruction from lsq i/o'
-                : 'direct';
+            document.getElementById('sq-summary').textContent = qualityText(PAGE.sq);
             renderOverview();
         }
 
@@ -831,7 +944,7 @@
                 <div class="mono text-sm font-bold">${entry.index}</div>
                 <div class="mt-1 text-[10px] uppercase">${entry.cause || '--'}</div>
             `, (entry) => formatQueueDetail(entry.detail));
-            document.getElementById('lqr-summary').textContent = `replay_all=${PAGE.replay.replay_all}, topdown=${PAGE.replay.topdown.rob_head_tlb_replay}`;
+            document.getElementById('lqr-summary').textContent = `${qualityText(PAGE.replay)} replay_all=${PAGE.replay.replay_all}, topdown=${PAGE.replay.topdown.rob_head_tlb_replay}`;
 
             const causeContainer = document.getElementById('replay-causes');
             causeContainer.innerHTML = '';
@@ -878,8 +991,8 @@
             document.getElementById('lqraw-allocated').textContent = raw.stats.allocated;
             document.getElementById('lqraw-waiting').textContent = raw.stats.waiting;
             document.getElementById('lqraw-violations').textContent = raw.stats.violations;
-            document.getElementById('lqrar-summary').textContent = 'aggregated + release shadow';
-            document.getElementById('lqraw-summary').textContent = 'lane-derived waiting shadow';
+            document.getElementById('lqrar-summary').textContent = qualityText(PAGE.violations);
+            document.getElementById('lqraw-summary').textContent = qualityText(PAGE.violations);
 
             const rarEntries = document.getElementById('lqrar-entries');
             rarEntries.innerHTML = '';
@@ -904,6 +1017,66 @@
             });
 
             renderOverview();
+        }
+
+        function renderTraces() {
+            if (!PAGE.traces) {
+                return;
+            }
+            const summary = document.getElementById('trace-summary');
+            summary.textContent = `${qualityText(PAGE.traces)} total=${PAGE.traces.total_matching || 0}`;
+
+            const list = document.getElementById('trace-list');
+            list.innerHTML = '';
+            const traces = PAGE.traces.active_requests || [];
+            if (!traces.length) {
+                list.innerHTML = '<div class="text-sm text-slate-500">no matching traces</div>';
+            }
+            if (!PAGE.selectedTraceId || !traces.some((trace) => trace.trace_id === PAGE.selectedTraceId)) {
+                PAGE.selectedTraceId = traces[0] ? traces[0].trace_id : null;
+            }
+            traces.forEach((trace) => {
+                const item = document.createElement('button');
+                item.className = `trace-item w-full text-left ${trace.trace_id === PAGE.selectedTraceId ? 'active' : ''}`;
+                item.innerHTML = `
+                    <div class="flex items-center justify-between gap-2">
+                        <div class="mono text-sm text-sky-300">${trace.label}</div>
+                        <div class="text-[11px] text-slate-500">${trace.last_cycle}</div>
+                    </div>
+                    <div class="mt-1 text-xs text-slate-300">${trace.status} / ${trace.source || '--'} / ${trace.cause || '--'}</div>
+                `;
+                item.addEventListener('click', () => {
+                    PAGE.selectedTraceId = trace.trace_id;
+                    renderTraces();
+                });
+                list.appendChild(item);
+            });
+
+            const detail = document.getElementById('trace-detail');
+            detail.innerHTML = '';
+            const selected = traces.find((trace) => trace.trace_id === PAGE.selectedTraceId);
+            if (!selected) {
+                detail.innerHTML = '<div class="text-sm text-slate-500">select a trace</div>';
+                return;
+            }
+            const header = document.createElement('div');
+            header.className = 'mini-tile';
+            header.innerHTML = `
+                <div class="mono text-sm text-sky-300">${selected.label}</div>
+                <div class="mt-2 text-xs text-slate-400">status=${selected.status}, source=${selected.source || '--'}, cause=${selected.cause || '--'}</div>
+                <div class="mt-1 text-xs text-slate-500">first=${selected.first_cycle}, last=${selected.last_cycle}</div>
+            `;
+            detail.appendChild(header);
+            selected.events.forEach((event) => {
+                const line = document.createElement('div');
+                line.className = `log-line ${event.type && event.type.includes('replay') ? 'replay' : event.type === 'writeback' ? 'enqueue' : ''}`;
+                line.innerHTML = `
+                    <div class="mono text-[11px] text-slate-500">[${String(event.cycle).padStart(6, '0')}] ${event.type}</div>
+                    <div class="mt-1">${event.summary}</div>
+                    <div class="mt-1 text-[11px] text-slate-500">${formatQueueDetail(event.detail).replaceAll('\n', ' | ')}</div>
+                `;
+                detail.appendChild(line);
+            });
         }
 
         function initCharts() {
@@ -1085,6 +1258,9 @@
                     PAGE.control.tickMs = payload.tick_ms || 100;
                     PAGE.control.scenarioName = payload.scenario_name || PAGE.control.scenarioName;
                     PAGE.control.scenarios = payload.scenarios || PAGE.control.scenarios;
+                    PAGE.control.traceFilters = payload.trace_filters || {};
+                    PAGE.control.runUntilCondition = payload.run_until_condition || null;
+                    PAGE.control.runUntilHit = payload.run_until_hit || null;
                     renderControlMeta(payload);
                     renderConnectionPills();
                 }
@@ -1130,6 +1306,12 @@
             createSocket('events', '/ws/events', (payload) => {
                 setConnection('events', true);
                 addEvents(payload.events || [], !payload.backlog);
+            });
+
+            createSocket('traces', '/ws/traces', (payload) => {
+                PAGE.traces = payload;
+                setConnection('traces', true);
+                renderTraces();
             });
         }
 

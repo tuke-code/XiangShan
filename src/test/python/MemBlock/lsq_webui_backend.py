@@ -28,9 +28,12 @@ REPLAY_PORTS = 3
 STORE_ADDR_PORTS = 2
 STORE_DATA_PORTS = 2
 LOAD_PIPELINE_WIDTH = 3
+INT_WRITEBACK_PORTS = 7
 PERF_SAMPLE_PERIOD = 8
 HISTORY_LIMIT = 48
 EVENT_BACKLOG_LIMIT = 200
+TRACE_EVENT_LIMIT = 16
+TRACE_RECORD_LIMIT = 96
 
 
 def _json_key(payload: dict[str, Any]) -> str:
@@ -219,6 +222,27 @@ class SignalReader:
             )
 
         perf_values = [self._read(f"MemBlock_inner_lsq_io_perf_{idx}_value") for idx in range(36)]
+        writeback_lanes = []
+        for idx in range(INT_WRITEBACK_PORTS):
+            prefix = f"io_mem_to_ooo_intWriteback_{idx}_0"
+            writeback_lanes.append(
+                {
+                    "lane": idx,
+                    "valid": self._read(f"{prefix}_valid"),
+                    "ready": self._read(f"{prefix}_ready"),
+                    "rob_idx": self._read_ptr(f"{prefix}_bits_robIdx"),
+                    "lq_idx": self._read_ptr(f"{prefix}_bits_lqIdx"),
+                    "sq_idx": self._read_ptr(f"{prefix}_bits_sqIdx"),
+                    "pdest": self._read(f"{prefix}_bits_pdest"),
+                    "data": self._read(f"{prefix}_bits_data_0"),
+                    "int_wen": self._read(f"{prefix}_bits_intWen"),
+                    "is_from_load_unit": self._read(f"{prefix}_bits_isFromLoadUnit"),
+                    "is_mmio": self._read(f"{prefix}_bits_debug_isMMIO"),
+                    "is_ncio": self._read(f"{prefix}_bits_debug_isNCIO"),
+                    "paddr": self._read(f"{prefix}_bits_debug_paddr"),
+                    "vaddr": self._read(f"{prefix}_bits_debug_vaddr"),
+                }
+            )
 
         return {
             "cycle": cycle,
@@ -272,6 +296,7 @@ class SignalReader:
             "ldu_lanes": ldu_lanes,
             "nc_out_lanes": nc_out_lanes,
             "perf_values": perf_values,
+            "writeback_lanes": writeback_lanes,
         }
 
 
@@ -337,6 +362,10 @@ class LsqStateTracker:
         self.topdown = {}
         self.events = deque(maxlen=EVENT_BACKLOG_LIMIT)
         self.pending_events = []
+        self.trace_records: dict[str, dict[str, Any]] = {}
+        self.trace_order = deque()
+        self.trace_aliases: dict[str, str] = {}
+        self.pending_trace_keys: set[str] = set()
         self.history = {
             "cycles": [],
             "load_throughput": [],
@@ -365,6 +394,176 @@ class LsqStateTracker:
             event["payload"] = payload
         self.events.appendleft(event)
         self.pending_events.append(event)
+
+    def _ptr_alias(self, name: str, ptr: dict[str, Any] | None) -> str | None:
+        if ptr is None:
+            return None
+        if "flag" not in ptr or "value" not in ptr:
+            return None
+        return f"{name}:{ptr['flag']}:{ptr['value']}"
+
+    def _trace_alias_candidates(self, detail: dict[str, Any]) -> list[str]:
+        aliases = []
+        sched_index = detail.get("sched_index")
+        if sched_index is not None and int(sched_index) >= 0:
+            aliases.append(f"sched:{int(sched_index)}")
+        for name in ("lq_idx", "sq_idx", "rob_idx"):
+            alias = self._ptr_alias(name, detail.get(name))
+            if alias is not None:
+                aliases.append(alias)
+        rob_idx = detail.get("rob_idx")
+        uop_idx = detail.get("uop_idx")
+        if rob_idx is not None and "flag" in rob_idx and "value" in rob_idx and uop_idx is not None:
+            aliases.append(f"rob_uop:{rob_idx['flag']}:{rob_idx['value']}:{uop_idx}")
+        return aliases
+
+    def _preferred_trace_id(self, detail: dict[str, Any]) -> str:
+        aliases = self._trace_alias_candidates(detail)
+        if aliases:
+            return aliases[0]
+        return f"cycle:{self.cycle}:{len(self.trace_records)}"
+
+    def _merge_trace_detail(self, target: dict[str, Any], detail: dict[str, Any]) -> None:
+        for key, value in detail.items():
+            if value is not None:
+                target[key] = copy.deepcopy(value)
+
+    def _get_or_create_trace(self, detail: dict[str, Any]) -> dict[str, Any]:
+        trace_id = None
+        for alias in self._trace_alias_candidates(detail):
+            trace_id = self.trace_aliases.get(alias)
+            if trace_id is not None and trace_id in self.trace_records:
+                break
+        if trace_id is None or trace_id not in self.trace_records:
+            trace_id = self._preferred_trace_id(detail)
+            trace = {
+                "trace_id": trace_id,
+                "first_cycle": self.cycle,
+                "last_cycle": self.cycle,
+                "status": "new",
+                "source": detail.get("source"),
+                "cause": detail.get("cause"),
+                "completed": False,
+                "identifiers": {},
+                "detail": {},
+                "events": [],
+            }
+            self.trace_records[trace_id] = trace
+            self.trace_order.append(trace_id)
+            while len(self.trace_records) > TRACE_RECORD_LIMIT:
+                oldest = self.trace_order.popleft()
+                self.trace_records.pop(oldest, None)
+                self.trace_aliases = {alias: key for alias, key in self.trace_aliases.items() if key != oldest}
+        trace = self.trace_records[trace_id]
+        trace["last_cycle"] = self.cycle
+        trace["source"] = detail.get("source") or trace.get("source")
+        trace["cause"] = detail.get("cause") or trace.get("cause")
+        identifiers = trace["identifiers"]
+        for key in ("sched_index", "lq_idx", "sq_idx", "rob_idx", "uop_idx", "pdest"):
+            if detail.get(key) is not None:
+                identifiers[key] = copy.deepcopy(detail[key])
+        self._merge_trace_detail(trace["detail"], detail)
+        for alias in self._trace_alias_candidates(trace["detail"]):
+            self.trace_aliases[alias] = trace_id
+        return trace
+
+    def _append_trace_event(self, detail: dict[str, Any], event_type: str, status: str, summary: str) -> None:
+        trace = self._get_or_create_trace(detail)
+        signature = (event_type, summary, detail.get("source"), detail.get("cause"), self.cycle)
+        if trace["events"]:
+            last_event = trace["events"][-1]
+            if tuple(last_event.get("signature", ())) == signature:
+                return
+        event = {
+            "cycle": self.cycle,
+            "type": event_type,
+            "status": status,
+            "source": detail.get("source"),
+            "cause": detail.get("cause"),
+            "summary": summary,
+            "detail": copy.deepcopy(detail),
+            "signature": signature,
+        }
+        trace["events"].append(event)
+        trace["events"] = trace["events"][-TRACE_EVENT_LIMIT:]
+        trace["status"] = status
+        if status in {"writeback", "retired"}:
+            trace["completed"] = True
+        self.pending_trace_keys.add(trace["trace_id"])
+
+    def _trace_label(self, trace: dict[str, Any]) -> str:
+        identifiers = trace.get("identifiers", {})
+        sched = identifiers.get("sched_index")
+        if sched is not None:
+            return f"sched {sched}"
+        lq_idx = identifiers.get("lq_idx")
+        if isinstance(lq_idx, dict):
+            return f"lq {lq_idx.get('value', '--')}"
+        rob_idx = identifiers.get("rob_idx")
+        if isinstance(rob_idx, dict):
+            suffix = identifiers.get("uop_idx")
+            if suffix is not None:
+                return f"rob {rob_idx.get('value', '--')}.{suffix}"
+            return f"rob {rob_idx.get('value', '--')}"
+        return trace["trace_id"]
+
+    def _trace_matches_filters(self, trace: dict[str, Any], filters: dict[str, Any] | None) -> bool:
+        if not filters:
+            return True
+        identifiers = trace.get("identifiers", {})
+        detail = trace.get("detail", {})
+        sched = filters.get("sched_index")
+        if sched and str(identifiers.get("sched_index")) != str(sched):
+            return False
+        lq_idx = filters.get("lq_idx")
+        if lq_idx and str((identifiers.get("lq_idx") or {}).get("value")) != str(lq_idx):
+            return False
+        rob_idx = filters.get("rob_idx")
+        if rob_idx and str((identifiers.get("rob_idx") or {}).get("value")) != str(rob_idx):
+            return False
+        cause = filters.get("cause")
+        if cause and str(trace.get("cause") or detail.get("cause") or "").lower() != str(cause).lower():
+            return False
+        source = filters.get("source")
+        if source and str(trace.get("source") or detail.get("source") or "").lower() != str(source).lower():
+            return False
+        state = filters.get("state")
+        if state and str(trace.get("status") or "").lower() != str(state).lower():
+            return False
+        return True
+
+    def matching_traces(self, filters: dict[str, Any] | None, only_pending: bool = False) -> list[dict[str, Any]]:
+        records = []
+        pending = self.pending_trace_keys if only_pending else None
+        for trace_id in reversed(self.trace_order):
+            trace = self.trace_records.get(trace_id)
+            if trace is None:
+                continue
+            if pending is not None and trace_id not in pending:
+                continue
+            if self._trace_matches_filters(trace, filters):
+                records.append(trace)
+        return records
+
+    def _public_trace(self, trace: dict[str, Any]) -> dict[str, Any]:
+        events = []
+        for event in trace["events"]:
+            event_view = dict(event)
+            event_view.pop("signature", None)
+            events.append(copy.deepcopy(event_view))
+        return {
+            "trace_id": trace["trace_id"],
+            "label": self._trace_label(trace),
+            "first_cycle": trace["first_cycle"],
+            "last_cycle": trace["last_cycle"],
+            "status": trace["status"],
+            "source": trace.get("source"),
+            "cause": trace.get("cause"),
+            "completed": trace["completed"],
+            "identifiers": copy.deepcopy(trace["identifiers"]),
+            "detail": copy.deepcopy(trace["detail"]),
+            "events": events,
+        }
 
     def _first_cause(self, lane: dict[str, Any]) -> str | None:
         for label in CAUSE_LABELS:
@@ -433,6 +632,7 @@ class LsqStateTracker:
     def update(self, raw: dict[str, Any]) -> None:
         self.cycle = raw["cycle"]
         self.pending_events = []
+        self.pending_trace_keys = set()
         self.overview = copy.deepcopy(raw["overview"])
         self.topdown = copy.deepcopy(raw["debug_topdown"])
         self.perf_values = list(raw["perf_values"])
@@ -474,6 +674,7 @@ class LsqStateTracker:
                         )
                         self.vlq_stats["enq"] += 1
                         self._add_event("enqueue", f"VLQ shadow allocate entry={lq_idx}", {"entry": lq_idx})
+                        self._append_trace_event(entry["request"], "enq", "enqueued", f"enq lane={idx}")
             if need_alloc & 0x2:
                 sq_idx = resp["sq_idx"]["value"]
                 if 0 <= sq_idx < SQ_SIZE:
@@ -499,6 +700,11 @@ class LsqStateTracker:
                     entry["committed"] = True
                     entry["retire_at"] = self.cycle + 1
                     self.vlq_stats["total_latency"] += max(0, self.cycle - entry["age"])
+                    if entry["request"] is not None:
+                        retire_detail = copy.deepcopy(entry["request"])
+                        retire_detail["source"] = "retire"
+                        retire_detail["lq_idx"] = {"flag": 0, "value": idx}
+                        self._append_trace_event(retire_detail, "retire", "retired", f"lq retire entry={idx}")
                 self.vlq_stats["deq"] += 1
                 self._add_event("enqueue", f"VLQ shadow retire entry={idx}", {"entry": idx})
         self._prev_lq_deq_ptr = curr_lq_deq_ptr
@@ -593,6 +799,7 @@ class LsqStateTracker:
             )
             entry["retire_at"] = self.cycle + 2 if lane["valid"] and lane["ready"] else None
             if lane["valid"] and lane["ready"]:
+                self._append_trace_event(replay_lane, "replay_fire", "scheduled", f"replay fire lane={lane['lane']}")
                 self._add_event(
                     "replay",
                     f"Replay lane={lane['lane']} fire schedIndex={lane['sched_index']}",
@@ -612,6 +819,7 @@ class LsqStateTracker:
             lane_view["cause"] = cause
             self.ldu_lanes.append(lane_view)
             if lane["valid"] and lane["is_load_replay"] and cause is not None:
+                self._append_trace_event(lane_view, "ldu_replay", "blocking", f"ldu replay lane={lane['lane']}")
                 self.replay_cause_counts[cause] += 1
                 self._add_event(
                     "replay",
@@ -663,6 +871,12 @@ class LsqStateTracker:
                 self.replay_lanes.append(copy.deepcopy(lane_view))
             if lane["valid"]:
                 self.replay_cause_counts["NC"] += 1
+                self._append_trace_event(
+                    lane_view,
+                    "nc_fire" if lane["ready"] else "nc_wait",
+                    "scheduled" if lane["ready"] else "blocking",
+                    f"nc lane={lane['lane']}",
+                )
             if lane["sched_index"] < 0:
                 continue
             entry_idx = lane["sched_index"] % LQR_SIZE
@@ -729,6 +943,25 @@ class LsqStateTracker:
         if raw["debug_topdown"]["rob_head_load_mshr"]:
             self.replay_cause_counts["DM"] += 1
 
+        for lane in raw.get("writeback_lanes", []):
+            if not lane["valid"]:
+                continue
+            wb_detail = {
+                "source": "writeback",
+                "lane": lane["lane"],
+                "rob_idx": lane["rob_idx"],
+                "lq_idx": lane["lq_idx"],
+                "sq_idx": lane["sq_idx"],
+                "pdest": lane["pdest"],
+                "paddr": lane["paddr"],
+                "vaddr": lane["vaddr"],
+                "int_wen": lane["int_wen"],
+                "is_mmio": lane["is_mmio"],
+                "is_ncio": lane["is_ncio"],
+                "is_from_load_unit": lane["is_from_load_unit"],
+            }
+            self._append_trace_event(wb_detail, "writeback", "writeback", f"wb lane={lane['lane']}")
+
         if self.cycle - self._perf_sample_cycle >= PERF_SAMPLE_PERIOD:
             self.history["cycles"].append(self.cycle)
             self.history["load_throughput"].append(self.vlq_stats["enq"])
@@ -764,7 +997,27 @@ class LsqStateTracker:
         self.pending_events = []
         return events
 
+    def topic_metadata(self, topic: str) -> tuple[str, list[str]]:
+        if topic == "overview":
+            return "direct", []
+        if topic == "vlq":
+            return "derived", ["virtual load queue entries are reconstructed from enq/lqDeqPtr activity"]
+        if topic == "sq":
+            return "derived", ["store queue entries are reconstructed from enq/store addr/store data signals"]
+        if topic == "replay":
+            return "mixed", ["replay entries are aggregated from io_replay/io_ldu_ldin/io_ncOut rather than a direct replay queue state array"]
+        if topic == "violations":
+            return "derived", ["RAR/RAW entries are reconstructed from counters, release and lane side effects"]
+        if topic == "perf":
+            return "mixed", ["perf bars/history mix direct perf counters with derived replay/violation counts"]
+        if topic == "events":
+            return "mixed", ["event stream is synthesized from observed lane activity and shadow queue transitions"]
+        if topic == "traces":
+            return "mixed", ["trace timeline is synthesized from enq/replay/ncOut/writeback/deq observations"]
+        raise KeyError(f"unknown topic {topic}")
+
     def topic_payload(self, topic: str, service_state: dict[str, Any]) -> dict[str, Any]:
+        data_quality, degraded_reasons = self.topic_metadata(topic)
         if topic == "overview":
             return {
                 "cycle": self.cycle,
@@ -772,6 +1025,8 @@ class LsqStateTracker:
                 "step_cycles": service_state["step_cycles"],
                 "tick_ms": service_state["tick_ms"],
                 "overview": self.overview,
+                "data_quality": data_quality,
+                "degraded_reasons": degraded_reasons,
                 "degraded_features": ["vlq-shadow", "sq-shadow", "violations-shadow"],
             }
         if topic == "vlq":
@@ -785,6 +1040,8 @@ class LsqStateTracker:
                 "size": VLQ_SIZE,
                 "allocated": allocated,
                 "entries": copy.deepcopy(self.vlq_entries),
+                "data_quality": data_quality,
+                "degraded_reasons": degraded_reasons,
                 "stats": {
                     "enq": self.vlq_stats["enq"],
                     "deq": self.vlq_stats["deq"],
@@ -799,6 +1056,8 @@ class LsqStateTracker:
                 "size": SQ_SIZE,
                 "allocated": allocated,
                 "entries": copy.deepcopy(self.sq_entries),
+                "data_quality": data_quality,
+                "degraded_reasons": degraded_reasons,
                 "stats": copy.deepcopy(self.sq_stats),
             }
         if topic == "replay":
@@ -811,6 +1070,8 @@ class LsqStateTracker:
                 "lanes": copy.deepcopy(self.replay_lanes),
                 "ldu_lanes": copy.deepcopy(self.ldu_lanes),
                 "nc_out_lanes": copy.deepcopy(self.nc_out_lanes),
+                "data_quality": data_quality,
+                "degraded_reasons": degraded_reasons,
                 "cause_counts": copy.deepcopy(self.replay_cause_counts),
                 "topdown": copy.deepcopy(self.topdown),
                 "replay_all": service_state["last_raw"].get("tlb_hint", {}).get("replay_all", 0) if service_state["last_raw"] else 0,
@@ -819,6 +1080,8 @@ class LsqStateTracker:
             return {
                 "cycle": self.cycle,
                 "is_degraded": True,
+                "data_quality": data_quality,
+                "degraded_reasons": degraded_reasons,
                 "rar": {
                     "size": LQRAR_SIZE,
                     "entries": copy.deepcopy(self.rar_entries),
@@ -835,6 +1098,8 @@ class LsqStateTracker:
             return {
                 "cycle": self.cycle,
                 "values": list(self.perf_values),
+                "data_quality": data_quality,
+                "degraded_reasons": degraded_reasons,
                 "history": copy.deepcopy(self.history),
                 "bars": {
                     "rar": self.rar_stats["violations"],
@@ -847,7 +1112,20 @@ class LsqStateTracker:
         if topic == "events":
             return {
                 "cycle": self.cycle,
+                "data_quality": data_quality,
+                "degraded_reasons": degraded_reasons,
                 "events": self.consume_pending_events(),
+            }
+        if topic == "traces":
+            filters = copy.deepcopy(service_state.get("trace_filters") or {})
+            traces = [self._public_trace(trace) for trace in self.matching_traces(filters)]
+            return {
+                "cycle": self.cycle,
+                "filters": filters,
+                "data_quality": data_quality,
+                "degraded_reasons": degraded_reasons,
+                "active_requests": traces[:40],
+                "total_matching": len(traces),
             }
         raise KeyError(f"unknown topic {topic}")
 
@@ -864,6 +1142,7 @@ class TopicPublisher:
             "violations": TopicState(min_interval=1),
             "perf": TopicState(min_interval=PERF_SAMPLE_PERIOD),
             "events": TopicState(min_interval=1),
+            "traces": TopicState(min_interval=1),
         }
 
     def should_publish(self, topic: str, payload: dict[str, Any]) -> bool:
