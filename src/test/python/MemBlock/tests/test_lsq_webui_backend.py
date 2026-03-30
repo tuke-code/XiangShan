@@ -106,6 +106,7 @@ def _make_raw(cycle: int = 0):
                 "lane": idx,
                 "valid": 0,
                 "is_load_replay": 0,
+                "sched_index": -1,
                 "update_addr_valid": 1,
                 "lq_idx": _empty_lane_ptr(),
                 "sq_idx": _empty_lane_ptr(),
@@ -121,6 +122,23 @@ def _make_raw(cycle: int = 0):
             }
             for idx in range(3)
         ],
+        "nc_out_lanes": [
+            {
+                "lane": idx,
+                "valid": 0,
+                "ready": 0,
+                "sched_index": -1,
+                "lq_idx": _empty_lane_ptr(),
+                "sq_idx": _empty_lane_ptr(),
+                "rob_idx": _empty_lane_ptr(),
+                "uop_idx": 0,
+                "vaddr": 0,
+                "paddr": 0,
+                "is_vec": 0,
+                "is_128bit": 0,
+            }
+            for idx in range(3)
+        ],
         "perf_values": [0] * 36,
     }
 
@@ -131,6 +149,10 @@ def test_lsq_webui_tracker_builds_shadow_vlq_and_sq_entries():
     raw = _make_raw(cycle=1)
     raw["enq"]["need_alloc"][0] = 0x3
     raw["enq"]["req"][0]["valid"] = 1
+    raw["enq"]["req"][0]["fu_type"] = 0x12
+    raw["enq"]["req"][0]["fu_op_type"] = 0x34
+    raw["enq"]["req"][0]["rob_idx"] = {"flag": 1, "value": 9}
+    raw["enq"]["req"][0]["num_ls_elem"] = 2
     raw["enq"]["resp"][0]["lq_idx"] = {"flag": 0, "value": 5}
     raw["enq"]["resp"][0]["sq_idx"] = {"flag": 0, "value": 7}
     raw["store_addr_re"][0]["update_addr_valid"] = 1
@@ -141,6 +163,10 @@ def test_lsq_webui_tracker_builds_shadow_vlq_and_sq_entries():
     tracker.update(raw)
 
     assert tracker.vlq_entries[5]["allocated"] is True
+    assert tracker.vlq_entries[5]["request"]["fu_type"] == 0x12
+    assert tracker.vlq_entries[5]["request"]["fu_op_type"] == 0x34
+    assert tracker.vlq_entries[5]["request"]["rob_idx"] == {"flag": 1, "value": 9}
+    assert tracker.vlq_entries[5]["request"]["num_ls_elem"] == 2
     assert tracker.sq_entries[7]["allocated"] is True
     assert tracker.sq_entries[7]["addrvalid"] is True
     assert tracker.sq_entries[7]["datavalid"] is True
@@ -155,10 +181,18 @@ def test_lsq_webui_tracker_collects_replay_and_violation_data():
     raw["replay_lanes"][1]["ready"] = 1
     raw["replay_lanes"][1]["sched_index"] = 9
     raw["replay_lanes"][1]["tlb_miss"] = 1
+    raw["replay_lanes"][1]["vaddr"] = 0x123456
+    raw["replay_lanes"][1]["pdest"] = 17
     raw["ldu_lanes"][0]["valid"] = 1
     raw["ldu_lanes"][0]["is_load_replay"] = 1
+    raw["ldu_lanes"][0]["sched_index"] = 11
     raw["ldu_lanes"][0]["cause_bits"]["RAW"] = 1
     raw["ldu_lanes"][0]["update_addr_valid"] = 0
+    raw["ldu_lanes"][0]["paddr"] = 0x80000040
+    raw["nc_out_lanes"][2]["valid"] = 1
+    raw["nc_out_lanes"][2]["ready"] = 1
+    raw["nc_out_lanes"][2]["sched_index"] = 13
+    raw["nc_out_lanes"][2]["paddr"] = 0x80000100
     raw["overview"]["rar_valid_count"] = 3
     raw["release"]["valid"] = 1
     raw["release"]["paddr"] = 0x1234
@@ -166,11 +200,24 @@ def test_lsq_webui_tracker_collects_replay_and_violation_data():
     tracker.update(raw)
 
     assert tracker.lqr_entries[9]["allocated"] is True
+    assert tracker.lqr_entries[11]["allocated"] is True
+    assert tracker.lqr_entries[11]["blocking"] is True
+    assert tracker.lqr_entries[11]["source"] == "ldu"
+    assert tracker.lqr_entries[11]["detail"]["paddr"] == 0x80000040
+    assert tracker.lqr_entries[13]["allocated"] is True
+    assert tracker.lqr_entries[13]["scheduled"] is True
+    assert tracker.lqr_entries[13]["source"] == "nc"
+    assert tracker.lqr_entries[13]["detail"]["paddr"] == 0x80000100
+    assert tracker.lqr_entries[9]["detail"]["vaddr"] == 0x123456
+    assert tracker.lqr_entries[9]["detail"]["pdest"] == 17
     assert tracker.replay_cause_counts["TM"] >= 1
     assert tracker.replay_cause_counts["RAW"] == 1
+    assert tracker.replay_cause_counts["NC"] == 1
     assert tracker.raw_stats["waiting"] == 1
     assert tracker.rar_stats["allocated"] == 3
     assert tracker.rar_stats["released"] == 1
+    assert any(lane["source"] == "ldu" and lane["sched_index"] == 11 for lane in tracker.replay_lanes)
+    assert any(lane["source"] == "nc" and lane["sched_index"] == 13 for lane in tracker.replay_lanes)
     assert tracker.events_backlog()[0]["type"] in {"violation", "replay"}
 
 
@@ -204,6 +251,47 @@ def test_lsq_webui_tracker_uses_real_queue_sizes_and_ptr_deltas():
     )
     assert payload["size"] == VLQ_SIZE
     assert payload["stats"]["deq"] == 1
+
+
+def test_lsq_webui_tracker_reset_snapshot_clears_shadow_queues_and_counts():
+    tracker = LsqStateTracker()
+
+    active = _make_raw(cycle=7)
+    active["replay_lanes"][0]["valid"] = 1
+    active["replay_lanes"][0]["ready"] = 1
+    active["replay_lanes"][0]["sched_index"] = 3
+    active["ldu_lanes"][1]["valid"] = 1
+    active["ldu_lanes"][1]["is_load_replay"] = 1
+    active["ldu_lanes"][1]["sched_index"] = 5
+    active["ldu_lanes"][1]["cause_bits"]["RAW"] = 1
+    active["nc_out_lanes"][2]["valid"] = 1
+    active["nc_out_lanes"][2]["ready"] = 1
+    active["nc_out_lanes"][2]["sched_index"] = 7
+    active["store_data"][0]["valid"] = 1
+    active["store_data"][0]["sq_idx"] = {"flag": 0, "value": 4}
+    active["store_addr_re"][0]["update_addr_valid"] = 1
+    active["store_addr_re"][0]["sq_idx"] = {"flag": 0, "value": 4}
+    tracker.update(active)
+
+    reset_raw = _make_raw(cycle=0)
+    reset_raw["overview"]["sq_empty"] = 1
+    reset_raw["overview"]["lq_empty"] = 1
+    reset_raw["replay_lanes"][0]["valid"] = 1
+    reset_raw["replay_lanes"][0]["sched_index"] = 3
+    reset_raw["store_data"][0]["valid"] = 1
+    reset_raw["store_data"][0]["sq_idx"] = {"flag": 0, "value": 4}
+
+    tracker.load_reset_snapshot(reset_raw)
+
+    assert sum(1 for entry in tracker.sq_entries if entry["allocated"]) == 0
+    assert sum(1 for entry in tracker.lqr_entries if entry["allocated"]) == 0
+    assert tracker.sq_stats["fwd_req"] == 0
+    assert tracker.replay_cause_counts["TM"] == 0
+    assert tracker.replay_cause_counts["RAW"] == 0
+    assert tracker.replay_cause_counts["NC"] == 0
+    assert tracker.replay_lanes == []
+    assert tracker.ldu_lanes == []
+    assert tracker.nc_out_lanes == []
 
 
 def test_lsq_webui_topic_publisher_only_publishes_on_change():

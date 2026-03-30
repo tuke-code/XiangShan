@@ -182,6 +182,7 @@ class SignalReader:
                     "lane": idx,
                     "valid": self._read(f"{prefix}_valid"),
                     "is_load_replay": self._read(f"{prefix}_bits_isLoadReplay"),
+                    "sched_index": self._read(f"{prefix}_bits_schedIndex", -1),
                     "update_addr_valid": self._read(f"{prefix}_bits_updateAddrValid"),
                     "lq_idx": self._read_uop_ptr(f"{prefix}_bits_uop", "lqIdx"),
                     "sq_idx": self._read_uop_ptr(f"{prefix}_bits_uop", "sqIdx"),
@@ -194,6 +195,26 @@ class SignalReader:
                     "handled_by_mshr": self._read(f"{prefix}_bits_handledByMSHR"),
                     "addr_inv_sq_idx": self._read_ptr(f"{prefix}_bits_rep_info_addr_inv_sq_idx"),
                     "cause_bits": cause_bits,
+                }
+            )
+
+        nc_out_lanes = []
+        for idx in range(LOAD_PIPELINE_WIDTH):
+            prefix = f"MemBlock_inner_lsq_io_ncOut_{idx}"
+            nc_out_lanes.append(
+                {
+                    "lane": idx,
+                    "valid": self._read(f"{prefix}_valid"),
+                    "ready": self._read(f"{prefix}_ready"),
+                    "sched_index": self._read(f"{prefix}_bits_schedIndex", -1),
+                    "lq_idx": self._read_uop_ptr(f"{prefix}_bits_uop", "lqIdx"),
+                    "sq_idx": self._read_uop_ptr(f"{prefix}_bits_uop", "sqIdx"),
+                    "rob_idx": self._read_uop_ptr(f"{prefix}_bits_uop", "robIdx"),
+                    "uop_idx": self._read(f"{prefix}_bits_uop_uopIdx"),
+                    "vaddr": self._read(f"{prefix}_bits_vaddr"),
+                    "paddr": self._read(f"{prefix}_bits_paddr"),
+                    "is_vec": self._read(f"{prefix}_bits_isvec"),
+                    "is_128bit": self._read(f"{prefix}_bits_is128bit"),
                 }
             )
 
@@ -249,6 +270,7 @@ class SignalReader:
             "store_addr": store_addr,
             "store_addr_re": store_addr_re,
             "ldu_lanes": ldu_lanes,
+            "nc_out_lanes": nc_out_lanes,
             "perf_values": perf_values,
         }
 
@@ -270,7 +292,7 @@ class LsqStateTracker:
         self.cycle = 0
         self.overview = {}
         self.vlq_entries = [
-            {"index": idx, "allocated": False, "committed": False, "age": 0, "retire_at": None}
+            {"index": idx, "allocated": False, "committed": False, "age": 0, "request": None, "retire_at": None}
             for idx in range(VLQ_SIZE)
         ]
         self.sq_entries = [
@@ -295,6 +317,8 @@ class LsqStateTracker:
                 "blocking": False,
                 "cause": None,
                 "lane": None,
+                "source": None,
+                "detail": None,
                 "retire_at": None,
             }
             for idx in range(LQR_SIZE)
@@ -303,8 +327,9 @@ class LsqStateTracker:
         self.raw_entries = [{"index": idx, "allocated": False, "waiting": False} for idx in range(LQRAW_SIZE)]
         self.replay_lanes = []
         self.ldu_lanes = []
+        self.nc_out_lanes = []
         self.perf_values = [0] * 36
-        self.replay_cause_counts = {label: 0 for label in CAUSE_LABELS}
+        self.replay_cause_counts = {label: 0 for label in [*CAUSE_LABELS, "NC"]}
         self.vlq_stats = {"enq": 0, "deq": 0, "total_latency": 0}
         self.sq_stats = {"fwd_req": 0, "fwd_succ": 0, "mmio": 0, "nc": 0}
         self.rar_stats = {"allocated": 0, "released": 0, "violations": 0}
@@ -350,7 +375,7 @@ class LsqStateTracker:
     def _retire_entries(self) -> None:
         for entry in self.vlq_entries:
             if entry["retire_at"] is not None and entry["retire_at"] <= self.cycle:
-                entry.update({"allocated": False, "committed": False, "age": 0, "retire_at": None})
+                entry.update({"allocated": False, "committed": False, "age": 0, "request": None, "retire_at": None})
         for entry in self.sq_entries:
             if entry["retire_at"] is not None and entry["retire_at"] <= self.cycle:
                 entry.update(
@@ -374,9 +399,36 @@ class LsqStateTracker:
                         "blocking": False,
                         "cause": None,
                         "lane": None,
+                        "source": None,
+                        "detail": None,
                         "retire_at": None,
                     }
                 )
+
+    def _activate_lqr_entry(self, active_entries: set[int], entry_idx: int) -> dict[str, Any]:
+        entry = self.lqr_entries[entry_idx]
+        if entry_idx not in active_entries:
+            entry.update(
+                {
+                    "allocated": True,
+                    "scheduled": False,
+                    "blocking": False,
+                    "cause": None,
+                    "lane": None,
+                    "source": None,
+                    "detail": None,
+                    "retire_at": None,
+                }
+            )
+            active_entries.add(entry_idx)
+        return entry
+
+    def _merge_entry_detail(self, entry: dict[str, Any], detail: dict[str, Any]) -> None:
+        if entry.get("detail") is None:
+            entry["detail"] = {}
+        for key, value in detail.items():
+            if value is not None:
+                entry["detail"][key] = copy.deepcopy(value)
 
     def update(self, raw: dict[str, Any]) -> None:
         self.cycle = raw["cycle"]
@@ -386,6 +438,7 @@ class LsqStateTracker:
         self.perf_values = list(raw["perf_values"])
         self.replay_lanes = []
         self.ldu_lanes = []
+        self.nc_out_lanes = []
         self._retire_entries()
 
         enq_can_accept = bool(raw["enq"]["can_accept"])
@@ -399,7 +452,26 @@ class LsqStateTracker:
                 if 0 <= lq_idx < VLQ_SIZE:
                     entry = self.vlq_entries[lq_idx]
                     if not entry["allocated"]:
-                        entry.update({"allocated": True, "committed": False, "age": self.cycle, "retire_at": None})
+                        entry.update(
+                            {
+                                "allocated": True,
+                                "committed": False,
+                                "age": self.cycle,
+                                "request": {
+                                    "source": "enq",
+                                    "lane": idx,
+                                    "fu_type": req["fu_type"],
+                                    "fu_op_type": req["fu_op_type"],
+                                    "rob_idx": copy.deepcopy(req["rob_idx"]),
+                                    "lq_idx": copy.deepcopy(resp["lq_idx"]),
+                                    "sq_idx": copy.deepcopy(resp["sq_idx"]),
+                                    "req_lq_idx": copy.deepcopy(req["lq_idx"]),
+                                    "req_sq_idx": copy.deepcopy(req["sq_idx"]),
+                                    "num_ls_elem": req["num_ls_elem"],
+                                },
+                                "retire_at": None,
+                            }
+                        )
                         self.vlq_stats["enq"] += 1
                         self._add_event("enqueue", f"VLQ shadow allocate entry={lq_idx}", {"entry": lq_idx})
             if need_alloc & 0x2:
@@ -483,6 +555,7 @@ class LsqStateTracker:
         active_lqr_entries = set()
         for lane in raw["replay_lanes"]:
             replay_lane = copy.deepcopy(lane)
+            replay_lane["source"] = "replay"
             replay_lane["fire"] = bool(lane["valid"] and lane["ready"])
             cause = "TM" if lane["tlb_miss"] else None
             if cause is not None:
@@ -492,13 +565,32 @@ class LsqStateTracker:
             if lane["sched_index"] < 0:
                 continue
             entry_idx = lane["sched_index"] % LQR_SIZE
-            active_lqr_entries.add(entry_idx)
-            entry = self.lqr_entries[entry_idx]
-            entry["allocated"] = True
-            entry["scheduled"] = bool(lane["valid"] and lane["ready"])
-            entry["blocking"] = bool(lane["valid"] and not lane["ready"])
+            entry = self._activate_lqr_entry(active_lqr_entries, entry_idx)
+            entry["scheduled"] = entry["scheduled"] or bool(lane["valid"] and lane["ready"])
+            entry["blocking"] = entry["blocking"] or bool(lane["valid"] and not lane["ready"])
             entry["cause"] = cause or entry["cause"]
             entry["lane"] = lane["lane"]
+            entry["source"] = "replay"
+            self._merge_entry_detail(
+                entry,
+                {
+                    "source": "replay",
+                    "sched_index": lane["sched_index"],
+                    "cause": cause,
+                    "lane": lane["lane"],
+                    "valid": lane["valid"],
+                    "ready": lane["ready"],
+                    "lq_idx": lane["lq_idx"],
+                    "sq_idx": lane["sq_idx"],
+                    "rob_idx": lane["rob_idx"],
+                    "uop_idx": lane["uop_idx"],
+                    "pdest": lane["pdest"],
+                    "vaddr": lane["vaddr"],
+                    "is_vec": lane["is_vec"],
+                    "is_128bit": lane["is_128bit"],
+                    "mask": lane["mask"],
+                },
+            )
             entry["retire_at"] = self.cycle + 2 if lane["valid"] and lane["ready"] else None
             if lane["valid"] and lane["ready"]:
                 self._add_event(
@@ -515,6 +607,8 @@ class LsqStateTracker:
         for lane in raw["ldu_lanes"]:
             cause = self._first_cause(lane)
             lane_view = copy.deepcopy(lane)
+            lane_view["source"] = "ldu"
+            lane_view["fire"] = bool(lane["valid"] and lane["is_load_replay"])
             lane_view["cause"] = cause
             self.ldu_lanes.append(lane_view)
             if lane["valid"] and lane["is_load_replay"] and cause is not None:
@@ -526,8 +620,84 @@ class LsqStateTracker:
                 )
                 if cause == "RAW":
                     self.raw_stats["violations"] += 1
+            if lane["valid"] and lane["is_load_replay"] and lane["sched_index"] >= 0:
+                replay_lane = copy.deepcopy(lane_view)
+                replay_lane["ready"] = None
+                self.replay_lanes.append(replay_lane)
+                entry_idx = lane["sched_index"] % LQR_SIZE
+                entry = self._activate_lqr_entry(active_lqr_entries, entry_idx)
+                entry["blocking"] = True
+                entry["cause"] = cause or entry["cause"]
+                entry["lane"] = lane["lane"]
+                entry["source"] = "ldu"
+                self._merge_entry_detail(
+                    entry,
+                    {
+                        "source": "ldu",
+                        "sched_index": lane["sched_index"],
+                        "cause": cause,
+                        "lane": lane["lane"],
+                        "valid": lane["valid"],
+                        "lq_idx": lane["lq_idx"],
+                        "sq_idx": lane["sq_idx"],
+                        "rob_idx": lane["rob_idx"],
+                        "uop_idx": lane["uop_idx"],
+                        "vaddr": lane["vaddr"],
+                        "paddr": lane["paddr"],
+                        "nc_with_data": lane["nc_with_data"],
+                        "mmio": lane["mmio"],
+                        "handled_by_mshr": lane["handled_by_mshr"],
+                        "addr_inv_sq_idx": lane["addr_inv_sq_idx"],
+                    },
+                )
             if lane["valid"] and not lane["update_addr_valid"]:
                 raw_waiting += 1
+
+        for lane in raw.get("nc_out_lanes", []):
+            lane_view = copy.deepcopy(lane)
+            lane_view["source"] = "nc"
+            lane_view["fire"] = bool(lane["valid"] and lane["ready"])
+            lane_view["cause"] = "NC"
+            self.nc_out_lanes.append(lane_view)
+            if lane["valid"] or lane["sched_index"] >= 0:
+                self.replay_lanes.append(copy.deepcopy(lane_view))
+            if lane["valid"]:
+                self.replay_cause_counts["NC"] += 1
+            if lane["sched_index"] < 0:
+                continue
+            entry_idx = lane["sched_index"] % LQR_SIZE
+            entry = self._activate_lqr_entry(active_lqr_entries, entry_idx)
+            entry["scheduled"] = entry["scheduled"] or bool(lane["valid"] and lane["ready"])
+            entry["blocking"] = entry["blocking"] or bool(lane["valid"] and not lane["ready"])
+            entry["cause"] = entry["cause"] or "NC"
+            entry["lane"] = lane["lane"]
+            entry["source"] = "nc"
+            self._merge_entry_detail(
+                entry,
+                {
+                    "source": "nc",
+                    "sched_index": lane["sched_index"],
+                    "cause": "NC",
+                    "lane": lane["lane"],
+                    "valid": lane["valid"],
+                    "ready": lane["ready"],
+                    "lq_idx": lane["lq_idx"],
+                    "sq_idx": lane["sq_idx"],
+                    "rob_idx": lane["rob_idx"],
+                    "uop_idx": lane["uop_idx"],
+                    "vaddr": lane["vaddr"],
+                    "paddr": lane["paddr"],
+                    "is_vec": lane["is_vec"],
+                    "is_128bit": lane["is_128bit"],
+                },
+            )
+            entry["retire_at"] = self.cycle + 2 if lane["valid"] and lane["ready"] else entry["retire_at"]
+            if lane["valid"] and lane["ready"]:
+                self._add_event(
+                    "replay",
+                    f"NC lane={lane['lane']} fire schedIndex={lane['sched_index']}",
+                    {"lane": lane["lane"], "sched_index": lane["sched_index"]},
+                )
 
         rar_count = max(0, min(LQRAR_SIZE, int(raw["overview"]["rar_valid_count"])))
         for idx, entry in enumerate(self.rar_entries):
@@ -573,6 +743,18 @@ class LsqStateTracker:
             self._perf_sample_cycle = self.cycle
 
         self._prev = copy.deepcopy(raw)
+
+    def load_reset_snapshot(self, raw: dict[str, Any]) -> None:
+        """Seed non-shadow state after DUT reset without reconstructing queue activity."""
+        self.reset()
+        self.cycle = raw["cycle"]
+        self.overview = copy.deepcopy(raw["overview"])
+        self.topdown = copy.deepcopy(raw["debug_topdown"])
+        self.perf_values = list(raw["perf_values"])
+        self._prev = copy.deepcopy(raw)
+        self._prev_lq_deq_ptr = (raw["lq"]["deq_ptr"]["flag"], raw["lq"]["deq_ptr"]["value"])
+        self._prev_sq_commit_ptr = (raw["sq"]["commit_ptr"]["flag"], raw["sq"]["commit_ptr"]["value"])
+        self._prev_sq_deq_ptr = (raw["sq"]["deq_ptr"]["flag"], raw["sq"]["deq_ptr"]["value"])
 
     def events_backlog(self) -> list[dict[str, Any]]:
         return list(self.events)
@@ -628,6 +810,7 @@ class LsqStateTracker:
                 "entries": copy.deepcopy(self.lqr_entries),
                 "lanes": copy.deepcopy(self.replay_lanes),
                 "ldu_lanes": copy.deepcopy(self.ldu_lanes),
+                "nc_out_lanes": copy.deepcopy(self.nc_out_lanes),
                 "cause_counts": copy.deepcopy(self.replay_cause_counts),
                 "topdown": copy.deepcopy(self.topdown),
                 "replay_all": service_state["last_raw"].get("tlb_hint", {}).get("replay_all", 0) if service_state["last_raw"] else 0,

@@ -196,6 +196,30 @@
         .log-line.replay { border-color: rgba(180, 110, 255, 0.35); }
         .log-line.violation { border-color: rgba(255, 107, 107, 0.35); }
 
+        .detail-tooltip {
+            position: fixed;
+            z-index: 1000;
+            max-width: min(28rem, calc(100vw - 1.5rem));
+            padding: 0.75rem 0.85rem;
+            border-radius: 14px;
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            background: rgba(6, 15, 27, 0.96);
+            box-shadow: 0 18px 60px rgba(0, 0, 0, 0.4);
+            color: #dce8f5;
+            font-size: 0.8rem;
+            line-height: 1.4;
+            white-space: pre-wrap;
+            pointer-events: none;
+            opacity: 0;
+            transform: translateY(4px);
+            transition: opacity 0.08s ease, transform 0.08s ease;
+        }
+
+        .detail-tooltip.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
         @media (max-width: 1024px) {
             .desktop-grid {
                 grid-template-columns: 1fr;
@@ -368,7 +392,7 @@
                 <div class="panel-title">
                     <div>
                         <h2 class="text-lg font-semibold">LoadQueueReplay</h2>
-                        <div class="mt-1 text-xs text-slate-400">lane 状态直接来自 `io_replay_*`，entry 视图使用 schedIndex 聚合</div>
+                        <div class="mt-1 text-xs text-slate-400">聚合 `io_replay_*` / `io_ldu_ldin_*` / `io_ncOut_*`，entry 视图按 schedIndex 合并</div>
                     </div>
                     <span class="status-pill disconnected" id="status-replay">replay</span>
                 </div>
@@ -382,8 +406,10 @@
                         <table class="lane-table">
                             <thead>
                                 <tr>
+                                    <th>Src</th>
                                     <th>Lane</th>
-                                    <th>Ready</th>
+                                    <th>State</th>
+                                    <th>Sched</th>
                                     <th>LQ</th>
                                     <th>Cause</th>
                                 </tr>
@@ -471,6 +497,7 @@
             <div class="mt-4 max-h-[20rem] overflow-y-auto" id="event-log"></div>
         </section>
     </div>
+    <div id="detail-tooltip" class="detail-tooltip hidden"></div>
 
     <script>
         const ENDPOINTS = ['overview', 'vlq', 'sq', 'replay', 'violations', 'perf', 'events'];
@@ -489,6 +516,7 @@
 
         let throughputChart = null;
         let violationChart = null;
+        let detailTooltip = null;
 
         function wsBase() {
             const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
@@ -659,13 +687,103 @@
             return 'state-allocated';
         }
 
-        function renderQueueStrip(containerId, entries, type, formatter) {
+        function ptrText(ptr) {
+            if (!ptr) {
+                return '--';
+            }
+            return `${ptr.flag}:${ptr.value}`;
+        }
+
+        function hexText(value) {
+            if (value === undefined || value === null) {
+                return '--';
+            }
+            return `0x${Number(value).toString(16)}`;
+        }
+
+        function formatQueueDetail(detail) {
+            if (!detail) {
+                return '';
+            }
+            const lines = [];
+            if (detail.source !== undefined) lines.push(`source: ${detail.source}`);
+            if (detail.lane !== undefined) lines.push(`lane: ${detail.lane}`);
+            if (detail.sched_index !== undefined) lines.push(`sched: ${detail.sched_index}`);
+            if (detail.cause !== undefined && detail.cause !== null) lines.push(`cause: ${detail.cause}`);
+            if (detail.fu_type !== undefined) lines.push(`fuType: ${hexText(detail.fu_type)}`);
+            if (detail.fu_op_type !== undefined) lines.push(`fuOpType: ${hexText(detail.fu_op_type)}`);
+            if (detail.rob_idx !== undefined) lines.push(`rob: ${ptrText(detail.rob_idx)}`);
+            if (detail.lq_idx !== undefined) lines.push(`lq: ${ptrText(detail.lq_idx)}`);
+            if (detail.sq_idx !== undefined) lines.push(`sq: ${ptrText(detail.sq_idx)}`);
+            if (detail.req_lq_idx !== undefined) lines.push(`reqLq: ${ptrText(detail.req_lq_idx)}`);
+            if (detail.req_sq_idx !== undefined) lines.push(`reqSq: ${ptrText(detail.req_sq_idx)}`);
+            if (detail.uop_idx !== undefined) lines.push(`uop: ${detail.uop_idx}`);
+            if (detail.pdest !== undefined) lines.push(`pdest: ${detail.pdest}`);
+            if (detail.num_ls_elem !== undefined) lines.push(`numLsElem: ${detail.num_ls_elem}`);
+            if (detail.vaddr !== undefined) lines.push(`vaddr: ${hexText(detail.vaddr)}`);
+            if (detail.paddr !== undefined) lines.push(`paddr: ${hexText(detail.paddr)}`);
+            if (detail.mask !== undefined) lines.push(`mask: ${hexText(detail.mask)}`);
+            if (detail.is_vec !== undefined) lines.push(`isVec: ${detail.is_vec}`);
+            if (detail.is_128bit !== undefined) lines.push(`is128b: ${detail.is_128bit}`);
+            if (detail.nc_with_data !== undefined) lines.push(`ncWithData: ${detail.nc_with_data}`);
+            if (detail.mmio !== undefined) lines.push(`mmio: ${detail.mmio}`);
+            if (detail.handled_by_mshr !== undefined) lines.push(`handledByMSHR: ${detail.handled_by_mshr}`);
+            if (detail.addr_inv_sq_idx !== undefined) lines.push(`addrInvSq: ${ptrText(detail.addr_inv_sq_idx)}`);
+            if (detail.valid !== undefined) lines.push(`valid: ${detail.valid}`);
+            if (detail.ready !== undefined && detail.ready !== null) lines.push(`ready: ${detail.ready}`);
+            return lines.join('\n');
+        }
+
+        function hideDetailTooltip() {
+            if (!detailTooltip) {
+                return;
+            }
+            detailTooltip.classList.add('hidden');
+            detailTooltip.classList.remove('visible');
+            detailTooltip.textContent = '';
+        }
+
+        function moveDetailTooltip(event) {
+            if (!detailTooltip || detailTooltip.classList.contains('hidden')) {
+                return;
+            }
+            const gap = 14;
+            const maxLeft = Math.max(8, window.innerWidth - detailTooltip.offsetWidth - 8);
+            const maxTop = Math.max(8, window.innerHeight - detailTooltip.offsetHeight - 8);
+            let left = Math.min(event.clientX + gap, maxLeft);
+            let top = Math.min(event.clientY + gap, maxTop);
+            if (left < 8) left = 8;
+            if (top < 8) top = 8;
+            detailTooltip.style.left = `${left}px`;
+            detailTooltip.style.top = `${top}px`;
+        }
+
+        function showDetailTooltip(event, detail) {
+            if (!detailTooltip || !detail) {
+                return;
+            }
+            detailTooltip.textContent = detail;
+            detailTooltip.classList.remove('hidden');
+            moveDetailTooltip(event);
+            requestAnimationFrame(() => {
+                detailTooltip.classList.add('visible');
+            });
+        }
+
+        function renderQueueStrip(containerId, entries, type, formatter, detailFormatter) {
             const container = document.getElementById(containerId);
             container.innerHTML = '';
             entries.filter(entry => entry.allocated).forEach((entry) => {
                 const card = document.createElement('div');
                 card.className = `queue-card ${queueClass(entry, type)} ${type === 'vlq' || type === 'sq' ? 'shadow' : ''}`;
                 card.innerHTML = formatter(entry);
+                const detail = detailFormatter ? detailFormatter(entry) : '';
+                if (detail) {
+                    card.style.cursor = 'help';
+                    card.addEventListener('mouseenter', (event) => showDetailTooltip(event, detail));
+                    card.addEventListener('mousemove', moveDetailTooltip);
+                    card.addEventListener('mouseleave', hideDetailTooltip);
+                }
                 container.appendChild(card);
             });
         }
@@ -677,7 +795,7 @@
             renderQueueStrip('vlq-entries', PAGE.vlq.entries, 'vlq', (entry) => `
                 <div class="mono text-sm font-bold">${entry.index}</div>
                 <div class="mt-1 text-[10px] uppercase">${entry.committed ? 'C' : 'A'}</div>
-            `);
+            `, (entry) => formatQueueDetail(entry.request));
             document.getElementById('vlq-enq-rate').textContent = PAGE.vlq.stats.enq;
             document.getElementById('vlq-deq-rate').textContent = PAGE.vlq.stats.deq;
             document.getElementById('vlq-avg-lat').textContent = `${PAGE.vlq.stats.avg_latency} cycles`;
@@ -712,7 +830,7 @@
             renderQueueStrip('lqr-entries', PAGE.replay.entries, 'replay', (entry) => `
                 <div class="mono text-sm font-bold">${entry.index}</div>
                 <div class="mt-1 text-[10px] uppercase">${entry.cause || '--'}</div>
-            `);
+            `, (entry) => formatQueueDetail(entry.detail));
             document.getElementById('lqr-summary').textContent = `replay_all=${PAGE.replay.replay_all}, topdown=${PAGE.replay.topdown.rob_head_tlb_replay}`;
 
             const causeContainer = document.getElementById('replay-causes');
@@ -727,10 +845,17 @@
             const laneBody = document.getElementById('replay-lanes');
             laneBody.innerHTML = '';
             PAGE.replay.lanes.forEach((lane) => {
+                const state = !lane.valid
+                    ? '-'
+                    : (lane.ready === undefined || lane.ready === null)
+                        ? (lane.fire ? 'seen' : 'hold')
+                        : (lane.ready ? 'fire' : 'wait');
                 const row = document.createElement('tr');
                 row.innerHTML = `
+                    <td>${lane.source || '--'}</td>
                     <td class="mono">${lane.lane}</td>
-                    <td>${lane.valid ? (lane.ready ? 'fire' : 'wait') : '-'}</td>
+                    <td>${state}</td>
+                    <td class="mono">${lane.sched_index ?? '--'}</td>
                     <td class="mono">${lane.lq_idx.value}</td>
                     <td>${lane.cause || '--'}</td>
                 `;
@@ -1009,6 +1134,9 @@
         }
 
         document.addEventListener('DOMContentLoaded', () => {
+            detailTooltip = document.getElementById('detail-tooltip');
+            window.addEventListener('scroll', hideDetailTooltip, true);
+            window.addEventListener('resize', hideDetailTooltip);
             initCharts();
             renderConnectionPills();
             renderControlMeta();

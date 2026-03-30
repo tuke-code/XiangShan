@@ -352,9 +352,8 @@ class MemBlockWebUIService:
             self._scenario_error = None
             self.cycle = 0
             self.env.reset(cycles=self.reset_cycles, settle_cycles=1)
-            self.tracker.reset()
             self.last_raw = self.reader.read(self.cycle)
-            self.tracker.update(self.last_raw)
+            self.tracker.load_reset_snapshot(self.last_raw)
         await self._broadcast_all(force=True)
         await self._broadcast_control_state()
 
