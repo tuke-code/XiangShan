@@ -15,20 +15,28 @@ import chisel3.experimental.noPrefix
 object CSRBundles {
   class XtvecBundle extends CSRBundle {
     val mode = XtvecMode(1, 0, wNoFilter).withReset(0.U)
+      .withDescription("Trap-vector mode selector.")
     val addr = WARL(63, 2, wNoFilter).withReset(0.U)
+      .withDescription("Base address of the trap handler.")
   }
 
   class CauseBundle extends CSRBundle {
     val Interrupt = RW(63).withReset(0.U)
+      .withDescription("Set when the trap was caused by an interrupt.")
     val ExceptionCode = RW(62, 0).withReset(0.U)
+      .withDescription("Trap cause code.")
   }
 
   class Counteren extends CSRBundle {
     // Todo: remove reset after adding mcounteren in difftest
     val CY = RW(0).withReset(0.U)
+      .withDescription("Permit cycle reads below the current privilege level.")
     val TM = RW(1).withReset(0.U)
+      .withDescription("Permit time reads below the current privilege level.")
     val IR = RW(2).withReset(0.U)
+      .withDescription("Permit instret reads below the current privilege level.")
     val HPM = RW(31, 3).withReset(0.U)
+      .withDescription("Permit hpmcounter3 through hpmcounter31 reads below the current privilege level.")
   }
 
   class OneFieldBundle extends CSRBundle {
@@ -45,17 +53,17 @@ object CSRBundles {
 
   abstract class EnvCfg extends CSRBundle {
     // Set all fields not supported as RO in base class
-    val STCE  =      RO(    63)           .withReset(0.U) // Sstc Enable
-    val PBMTE =      RO(    62)           .withReset(0.U) // Svpbmt Enable
-    val ADUE  =      RO(    61)           .withReset(0.U) // Svadu extension Enable
-    val DTE   =      RO(    59)           .withReset(0.U) // Ssdbltrp extension Enable
-    val PMM   =  EnvPMM(33, 32, wNoEffect).withReset(EnvPMM.Disable) // Smnpm extension
-    val CBZE  =      RW(     7)           .withReset(1.U) // Zicboz extension
-    val CBCFE =      RW(     6)           .withReset(1.U) // Zicbom extension
-    val CBIE  = EnvCBIE( 5,  4, wNoEffect).withReset(EnvCBIE.Inval) // Zicbom extension
-    val SSE   =      RO(     3)           .withReset(0.U) // Zicfiss extension Enable in S mode
-    val LPE   =      RO(     2)           .withReset(0.U) // Zicfilp extension
-    val FIOM  =      RO(     0)           .withReset(0.U) // Fence of I/O implies Memory
+    val STCE  =      RO(    63)           .withReset(0.U).withDescription("Enable supervisor and virtual-supervisor timer compare CSRs.") // Sstc Enable
+    val PBMTE =      RO(    62)           .withReset(0.U).withDescription("Enable page-based memory types during address translation.") // Svpbmt Enable
+    val ADUE  =      RO(    61)           .withReset(0.U).withDescription("Enable hardware A/D-bit update during page-table walks.") // Svadu extension Enable
+    val DTE   =      RO(    59)           .withReset(0.U).withDescription("Enable double-trap support for lower privilege modes.") // Ssdbltrp extension Enable
+    val PMM   =  EnvPMM(33, 32, wNoEffect).withReset(EnvPMM.Disable).withDescription("Environment protection and memory-type mode.") // Smnpm extension
+    val CBZE  =      RW(     7)           .withReset(1.U).withDescription("Enable cache-block zero operations from Zicboz.") // Zicboz extension
+    val CBCFE =      RW(     6)           .withReset(1.U).withDescription("Enable cache-block clean-and-flush operations from Zicbom.") // Zicbom extension
+    val CBIE  = EnvCBIE( 5,  4, wNoEffect).withReset(EnvCBIE.Inval).withDescription("Enable cache-block invalidate operations from Zicbom.") // Zicbom extension
+    val SSE   =      RO(     3)           .withReset(0.U).withDescription("Enable the Zicfiss shadow-stack extension below M-mode.") // Zicfiss extension Enable in S mode
+    val LPE   =      RO(     2)           .withReset(0.U).withDescription("Enable the Zicfilp landing-pad extension.") // Zicfilp extension
+    val FIOM  =      RO(     0)           .withReset(0.U).withDescription("Fence of I/O implies memory ordering.") // Fence of I/O implies Memory
   }
 
   class PrivState extends Bundle { self =>

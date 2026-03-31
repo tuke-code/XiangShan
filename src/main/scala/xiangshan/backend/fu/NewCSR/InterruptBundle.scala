@@ -7,20 +7,20 @@ import xiangshan.backend.fu.NewCSR.ChiselRecordForField.AddRecordSpecifyFields
 
 class InterruptBundle extends CSRBundle {
   // Software Interrupt
-  val SSI      = RW(1)
-  val VSSI     = RW(2)
-  val MSI      = RW(3)
+  val SSI      = RW(1).withDescription("Supervisor software interrupt delegation bit.")
+  val VSSI     = RW(2).withDescription("Virtual supervisor software interrupt delegation bit.")
+  val MSI      = RW(3).withDescription("Machine software interrupt delegation bit.")
   // Time Interrupt
-  val STI      = RW(5)
-  val VSTI     = RW(6)
-  val MTI      = RW(7)
+  val STI      = RW(5).withDescription("Supervisor timer interrupt delegation bit.")
+  val VSTI     = RW(6).withDescription("Virtual supervisor timer interrupt delegation bit.")
+  val MTI      = RW(7).withDescription("Machine timer interrupt delegation bit.")
   // External Interrupt
-  val SEI      = RW(9)
-  val VSEI     = RW(10)
-  val MEI      = RW(11)
-  val SGEI     = RW(12)
+  val SEI      = RW(9).withDescription("Supervisor external interrupt delegation bit.")
+  val VSEI     = RW(10).withDescription("Virtual supervisor external interrupt delegation bit.")
+  val MEI      = RW(11).withDescription("Machine external interrupt delegation bit.")
+  val SGEI     = RW(12).withDescription("Supervisor guest external interrupt delegation bit.")
   // SoC
-  val LCOFI    = RW(13) // Counter overflow interrupt
+  val LCOFI    = RW(13).withDescription("Local counter-overflow interrupt delegation bit.") // Counter overflow interrupt
   val LC14I    = RO(14)
   val LC15I    = RO(15)
   val LC16I    = RO(16)
@@ -42,7 +42,7 @@ class InterruptBundle extends CSRBundle {
   val LC32I    = RO(32)
   val LC33I    = RO(33)
   val LC34I    = RO(34)
-  val LPRASEI  = RO(35)
+  val LPRASEI  = RO(35).withDescription("Low-priority platform-reserved interrupt delegation bit.")
   val LC36I    = RO(36)
   val LC37I    = RO(37)
   val LC38I    = RO(38)
@@ -50,7 +50,7 @@ class InterruptBundle extends CSRBundle {
   val LC40I    = RO(40)
   val LC41I    = RO(41)
   val LC42I    = RO(42)
-  val HPRASEI  = RO(43)
+  val HPRASEI  = RO(43).withDescription("High-priority platform-reserved interrupt delegation bit.")
   val LC44I    = RO(44)
   val LC45I    = RO(45)
   val LC46I    = RO(46)
@@ -100,20 +100,20 @@ class InterruptBundle extends CSRBundle {
 
 class InterruptPendingBundle extends CSRBundle {
   // Software Interrupt
-  val SSIP     = RO(1)
-  val VSSIP    = RO(2)
-  val MSIP     = RO(3)
+  val SSIP     = RO(1).withDescription("Supervisor software interrupt pending bit.")
+  val VSSIP    = RO(2).withDescription("Virtual supervisor software interrupt pending bit.")
+  val MSIP     = RO(3).withDescription("Machine software interrupt pending bit.")
   // Time Interrupt
-  val STIP     = RO(5)
-  val VSTIP    = RO(6)
-  val MTIP     = RO(7)
+  val STIP     = RO(5).withDescription("Supervisor timer interrupt pending bit.")
+  val VSTIP    = RO(6).withDescription("Virtual supervisor timer interrupt pending bit.")
+  val MTIP     = RO(7).withDescription("Machine timer interrupt pending bit.")
   // External Interrupt
-  val SEIP     = RO(9)
-  val VSEIP    = RO(10)
-  val MEIP     = RO(11)
-  val SGEIP    = RO(12)
+  val SEIP     = RO(9).withDescription("Supervisor external interrupt pending bit.")
+  val VSEIP    = RO(10).withDescription("Virtual supervisor external interrupt pending bit.")
+  val MEIP     = RO(11).withDescription("Machine external interrupt pending bit.")
+  val SGEIP    = RO(12).withDescription("Supervisor guest external interrupt pending bit.")
   // Local Interrupt
-  val LCOFIP   = RO(13) // Counter overflow interrupt
+  val LCOFIP   = RO(13).withDescription("Local counter-overflow interrupt pending bit.") // Counter overflow interrupt
   val LC14IP   = RO(14)
   val LC15IP   = RO(15)
   val LC16IP   = RO(16)
@@ -135,7 +135,7 @@ class InterruptPendingBundle extends CSRBundle {
   val LC32IP   = RO(32)
   val LC33IP   = RO(33)
   val LC34IP   = RO(34)
-  val LPRASEIP = RO(35) // Low-priority RAS event interrupt
+  val LPRASEIP = RO(35).withDescription("Low-priority platform-reserved interrupt pending bit.") // Low-priority RAS event interrupt
   val LC36IP   = RO(36)
   val LC37IP   = RO(37)
   val LC38IP   = RO(38)
@@ -143,12 +143,12 @@ class InterruptPendingBundle extends CSRBundle {
   val LC40IP   = RO(40)
   val LC41IP   = RO(41)
   val LC42IP   = RO(42)
-  val HPRASEIP = RO(43) // High-priority RAS event interrupt
+  val HPRASEIP = RO(43).withDescription("High-priority platform-reserved interrupt pending bit.") // High-priority RAS event interrupt
   val LC44IP   = RO(44)
   val LC45IP   = RO(45)
   val LC46IP   = RO(46)
   val LC47IP   = RO(47)
-  val LC48IP   = RO(48) //Another safe-mode(TEE/REE) notice-pending interrupt
+  val LC48IP   = RO(48).withDescription("Local interrupt 48 pending bit.") //Another safe-mode(TEE/REE) notice-pending interrupt
   val LC49IP   = RO(49)
   val LC50IP   = RO(50)
   val LC51IP   = RO(51)
@@ -193,20 +193,20 @@ class InterruptPendingBundle extends CSRBundle {
 
 class InterruptEnableBundle extends CSRBundle {
   // Software Interrupt
-  val SSIE     = RO(1)
-  val VSSIE    = RO(2)
-  val MSIE     = RO(3)
+  val SSIE     = RO(1).withDescription("Supervisor software interrupt enable bit.")
+  val VSSIE    = RO(2).withDescription("Virtual supervisor software interrupt enable bit.")
+  val MSIE     = RO(3).withDescription("Machine software interrupt enable bit.")
   // Time Interrupt
-  val STIE     = RO(5)
-  val VSTIE    = RO(6)
-  val MTIE     = RO(7)
+  val STIE     = RO(5).withDescription("Supervisor timer interrupt enable bit.")
+  val VSTIE    = RO(6).withDescription("Virtual supervisor timer interrupt enable bit.")
+  val MTIE     = RO(7).withDescription("Machine timer interrupt enable bit.")
   // External Interrupt
-  val SEIE     = RO(9)
-  val VSEIE    = RO(10)
-  val MEIE     = RO(11)
-  val SGEIE    = RO(12)
+  val SEIE     = RO(9).withDescription("Supervisor external interrupt enable bit.")
+  val VSEIE    = RO(10).withDescription("Virtual supervisor external interrupt enable bit.")
+  val MEIE     = RO(11).withDescription("Machine external interrupt enable bit.")
+  val SGEIE    = RO(12).withDescription("Supervisor guest external interrupt enable bit.")
   // SoC
-  val LCOFIE   = RO(13) // Counter overflow interrupt
+  val LCOFIE   = RO(13).withDescription("Local counter-overflow interrupt enable bit.") // Counter overflow interrupt
   val LC14IE   = RO(14)
   val LC15IE   = RO(15)
   val LC16IE   = RO(16)
@@ -228,7 +228,7 @@ class InterruptEnableBundle extends CSRBundle {
   val LC32IE   = RO(32)
   val LC33IE   = RO(33)
   val LC34IE   = RO(34)
-  val LPRASEIE = RO(35) // Low-priority RAS event interrupt
+  val LPRASEIE = RO(35).withDescription("Low-priority platform-reserved interrupt enable bit.") // Low-priority RAS event interrupt
   val LC36IE   = RO(36)
   val LC37IE   = RO(37)
   val LC38IE   = RO(38)
@@ -236,12 +236,12 @@ class InterruptEnableBundle extends CSRBundle {
   val LC40IE   = RO(40)
   val LC41IE   = RO(41)
   val LC42IE   = RO(42)
-  val HPRASEIE = RO(43) // High-priority RAS event interrupt
+  val HPRASEIE = RO(43).withDescription("High-priority platform-reserved interrupt enable bit.") // High-priority RAS event interrupt
   val LC44IE   = RO(44)
   val LC45IE   = RO(45)
   val LC46IE   = RO(46)
   val LC47IE   = RO(47)
-  val LC48IE   = RO(48) //Another safe-mode(TEE/REE) notice-pending interrupt
+  val LC48IE   = RO(48).withDescription("Local interrupt 48 enable bit.") //Another safe-mode(TEE/REE) notice-pending interrupt
   val LC49IE   = RO(49)
   val LC50IE   = RO(50)
   val LC51IE   = RO(51)
@@ -289,8 +289,8 @@ class InterruptEnableBundle extends CSRBundle {
 }
 
 class NonMaskableIRPendingBundle extends CSRBundle {
-  val NMI_31 = RW(31).withReset(0.U)
-  val NMI_43 = RW(43).withReset(0.U)
+  val NMI_31 = RW(31).withReset(0.U).withDescription("Non-maskable interrupt pending bit 31.")
+  val NMI_43 = RW(43).withReset(0.U).withDescription("Non-maskable interrupt pending bit 43.")
   // reserve for more NMI type
 }
 object NonMaskableIRNO{

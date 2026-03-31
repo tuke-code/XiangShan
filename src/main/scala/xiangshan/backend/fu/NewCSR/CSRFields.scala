@@ -129,6 +129,7 @@ class CSREnumType(
 ) extends EnumType(factory) {
 
   var otherUpdateSeq: mutable.Seq[Tuple2[Bool, Data]] = mutable.Seq()
+  private var descriptionText: Option[String] = None
 
   if (factory.all.isEmpty) {
     factory.asInstanceOf[CSREnum].addMinValue
@@ -249,6 +250,15 @@ class CSREnumType(
     s"${chisel3.reflect.DataMirror.queryNameGuess(this)} ${rwType} [$msb, $lsb] reset($init)"
   }
 
+  def withDescription(description: String): this.type = {
+    descriptionText = Option(description).map(_.trim).filter(_.nonEmpty)
+    this
+  }
+
+  def getDescription(defaultFieldName: String): String = {
+    descriptionText.getOrElse(defaultFieldName)
+  }
+
   def asBool: Bool = {
     this.asUInt.asBool
   }
@@ -322,7 +332,11 @@ class CSREnumType(
   }
 
   // override cloneType to make ValidIO etc function return CSREnumType not EnumType
-  override def cloneType: this.type = factory.asInstanceOf[CSREnum].makeType.asInstanceOf[this.type].setRwType(this.rwType)
+  override def cloneType: this.type = {
+    val cloned = factory.asInstanceOf[CSREnum].makeType.asInstanceOf[this.type].setRwType(this.rwType)
+    descriptionText.foreach(cloned.withDescription)
+    cloned
+  }
 }
 
 class CSREnum extends ChiselEnum {
@@ -455,4 +469,3 @@ object CSREnumTypeImplicitCast {
 
   implicit def BoolToBoolField(bool: Bool): BoolField = new BoolField(bool)
 }
-
