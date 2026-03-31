@@ -139,7 +139,7 @@ jobs:
           python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --clean
       - name: Build GSIM emu
         run: |
-          make gsim GSIM=1 -j 200 PGO_WORKLOAD=$GITHUB_WORKSPACE/ready-to-run/coremark-2-iteration.bin LLVM_PROFDATA=llvm-profdata WITH_DRAMSIM3=1 DRAMSIM3_HOME=/nfs/home/share/ci-workloads/DRAMsim3
+          make gsim GSIM=1 -j 200 PGO_WORKLOAD=$GITHUB_WORKSPACE/ready-to-run/coremark-2-iteration.bin LLVM_PROFDATA=llvm-profdata WITH_DRAMSIM3=1 DRAMSIM3_HOME=/nfs/home/share/wuchengkai/DRAMsim3
       - name: System Test - Linux
         id: linux
         run: |
