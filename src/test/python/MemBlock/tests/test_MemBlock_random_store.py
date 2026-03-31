@@ -10,22 +10,22 @@ MemBlock 真实 DUT store 冒烟测试。
 而是通过真实 DUT 端口驱动 enqueue / issue，并复用 `MemBlockEnv` 的在线观测口做校验。
 """
 
-from dataclasses import dataclass
 import random
 
+from request_apis import (
+    QueuePtr,
+    enqueue_scalar_load,
+    enqueue_scalar_store,
+    issue_scalar_load,
+    issue_scalar_sta,
+    issue_scalar_std,
+    ptr_inc,
+    reset_env_and_wait_backend,
+)
 
-FU_TYPE_LDU = 1 << 16
-FU_TYPE_STU = 1 << 17
-LSU_OP_LD = 0x3
-LSU_OP_SD = 0x3
-RESET_CYCLES = 20
-BACKEND_RESET_SYNC_CYCLES = 200
+
 STORE_PIPELINE_SETTLE_CYCLES = 4
 PER_REQUEST_DRAIN_CYCLES = 400
-STORE_ENQ_PORT = 0
-LOAD_ISSUE_LANE = 0
-STA_LANE = 3
-STD_LANE = 5
 VIRTUAL_LOAD_QUEUE_SIZE = 72
 VIRTUAL_STORE_QUEUE_SIZE = 56
 MMIO_STORE_ADDR = 0x1000
@@ -40,216 +40,10 @@ RANDOM_ADDR_POOL = [
 ]
 
 
-@dataclass(frozen=True)
-class QueuePtr:
-    """环形队列指针。"""
-
-    flag: int
-    value: int
-
-
-def _ptr_inc(ptr: QueuePtr, size: int, step: int = 1) -> QueuePtr:
-    flag = ptr.flag
-    value = ptr.value
-    for _ in range(step):
-        value += 1
-        if value == size:
-            value = 0
-            flag ^= 0x1
-    return QueuePtr(flag=flag, value=value)
-
-
-def _wait_backend_reset_deassert(env, must_observe_assert: bool) -> None:
-    observed_assert = not must_observe_assert
-
-    for _ in range(BACKEND_RESET_SYNC_CYCLES):
-        backend_reset = int(env.dut.io_reset_backend.value)
-        if backend_reset:
-            observed_assert = True
-        elif observed_assert:
-            return
-        env.Step(1)
-
-    raise TimeoutError("等待 `io_reset_backend` 解复位超时")
-
-
 def _reset_env_and_state(env) -> QueuePtr:
-    env.reset(cycles=RESET_CYCLES, settle_cycles=1)
-    _wait_backend_reset_deassert(env, must_observe_assert=True)
-
-    assert env.dut.reset.value == 0, "解复位后 `reset` 仍为高"
-    assert int(env.dut.io_reset_backend.value) == 0, "解复位后 `io_reset_backend` 仍为高"
-    assert env.lsq_status.sqCanAccept.value == 1, "解复位后 `sqCanAccept` 未恢复为 1"
+    reset_env_and_wait_backend(env, require_sq_ready=True)
 
     return QueuePtr(flag=0, value=0)
-
-
-def _wait_lsq_store_enq_ready(env, max_cycles: int = 200) -> None:
-    for _ in range(max_cycles):
-        if int(env.dut.io_reset_backend.value):
-            raise RuntimeError("等待 `enqLsq` ready 时 backend 进入 reset")
-        if env.lsq_enq_meta.canAccept.value and env.lsq_status.sqCanAccept.value:
-            return
-        env.Step(1)
-    raise TimeoutError("等待 store `enqLsq` ready 超时")
-
-
-def _wait_lsq_load_enq_ready(env, max_cycles: int = 200) -> None:
-    for _ in range(max_cycles):
-        if int(env.dut.io_reset_backend.value):
-            raise RuntimeError("等待 load `enqLsq` ready 时 backend 进入 reset")
-        if env.lsq_enq_meta.canAccept.value and env.lsq_status.lqCanAccept.value:
-            return
-        env.Step(1)
-    raise TimeoutError("等待 load `enqLsq` ready 超时")
-
-
-def _enqueue_scalar_store(env, req_id: int, sq_ptr: QueuePtr) -> QueuePtr:
-    _wait_lsq_store_enq_ready(env)
-
-    dut = env.dut
-    req = env.lsq_enq_req[STORE_ENQ_PORT]
-
-    env.lsq_enq_meta.need_alloc[STORE_ENQ_PORT].value = 2
-    req.valid.value = 1
-    req.bits_fuType.value = FU_TYPE_STU
-    req.bits_fuOpType.value = LSU_OP_SD
-    req.bits_rfWen.value = 0
-    req.bits_lastUop.value = 1
-    req.bits_pdest.value = 0
-    req.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-    req.bits_robIdx_value.value = req_id & 0x1FF
-    req.bits_lqIdx_flag.value = 0
-    req.bits_lqIdx_value.value = 0
-    req.bits_sqIdx_flag.value = sq_ptr.flag
-    req.bits_sqIdx_value.value = sq_ptr.value
-    req.bits_numLsElem.value = 1
-    dut.io_ooo_to_mem_enqLsq_req_0_bits_uopIdx.value = 0
-
-    env.Step(1)
-
-    allocated_sq_ptr = QueuePtr(
-        flag=int(env.lsq_enq_resp[STORE_ENQ_PORT].sqIdx_flag.value),
-        value=int(env.lsq_enq_resp[STORE_ENQ_PORT].sqIdx_value.value),
-    )
-    env.idle_inputs()
-    return allocated_sq_ptr
-
-
-def _enqueue_scalar_load(env, req_id: int, lq_ptr: QueuePtr, sq_ptr: QueuePtr) -> None:
-    _wait_lsq_load_enq_ready(env)
-
-    dut = env.dut
-    req = env.lsq_enq_req[STORE_ENQ_PORT]
-
-    env.lsq_enq_meta.need_alloc[STORE_ENQ_PORT].value = 1
-    req.valid.value = 1
-    req.bits_fuType.value = FU_TYPE_LDU
-    req.bits_fuOpType.value = LSU_OP_LD
-    req.bits_rfWen.value = 1
-    req.bits_lastUop.value = 1
-    req.bits_pdest.value = req_id % 64
-    req.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-    req.bits_robIdx_value.value = req_id & 0x1FF
-    req.bits_lqIdx_flag.value = lq_ptr.flag
-    req.bits_lqIdx_value.value = lq_ptr.value
-    req.bits_sqIdx_flag.value = sq_ptr.flag
-    req.bits_sqIdx_value.value = sq_ptr.value
-    req.bits_numLsElem.value = 1
-    dut.io_ooo_to_mem_enqLsq_req_0_bits_uopIdx.value = 0
-
-    env.Step(1)
-    env.idle_inputs()
-
-
-def _issue_until_fire(env, lane: int, drive_inputs, max_cycles: int = 50) -> None:
-    issue = env.issue[lane]
-
-    for _ in range(max_cycles):
-        if int(env.dut.io_reset_backend.value):
-            raise RuntimeError(f"等待 `issue[{lane}]` 握手时 backend 进入 reset")
-        drive_inputs()
-        if int(issue.ready.value):
-            env.Step(1)
-            env.idle_inputs()
-            return
-        env.Step(1)
-
-    env.idle_inputs()
-    raise TimeoutError(f"等待 `issue[{lane}]` 完成握手超时")
-
-
-def _issue_scalar_std(env, req_id: int, sq_ptr: QueuePtr, data: int, lane: int = STD_LANE) -> None:
-    def _drive() -> None:
-        issue = env.issue[lane]
-        issue.valid.value = 1
-        issue.bits_fuType.value = FU_TYPE_STU
-        issue.bits_fuOpType.value = LSU_OP_SD
-        issue.bits_src_0.value = data
-        issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        issue.bits_robIdx_value.value = req_id & 0x1FF
-        issue.bits_sqIdx_flag.value = sq_ptr.flag
-        issue.bits_sqIdx_value.value = sq_ptr.value
-
-    _issue_until_fire(env, lane, _drive)
-
-
-def _issue_scalar_sta(env, req_id: int, sq_ptr: QueuePtr, addr: int, lane: int = STA_LANE) -> None:
-    def _drive() -> None:
-        issue = env.issue[lane]
-        issue.valid.value = 1
-        issue.bits_fuType.value = FU_TYPE_STU
-        issue.bits_fuOpType.value = LSU_OP_SD
-        issue.bits_src_0.value = addr
-        issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        issue.bits_robIdx_value.value = req_id & 0x1FF
-        issue.bits_sqIdx_flag.value = sq_ptr.flag
-        issue.bits_sqIdx_value.value = sq_ptr.value
-
-        env.dut.io_ooo_to_mem_intIssue_3_0_bits_imm.value = 0
-        env.dut.io_ooo_to_mem_intIssue_3_0_bits_isFirstIssue.value = 1
-        env.dut.io_ooo_to_mem_intIssue_3_0_bits_pdest.value = 0
-        env.dut.io_ooo_to_mem_intIssue_3_0_bits_rfWen.value = 0
-        env.dut.io_ooo_to_mem_intIssue_3_0_bits_isRVC.value = 0
-        env.dut.io_ooo_to_mem_intIssue_3_0_bits_ftqIdx_flag.value = 0
-        env.dut.io_ooo_to_mem_intIssue_3_0_bits_ftqIdx_value.value = req_id & 0x3F
-        env.dut.io_ooo_to_mem_intIssue_3_0_bits_ftqOffset.value = 0
-        env.dut.io_ooo_to_mem_intIssue_3_0_bits_storeSetHit.value = 0
-        env.dut.io_ooo_to_mem_intIssue_3_0_bits_ssid.value = 0
-
-    _issue_until_fire(env, lane, _drive)
-
-
-def _issue_scalar_load(env, req_id: int, lq_ptr: QueuePtr, sq_ptr: QueuePtr, addr: int, lane: int = LOAD_ISSUE_LANE) -> None:
-    def _drive() -> None:
-        issue = env.issue[lane]
-        issue.valid.value = 1
-        issue.bits_fuType.value = FU_TYPE_LDU
-        issue.bits_fuOpType.value = LSU_OP_LD
-        issue.bits_src_0.value = addr
-        issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        issue.bits_robIdx_value.value = req_id & 0x1FF
-        issue.bits_sqIdx_flag.value = sq_ptr.flag
-        issue.bits_sqIdx_value.value = sq_ptr.value
-
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_imm.value = 0
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_pdest.value = req_id % 64
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_rfWen.value = 1
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_pc.value = 0x80000000 + req_id * 4
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_ftqIdx_flag.value = 0
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_ftqIdx_value.value = req_id & 0x3F
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_ftqOffset.value = 0
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_loadWaitBit.value = 0
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_waitForRobIdx_flag.value = 0
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_waitForRobIdx_value.value = 0
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_storeSetHit.value = 0
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_loadWaitStrict.value = 0
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_ssid.value = 0
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_lqIdx_flag.value = lq_ptr.flag
-        env.dut.io_ooo_to_mem_intIssue_0_0_bits_lqIdx_value.value = lq_ptr.value
-
-    _issue_until_fire(env, lane, _drive)
-    env.note_load_issued((req_id >> 9) & 0x1, req_id & 0x1FF)
 
 
 def _store_data_low64_matches(store, expected_data: int) -> bool:
@@ -313,8 +107,8 @@ def _issue_and_check_scalar_load(
     addr: int,
     expected_completed_loads: int,
 ) -> QueuePtr:
-    _enqueue_scalar_load(env, req_id, lq_ptr, sq_ptr)
-    _issue_scalar_load(env, req_id, lq_ptr, sq_ptr, addr)
+    enqueue_scalar_load(env, req_id, lq_ptr, sq_ptr)
+    issue_scalar_load(env, req_id, addr, lq_ptr, sq_ptr)
     env.memory.expect_load(
         rob_idx_flag=(req_id >> 9) & 0x1,
         rob_idx_value=req_id & 0x1FF,
@@ -327,7 +121,7 @@ def _issue_and_check_scalar_load(
     assert env.memory.completed_loads == expected_completed_loads, (
         f"load req_id={req_id} 未在限定周期内完成"
     )
-    return _ptr_inc(lq_ptr, VIRTUAL_LOAD_QUEUE_SIZE)
+    return ptr_inc(lq_ptr, VIRTUAL_LOAD_QUEUE_SIZE)
 
 
 def test_api_MemBlock_single_mmio_store_smoke(env):
@@ -347,9 +141,9 @@ def test_api_MemBlock_single_mmio_store_smoke(env):
     outer_writes_before = env.memory.outer_write_request_count
     sbuffer_drains_before = env.memory.sbuffer_drain_count
 
-    allocated_sq_ptr = _enqueue_scalar_store(env, req_id, sq_ptr)
-    _issue_scalar_std(env, req_id, allocated_sq_ptr, store_data)
-    _issue_scalar_sta(env, req_id, allocated_sq_ptr, MMIO_STORE_ADDR)
+    allocated_sq_ptr = enqueue_scalar_store(env, req_id, sq_ptr)
+    issue_scalar_std(env, req_id, allocated_sq_ptr, store_data)
+    issue_scalar_sta(env, req_id, allocated_sq_ptr, MMIO_STORE_ADDR)
 
     store = _wait_pending_store_materialized(
         env,
@@ -388,9 +182,9 @@ def test_api_MemBlock_single_cacheable_store_then_load_same_addr(env):
     sq_ptr = _reset_env_and_state(env)
     lq_ptr = QueuePtr(flag=0, value=0)
 
-    allocated_sq_ptr = _enqueue_scalar_store(env, store_req_id, sq_ptr)
-    _issue_scalar_std(env, store_req_id, allocated_sq_ptr, store_data)
-    _issue_scalar_sta(env, store_req_id, allocated_sq_ptr, CACHEABLE_STORE_ADDR)
+    allocated_sq_ptr = enqueue_scalar_store(env, store_req_id, sq_ptr)
+    issue_scalar_std(env, store_req_id, allocated_sq_ptr, store_data)
+    issue_scalar_sta(env, store_req_id, allocated_sq_ptr, CACHEABLE_STORE_ADDR)
 
     store = _wait_pending_store_materialized(
         env,
@@ -406,7 +200,7 @@ def test_api_MemBlock_single_cacheable_store_then_load_same_addr(env):
         env,
         req_id=load_req_id,
         lq_ptr=lq_ptr,
-        sq_ptr=_ptr_inc(sq_ptr, VIRTUAL_STORE_QUEUE_SIZE),
+        sq_ptr=ptr_inc(sq_ptr, VIRTUAL_STORE_QUEUE_SIZE),
         addr=CACHEABLE_STORE_ADDR,
         expected_completed_loads=1,
     )
@@ -435,9 +229,9 @@ def test_api_MemBlock_single_cacheable_store_flush_smoke(env):
     outer_writes_before = env.memory.outer_write_request_count
     sbuffer_drains_before = env.memory.sbuffer_drain_count
 
-    allocated_sq_ptr = _enqueue_scalar_store(env, req_id, sq_ptr)
-    _issue_scalar_std(env, req_id, allocated_sq_ptr, store_data)
-    _issue_scalar_sta(env, req_id, allocated_sq_ptr, CACHEABLE_STORE_ADDR)
+    allocated_sq_ptr = enqueue_scalar_store(env, req_id, sq_ptr)
+    issue_scalar_std(env, req_id, allocated_sq_ptr, store_data)
+    issue_scalar_sta(env, req_id, allocated_sq_ptr, CACHEABLE_STORE_ADDR)
 
     store = _wait_pending_store_materialized(
         env,
@@ -496,9 +290,9 @@ def test_api_MemBlock_small_mixed_load_store_random(env):
     for op_kind, addr, maybe_data in operations:
         if op_kind == "store":
             store_data = int(maybe_data)
-            allocated_sq_ptr = _enqueue_scalar_store(env, 0, sq_ptr)
-            _issue_scalar_std(env, 0, allocated_sq_ptr, store_data)
-            _issue_scalar_sta(env, 0, allocated_sq_ptr, addr)
+            allocated_sq_ptr = enqueue_scalar_store(env, 0, sq_ptr)
+            issue_scalar_std(env, 0, allocated_sq_ptr, store_data)
+            issue_scalar_sta(env, 0, allocated_sq_ptr, addr)
             _wait_pending_store_materialized(
                 env,
                 allocated_sq_ptr,
@@ -509,7 +303,7 @@ def test_api_MemBlock_small_mixed_load_store_random(env):
                 max_cycles=300,
             )
             total_stores += 1
-            sq_ptr = _ptr_inc(sq_ptr, VIRTUAL_STORE_QUEUE_SIZE)
+            sq_ptr = ptr_inc(sq_ptr, VIRTUAL_STORE_QUEUE_SIZE)
             continue
 
         lq_ptr = _issue_and_check_scalar_load(
