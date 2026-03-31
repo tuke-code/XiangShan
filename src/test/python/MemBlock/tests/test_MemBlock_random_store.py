@@ -16,11 +16,12 @@ from request_apis import (
     LoadTxn,
     QueuePtr,
     StoreTxn,
-    expect_load,
-    ptr_inc,
-    reset_env_and_wait_backend,
-    send_load,
-    send_store,
+)
+from sequences.memblock_sequences import (
+    FlushStoreBuffersSequence,
+    ResetEnvSequence,
+    ScalarLoadSequence,
+    ScalarStoreSequence,
 )
 
 
@@ -41,34 +42,13 @@ RANDOM_ADDR_POOL = [
 
 
 def _reset_env_and_state(env) -> QueuePtr:
-    reset_env_and_wait_backend(env, require_sq_ready=True)
-
-    return QueuePtr(flag=0, value=0)
+    return ResetEnvSequence(require_sq_ready=True).run(env).sq_ptr
 
 
 def _store_data_low64_matches(store, expected_data: int) -> bool:
     if store.data is None:
         return False
     return (int(store.data) & ((1 << 64) - 1)) == (expected_data & ((1 << 64) - 1))
-
-
-def _wait_pending_store_materialized(
-    env,
-    sq_ptr: QueuePtr,
-    expected_addr: int,
-    expected_data: int,
-    expected_mmio: bool | None = None,
-    require_committed: bool = False,
-    max_cycles: int = 200,
-):
-    return env.wait_store_materialized(
-        sq_ptr.value,
-        expected_addr=expected_addr,
-        expected_data=expected_data,
-        expected_mmio=expected_mmio,
-        require_committed=require_committed,
-        max_cycles=max_cycles,
-    )
 
 
 def _wait_for_counter_growth(env, attr_name: str, baseline: int, max_cycles: int = 200) -> int:
@@ -95,13 +75,12 @@ def _issue_and_check_scalar_load(
         size=8,
         mask=0xFF,
     )
-    send_load(env, txn)
-    expect_load(env, txn)
-    env.drain_writebacks(max_cycles=PER_REQUEST_DRAIN_CYCLES)
-    assert env.get_completed_load_count() == expected_completed_loads, (
-        f"load req_id={req_id} 未在限定周期内完成"
-    )
-    return ptr_inc(lq_ptr, VIRTUAL_LOAD_QUEUE_SIZE)
+    return ScalarLoadSequence(
+        txn,
+        drain_cycles=PER_REQUEST_DRAIN_CYCLES,
+        expected_completed_loads=expected_completed_loads,
+        load_queue_size=VIRTUAL_LOAD_QUEUE_SIZE,
+    ).run(env).next_lq_ptr
 
 
 def test_api_MemBlock_single_mmio_store_smoke(env):
@@ -121,18 +100,11 @@ def test_api_MemBlock_single_mmio_store_smoke(env):
     outer_writes_before = env.get_counter("outer_write_request_count")
     sbuffer_drains_before = env.get_counter("sbuffer_drain_count")
 
-    allocated_sq_ptr = send_store(
-        env,
+    store_result = ScalarStoreSequence(
         StoreTxn(req_id=req_id, sq_ptr=sq_ptr, addr=MMIO_STORE_ADDR, data=store_data),
-    )
-
-    store = _wait_pending_store_materialized(
-        env,
-        allocated_sq_ptr,
-        expected_addr=MMIO_STORE_ADDR,
-        expected_data=store_data,
         expected_mmio=True,
-    )
+    ).run(env)
+    store = store_result.store_view
     _wait_for_counter_growth(env, "outer_write_request_count", outer_writes_before, max_cycles=300)
     env.pulse_store_commit(1)
     env.Step(STORE_PIPELINE_SETTLE_CYCLES)
@@ -163,26 +135,19 @@ def test_api_MemBlock_single_cacheable_store_then_load_same_addr(env):
     sq_ptr = _reset_env_and_state(env)
     lq_ptr = QueuePtr(flag=0, value=0)
 
-    allocated_sq_ptr = send_store(
-        env,
+    store_result = ScalarStoreSequence(
         StoreTxn(req_id=store_req_id, sq_ptr=sq_ptr, addr=CACHEABLE_STORE_ADDR, data=store_data),
-    )
-
-    store = _wait_pending_store_materialized(
-        env,
-        allocated_sq_ptr,
-        expected_addr=CACHEABLE_STORE_ADDR,
-        expected_data=store_data,
         expected_mmio=False,
         require_committed=True,
-        max_cycles=300,
-    )
+        materialize_cycles=300,
+    ).run(env)
+    store = store_result.store_view
 
     lq_ptr = _issue_and_check_scalar_load(
         env,
         req_id=load_req_id,
         lq_ptr=lq_ptr,
-        sq_ptr=ptr_inc(sq_ptr, VIRTUAL_STORE_QUEUE_SIZE),
+        sq_ptr=store_result.next_sq_ptr,
         addr=CACHEABLE_STORE_ADDR,
         expected_completed_loads=1,
     )
@@ -211,23 +176,18 @@ def test_api_MemBlock_single_cacheable_store_flush_smoke(env):
     outer_writes_before = env.get_counter("outer_write_request_count")
     sbuffer_drains_before = env.get_counter("sbuffer_drain_count")
 
-    allocated_sq_ptr = send_store(
-        env,
+    store = ScalarStoreSequence(
         StoreTxn(req_id=req_id, sq_ptr=sq_ptr, addr=CACHEABLE_STORE_ADDR, data=store_data),
-    )
-
-    store = _wait_pending_store_materialized(
-        env,
-        allocated_sq_ptr,
-        expected_addr=CACHEABLE_STORE_ADDR,
-        expected_data=store_data,
         expected_mmio=False,
         require_committed=True,
-        max_cycles=300,
-    )
+        materialize_cycles=300,
+    ).run(env).store_view
     _wait_for_counter_growth(env, "sbuffer_drain_count", sbuffer_drains_before, max_cycles=300)
 
-    drain_summary = env.flush_store_buffers_and_wait(max_cycles=400, settle_cycles=STORE_PIPELINE_SETTLE_CYCLES)
+    drain_summary = FlushStoreBuffersSequence(
+        max_cycles=400,
+        settle_cycles=STORE_PIPELINE_SETTLE_CYCLES,
+    ).run(env)
 
     assert not store.mmio, "cacheable store 被错误标记为 mmio"
     assert store.addr == CACHEABLE_STORE_ADDR, "cacheable store shadow 地址不匹配"
@@ -273,21 +233,13 @@ def test_api_MemBlock_small_mixed_load_store_random(env):
     for op_kind, addr, maybe_data in operations:
         if op_kind == "store":
             store_data = int(maybe_data)
-            allocated_sq_ptr = send_store(
-                env,
+            sq_ptr = ScalarStoreSequence(
                 StoreTxn(req_id=0, sq_ptr=sq_ptr, addr=addr, data=store_data),
-            )
-            _wait_pending_store_materialized(
-                env,
-                allocated_sq_ptr,
-                expected_addr=addr,
-                expected_data=store_data,
                 expected_mmio=False,
                 require_committed=True,
-                max_cycles=300,
-            )
+                materialize_cycles=300,
+            ).run(env).next_sq_ptr
             total_stores += 1
-            sq_ptr = ptr_inc(sq_ptr, VIRTUAL_STORE_QUEUE_SIZE)
             continue
 
         lq_ptr = _issue_and_check_scalar_load(
@@ -301,10 +253,10 @@ def test_api_MemBlock_small_mixed_load_store_random(env):
         total_loads += 1
         next_load_req_id += 1
 
-    drain_summary = env.flush_store_buffers_and_wait(
+    drain_summary = FlushStoreBuffersSequence(
         max_cycles=PER_REQUEST_DRAIN_CYCLES,
         settle_cycles=STORE_PIPELINE_SETTLE_CYCLES,
-    )
+    ).run(env)
 
     assert total_stores > 0, "mixed random 未生成任何 store"
     assert total_loads > 0, "mixed random 未生成任何 load"

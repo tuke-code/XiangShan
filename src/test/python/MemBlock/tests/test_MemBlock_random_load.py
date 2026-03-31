@@ -13,16 +13,11 @@ MemBlock 随机 load 流量测试。
 """
 
 import random
-from dataclasses import dataclass
 
 from request_apis import (
     LoadTxn,
-    QueuePtr,
-    expect_load,
-    ptr_inc,
-    reset_env_and_wait_backend,
-    send_load,
 )
+from sequences.memblock_sequences import ResetEnvSequence, ScalarLoadSequence, SequenceState
 
 
 RANDOM_SEED = 20260324
@@ -40,15 +35,7 @@ TRANSPORT_STAT_KEYS = (
 )
 
 
-@dataclass(frozen=True)
-class StreamState:
-    """测试侧维护的可重建状态。"""
-
-    next_lq_ptr: QueuePtr
-    sq_ptr: QueuePtr
-
-
-def _reset_env_and_state(env) -> StreamState:
+def _reset_env_and_state(env) -> SequenceState:
     """
     执行一次完整复位，并同步重建测试侧状态。
 
@@ -57,16 +44,10 @@ def _reset_env_and_state(env) -> StreamState:
       - 用例执行过程中若再次 reset，软件侧维护的索引状态必须同步清零
     """
 
-    reset_env_and_wait_backend(
-        env,
+    return ResetEnvSequence(
         require_issue_lanes=(0,),
         require_lq_ready=True,
-    )
-
-    return StreamState(
-        next_lq_ptr=QueuePtr(flag=0, value=0),
-        sq_ptr=QueuePtr(flag=0, value=0),
-    )
+    ).run(env)
 
 
 def _snapshot_transport_stats(env) -> dict[str, int]:
@@ -107,15 +88,15 @@ def _run_random_load_requests(env, requests: list[tuple[int, int]]) -> None:
             size=8,
             mask=0xFF,
         )
-        send_load(env, txn)
-        expect_load(env, txn)
-        env.drain_writebacks(max_cycles=PER_REQUEST_DRAIN_CYCLES)
-        assert env.get_completed_load_count() == completed_before + req_id + 1, (
-            f"请求 {req_id} 未在限定周期内完成"
-        )
+        result = ScalarLoadSequence(
+            txn,
+            drain_cycles=PER_REQUEST_DRAIN_CYCLES,
+            expected_completed_loads=completed_before + req_id + 1,
+            load_queue_size=VIRTUAL_LOAD_QUEUE_SIZE,
+        ).run(env)
 
-        stream_state = StreamState(
-            next_lq_ptr=ptr_inc(stream_state.next_lq_ptr, VIRTUAL_LOAD_QUEUE_SIZE),
+        stream_state = SequenceState(
+            next_lq_ptr=result.next_lq_ptr,
             sq_ptr=stream_state.sq_ptr,
         )
 
@@ -181,13 +162,12 @@ def test_api_MemBlock_single_preloaded_load_data_check(env):
         size=8,
         mask=0xFF,
     )
-    send_load(env, txn)
-    expect_load(env, txn)
-
-    env.drain_writebacks(max_cycles=200)
-
-    assert env.get_completed_load_count() == 1, "单笔预加载 load 未完成数据校验"
-    env.assert_no_outstanding()
+    ScalarLoadSequence(
+        txn,
+        drain_cycles=200,
+        expected_completed_loads=1,
+        assert_no_outstanding=True,
+    ).run(env)
 
 
 def test_api_MemBlock_random_io_1000_load_requests(env):
