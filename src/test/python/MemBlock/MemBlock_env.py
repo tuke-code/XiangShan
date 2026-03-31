@@ -63,6 +63,26 @@ class RobIndex:
     value: int
 
 
+@dataclass(frozen=True)
+class StoreView:
+    """对外暴露的 store 只读视图。"""
+
+    sq_idx: int
+    allocated: bool
+    addr: int | None
+    data: int | None
+    mask: int
+    committed: bool
+    completed: bool
+    mmio: bool
+    nc: bool
+    mem_back_type_mm: bool
+    has_exception: bool
+    retired: bool
+    rob_idx_flag: int | None
+    rob_idx_value: int | None
+
+
 class PendingPtrDriver:
     """根据 load 完成情况推进 `io_ooo_to_mem_lsqio_pendingPtr`。"""
 
@@ -1131,6 +1151,137 @@ class MemBlockEnv:
 
         self.memory.enqueue_d_response(delay_cycles=delay_cycles, **kwargs)
 
+    def preload_u64(self, addr: int, value: int) -> None:
+        """向黄金内存预置一笔 64-bit 数据。"""
+
+        self.memory.preload_u64(addr, value)
+
+    def expect_scalar_load(
+        self,
+        *,
+        addr: int,
+        pdest: int | None = None,
+        size: int = 8,
+        mask: int = 0xFF,
+        req_id: int | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+    ):
+        """登记一笔标量 load 的期望结果。"""
+
+        if req_id is not None:
+            rob_idx_flag = (req_id >> 9) & 0x1
+            rob_idx_value = req_id & 0x1FF
+            if pdest is None:
+                pdest = req_id % 64
+        if rob_idx_flag is None or rob_idx_value is None or pdest is None:
+            raise ValueError("expect_scalar_load 需要 `req_id`，或同时提供 `rob_idx_flag/rob_idx_value/pdest`")
+        return self.memory.expect_load(
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+            pdest=pdest,
+            addr=addr,
+            size=size,
+            mask=mask,
+        )
+
+    def get_transport_stats(self) -> dict[str, int]:
+        """返回当前传输与 compare 统计的快照。"""
+
+        return {key: int(value) for key, value in self.memory.stats.items()}
+
+    def get_completed_load_count(self) -> int:
+        """返回已完成 compare 的 load 数量。"""
+
+        return int(self.memory.completed_loads)
+
+    def get_counter(self, counter_name: str) -> int:
+        """读取 env 导出的统计计数器。"""
+
+        if hasattr(self.memory, counter_name):
+            return int(getattr(self.memory, counter_name))
+        stats = self.get_transport_stats()
+        if counter_name in stats:
+            return int(stats[counter_name])
+        raise AttributeError(f"未知计数器 `{counter_name}`")
+
+    def get_store_view(self, sq_idx: int) -> StoreView | None:
+        """返回某个 SQ slot 的只读 store 视图。"""
+
+        store = self.memory.pending_stores.get(int(sq_idx))
+        if store is None:
+            return None
+        rob_idx_flag = None if store.rob_idx is None else int(store.rob_idx.flag)
+        rob_idx_value = None if store.rob_idx is None else int(store.rob_idx.value)
+        return StoreView(
+            sq_idx=int(store.sq_idx),
+            allocated=bool(store.allocated),
+            addr=None if store.addr is None else int(store.addr),
+            data=None if store.data is None else int(store.data),
+            mask=int(store.mask),
+            committed=bool(store.committed),
+            completed=bool(store.completed),
+            mmio=bool(store.mmio),
+            nc=bool(store.nc),
+            mem_back_type_mm=bool(store.mem_back_type_mm),
+            has_exception=bool(store.has_exception),
+            retired=bool(store.retired),
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+
+    def wait_store_materialized(
+        self,
+        sq_idx: int,
+        *,
+        expected_addr: int,
+        expected_data: int,
+        expected_mmio: bool | None = None,
+        require_committed: bool = False,
+        max_cycles: int = 200,
+    ) -> StoreView:
+        """等待某个 SQ slot 的 store shadow 收敛。"""
+
+        for _ in range(max_cycles):
+            store = self.get_store_view(sq_idx)
+            if (
+                store is not None
+                and store.allocated
+                and store.addr == expected_addr
+                and store.data is not None
+                and (store.data & ((1 << 64) - 1)) == (expected_data & ((1 << 64) - 1))
+                and store.mask != 0
+                and (expected_mmio is None or store.mmio == expected_mmio)
+                and (not require_committed or store.committed)
+            ):
+                return store
+            self.Step(1)
+
+        store = self.get_store_view(sq_idx)
+        raise AssertionError(
+            "等待 pending store shadow 超时: "
+            f"sqIdx={sq_idx}, store={store}"
+        )
+
+    def wait_counter_growth(self, counter_name: str, baseline: int, max_cycles: int = 200) -> int:
+        """等待某个计数器增长。"""
+
+        for _ in range(max_cycles):
+            current = self.get_counter(counter_name)
+            if current > baseline:
+                return current
+            self.Step(1)
+        raise TimeoutError(f"等待 `{counter_name}` 增长超时")
+
+    def wait_memory_quiesce(self, max_cycles: int = 200) -> None:
+        """等待 MemoryModel 事务收敛。"""
+
+        for _ in range(max_cycles):
+            if self.memory.outstanding_transaction_count == 0:
+                return
+            self.Step(1)
+        raise TimeoutError("等待 MemoryModel 事务收敛超时")
+
     def drain_writebacks(self, max_cycles: int = 200) -> None:
         """推进若干周期直到待校验 writeback 全部收敛。"""
 
@@ -1172,6 +1323,11 @@ class MemBlockEnv:
 
         assert self.memory.outstanding_expected_count == 0, "仍有未校验的 load writeback"
         assert self.memory.outstanding_transaction_count == 0, "仍有未完成的 TL 事务"
+
+    def assert_no_outstanding(self) -> None:
+        """公开的无残留事务断言。"""
+
+        self.check_no_outstanding_transactions()
 
     def clear_callbacks(self) -> None:
         """移除 env 注册的 StepRis 回调。"""

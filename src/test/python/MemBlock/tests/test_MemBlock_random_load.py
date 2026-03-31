@@ -16,11 +16,12 @@ import random
 from dataclasses import dataclass
 
 from request_apis import (
+    LoadTxn,
     QueuePtr,
-    enqueue_scalar_load,
-    issue_scalar_load,
+    expect_load,
     ptr_inc,
     reset_env_and_wait_backend,
+    send_load,
 )
 
 
@@ -69,7 +70,7 @@ def _reset_env_and_state(env) -> StreamState:
 
 
 def _snapshot_transport_stats(env) -> dict[str, int]:
-    stats = env.memory.stats
+    stats = env.get_transport_stats()
     return {key: int(stats[key]) for key in TRANSPORT_STAT_KEYS}
 
 
@@ -82,13 +83,13 @@ def _prepare_random_requests(env, addr_base: int) -> list[tuple[int, int]]:
     requests = []
     for req_id in range(RANDOM_LOAD_COUNT):
         addr = _random_addr(rng, addr_base)
-        env.memory.preload_u64(addr, rng.getrandbits(64))
+        env.preload_u64(addr, rng.getrandbits(64))
         requests.append((req_id, addr))
     return requests
 
 
 def _run_random_load_requests(env, requests: list[tuple[int, int]]) -> None:
-    completed_before = env.memory.completed_loads
+    completed_before = env.get_completed_load_count()
     stream_state = _reset_env_and_state(env)
 
     for req_id, random_addr in requests:
@@ -98,18 +99,18 @@ def _run_random_load_requests(env, requests: list[tuple[int, int]]) -> None:
 
         current_lq_ptr = stream_state.next_lq_ptr
 
-        enqueue_scalar_load(env, req_id, current_lq_ptr, stream_state.sq_ptr)
-        issue_scalar_load(env, req_id, random_addr, current_lq_ptr, stream_state.sq_ptr)
-        env.memory.expect_load(
-            rob_idx_flag=(req_id >> 9) & 0x1,
-            rob_idx_value=req_id & 0x1FF,
-            pdest=req_id % 64,
+        txn = LoadTxn(
+            req_id=req_id,
             addr=random_addr,
+            lq_ptr=current_lq_ptr,
+            sq_ptr=stream_state.sq_ptr,
             size=8,
             mask=0xFF,
         )
+        send_load(env, txn)
+        expect_load(env, txn)
         env.drain_writebacks(max_cycles=PER_REQUEST_DRAIN_CYCLES)
-        assert env.memory.completed_loads == completed_before + req_id + 1, (
+        assert env.get_completed_load_count() == completed_before + req_id + 1, (
             f"请求 {req_id} 未在限定周期内完成"
         )
 
@@ -120,10 +121,10 @@ def _run_random_load_requests(env, requests: list[tuple[int, int]]) -> None:
 
     assert env.issue[0].ready.value == 1, "随机 load 流结束后 `issue[0]` 不再 ready"
     assert env.lsq_status.lqCanAccept.value == 1, "随机 load 流结束后 `lqCanAccept` 变为 0"
-    assert env.memory.completed_loads == completed_before + RANDOM_LOAD_COUNT, (
+    assert env.get_completed_load_count() == completed_before + RANDOM_LOAD_COUNT, (
         "1000 个随机 load 未全部完成校验"
     )
-    env.check_no_outstanding_transactions()
+    env.assert_no_outstanding()
 
 
 def _assert_random_io_transport(stats_before: dict[str, int], stats_after: dict[str, int]) -> None:
@@ -170,23 +171,23 @@ def test_api_MemBlock_single_preloaded_load_data_check(env):
     expected_data = 0x1122334455667788
 
     stream_state = _reset_env_and_state(env)
-    env.memory.preload_u64(load_addr, expected_data)
+    env.preload_u64(load_addr, expected_data)
 
-    enqueue_scalar_load(env, req_id, stream_state.next_lq_ptr, stream_state.sq_ptr)
-    issue_scalar_load(env, req_id, load_addr, stream_state.next_lq_ptr, stream_state.sq_ptr)
-    env.memory.expect_load(
-        rob_idx_flag=0,
-        rob_idx_value=req_id,
-        pdest=req_id % 64,
+    txn = LoadTxn(
+        req_id=req_id,
         addr=load_addr,
+        lq_ptr=stream_state.next_lq_ptr,
+        sq_ptr=stream_state.sq_ptr,
         size=8,
         mask=0xFF,
     )
+    send_load(env, txn)
+    expect_load(env, txn)
 
     env.drain_writebacks(max_cycles=200)
 
-    assert env.memory.completed_loads == 1, "单笔预加载 load 未完成数据校验"
-    env.check_no_outstanding_transactions()
+    assert env.get_completed_load_count() == 1, "单笔预加载 load 未完成数据校验"
+    env.assert_no_outstanding()
 
 
 def test_api_MemBlock_random_io_1000_load_requests(env):

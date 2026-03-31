@@ -3,7 +3,7 @@
 MemBlock 真实 DUT 请求发送公共 API。
 """
 
-from dataclasses import dataclass
+from transactions import LoadTxn, QueuePtr, StoreTxn
 
 
 FU_TYPE_LDU = 1 << 16
@@ -17,14 +17,6 @@ DEFAULT_STORE_ENQ_PORT = 0
 DEFAULT_LOAD_ISSUE_LANE = 0
 DEFAULT_STA_LANE = 3
 DEFAULT_STD_LANE = 5
-
-
-@dataclass(frozen=True)
-class QueuePtr:
-    """环形队列指针。"""
-
-    flag: int
-    value: int
 
 
 def _set_optional_signal(dut, signal_name: str, value: int) -> None:
@@ -163,6 +155,64 @@ def enqueue_scalar_store(
         rob_idx_value=req_id & 0x1FF,
     )
     env.idle_inputs()
+    return allocated_sq_ptr
+
+
+def send_load(env, txn: LoadTxn) -> None:
+    """按标准时序发送一笔标量 load。"""
+
+    enqueue_scalar_load(
+        env,
+        req_id=txn.req_id,
+        lq_ptr=txn.lq_ptr,
+        sq_ptr=txn.sq_ptr,
+        enq_port=txn.enq_port,
+    )
+    issue_scalar_load(
+        env,
+        req_id=txn.req_id,
+        addr=txn.addr,
+        lq_ptr=txn.lq_ptr,
+        sq_ptr=txn.sq_ptr,
+        lane=txn.issue_lane,
+    )
+
+
+def expect_load(env, txn: LoadTxn):
+    """登记一笔 load 事务的期望结果。"""
+
+    return env.expect_scalar_load(
+        req_id=txn.req_id,
+        pdest=txn.resolved_pdest,
+        addr=txn.addr,
+        size=txn.size,
+        mask=txn.mask,
+    )
+
+
+def send_store(env, txn: StoreTxn) -> QueuePtr:
+    """按标准时序发送一笔标量 store。"""
+
+    allocated_sq_ptr = enqueue_scalar_store(
+        env,
+        req_id=txn.req_id,
+        sq_ptr=txn.sq_ptr,
+        enq_port=txn.enq_port,
+    )
+    issue_scalar_std(
+        env,
+        req_id=txn.req_id,
+        sq_ptr=allocated_sq_ptr,
+        data=txn.data,
+        lane=txn.std_lane,
+    )
+    issue_scalar_sta(
+        env,
+        req_id=txn.req_id,
+        sq_ptr=allocated_sq_ptr,
+        addr=txn.addr,
+        lane=txn.sta_lane,
+    )
     return allocated_sq_ptr
 
 

@@ -125,7 +125,7 @@ def test_api_MemBlock_env_outer_buffer_mock_ready(env):
 
     env.Step(1)
     assert env.outer_tl_a.ready.value == 1
-    stats = env.memory.stats
+    stats = env.get_transport_stats()
     assert stats["pending_outer_d_count"] == 0
     assert stats["active_outer_d_count"] == 0
 
@@ -134,9 +134,9 @@ def test_api_MemBlock_env_outer_buffer_mock_response_queue(env):
     """验证 MemoryModel 支持排队注入 outer D 响应。"""
 
     env.inject_outer_d_response(delay_cycles=3, opcode=4, source=2, data=0x55AA)
-    assert env.memory.stats["pending_outer_d_count"] == 1
+    assert env.get_transport_stats()["pending_outer_d_count"] == 1
     env.Step(3)
-    stats = env.memory.stats
+    stats = env.get_transport_stats()
     assert stats["pending_outer_d_count"] + stats["active_outer_d_count"] <= 1
     assert env.outer_tl_a.ready.value == 1
 
@@ -155,11 +155,11 @@ def test_api_MemBlock_env_dcache_client_mock_response_queue(env):
 
     env.inject_dcache_b_response(delay_cycles=2, opcode=6, source=1, address=0x1000)
     env.inject_dcache_d_response(delay_cycles=2, opcode=1, source=1, sink=3, data=0x1234)
-    stats = env.memory.stats
+    stats = env.get_transport_stats()
     assert stats["pending_b_count"] == 1
     assert stats["pending_d_count"] == 1
     env.Step(2)
-    stats = env.memory.stats
+    stats = env.get_transport_stats()
     assert stats["pending_b_count"] + stats["active_b_count"] <= 1
     assert stats["pending_d_count"] + stats["active_d_count"] <= 1
 
@@ -167,8 +167,16 @@ def test_api_MemBlock_env_dcache_client_mock_response_queue(env):
 def test_api_MemBlock_env_memory_preload_access(env):
     """验证 MemoryModel preload/read 接口可用。"""
 
-    env.memory.preload_u64(0x1000, 0x1122334455667788)
+    env.preload_u64(0x1000, 0x1122334455667788)
     assert env.memory.read(0x1000, 8) == 0x1122334455667788
+
+
+def test_api_MemBlock_env_facade_counter_access(env):
+    """验证 env facade 能返回计数与完成数量。"""
+
+    env.Step(1)
+    assert env.get_counter("outer_request_count") >= 0
+    assert env.get_completed_load_count() == 0
 
 
 def test_api_MemBlock_env_idle_inputs_restores_default(env):
