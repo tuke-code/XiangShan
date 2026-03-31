@@ -315,9 +315,7 @@ def test_scoreboard_can_be_unit_tested_without_transport():
     )
     refmem = RefMemory()
     scoreboard = Scoreboard(
-        FakeDut(),
         refmem,
-        writebacks=[writeback],
         rob_size=512,
         store_queue_size=56,
     )
@@ -326,7 +324,14 @@ def test_scoreboard_can_be_unit_tested_without_transport():
     scoreboard.expect_load(rob_idx_flag=0, rob_idx_value=1, pdest=7, addr=0x1000, size=8, mask=0xFF)
     scoreboard.note_load_issued(0, 1)
     scoreboard.note_load_commits(1)
-    scoreboard.after_cycle()
+    scoreboard.observe_load_writeback(
+        data=writeback.read("data_0", 0),
+        pdest=writeback.read("pdest", 0),
+        int_wen=writeback.read("intWen", 0),
+        rob_idx_flag=writeback.read("robIdx_flag", 0),
+        rob_idx_value=writeback.read("robIdx_value", 0),
+        exception_bits=writeback.read_exception_bits(),
+    )
 
     assert scoreboard.completed_loads == 1
     assert scoreboard.outstanding_expected_count == 0

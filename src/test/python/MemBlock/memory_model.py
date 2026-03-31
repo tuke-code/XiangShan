@@ -11,13 +11,14 @@ MemBlock 统一内存模型。
 
 from __future__ import annotations
 
+from monitors.store_monitor import StoreMonitor
+from monitors.writeback_monitor import WritebackMonitor
 from model.ref_memory import RefMemory
 from model.scoreboard import (
     ExpectedLoad,
     PendingStore,
     RobIndex,
     Scoreboard,
-    STORE_DATA_WIDTH_BYTES,
 )
 from model.transport_responder import TransportResponder
 
@@ -98,16 +99,20 @@ class MemoryModel:
         self.ref_memory = RefMemory()
         self.memory = self.ref_memory.storage
         self.scoreboard = Scoreboard(
-            dut,
             self.ref_memory,
-            writebacks=writebacks,
+            rob_size=rob_size,
+            store_queue_size=store_queue_size,
+        )
+        self.writeback_monitor = WritebackMonitor(writebacks, self.scoreboard)
+        self.store_monitor = StoreMonitor(
+            dut,
+            self.scoreboard,
             store_data_inputs=store_data_inputs,
             store_addr_inputs=store_addr_inputs,
             store_mask_inputs=store_mask_inputs,
             store_addr_re_inputs=store_addr_re_inputs,
             sq_shadow_entries=sq_shadow_entries,
             sbuffer_writes=sbuffer_writes,
-            rob_size=rob_size,
             store_queue_size=store_queue_size,
         )
         self.transport = TransportResponder(
@@ -132,7 +137,7 @@ class MemoryModel:
 
     @property
     def writebacks(self):
-        return self.scoreboard.writebacks
+        return self.writeback_monitor.writebacks
 
     @property
     def pending_stores(self) -> dict[int, PendingStore]:
@@ -167,18 +172,19 @@ class MemoryModel:
         return self.scoreboard.sbuffer_drain_count
 
     def attach_writebacks(self, writebacks) -> None:
-        self.scoreboard.attach_writebacks(writebacks)
+        self.writeback_monitor.attach_writebacks(writebacks)
 
     def drive_idle(self) -> None:
         self.transport.drive_idle()
-        self.scoreboard.drive_writeback_ready()
+        self.writeback_monitor.drive_ready()
 
     def drive_writeback_ready(self) -> None:
-        self.scoreboard.drive_writeback_ready()
+        self.writeback_monitor.drive_ready()
 
     def reset_runtime_state(self) -> None:
         self.transport.reset_runtime_state()
         self.scoreboard.reset_runtime_state()
+        self.store_monitor.reset_runtime_state()
         self.drive_idle()
 
     def reset(self) -> None:
@@ -393,10 +399,11 @@ class MemoryModel:
             return
 
         self._runtime_reset_active = False
-        self.scoreboard.after_cycle()
+        self.store_monitor.after_cycle()
+        self.writeback_monitor.after_cycle()
 
     def check_writebacks(self) -> None:
-        self.scoreboard.check_writebacks()
+        self.writeback_monitor.after_cycle()
 
     def drain_completed_robs(self) -> list[RobIndex]:
         return self.scoreboard.drain_completed_robs()

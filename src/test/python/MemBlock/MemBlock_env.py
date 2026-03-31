@@ -47,6 +47,7 @@ from agents.csr_agent import CsrAgent
 from agents.issue_agent import IssueAgent
 from agents.lsq_agent import LsqAgent
 from memory_model import MemoryModel
+from monitors.mem_status_monitor import MemStatusMonitor
 
 
 LOAD_PIPELINE_WIDTH = 3
@@ -1057,6 +1058,7 @@ class MemBlockEnv:
         )
         self.mock_outer_buffer = self.memory
         self.mock_dcache_client = self.memory
+        self.mem_status_monitor = MemStatusMonitor(self.mem_status, self.memory, self.commit_agent)
 
         self.dut.StepRis(self.memory.on_memory_edge)
 
@@ -1099,9 +1101,7 @@ class MemBlockEnv:
             if int(self.dut.reset.value) or int(self.dut.io_reset_backend.value):
                 self.commit_agent.reset()
                 continue
-            self.memory.note_load_commits(int(self.mem_status.lqDeq.value))
-            for rob_idx in self.memory.drain_completed_robs():
-                self.commit_agent.note_load_completed(rob_idx.flag, rob_idx.value)
+            self.mem_status_monitor.after_cycle()
             self.commit_agent.advance()
 
     def reset(self, cycles: int = 10, settle_cycles: int = 5) -> None:
