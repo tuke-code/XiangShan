@@ -25,6 +25,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 import random
 
+from model.ref_memory import RefMemory
+
 
 TL_A_PUT_FULL = 0
 TL_A_PUT_PARTIAL = 1
@@ -177,7 +179,8 @@ class MemoryModel:
         self.store_queue_size = store_queue_size
         self._delay_rng = random.Random(delay_seed)
 
-        self.memory = {}
+        self.ref_memory = RefMemory()
+        self.memory = self.ref_memory.storage
         self._cycle = 0
         self._runtime_reset_active = False
         self._next_sink = 1
@@ -260,7 +263,7 @@ class MemoryModel:
         self.drive_idle()
 
     def reset(self) -> None:
-        self.memory.clear()
+        self.ref_memory.clear()
         self._next_sink = 1
         self.completed_loads = 0
         self.writeback_events = 0
@@ -277,11 +280,10 @@ class MemoryModel:
         self.reset_runtime_state()
 
     def preload_bytes(self, base_addr: int, data: bytes) -> None:
-        for offset, value in enumerate(data):
-            self.memory[base_addr + offset] = value & 0xFF
+        self.ref_memory.preload_bytes(base_addr, data)
 
     def preload_u64(self, addr: int, value: int) -> None:
-        self.preload_bytes(addr, int(value & ((1 << 64) - 1)).to_bytes(8, "little"))
+        self.ref_memory.preload_u64(addr, value)
 
     def fill_random(
         self,
@@ -290,40 +292,19 @@ class MemoryModel:
         seed: int,
         line_bytes: int = DEFAULT_CACHELINE_BYTES,
     ) -> None:
-        if addr_end < addr_start:
-            raise ValueError("addr_end 不能小于 addr_start")
-        rng = random.Random(seed)
-        start = addr_start - (addr_start % line_bytes)
-        end = addr_end + ((line_bytes - (addr_end % line_bytes)) % line_bytes)
-        for base in range(start, end, line_bytes):
-            self.preload_bytes(
-                base,
-                bytes(rng.getrandbits(8) for _ in range(line_bytes)),
-            )
+        self.ref_memory.fill_random(addr_start, addr_end, seed, line_bytes=line_bytes)
 
     def read(self, addr: int, size: int) -> int:
-        value = 0
-        for offset in range(size):
-            value |= (self.memory.get(addr + offset, 0) & 0xFF) << (offset * 8)
-        return value
+        return self.ref_memory.read(addr, size)
 
     def read_masked(self, addr: int, mask: int, width_bytes: int = 8) -> int:
-        value = 0
-        out_offset = 0
-        for byte_idx in range(width_bytes):
-            if (mask >> byte_idx) & 0x1:
-                byte = self.memory.get(addr + byte_idx, 0) & 0xFF
-                value |= byte << (out_offset * 8)
-                out_offset += 1
-        return value
+        return self.ref_memory.read_masked(addr, mask, width_bytes=width_bytes)
 
     def read_cacheline(self, block_addr: int, line_bytes: int = DEFAULT_CACHELINE_BYTES) -> bytes:
-        return bytes(self.memory.get(block_addr + idx, 0) & 0xFF for idx in range(line_bytes))
+        return self.ref_memory.read_cacheline(block_addr, line_bytes=line_bytes)
 
     def apply_masked_write(self, addr: int, data: int, mask: int, width_bytes: int) -> None:
-        for byte_idx in range(width_bytes):
-            if (mask >> byte_idx) & 0x1:
-                self.memory[addr + byte_idx] = (data >> (byte_idx * 8)) & 0xFF
+        self.ref_memory.apply_masked_write(addr, data, mask, width_bytes)
 
     def expect_load(
         self,

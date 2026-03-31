@@ -7,6 +7,7 @@ from memory_model import (
     MemoryModel,
     TL_A_PUT_PARTIAL,
 )
+from model.ref_memory import RefMemory
 
 
 class FakeSignal:
@@ -287,3 +288,13 @@ def test_memory_model_records_outer_put_partial_as_drain_event():
     assert model.drain_log[-1]["channel"] == "outer"
     assert model.drain_log[-1]["addr"] == 0x3000
     assert model.outer_d.valid.value == 1
+
+
+def test_ref_memory_masked_write_and_read():
+    refmem = RefMemory()
+
+    refmem.preload_u64(0x1000, 0x1122334455667788)
+    refmem.apply_masked_write(0x1000, 0xAABBCCDDEEFF0011, 0x0F, 8)
+
+    assert refmem.read(0x1000, 8) == 0x11223344EEFF0011
+    assert refmem.read_masked(0x1000, 0x0F, width_bytes=8) == 0xEEFF0011
