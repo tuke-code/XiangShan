@@ -77,23 +77,11 @@ def reset_env_and_wait_backend(
 
 
 def wait_lsq_load_enq_ready(env, max_cycles: int = 200) -> None:
-    for _ in range(max_cycles):
-        if int(env.dut.io_reset_backend.value):
-            raise RuntimeError("等待 load `enqLsq` ready 时 backend 进入 reset")
-        if env.lsq_enq_meta.canAccept.value and env.lsq_status.lqCanAccept.value:
-            return
-        env.Step(1)
-    raise TimeoutError("等待 load `enqLsq` ready 超时")
+    env.lsq_agent.wait_load_enq_ready(max_cycles=max_cycles)
 
 
 def wait_lsq_store_enq_ready(env, max_cycles: int = 200) -> None:
-    for _ in range(max_cycles):
-        if int(env.dut.io_reset_backend.value):
-            raise RuntimeError("等待 store `enqLsq` ready 时 backend 进入 reset")
-        if env.lsq_enq_meta.canAccept.value and env.lsq_status.sqCanAccept.value:
-            return
-        env.Step(1)
-    raise TimeoutError("等待 store `enqLsq` ready 超时")
+    env.lsq_agent.wait_store_enq_ready(max_cycles=max_cycles)
 
 
 def enqueue_scalar_load(
@@ -103,23 +91,7 @@ def enqueue_scalar_load(
     sq_ptr: QueuePtr,
     enq_port: int = DEFAULT_STORE_ENQ_PORT,
 ) -> None:
-    wait_lsq_load_enq_ready(env)
-
-    req = env.lsq_enq_req[enq_port]
-    env.lsq_enq_meta.need_alloc[enq_port].value = 1
-    req.valid.value = 1
-    req.bits_fuType.value = FU_TYPE_LDU
-    req.bits_uopIdx.value = req_id & 0x7F
-    req.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-    req.bits_robIdx_value.value = req_id & 0x1FF
-    req.bits_lqIdx_flag.value = lq_ptr.flag
-    req.bits_lqIdx_value.value = lq_ptr.value
-    req.bits_sqIdx_flag.value = sq_ptr.flag
-    req.bits_sqIdx_value.value = sq_ptr.value
-    req.bits_numLsElem.value = 1
-
-    env.Step(1)
-    env.idle_inputs()
+    env.lsq_agent.enqueue_scalar_load(req_id, lq_ptr, sq_ptr, enq_port=enq_port)
 
 
 def enqueue_scalar_store(
@@ -128,34 +100,7 @@ def enqueue_scalar_store(
     sq_ptr: QueuePtr,
     enq_port: int = DEFAULT_STORE_ENQ_PORT,
 ) -> QueuePtr:
-    wait_lsq_store_enq_ready(env)
-
-    req = env.lsq_enq_req[enq_port]
-    env.lsq_enq_meta.need_alloc[enq_port].value = 2
-    req.valid.value = 1
-    req.bits_fuType.value = FU_TYPE_STU
-    req.bits_uopIdx.value = req_id & 0x7F
-    req.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-    req.bits_robIdx_value.value = req_id & 0x1FF
-    req.bits_lqIdx_flag.value = 0
-    req.bits_lqIdx_value.value = 0
-    req.bits_sqIdx_flag.value = sq_ptr.flag
-    req.bits_sqIdx_value.value = sq_ptr.value
-    req.bits_numLsElem.value = 1
-
-    env.Step(1)
-    allocated_sq_ptr = QueuePtr(
-        flag=int(env.lsq_enq_resp[enq_port].sqIdx_flag.value),
-        value=int(env.lsq_enq_resp[enq_port].sqIdx_value.value),
-    )
-    env.note_store_allocated(
-        sq_idx_flag=allocated_sq_ptr.flag,
-        sq_idx_value=allocated_sq_ptr.value,
-        rob_idx_flag=(req_id >> 9) & 0x1,
-        rob_idx_value=req_id & 0x1FF,
-    )
-    env.idle_inputs()
-    return allocated_sq_ptr
+    return env.lsq_agent.enqueue_scalar_store(req_id, sq_ptr, enq_port=enq_port)
 
 
 def send_load(env, txn: LoadTxn) -> None:
@@ -217,20 +162,8 @@ def send_store(env, txn: StoreTxn) -> QueuePtr:
 
 
 def _issue_until_fire(env, lane: int, drive_inputs, max_cycles: int = 50) -> None:
-    issue = env.issue[lane]
-
-    for _ in range(max_cycles):
-        if int(env.dut.io_reset_backend.value):
-            raise RuntimeError(f"等待 `issue[{lane}]` 握手时 backend 进入 reset")
-        drive_inputs()
-        if int(issue.ready.value):
-            env.Step(1)
-            env.idle_inputs()
-            return
-        env.Step(1)
-
-    env.idle_inputs()
-    raise TimeoutError(f"等待 `issue[{lane}]` 完成握手超时")
+    del env, lane, drive_inputs, max_cycles
+    raise NotImplementedError("_issue_until_fire 已下沉到 IssueAgent")
 
 
 def issue_scalar_load(
@@ -241,35 +174,7 @@ def issue_scalar_load(
     sq_ptr: QueuePtr,
     lane: int = DEFAULT_LOAD_ISSUE_LANE,
 ) -> None:
-    def _drive() -> None:
-        issue = env.issue[lane]
-        prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
-        issue.valid.value = 1
-        issue.bits_fuOpType.value = LSU_OP_LD
-        issue.bits_src_0.value = addr
-        issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        issue.bits_robIdx_value.value = req_id & 0x1FF
-        issue.bits_sqIdx_flag.value = sq_ptr.flag
-        issue.bits_sqIdx_value.value = sq_ptr.value
-
-        _set_optional_signal(env.dut, f"{prefix}imm", 0)
-        _set_optional_signal(env.dut, f"{prefix}pdest", req_id % 64)
-        _set_optional_signal(env.dut, f"{prefix}rfWen", 1)
-        _set_optional_signal(env.dut, f"{prefix}pc", 0x80000000 + req_id * 4)
-        _set_optional_signal(env.dut, f"{prefix}ftqIdx_flag", 0)
-        _set_optional_signal(env.dut, f"{prefix}ftqIdx_value", req_id & 0x3F)
-        _set_optional_signal(env.dut, f"{prefix}ftqOffset", 0)
-        _set_optional_signal(env.dut, f"{prefix}loadWaitBit", 0)
-        _set_optional_signal(env.dut, f"{prefix}waitForRobIdx_flag", 0)
-        _set_optional_signal(env.dut, f"{prefix}waitForRobIdx_value", 0)
-        _set_optional_signal(env.dut, f"{prefix}storeSetHit", 0)
-        _set_optional_signal(env.dut, f"{prefix}loadWaitStrict", 0)
-        _set_optional_signal(env.dut, f"{prefix}ssid", 0)
-        _set_optional_signal(env.dut, f"{prefix}lqIdx_flag", lq_ptr.flag)
-        _set_optional_signal(env.dut, f"{prefix}lqIdx_value", lq_ptr.value)
-
-    _issue_until_fire(env, lane, _drive)
-    env.note_load_issued((req_id >> 9) & 0x1, req_id & 0x1FF)
+    env.issue_agent.issue_scalar_load(req_id, addr, lq_ptr, sq_ptr, lane=lane)
 
 
 def issue_scalar_std(
@@ -279,17 +184,7 @@ def issue_scalar_std(
     data: int,
     lane: int = DEFAULT_STD_LANE,
 ) -> None:
-    def _drive() -> None:
-        issue = env.issue[lane]
-        issue.valid.value = 1
-        issue.bits_fuOpType.value = LSU_OP_SD
-        issue.bits_src_0.value = data
-        issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        issue.bits_robIdx_value.value = req_id & 0x1FF
-        issue.bits_sqIdx_flag.value = sq_ptr.flag
-        issue.bits_sqIdx_value.value = sq_ptr.value
-
-    _issue_until_fire(env, lane, _drive)
+    env.issue_agent.issue_scalar_std(req_id, sq_ptr, data, lane=lane)
 
 
 def issue_scalar_sta(
@@ -299,26 +194,4 @@ def issue_scalar_sta(
     addr: int,
     lane: int = DEFAULT_STA_LANE,
 ) -> None:
-    def _drive() -> None:
-        issue = env.issue[lane]
-        prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
-        issue.valid.value = 1
-        issue.bits_fuOpType.value = LSU_OP_SD
-        issue.bits_src_0.value = addr
-        issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        issue.bits_robIdx_value.value = req_id & 0x1FF
-        issue.bits_sqIdx_flag.value = sq_ptr.flag
-        issue.bits_sqIdx_value.value = sq_ptr.value
-
-        _set_optional_signal(env.dut, f"{prefix}imm", 0)
-        _set_optional_signal(env.dut, f"{prefix}isFirstIssue", 1)
-        _set_optional_signal(env.dut, f"{prefix}pdest", 0)
-        _set_optional_signal(env.dut, f"{prefix}rfWen", 0)
-        _set_optional_signal(env.dut, f"{prefix}isRVC", 0)
-        _set_optional_signal(env.dut, f"{prefix}ftqIdx_flag", 0)
-        _set_optional_signal(env.dut, f"{prefix}ftqIdx_value", req_id & 0x3F)
-        _set_optional_signal(env.dut, f"{prefix}ftqOffset", 0)
-        _set_optional_signal(env.dut, f"{prefix}storeSetHit", 0)
-        _set_optional_signal(env.dut, f"{prefix}ssid", 0)
-
-    _issue_until_fire(env, lane, _drive)
+    env.issue_agent.issue_scalar_sta(req_id, sq_ptr, addr, lane=lane)

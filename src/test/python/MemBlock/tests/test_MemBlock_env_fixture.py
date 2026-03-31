@@ -20,6 +20,10 @@ def test_api_MemBlock_env_create(env):
     assert env.mock_outer_buffer is not None
     assert env.mock_dcache_client is not None
     assert env.mock_csr is not None
+    assert env.csr_agent is not None
+    assert env.commit_agent is not None
+    assert env.lsq_agent is not None
+    assert env.issue_agent is not None
 
 
 def test_api_MemBlock_env_has_core_bundles(env):

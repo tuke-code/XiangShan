@@ -42,6 +42,10 @@ for _path in (_PYLIB, _HERE, _TOFFEE_FALLBACK):
 
 from toffee import Bundle, BundleList, Signal, SignalList, Signals
 
+from agents.commit_agent import CommitAgent
+from agents.csr_agent import CsrAgent
+from agents.issue_agent import IssueAgent
+from agents.lsq_agent import LsqAgent
 from memory_model import MemoryModel
 
 
@@ -956,11 +960,13 @@ class MemBlockEnv:
     def __init__(self, dut) -> None:
         self.dut = dut
         self.pending_ptr = PendingPtrDriver(dut)
+        self.commit_agent = CommitAgent(self)
 
         self.redirect = RedirectBundle.from_prefix("io_redirect_").bind(dut)
-        self.mock_csr = MockCSRInterface().bind(dut)
-        self.tlb_csr = self.mock_csr.tlb_csr
-        self.csr_ctrl = self.mock_csr.csr_ctrl
+        self.tlb_csr = TlbCsrBundle.from_prefix("io_ooo_to_mem_tlbCsr_").bind(dut)
+        self.csr_ctrl = CsrCtrlBundle.from_prefix("io_ooo_to_mem_csrCtrl_").bind(dut)
+        self.csr_agent = CsrAgent(self)
+        self.mock_csr = self.csr_agent
 
         self.lsq_enq_meta = LsqEnqMetaBundle.from_prefix("io_ooo_to_mem_enqLsq_").bind(dut)
         self.lsq_enq_req = BundleList(LsqEnqReqBundle, "io_ooo_to_mem_enqLsq_req_#_", LSQ_ENQ_PORTS)
@@ -969,10 +975,12 @@ class MemBlockEnv:
             bundle.bind(dut)
         for bundle in self.lsq_enq_resp:
             bundle.bind(dut)
+        self.lsq_agent = LsqAgent(self)
 
         self.issue = BundleList(IntIssueBundle, "io_ooo_to_mem_intIssue_#_0_", INT_ISSUE_PORTS)
         for bundle in self.issue:
             bundle.bind(dut)
+        self.issue_agent = IssueAgent(self)
         self.writeback = [
             IntWritebackBundle(f"io_mem_to_ooo_intWriteback_{idx}_0_", dut)
             for idx in range(INT_WRITEBACK_PORTS)
@@ -1059,7 +1067,7 @@ class MemBlockEnv:
     def idle_inputs(self) -> None:
         """将 env 管理的输入口恢复到空闲值。"""
 
-        self.mock_csr.reset()
+        self.csr_agent.reset()
         self.redirect.drive_idle()
         self.lsq_enq_meta.drive_idle()
         for bundle in self.lsq_enq_req:
@@ -1077,7 +1085,7 @@ class MemBlockEnv:
             self.dut.io_ooo_to_mem_sfence_bits_hv.value = 0
             self.dut.io_ooo_to_mem_sfence_bits_hg.value = 0
         self.memory.drive_idle()
-        self.pending_ptr.drive()
+        self.commit_agent.drive()
 
     def Step(self, cycles: int = 1) -> None:
         """推进 DUT 时钟。"""
@@ -1085,23 +1093,23 @@ class MemBlockEnv:
         if cycles < 0:
             raise ValueError(f"cycles 必须非负，当前值为 {cycles}")
         for _ in range(cycles):
-            self.pending_ptr.drive()
+            self.commit_agent.drive()
             self.dut.Step(1)
             self.memory.after_cycle()
             if int(self.dut.reset.value) or int(self.dut.io_reset_backend.value):
-                self.pending_ptr.reset()
+                self.commit_agent.reset()
                 continue
             self.memory.note_load_commits(int(self.mem_status.lqDeq.value))
             for rob_idx in self.memory.drain_completed_robs():
-                self.pending_ptr.note_completed(rob_idx.flag, rob_idx.value)
-            self.pending_ptr.advance()
+                self.commit_agent.note_load_completed(rob_idx.flag, rob_idx.value)
+            self.commit_agent.advance()
 
     def reset(self, cycles: int = 10, settle_cycles: int = 5) -> None:
         """执行同步复位，并清空 mock 内部状态。"""
 
         self.idle_inputs()
         self.memory.reset_runtime_state()
-        self.pending_ptr.reset()
+        self.commit_agent.reset()
         self.dut.reset.value = 1
         self.Step(cycles)
         self.dut.reset.value = 0
@@ -1111,7 +1119,7 @@ class MemBlockEnv:
     def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         """登记一笔已完成握手的 load issue，用于推进 `pendingPtr`。"""
 
-        self.pending_ptr.note_issued(rob_idx_flag, rob_idx_value)
+        self.commit_agent.note_load_issued(rob_idx_flag, rob_idx_value)
         self.memory.note_load_issued(rob_idx_flag, rob_idx_value)
 
     def note_store_allocated(
@@ -1133,7 +1141,7 @@ class MemBlockEnv:
     def pulse_store_commit(self, count: int = 1) -> None:
         """对 `io_ooo_to_mem_lsqio_scommit` 发送一个单拍脉冲。"""
 
-        self.pending_ptr.queue_store_commit(count)
+        self.commit_agent.queue_store_commit(count)
         self.Step(1)
 
     def inject_outer_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
