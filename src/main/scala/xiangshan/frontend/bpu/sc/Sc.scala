@@ -391,7 +391,7 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
     VecInit(t0_branches.zip(t0_branchesScIdxHitVec).zip(t0_branchesScIdxVec).zip(t0_writeTakenVec).map {
       case (((b, hit), predIdx), taken) =>
         b.valid && b.bits.attribute.isConditional && hit && t0_meta.tagePredValid(predIdx) &&
-        (!(t0_meta.scPred(predIdx) === taken) || !(t0_meta.useScPred(predIdx) &&
+        (!(t0_meta.useScPred(predIdx) && t0_meta.scPred(predIdx) === taken) || !(t0_meta.useScPred(predIdx) &&
           t0_meta.tagePredValid(predIdx) && t0_meta.scPred(predIdx) === t0_meta.tagePred(predIdx)))
     })
   private val t0_needWrite    = t0_writeValidVec.reduce(_ || _)
@@ -866,7 +866,7 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val scTraceVec = Wire(Vec(ResolveEntryBranchNumber, Valid(new ScConditionalBranchTrace)))
   scTraceVec.zipWithIndex.foreach { case (trace, i) =>
     val predWayIdx = t1_branchesScIdxVec(i)
-    trace.valid        := t1_branches(i).valid && t1_branches(i).bits.attribute.isConditional && t1_fire
+    trace.valid        := t1_writeValidVec(i)
     trace.bits.startPc := RegEnable(io.train.startPc, t0_fire)
     trace.bits.cfiPc   := t1_branches(i).bits.debug_realCfiPc.getOrElse(0.U(VAddrBits.W))
 
@@ -901,7 +901,7 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   scTraceDBTables.zip(scTraceVec).foreach { case (dbTable, condTrace) =>
     dbTable.log(
       data = condTrace.bits,
-      en = t1_writeValid && condTrace.valid,
+      en = condTrace.valid,
       clock = clock,
       reset = reset
     )
