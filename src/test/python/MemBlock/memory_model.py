@@ -656,7 +656,7 @@ class MemoryModel:
                     candidates.append(store)
         candidates.sort(key=lambda item: (self._rob_rank(item.rob_idx), item.sq_idx))
         for store in candidates:
-            self.apply_masked_write(store.addr, store.data, store.mask, store.width_bytes)
+            self._retire_store(store)
             store.retired = True
 
     def _retire_all_ready_stores(self) -> None:
@@ -668,8 +668,22 @@ class MemoryModel:
             )
         )
         for store in candidates:
-            self.apply_masked_write(store.addr, store.data, store.mask, store.width_bytes)
+            self._retire_store(store)
             store.retired = True
+
+    def _retire_store(self, store: PendingStore) -> None:
+        aligned_addr = store.addr & ~(store.width_bytes - 1)
+        effective_mask = store.mask
+        byte_offset = store.addr & (store.width_bytes - 1)
+        effective_data = store.data << (byte_offset * 8)
+        if byte_offset and (effective_mask & 0x1):
+            effective_mask <<= byte_offset
+        self.apply_masked_write(
+            aligned_addr,
+            effective_data,
+            effective_mask & ((1 << store.width_bytes) - 1),
+            store.width_bytes,
+        )
 
     def _observe_store_events(self) -> None:
         self._observe_sq_shadow()
@@ -744,20 +758,28 @@ class MemoryModel:
         for lane_idx, lane in enumerate(self.sbuffer_writes):
             if lane.read("valid", 0) == 0 or lane.read("ready", 0) == 0:
                 continue
+            if lane.read("vecValid", 1) == 0:
+                continue
             if lane.read("wline", 0):
                 raise AssertionError("当前 MemoryModel 暂不支持 wline store drain 校验")
-            if lane.read("vecValid", 0):
-                raise AssertionError("当前 MemoryModel 暂不支持 vector store drain 校验")
+
+            raw_addr = lane.read("addr", 0)
+            raw_data = lane.read("data", 0)
+            raw_mask = lane.read("mask", 0)
+            addr_bit3 = (raw_addr >> 3) & 0x1
+            normalized_addr = raw_addr & ~0x7
+            normalized_data = raw_data >> 64 if addr_bit3 else raw_data
+            normalized_mask = (raw_mask >> 8) if addr_bit3 else raw_mask
 
             self.sbuffer_drain_count += 1
             self.drain_log.append(
                 {
                     "channel": "sbuffer",
                     "lane": lane_idx,
-                    "addr": lane.read("addr", 0),
-                    "data": lane.read("data", 0),
-                    "mask": lane.read("mask", 0),
-                    "width_bytes": STORE_DATA_WIDTH_BYTES,
+                    "addr": normalized_addr,
+                    "data": normalized_data,
+                    "mask": normalized_mask & 0xFF,
+                    "width_bytes": 8,
                     "cycle": self._cycle,
                 }
             )

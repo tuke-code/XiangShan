@@ -78,6 +78,7 @@ class PendingPtrDriver:
         self.pending_ptr = RobIndex(flag=0, value=0)
         self._issued = deque()
         self._completed = defaultdict(int)
+        self._queued_scommit = 0
 
     def drive(self) -> None:
         if self._signal_flag is not None:
@@ -85,7 +86,11 @@ class PendingPtrDriver:
         if self._signal_value is not None:
             self._signal_value.value = self.pending_ptr.value
         if self._signal_scommit is not None:
-            self._signal_scommit.value = 0
+            self._signal_scommit.value = self._queued_scommit
+        self._queued_scommit = 0
+
+    def queue_store_commit(self, count: int = 1) -> None:
+        self._queued_scommit = max(0, int(count))
 
     def note_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         self._issued.append(RobIndex(flag=rob_idx_flag, value=rob_idx_value))
@@ -1094,6 +1099,12 @@ class MemBlockEnv:
 
         self.pending_ptr.note_issued(rob_idx_flag, rob_idx_value)
         self.memory.note_load_issued(rob_idx_flag, rob_idx_value)
+
+    def pulse_store_commit(self, count: int = 1) -> None:
+        """对 `io_ooo_to_mem_lsqio_scommit` 发送一个单拍脉冲。"""
+
+        self.pending_ptr.queue_store_commit(count)
+        self.Step(1)
 
     def inject_outer_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
         """向 outer buffer D 通道注入一笔响应。"""

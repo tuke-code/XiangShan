@@ -252,7 +252,7 @@ def test_memory_model_finalize_checks_sbuffer_drain_against_goldenmem():
         data=0xAABBCCDDEEFF0011,
         mask=0x00FF,
         wline=0,
-        vecValid=0,
+        vecValid=1,
     )
 
     model = _create_model(
