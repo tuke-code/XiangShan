@@ -404,8 +404,7 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
     VecInit(t1_branches.zip(t1_branchesScIdxHitVec).zip(t1_branchesScIdxVec).zip(t1_writeTakenVec).map {
       case (((b, hit), predIdx), taken) =>
         b.valid && b.bits.attribute.isConditional && t1_fire && hit &&
-        (!(t1_meta.scPred(predIdx) === taken) || !(t1_meta.useScPred(predIdx) &&
-          t1_meta.tagePredValid(predIdx) && t1_meta.scPred(predIdx) === t1_meta.tagePred(predIdx)))
+        (!(t1_meta.scPred(predIdx) =/= taken) || !t1_meta.sumAboveThres(predIdx))
     })
   private val t1_writeValid = t1_writeValidVec.reduce(_ || _)
 
