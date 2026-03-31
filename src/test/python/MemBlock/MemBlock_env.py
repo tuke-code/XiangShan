@@ -147,12 +147,7 @@ class LsqEnqReqBundle(Bundle):
 
     valid = Signal()
     bits_fuType = Signal()
-    bits_fuOpType = Signal()
-    bits_rfWen = Signal()
-    bits_vpu_vstart = Signal()
-    bits_vpu_vl = Signal()
-    bits_lastUop = Signal()
-    bits_pdest = Signal()
+    bits_uopIdx = Signal()
     bits_robIdx_flag = Signal()
     bits_robIdx_value = Signal()
     bits_lqIdx_flag = Signal()
@@ -160,17 +155,11 @@ class LsqEnqReqBundle(Bundle):
     bits_sqIdx_flag = Signal()
     bits_sqIdx_value = Signal()
     bits_numLsElem = Signal()
-    bits_exception_vec = SignalList("bits_exceptionVec_#", 24)
 
     def drive_idle(self) -> None:
         self.valid.value = 0
         self.bits_fuType.value = 0
-        self.bits_fuOpType.value = 0
-        self.bits_rfWen.value = 0
-        self.bits_vpu_vstart.value = 0
-        self.bits_vpu_vl.value = 0
-        self.bits_lastUop.value = 0
-        self.bits_pdest.value = 0
+        self.bits_uopIdx.value = 0
         self.bits_robIdx_flag.value = 0
         self.bits_robIdx_value.value = 0
         self.bits_lqIdx_flag.value = 0
@@ -178,8 +167,6 @@ class LsqEnqReqBundle(Bundle):
         self.bits_sqIdx_flag.value = 0
         self.bits_sqIdx_value.value = 0
         self.bits_numLsElem.value = 0
-        for signal in self.bits_exception_vec:
-            signal.value = 0
 
 
 class LsqEnqRespBundle(Bundle):
@@ -193,7 +180,6 @@ class IntIssueBundle(Bundle):
 
     ready = Signal()
     valid = Signal()
-    bits_fuType = Signal()
     bits_fuOpType = Signal()
     bits_src_0 = Signal()
     bits_robIdx_flag = Signal()
@@ -203,7 +189,6 @@ class IntIssueBundle(Bundle):
 
     def drive_idle(self) -> None:
         self.valid.value = 0
-        self.bits_fuType.value = 0
         self.bits_fuOpType.value = 0
         self.bits_src_0.value = 0
         self.bits_robIdx_flag.value = 0
@@ -215,36 +200,44 @@ class IntIssueBundle(Bundle):
 class IntWritebackBundle:
     """整数 writeback 单 lane 的可选信号封装。"""
 
-    OPTIONAL_SIGNAL_MAP = {
-        "ready": "ready",
-        "valid": "valid",
-        "bits_data_0": "bits_data_0",
-        "bits_pdest": "bits_pdest",
-        "bits_intWen": "bits_intWen",
-        "bits_fpWen": "bits_fpWen",
-        "bits_robIdx_flag": "bits_robIdx_flag",
-        "bits_robIdx_value": "bits_robIdx_value",
-        "bits_lqIdx_flag": "bits_lqIdx_flag",
-        "bits_lqIdx_value": "bits_lqIdx_value",
-        "bits_sqIdx_flag": "bits_sqIdx_flag",
-        "bits_sqIdx_value": "bits_sqIdx_value",
-        "bits_isFromLoadUnit": "bits_isFromLoadUnit",
-        "bits_debug_isMMIO": "bits_debug_isMMIO",
-        "bits_debug_isNCIO": "bits_debug_isNCIO",
-        "bits_debug_isPerfCnt": "bits_debug_isPerfCnt",
-        "bits_debug_paddr": "bits_debug_paddr",
-        "bits_debug_vaddr": "bits_debug_vaddr",
+    OPTIONAL_SIGNAL_CANDIDATES = {
+        "ready": ("ready",),
+        "valid": ("valid",),
+        "bits_toRob_valid": ("bits_toRob_valid",),
+        "bits_data_0": ("bits_data_0", "bits_toIntRf_bits"),
+        "bits_pdest": ("bits_pdest",),
+        "bits_intWen": ("bits_intWen", "bits_toIntRf_valid"),
+        "bits_fpWen": ("bits_fpWen", "bits_toFpRf_valid"),
+        "bits_robIdx_flag": ("bits_robIdx_flag", "bits_toRob_bits_robIdx_flag"),
+        "bits_robIdx_value": ("bits_robIdx_value", "bits_toRob_bits_robIdx_value"),
+        "bits_lqIdx_flag": ("bits_lqIdx_flag", "bits_toRob_bits_lqIdx_flag"),
+        "bits_lqIdx_value": ("bits_lqIdx_value", "bits_toRob_bits_lqIdx_value"),
+        "bits_sqIdx_flag": ("bits_sqIdx_flag", "bits_toRob_bits_sqIdx_flag"),
+        "bits_sqIdx_value": ("bits_sqIdx_value", "bits_toRob_bits_sqIdx_value"),
+        "bits_isFromLoadUnit": ("bits_isFromLoadUnit",),
+        "bits_debug_isMMIO": ("bits_debug_isMMIO",),
+        "bits_debug_isNCIO": ("bits_debug_isNCIO",),
+        "bits_debug_isPerfCnt": ("bits_debug_isPerfCnt",),
+        "bits_debug_paddr": ("bits_debug_paddr",),
+        "bits_debug_vaddr": ("bits_debug_vaddr",),
     }
 
     def __init__(self, prefix: str, dut) -> None:
         self._prefix = prefix
         self._dut = dut
-        for attr_name, suffix in self.OPTIONAL_SIGNAL_MAP.items():
-            setattr(self, attr_name, self._bind_optional(suffix))
-        self.bits_exception_vec = [self._bind_optional(f"bits_exceptionVec_{idx}") for idx in range(24)]
+        for attr_name, suffixes in self.OPTIONAL_SIGNAL_CANDIDATES.items():
+            setattr(self, attr_name, self._bind_optional(*suffixes))
+        self.bits_exception_vec = [
+            self._bind_optional(f"bits_exceptionVec_{idx}", f"bits_toRob_bits_exceptionVec_{idx}")
+            for idx in range(24)
+        ]
 
-    def _bind_optional(self, suffix: str):
-        return getattr(self._dut, f"{self._prefix}{suffix}", None)
+    def _bind_optional(self, *suffixes: str):
+        for suffix in suffixes:
+            signal = getattr(self._dut, f"{self._prefix}{suffix}", None)
+            if signal is not None:
+                return signal
+        return None
 
     def _signal_attr(self, name: str) -> str:
         if name in {"ready", "valid"}:
@@ -308,6 +301,7 @@ class StoreAddrInputBundle(OptionalSignalBundle):
         "valid": "valid",
         "sqIdx_value": "bits_uop_sqIdx_value",
         "paddr": "bits_paddr",
+        "mask": "bits_mask",
         "miss": "bits_miss",
         "nc": "bits_nc",
     }
@@ -325,6 +319,7 @@ class StoreAddrReInputBundle(OptionalSignalBundle):
     SIGNAL_MAP = {
         "updateAddrValid": "updateAddrValid",
         "sqIdx_value": "uop_sqIdx_value",
+        "nc": "nc",
         "mmio": "mmio",
         "memBackTypeMM": "memBackTypeMM",
         "hasException": "hasException",
@@ -380,9 +375,9 @@ class LsqStatusBundle(Bundle):
     vaddr = Signal()
     gpaddr = Signal()
     isForVSnonLeafPTE = Signal()
+    mmioBusy = Signal()
     lqCanAccept = Signal()
     sqCanAccept = Signal()
-    mmio = SignalList("mmio_#", LOAD_PIPELINE_WIDTH)
 
 
 class OuterTLABundle(Bundle):
@@ -599,7 +594,6 @@ class CsrCtrlBundle(Bundle):
     cache_error_enable = Signal()
     uncache_write_outstanding_enable = Signal()
     hd_misalign_st_enable = Signal()
-    hd_misalign_ld_enable = Signal()
     power_down_enable = Signal()
     flush_l2_enable = Signal()
     distribute_csr_w_valid = Signal()
@@ -980,7 +974,7 @@ class MemBlockEnv:
             for idx in range(STORE_PIPELINE_WIDTH)
         ]
         self.sbuffer_writes = [
-            SbufferWriteBundle(f"MemBlock_inner_lsq_io_sbuffer_{idx}_", dut)
+            SbufferWriteBundle(f"MemBlock_inner_lsq_io_sbuffer_req_{idx}_", dut)
             for idx in range(SBUFFER_WRITE_PORTS)
         ]
         self.sq_shadow_entries = [
@@ -1099,6 +1093,22 @@ class MemBlockEnv:
 
         self.pending_ptr.note_issued(rob_idx_flag, rob_idx_value)
         self.memory.note_load_issued(rob_idx_flag, rob_idx_value)
+
+    def note_store_allocated(
+        self,
+        sq_idx_flag: int,
+        sq_idx_value: int,
+        rob_idx_flag: int,
+        rob_idx_value: int,
+    ) -> None:
+        """登记一笔 store 已分配的 SQ/ROB 元信息。"""
+
+        self.memory.note_store_allocated(
+            sq_idx_flag=sq_idx_flag,
+            sq_idx_value=sq_idx_value,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
 
     def pulse_store_commit(self, count: int = 1) -> None:
         """对 `io_ooo_to_mem_lsqio_scommit` 发送一个单拍脉冲。"""

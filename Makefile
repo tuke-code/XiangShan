@@ -323,6 +323,11 @@ $(MEMBLOCK_INTERNAL_YAML): $(MEMBLOCK_LSQWRAPPER_V) scripts/generate_memblock_in
 		--output $@
 
 $(MEMBLOCK_PYLIB): $(MEMBLOCK_TOP_V) $(MEMBLOCK_INTERNAL_YAML)
+	mkdir -p $(MEMBLOCK_BUILD_DIR)/pylib
+	mkdir -p $(MEMBLOCK_BUILD_DIR)/.ccache/tmp
+	rm -rf $(MEMBLOCK_BUILD_DIR)/pylib/MemBlock
+	-CCACHE_DIR=$(abspath $(MEMBLOCK_BUILD_DIR)/.ccache) \
+	CCACHE_TEMPDIR=$(abspath $(MEMBLOCK_BUILD_DIR)/.ccache/tmp) \
 	time picker export $(dir $<)ClockGate.sv --sname MemBlock \
 		--filelist $(dir $<)filelist.f \
 		--lang python --autobuild true --cp_lib true \
@@ -332,6 +337,8 @@ $(MEMBLOCK_PYLIB): $(MEMBLOCK_TOP_V) $(MEMBLOCK_INTERNAL_YAML)
 		-w $(MEMBLOCK_BUILD_DIR)/memblock.fst \
 		--coverage \
 		-V "--output-split;20000;--no-timing;--threads;8"
+	test -f $(MEMBLOCK_BUILD_DIR)/pylib/MemBlock/libUTMemBlock.so
+	cp $(MEMBLOCK_BUILD_DIR)/pylib/MemBlock/libUTMemBlock.so $@
 memblock: $(MEMBLOCK_PYLIB)
 .PHONY: memblock
 

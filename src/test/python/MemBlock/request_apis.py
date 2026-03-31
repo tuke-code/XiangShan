@@ -27,6 +27,12 @@ class QueuePtr:
     value: int
 
 
+def _set_optional_signal(dut, signal_name: str, value: int) -> None:
+    signal = getattr(dut, signal_name, None)
+    if signal is not None:
+        signal.value = value
+
+
 def ptr_inc(ptr: QueuePtr, size: int, step: int = 1) -> QueuePtr:
     flag = ptr.flag
     value = ptr.value
@@ -111,10 +117,7 @@ def enqueue_scalar_load(
     env.lsq_enq_meta.need_alloc[enq_port].value = 1
     req.valid.value = 1
     req.bits_fuType.value = FU_TYPE_LDU
-    req.bits_fuOpType.value = LSU_OP_LD
-    req.bits_rfWen.value = 1
-    req.bits_lastUop.value = 1
-    req.bits_pdest.value = req_id % 64
+    req.bits_uopIdx.value = req_id & 0x7F
     req.bits_robIdx_flag.value = (req_id >> 9) & 0x1
     req.bits_robIdx_value.value = req_id & 0x1FF
     req.bits_lqIdx_flag.value = lq_ptr.flag
@@ -122,7 +125,6 @@ def enqueue_scalar_load(
     req.bits_sqIdx_flag.value = sq_ptr.flag
     req.bits_sqIdx_value.value = sq_ptr.value
     req.bits_numLsElem.value = 1
-    getattr(env.dut, f"io_ooo_to_mem_enqLsq_req_{enq_port}_bits_uopIdx").value = 0
 
     env.Step(1)
     env.idle_inputs()
@@ -140,10 +142,7 @@ def enqueue_scalar_store(
     env.lsq_enq_meta.need_alloc[enq_port].value = 2
     req.valid.value = 1
     req.bits_fuType.value = FU_TYPE_STU
-    req.bits_fuOpType.value = LSU_OP_SD
-    req.bits_rfWen.value = 0
-    req.bits_lastUop.value = 1
-    req.bits_pdest.value = 0
+    req.bits_uopIdx.value = req_id & 0x7F
     req.bits_robIdx_flag.value = (req_id >> 9) & 0x1
     req.bits_robIdx_value.value = req_id & 0x1FF
     req.bits_lqIdx_flag.value = 0
@@ -151,12 +150,17 @@ def enqueue_scalar_store(
     req.bits_sqIdx_flag.value = sq_ptr.flag
     req.bits_sqIdx_value.value = sq_ptr.value
     req.bits_numLsElem.value = 1
-    getattr(env.dut, f"io_ooo_to_mem_enqLsq_req_{enq_port}_bits_uopIdx").value = 0
 
     env.Step(1)
     allocated_sq_ptr = QueuePtr(
         flag=int(env.lsq_enq_resp[enq_port].sqIdx_flag.value),
         value=int(env.lsq_enq_resp[enq_port].sqIdx_value.value),
+    )
+    env.note_store_allocated(
+        sq_idx_flag=allocated_sq_ptr.flag,
+        sq_idx_value=allocated_sq_ptr.value,
+        rob_idx_flag=(req_id >> 9) & 0x1,
+        rob_idx_value=req_id & 0x1FF,
     )
     env.idle_inputs()
     return allocated_sq_ptr
@@ -191,7 +195,6 @@ def issue_scalar_load(
         issue = env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        issue.bits_fuType.value = FU_TYPE_LDU
         issue.bits_fuOpType.value = LSU_OP_LD
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
@@ -199,21 +202,21 @@ def issue_scalar_load(
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
 
-        getattr(env.dut, f"{prefix}imm").value = 0
-        getattr(env.dut, f"{prefix}pdest").value = req_id % 64
-        getattr(env.dut, f"{prefix}rfWen").value = 1
-        getattr(env.dut, f"{prefix}pc").value = 0x80000000 + req_id * 4
-        getattr(env.dut, f"{prefix}ftqIdx_flag").value = 0
-        getattr(env.dut, f"{prefix}ftqIdx_value").value = req_id & 0x3F
-        getattr(env.dut, f"{prefix}ftqOffset").value = 0
-        getattr(env.dut, f"{prefix}loadWaitBit").value = 0
-        getattr(env.dut, f"{prefix}waitForRobIdx_flag").value = 0
-        getattr(env.dut, f"{prefix}waitForRobIdx_value").value = 0
-        getattr(env.dut, f"{prefix}storeSetHit").value = 0
-        getattr(env.dut, f"{prefix}loadWaitStrict").value = 0
-        getattr(env.dut, f"{prefix}ssid").value = 0
-        getattr(env.dut, f"{prefix}lqIdx_flag").value = lq_ptr.flag
-        getattr(env.dut, f"{prefix}lqIdx_value").value = lq_ptr.value
+        _set_optional_signal(env.dut, f"{prefix}imm", 0)
+        _set_optional_signal(env.dut, f"{prefix}pdest", req_id % 64)
+        _set_optional_signal(env.dut, f"{prefix}rfWen", 1)
+        _set_optional_signal(env.dut, f"{prefix}pc", 0x80000000 + req_id * 4)
+        _set_optional_signal(env.dut, f"{prefix}ftqIdx_flag", 0)
+        _set_optional_signal(env.dut, f"{prefix}ftqIdx_value", req_id & 0x3F)
+        _set_optional_signal(env.dut, f"{prefix}ftqOffset", 0)
+        _set_optional_signal(env.dut, f"{prefix}loadWaitBit", 0)
+        _set_optional_signal(env.dut, f"{prefix}waitForRobIdx_flag", 0)
+        _set_optional_signal(env.dut, f"{prefix}waitForRobIdx_value", 0)
+        _set_optional_signal(env.dut, f"{prefix}storeSetHit", 0)
+        _set_optional_signal(env.dut, f"{prefix}loadWaitStrict", 0)
+        _set_optional_signal(env.dut, f"{prefix}ssid", 0)
+        _set_optional_signal(env.dut, f"{prefix}lqIdx_flag", lq_ptr.flag)
+        _set_optional_signal(env.dut, f"{prefix}lqIdx_value", lq_ptr.value)
 
     _issue_until_fire(env, lane, _drive)
     env.note_load_issued((req_id >> 9) & 0x1, req_id & 0x1FF)
@@ -229,7 +232,6 @@ def issue_scalar_std(
     def _drive() -> None:
         issue = env.issue[lane]
         issue.valid.value = 1
-        issue.bits_fuType.value = FU_TYPE_STU
         issue.bits_fuOpType.value = LSU_OP_SD
         issue.bits_src_0.value = data
         issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
@@ -251,7 +253,6 @@ def issue_scalar_sta(
         issue = env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        issue.bits_fuType.value = FU_TYPE_STU
         issue.bits_fuOpType.value = LSU_OP_SD
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
@@ -259,15 +260,15 @@ def issue_scalar_sta(
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
 
-        getattr(env.dut, f"{prefix}imm").value = 0
-        getattr(env.dut, f"{prefix}isFirstIssue").value = 1
-        getattr(env.dut, f"{prefix}pdest").value = 0
-        getattr(env.dut, f"{prefix}rfWen").value = 0
-        getattr(env.dut, f"{prefix}isRVC").value = 0
-        getattr(env.dut, f"{prefix}ftqIdx_flag").value = 0
-        getattr(env.dut, f"{prefix}ftqIdx_value").value = req_id & 0x3F
-        getattr(env.dut, f"{prefix}ftqOffset").value = 0
-        getattr(env.dut, f"{prefix}storeSetHit").value = 0
-        getattr(env.dut, f"{prefix}ssid").value = 0
+        _set_optional_signal(env.dut, f"{prefix}imm", 0)
+        _set_optional_signal(env.dut, f"{prefix}isFirstIssue", 1)
+        _set_optional_signal(env.dut, f"{prefix}pdest", 0)
+        _set_optional_signal(env.dut, f"{prefix}rfWen", 0)
+        _set_optional_signal(env.dut, f"{prefix}isRVC", 0)
+        _set_optional_signal(env.dut, f"{prefix}ftqIdx_flag", 0)
+        _set_optional_signal(env.dut, f"{prefix}ftqIdx_value", req_id & 0x3F)
+        _set_optional_signal(env.dut, f"{prefix}ftqOffset", 0)
+        _set_optional_signal(env.dut, f"{prefix}storeSetHit", 0)
+        _set_optional_signal(env.dut, f"{prefix}ssid", 0)
 
     _issue_until_fire(env, lane, _drive)

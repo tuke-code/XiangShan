@@ -76,7 +76,7 @@ def test_api_MemBlock_env_lsq_enq_bundle_access(env):
     env.lsq_enq_meta.need_alloc[0].value = 1
     env.lsq_enq_req[0].valid.value = 1
     env.lsq_enq_req[0].bits_fuType.value = 0x12
-    env.lsq_enq_req[0].bits_fuOpType.value = 0x3
+    env.lsq_enq_req[0].bits_uopIdx.value = 0x3
     env.lsq_enq_req[0].bits_robIdx_value.value = 0x11
     env.lsq_enq_req[0].bits_lqIdx_value.value = 0x22
     env.lsq_enq_req[0].bits_sqIdx_value.value = 0x7
@@ -93,7 +93,6 @@ def test_api_MemBlock_env_issue_bundle_access(env):
 
     for idx, bundle in enumerate(env.issue):
         bundle.valid.value = 1
-        bundle.bits_fuType.value = idx
         bundle.bits_fuOpType.value = idx + 1
         bundle.bits_src_0.value = idx + 2
         bundle.bits_robIdx_value.value = idx + 3
@@ -118,8 +117,7 @@ def test_api_MemBlock_env_mem_status_access(env):
     _ = env.mem_status.memoryViolation_valid.value
     _ = env.lsq_status.lqCanAccept.value
     _ = env.lsq_status.sqCanAccept.value
-    for signal in env.lsq_status.mmio:
-        _ = signal.value
+    _ = env.lsq_status.mmioBusy.value
 
 
 def test_api_MemBlock_env_outer_buffer_mock_ready(env):

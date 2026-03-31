@@ -152,6 +152,7 @@ class MemoryModel:
         release_ack_delay: int = 1,
         delay_seed: int = DEFAULT_DELAY_SEED,
         rob_size: int = 512,
+        store_queue_size: int = 56,
     ) -> None:
         self.dut = dut
         self.outer_a = outer_a
@@ -173,6 +174,7 @@ class MemoryModel:
         self.grant_delay_max = grant_delay_max
         self.release_ack_delay = release_ack_delay
         self.rob_size = rob_size
+        self.store_queue_size = store_queue_size
         self._delay_rng = random.Random(delay_seed)
 
         self.memory = {}
@@ -195,6 +197,8 @@ class MemoryModel:
         self._issued_loads = deque()
         self._committed_load_budget = defaultdict(int)
         self._completed_rob_indices = deque()
+        self._prev_sq_commit_ptr: tuple[int, int] | None = None
+        self._prev_sq_deq_ptr: tuple[int, int] | None = None
 
         self.pending_stores: dict[int, PendingStore] = {}
         self.drain_log: list[dict] = []
@@ -249,6 +253,8 @@ class MemoryModel:
         self._issued_loads.clear()
         self._committed_load_budget.clear()
         self._completed_rob_indices.clear()
+        self._prev_sq_commit_ptr = None
+        self._prev_sq_deq_ptr = None
         self.pending_stores.clear()
         self.drain_log.clear()
         self.drive_idle()
@@ -342,6 +348,18 @@ class MemoryModel:
 
     def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         self._issued_loads.append(RobIndex(flag=rob_idx_flag, value=rob_idx_value))
+
+    def note_store_allocated(
+        self,
+        sq_idx_flag: int,
+        sq_idx_value: int,
+        rob_idx_flag: int,
+        rob_idx_value: int,
+    ) -> None:
+        del sq_idx_flag
+        store = self.pending_stores.setdefault(sq_idx_value, PendingStore(sq_idx=sq_idx_value))
+        store.allocated = True
+        store.rob_idx = RobIndex(flag=rob_idx_flag, value=rob_idx_value)
 
     def note_load_commits(self, commit_count: int) -> None:
         for _ in range(max(0, int(commit_count))):
@@ -519,11 +537,14 @@ class MemoryModel:
                 continue
             if bundle.read("valid", 0) == 0:
                 continue
-            if bundle.read("ready", 0) == 0:
+            if bundle.connected("ready") and bundle.read("ready", 0) == 0:
                 continue
 
             self.writeback_events += 1
             if bundle.connected("isFromLoadUnit") and bundle.read("isFromLoadUnit", 0) == 0:
+                self._observe_store_writeback(bundle)
+                continue
+            if bundle.connected("toRob_valid") and bundle.read("toRob_valid", 0) == 0:
                 continue
             if (
                 not bundle.connected("data_0")
@@ -532,6 +553,7 @@ class MemoryModel:
                 or not bundle.connected("robIdx_flag")
                 or not bundle.connected("robIdx_value")
             ):
+                self._observe_store_writeback(bundle)
                 continue
             if bundle.read("intWen", 0) == 0:
                 continue
@@ -556,6 +578,21 @@ class MemoryModel:
             )
             self._completed_rob_indices.append(rob_idx)
             self._try_complete_loads(rob_idx)
+
+    def _observe_store_writeback(self, bundle) -> None:
+        if not bundle.connected("sqIdx_value") or not bundle.connected("robIdx_value"):
+            return
+        sq_idx = bundle.read("sqIdx_value", -1)
+        if sq_idx < 0:
+            return
+        store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+        store.allocated = True
+        if bundle.connected("robIdx_flag") and bundle.connected("robIdx_value"):
+            store.rob_idx = RobIndex(
+                flag=bundle.read("robIdx_flag", 0),
+                value=bundle.read("robIdx_value", 0),
+            )
+        store.completed = True
 
     def drain_completed_robs(self) -> list[RobIndex]:
         completed = list(self._completed_rob_indices)
@@ -686,6 +723,8 @@ class MemoryModel:
         )
 
     def _observe_store_events(self) -> None:
+        self._observe_sq_commit_ptr()
+        self._observe_sq_deq_ptr()
         self._observe_sq_shadow()
         self._observe_store_addr()
         self._observe_store_addr_re()
@@ -693,8 +732,61 @@ class MemoryModel:
         self._observe_store_data()
         self._observe_sbuffer_writes()
 
+    def _read_ptr(self, prefix: str) -> tuple[int, int] | None:
+        flag_signal = getattr(self.dut, f"{prefix}_flag", None)
+        value_signal = getattr(self.dut, f"{prefix}_value", None)
+        if flag_signal is None or value_signal is None:
+            return None
+        return (int(flag_signal.value), int(value_signal.value))
+
+    def _ptr_iter(self, prev: tuple[int, int], curr: tuple[int, int], size: int) -> list[int]:
+        prev_abs = prev[0] * size + prev[1]
+        curr_abs = curr[0] * size + curr[1]
+        if curr_abs < prev_abs:
+            curr_abs += size * 2
+        distance = curr_abs - prev_abs
+        _, ptr_value = prev
+        indices = []
+        for _ in range(distance):
+            indices.append(ptr_value)
+            ptr_value += 1
+            if ptr_value >= size:
+                ptr_value = 0
+        return indices
+
+    def _observe_sq_commit_ptr(self) -> None:
+        curr = self._read_ptr("MemBlock_inner_lsq_io_sqCommitPtr")
+        if curr is None:
+            return
+        if self._prev_sq_commit_ptr is None:
+            self._prev_sq_commit_ptr = curr
+            return
+        if curr != self._prev_sq_commit_ptr:
+            for sq_idx in self._ptr_iter(self._prev_sq_commit_ptr, curr, self.store_queue_size):
+                store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+                store.allocated = True
+                store.committed = True
+        self._prev_sq_commit_ptr = curr
+
+    def _observe_sq_deq_ptr(self) -> None:
+        curr = self._read_ptr("io_mem_to_ooo_sqDeqPtr")
+        if curr is None:
+            curr = self._read_ptr("MemBlock_inner_lsq_io_sqDeqPtr")
+        if curr is None:
+            return
+        if self._prev_sq_deq_ptr is None:
+            self._prev_sq_deq_ptr = curr
+            return
+        if curr != self._prev_sq_deq_ptr:
+            for sq_idx in self._ptr_iter(self._prev_sq_deq_ptr, curr, self.store_queue_size):
+                store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+                store.completed = True
+        self._prev_sq_deq_ptr = curr
+
     def _observe_sq_shadow(self) -> None:
         for sq_idx, entry in enumerate(self.sq_shadow_entries):
+            if not entry.connected("allocated"):
+                continue
             allocated = bool(entry.read("allocated", 0))
             rob_idx = RobIndex(
                 flag=entry.read("robIdx_flag", 0),
@@ -722,16 +814,35 @@ class MemoryModel:
                 continue
             sq_idx = lane.read("sqIdx_value", 0)
             store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+            store.allocated = True
             store.addr = lane.read("paddr", store.addr if store.addr is not None else 0)
             store.addr_valid = not bool(lane.read("miss", 0))
+            if lane.connected("mask"):
+                store.mask = lane.read("mask", store.mask)
             store.nc = bool(lane.read("nc", store.nc))
 
     def _observe_store_addr_re(self) -> None:
-        for lane in self.store_addr_re_inputs:
-            if lane.read("updateAddrValid", 0) == 0:
+        for lane_idx, lane in enumerate(self.store_addr_re_inputs):
+            should_update = True
+            if lane.connected("updateAddrValid"):
+                should_update = lane.read("updateAddrValid", 0) != 0
+            elif not any(
+                lane.connected(name) and lane.read(name, 0) != 0
+                for name in ("nc", "mmio", "memBackTypeMM", "hasException")
+            ):
+                should_update = False
+            if not should_update:
                 continue
-            sq_idx = lane.read("sqIdx_value", 0)
+            sq_idx = lane.read("sqIdx_value", -1)
+            if sq_idx < 0 and lane_idx < len(self.store_addr_inputs):
+                sq_idx = self.store_addr_inputs[lane_idx].read("sqIdx_value", -1)
+            if sq_idx < 0:
+                continue
             store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+            store.allocated = True
+            store.addr_valid = True
+            if lane.connected("nc"):
+                store.nc = bool(lane.read("nc", store.nc))
             store.mmio = bool(lane.read("mmio", store.mmio))
             store.mem_back_type_mm = bool(lane.read("memBackTypeMM", store.mem_back_type_mm))
             store.has_exception = bool(lane.read("hasException", store.has_exception))
@@ -742,6 +853,7 @@ class MemoryModel:
                 continue
             sq_idx = lane.read("sqIdx_value", 0)
             store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+            store.allocated = True
             store.mask = lane.read("mask", store.mask)
 
     def _observe_store_data(self) -> None:
@@ -750,36 +862,31 @@ class MemoryModel:
                 continue
             sq_idx = lane.read("sqIdx_value", 0)
             store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+            store.allocated = True
             store.data = lane.read("data", store.data if store.data is not None else 0)
             store.data_valid = True
             store.width_bytes = STORE_DATA_WIDTH_BYTES
 
     def _observe_sbuffer_writes(self) -> None:
         for lane_idx, lane in enumerate(self.sbuffer_writes):
-            if lane.read("valid", 0) == 0 or lane.read("ready", 0) == 0:
+            if lane.read("valid", 0) == 0:
                 continue
-            if lane.read("vecValid", 1) == 0:
+            if lane.connected("ready") and lane.read("ready", 0) == 0:
+                continue
+            if lane.connected("vecValid") and lane.read("vecValid", 1) == 0:
                 continue
             if lane.read("wline", 0):
                 raise AssertionError("当前 MemoryModel 暂不支持 wline store drain 校验")
-
-            raw_addr = lane.read("addr", 0)
-            raw_data = lane.read("data", 0)
-            raw_mask = lane.read("mask", 0)
-            addr_bit3 = (raw_addr >> 3) & 0x1
-            normalized_addr = raw_addr & ~0x7
-            normalized_data = raw_data >> 64 if addr_bit3 else raw_data
-            normalized_mask = (raw_mask >> 8) if addr_bit3 else raw_mask
 
             self.sbuffer_drain_count += 1
             self.drain_log.append(
                 {
                     "channel": "sbuffer",
                     "lane": lane_idx,
-                    "addr": normalized_addr,
-                    "data": normalized_data,
-                    "mask": normalized_mask & 0xFF,
-                    "width_bytes": 8,
+                    "addr": lane.read("addr", 0),
+                    "data": lane.read("data", 0),
+                    "mask": lane.read("mask", 0),
+                    "width_bytes": 16,
                     "cycle": self._cycle,
                 }
             )

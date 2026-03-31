@@ -67,44 +67,24 @@ def build_lqr_signals() -> list[str]:
         *bit_series("allocated", LQR_SIZE),
         *bit_series("scheduled", LQR_SIZE),
         *bit_series("blocking", LQR_SIZE),
-        *value_series("cause", "[10:0]", LQR_SIZE),
+        *value_series("cause", "[12:0]", LQR_SIZE),
         *value_series("debug_vaddr", "[49:0]", LQR_SIZE),
     ]
     for idx in range(LQR_SIZE):
         signals.extend(
             [
                 f"reg vecReplay_{idx}_isvec",
-                f"reg vecReplay_{idx}_is128bit",
+                f"reg [7:0] vecReplay_{idx}_elemIdx",
+                f"reg [2:0] vecReplay_{idx}_alignedType",
+                f"reg [3:0] vecReplay_{idx}_mbIndex",
+                f"reg [7:0] vecReplay_{idx}_elemIdxInsideVd",
+                f"reg [3:0] vecReplay_{idx}_reg_offset",
+                f"reg [15:0] vecReplay_{idx}_mask",
                 f"reg [7:0] uop_{idx}_pdest",
-                f"reg [6:0] uop_{idx}_uopIdx",
                 f"reg uop_{idx}_robIdx_flag",
                 f"reg [8:0] uop_{idx}_robIdx_value",
                 f"reg uop_{idx}_lqIdx_flag",
                 f"reg [6:0] uop_{idx}_lqIdx_value",
-                f"reg uop_{idx}_sqIdx_flag",
-                f"reg [5:0] uop_{idx}_sqIdx_value",
-            ]
-        )
-    return signals
-
-
-def build_sq_signals() -> list[str]:
-    signals = [
-        *bit_series("allocated", SQ_SIZE),
-        *bit_series("completed", SQ_SIZE),
-        *bit_series("addrvalid", SQ_SIZE),
-        *bit_series("datavalid", SQ_SIZE),
-        *bit_series("committed", SQ_SIZE),
-        *bit_series("nc", SQ_SIZE),
-        *bit_series("isVec", SQ_SIZE),
-    ]
-    for idx in range(SQ_SIZE):
-        signals.extend(
-            [
-                f"reg [7:0] uop_{idx}_pdest",
-                f"reg [6:0] uop_{idx}_uopIdx",
-                f"reg uop_{idx}_robIdx_flag",
-                f"reg [8:0] uop_{idx}_robIdx_value",
                 f"reg uop_{idx}_sqIdx_flag",
                 f"reg [5:0] uop_{idx}_sqIdx_value",
             ]
@@ -133,7 +113,6 @@ def generate_yaml(wrapper_path: Path) -> str:
         ],
     )
     add_scope(root, "MemBlock.inner_lsq.loadQueue.loadQueueReplay", build_lqr_signals())
-    add_scope(root, "MemBlock.inner_lsq.storeQueue", build_sq_signals())
 
     lines: list[str] = []
     for root_name, root_node in root.items():
