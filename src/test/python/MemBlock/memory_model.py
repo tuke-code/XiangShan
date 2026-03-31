@@ -23,9 +23,9 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from dataclasses import dataclass
-import random
 
 from model.ref_memory import RefMemory
+from model.transport_responder import TransportResponder
 
 
 TL_A_PUT_FULL = 0
@@ -171,29 +171,32 @@ class MemoryModel:
         self.store_addr_re_inputs = list(store_addr_re_inputs or [])
         self.sq_shadow_entries = list(sq_shadow_entries or [])
         self.sbuffer_writes = list(sbuffer_writes or [])
-        self.outer_delay = outer_delay
-        self.grant_delay_min = grant_delay_min
-        self.grant_delay_max = grant_delay_max
-        self.release_ack_delay = release_ack_delay
         self.rob_size = rob_size
         self.store_queue_size = store_queue_size
-        self._delay_rng = random.Random(delay_seed)
+        self.pending_stores: dict[int, PendingStore] = {}
+        self.drain_log: list[dict] = []
 
         self.ref_memory = RefMemory()
         self.memory = self.ref_memory.storage
+        self.transport = TransportResponder(
+            dut,
+            outer_a,
+            outer_d,
+            dcache_a,
+            dcache_b,
+            dcache_c,
+            dcache_d,
+            dcache_e,
+            self.ref_memory,
+            self.drain_log,
+            outer_delay=outer_delay,
+            grant_delay_min=grant_delay_min,
+            grant_delay_max=grant_delay_max,
+            release_ack_delay=release_ack_delay,
+            delay_seed=delay_seed,
+        )
         self._cycle = 0
         self._runtime_reset_active = False
-        self._next_sink = 1
-
-        self._pending_outer_d = deque()
-        self._active_outer_d = None
-
-        self._pending_b = deque()
-        self._active_b = None
-
-        self._pending_d = deque()
-        self._active_d = None
-        self._inflight_grants = {}
 
         self._expected_loads = defaultdict(deque)
         self._observed_load_writebacks = defaultdict(deque)
@@ -203,39 +206,20 @@ class MemoryModel:
         self._prev_sq_commit_ptr: tuple[int, int] | None = None
         self._prev_sq_deq_ptr: tuple[int, int] | None = None
 
-        self.pending_stores: dict[int, PendingStore] = {}
-        self.drain_log: list[dict] = []
-
         self.strict_writeback_check = True
         self.completed_loads = 0
         self.writeback_events = 0
         self.failed_transactions = 0
-
-        self.outer_request_count = 0
-        self.outer_response_count = 0
-        self.outer_write_request_count = 0
-        self.dcache_a_request_count = 0
-        self.dcache_c_request_count = 0
-        self.dcache_e_request_count = 0
-        self.dcache_b_response_count = 0
-        self.dcache_d_response_count = 0
         self.sbuffer_drain_count = 0
 
         self.drive_idle()
-
-    def _sample_dcache_delay(self) -> int:
-        low = min(self.grant_delay_min, self.grant_delay_max)
-        high = max(self.grant_delay_min, self.grant_delay_max)
-        return self._delay_rng.randint(low, high)
 
     def attach_writebacks(self, writebacks) -> None:
         self.writebacks = list(writebacks)
         self.drive_writeback_ready()
 
     def drive_idle(self) -> None:
-        self.outer_d.drive_idle()
-        self.dcache_b.drive_idle()
-        self.dcache_d.drive_idle()
+        self.transport.drive_idle()
         self.drive_writeback_ready()
 
     def drive_writeback_ready(self) -> None:
@@ -244,13 +228,7 @@ class MemoryModel:
                 bundle.set_ready(1)
 
     def reset_runtime_state(self) -> None:
-        self._pending_outer_d.clear()
-        self._active_outer_d = None
-        self._pending_b.clear()
-        self._active_b = None
-        self._pending_d.clear()
-        self._active_d = None
-        self._inflight_grants.clear()
+        self.transport.reset_runtime_state()
         self._expected_loads.clear()
         self._observed_load_writebacks.clear()
         self._issued_loads.clear()
@@ -264,18 +242,10 @@ class MemoryModel:
 
     def reset(self) -> None:
         self.ref_memory.clear()
-        self._next_sink = 1
+        self.transport.reset()
         self.completed_loads = 0
         self.writeback_events = 0
         self.failed_transactions = 0
-        self.outer_request_count = 0
-        self.outer_response_count = 0
-        self.outer_write_request_count = 0
-        self.dcache_a_request_count = 0
-        self.dcache_c_request_count = 0
-        self.dcache_e_request_count = 0
-        self.dcache_b_response_count = 0
-        self.dcache_d_response_count = 0
         self.sbuffer_drain_count = 0
         self.reset_runtime_state()
 
@@ -356,34 +326,12 @@ class MemoryModel:
 
     @property
     def outstanding_transaction_count(self) -> int:
-        return (
-            len(self._pending_outer_d)
-            + (1 if self._active_outer_d is not None else 0)
-            + len(self._pending_b)
-            + (1 if self._active_b is not None else 0)
-            + len(self._pending_d)
-            + (1 if self._active_d is not None else 0)
-            + len(self._inflight_grants)
-        )
+        return self.transport.outstanding_transaction_count
 
     @property
     def stats(self) -> dict:
         return {
-            "outer_request_count": self.outer_request_count,
-            "outer_response_count": self.outer_response_count,
-            "outer_write_request_count": self.outer_write_request_count,
-            "dcache_a_request_count": self.dcache_a_request_count,
-            "dcache_c_request_count": self.dcache_c_request_count,
-            "dcache_e_request_count": self.dcache_e_request_count,
-            "dcache_b_response_count": self.dcache_b_response_count,
-            "dcache_d_response_count": self.dcache_d_response_count,
-            "pending_outer_d_count": len(self._pending_outer_d),
-            "pending_b_count": len(self._pending_b),
-            "pending_d_count": len(self._pending_d),
-            "active_outer_d_count": 1 if self._active_outer_d is not None else 0,
-            "active_b_count": 1 if self._active_b is not None else 0,
-            "active_d_count": 1 if self._active_d is not None else 0,
-            "inflight_grant_count": len(self._inflight_grants),
+            **self.transport.stats,
             "outstanding_expected_count": self.outstanding_expected_count,
             "completed_loads": self.completed_loads,
             "writeback_events": self.writeback_events,
@@ -391,6 +339,38 @@ class MemoryModel:
             "drain_log_count": len(self.drain_log),
             "sbuffer_drain_count": self.sbuffer_drain_count,
         }
+
+    @property
+    def outer_request_count(self) -> int:
+        return self.transport.outer_request_count
+
+    @property
+    def outer_response_count(self) -> int:
+        return self.transport.outer_response_count
+
+    @property
+    def outer_write_request_count(self) -> int:
+        return self.transport.outer_write_request_count
+
+    @property
+    def dcache_a_request_count(self) -> int:
+        return self.transport.dcache_a_request_count
+
+    @property
+    def dcache_c_request_count(self) -> int:
+        return self.transport.dcache_c_request_count
+
+    @property
+    def dcache_e_request_count(self) -> int:
+        return self.transport.dcache_e_request_count
+
+    @property
+    def dcache_b_response_count(self) -> int:
+        return self.transport.dcache_b_response_count
+
+    @property
+    def dcache_d_response_count(self) -> int:
+        return self.transport.dcache_d_response_count
 
     def enqueue_outer_response(
         self,
@@ -405,20 +385,17 @@ class MemoryModel:
         corrupt: int = 0,
         delay_cycles: int | None = None,
     ) -> None:
-        delay = self.outer_delay if delay_cycles is None else delay_cycles
-        self._pending_outer_d.append(
-            {
-                "release_cycle": self._cycle + delay,
-                "opcode": opcode,
-                "param": param,
-                "size": size,
-                "source": source,
-                "request_source": source if request_source is None else request_source,
-                "sink": sink,
-                "denied": denied,
-                "data": data,
-                "corrupt": corrupt,
-            }
+        self.transport.enqueue_outer_response(
+            opcode=opcode,
+            param=param,
+            size=size,
+            source=source,
+            request_source=request_source,
+            sink=sink,
+            denied=denied,
+            data=data,
+            corrupt=corrupt,
+            delay_cycles=delay_cycles,
         )
 
     def enqueue_b_response(
@@ -433,19 +410,16 @@ class MemoryModel:
         corrupt: int = 0,
         delay_cycles: int | None = None,
     ) -> None:
-        delay = self._sample_dcache_delay() if delay_cycles is None else delay_cycles
-        self._pending_b.append(
-            {
-                "release_cycle": self._cycle + delay,
-                "opcode": opcode,
-                "param": param,
-                "size": size,
-                "source": source,
-                "address": address,
-                "mask": mask,
-                "data": data,
-                "corrupt": corrupt,
-            }
+        self.transport.enqueue_b_response(
+            opcode=opcode,
+            param=param,
+            size=size,
+            source=source,
+            address=address,
+            mask=mask,
+            data=data,
+            corrupt=corrupt,
+            delay_cycles=delay_cycles,
         )
 
     def enqueue_d_response(
@@ -463,42 +437,24 @@ class MemoryModel:
         corrupt: int = 0,
         delay_cycles: int | None = None,
     ) -> None:
-        delay = self._sample_dcache_delay() if delay_cycles is None else delay_cycles
-        self._pending_d.append(
-            {
-                "release_cycle": self._cycle + delay,
-                "beats": deque(
-                    [
-                        {
-                            "opcode": opcode,
-                            "param": param,
-                            "size": size,
-                            "source": source,
-                            "request_channel": request_channel,
-                            "request_source": source if request_source is None else request_source,
-                            "sink": sink,
-                            "denied": denied,
-                            "echo_isKeyword": echo_is_keyword,
-                            "data": data,
-                            "corrupt": corrupt,
-                        }
-                    ]
-                ),
-            }
+        self.transport.enqueue_d_response(
+            opcode=opcode,
+            param=param,
+            size=size,
+            source=source,
+            request_channel=request_channel,
+            request_source=request_source,
+            sink=sink,
+            denied=denied,
+            echo_is_keyword=echo_is_keyword,
+            data=data,
+            corrupt=corrupt,
+            delay_cycles=delay_cycles,
         )
 
     def on_memory_edge(self, cycle: int) -> None:
         self._cycle = cycle
-        self._drive_request_readies()
-        if self._in_reset():
-            self.drive_idle()
-            return
-
-        self._capture_outer_request()
-        self._capture_dcache_requests()
-        self._service_outer_d()
-        self._service_b_channel()
-        self._service_d_channel()
+        self.transport.on_memory_edge(cycle)
 
     def after_cycle(self) -> None:
         self.drive_writeback_ready()
