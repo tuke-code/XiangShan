@@ -168,7 +168,7 @@ jobs:
           if [ ! -e "$SPEC_DIR/emu" ] || [ "${{ inputs.recompile }}" = "true" ]; then
             python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --build \
               --config "${{ inputs.xs_config }}" \
-              --dramsim3 /nfs/home/share/ci-workloads/DRAMsim3 --with-dramsim3 \
+              --dramsim3 /nfs/home/share/wuchengkai/DRAMsim3 --with-dramsim3 \
               --threads $([ "${{ inputs.emulator }}" = "gsim" ] && echo 1 || echo 8) \
               --pgo $GITHUB_WORKSPACE/ready-to-run/coremark-2-iteration.bin \
               --llvm-profdata llvm-profdata --trace-fst \
