@@ -1019,7 +1019,11 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   }
   private val othersLeftOne = othersLeftOneCaseVec.map(_ === VecInit(validVecRegNext.drop(params.numEnq)).asUInt).reduce(_ | _)
   private val othersCanotIn = Wire(Bool())
-  othersCanotIn := othersLeftOne || validVecRegNext.drop(params.numEnq).reduce(_ & _)
+  dontTouch(othersCanotIn)
+  if (params.numEnq > 2)
+    othersCanotIn := PopCount(validVecRegNext.drop(params.numEnq)) > (params.numSimp - params.numEnq).U
+  else
+    othersCanotIn := othersLeftOne || validVecRegNext.drop(params.numEnq).reduce(_ & _)
   // if has simp Entry, othersCanotIn will be simpCanotIn
   if (params.numSimp > 0) {
     val simpLeftOneCaseVec = Wire(Vec(params.numSimp, UInt((params.numSimp).W)))
@@ -1027,7 +1031,11 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       leftone := ~(1.U((params.numSimp).W) << i)
     }
     val simpLeftOne = simpLeftOneCaseVec.map(_ === VecInit(validVecRegNext.drop(params.numEnq).take(params.numSimp)).asUInt).reduce(_ | _)
-    val simpCanotIn = simpLeftOne || validVecRegNext.drop(params.numEnq).take(params.numSimp).reduce(_ & _)
+    val simpCanotIn = Wire(Bool())
+    if (params.numEnq > 2)
+      simpCanotIn := PopCount(validVecRegNext.drop(params.numEnq)) > (params.numSimp - params.numEnq).U
+    else
+      simpCanotIn := simpLeftOne || validVecRegNext.drop(params.numEnq).take(params.numSimp).reduce(_ & _)
     othersCanotIn := simpCanotIn
   }
   val enqReady = GatedValidRegNext((!othersCanotIn || !enqHasValidRegNext) && !enqHasIssuedRegNext, false.B)
