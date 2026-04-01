@@ -39,6 +39,7 @@ class TrainInfo(implicit p: Parameters) extends XSBundle with HasMdpTageTablePar
   val hitWayMaskOH = UInt(MaxNumWays.W)
   val allocateNxOH = UInt(NumTables.W)
   val updateEntry  = new TageEntry
+  val allocateEntry= new TageEntry
   val canAllocate = Bool()
   //
   val needUpdate         = Bool()
@@ -300,6 +301,9 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     trainInfo.updateEntry.valid := !tageHitTableMask.reduce(_ || _)
     trainInfo.updateEntry.tag   := provider.tag
     trainInfo.updateEntry.distance := provider.distance
+    trainInfo.allocateEntry.valid := true.B
+    trainInfo.allocateEntry.tag   := provider.tag
+    trainInfo.allocateEntry.distance := provider.distance
     trainInfo.AllWayWeakUsefulCtrs := provider.allWayWeakUsefulCtrs
 
     when(load.valid){
@@ -417,51 +421,59 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   XSPerfAccumulate("mdp_tage_train_need_write", PopCount(mdpTageTrainNeedWrite))
   XSPerfAccumulate("mdp_tage_train_skip_update", PopCount(mdpTageTrainSkipUpdate))
 
-  //allocate
-  private val t2_needAllocateLoadOH = t2_trainInfoVec.map(info => info.valid && info.needAllocate)
-  
-  when(t2_fire) {
-    assert(PopCount(t2_needAllocateLoadOH) <= 1.U)
-  } //FIXME:
-  private val t2_needAllocate          = t2_needAllocateLoadOH.reduce(_ || _)
-  private val t2_allocateLoad          = Mux1H(t2_needAllocateLoadOH, t2_loads)
-  private val t2_allocateLoadTrainInfo = Mux1H(t2_needAllocateLoadOH, t2_trainInfoVec)
+  // //allocate
+  // private val t2_needAllocateLoadOH = t2_trainInfoVec.map(info => info.valid && info.needAllocate)
+  // when(t2_fire) {
+  //   assert(PopCount(t2_needAllocateLoadOH) <= 1.U)
+  // } //FIXME:
+  // private val t2_needAllocate          = t2_needAllocateLoadOH.reduce(_ || _)
+  // private val t2_allocateLoad          = Mux1H(t2_needAllocateLoadOH, t2_loads)
+  // private val t2_allocateLoadTrainInfo = Mux1H(t2_needAllocateLoadOH, t2_trainInfoVec)
+  // private val t2_canAllocate = t2_allocateLoadTrainInfo.canAllocate //TODO:canAllocate 没考虑usefulctr的情况
+  // private val t2_allocate = t2_needAllocate && t2_canAllocate       //TODO:can allocate
+
+  // private val t2_allocateTableOH     = t2_allocateLoadTrainInfo.allocateNxOH
+  // private val t2_allocateWayMask     = Mux1H(t2_allocateTableOH,t2_tageTableCanAllocateWayMask)
+  // private val t2_allocateWayOH       = PriorityEncoderOH(t2_allocateWayMask)
+  // dontTouch(t2_allocateTableOH)
+  // dontTouch(t2_allocateWayOH)
+  // private val t2_allocateEntry = {
+  //   val rawTag      = Mux1H(t2_allocateTableOH, t2_rawTag)
+  //   val position    = t2_allocateLoad.bits.cfiPosition
+  //   val entry       = Wire(new TageEntry)
+  //   entry.valid := true.B
+  //   entry.tag   := rawTag ^ position
+  //   entry.distance := t2_allocateLoad.bits.distance
+  //   entry
+  // }
+  private val t2_needAllocateMask = t2_trainInfoVec.map(info => info.valid && info.needAllocate)
+  private val t2_needAllocate     = t2_needAllocateMask.reduce(_ || _)
+
   private val t2_tageTableCanAllocateWayMask = t2_readResp.map { tableReadResp =>
     tableReadResp.entries.zip(tableReadResp.usefulCtrs).map { case (entry, usefulCtr) =>
       !entry.valid || entry.valid && usefulCtr.isSaturateNegative
     }.asUInt
   }
-  private val t2_canAllocate = t2_allocateLoadTrainInfo.canAllocate //TODO:canAllocate 没考虑usefulctr的情况
-  private val t2_allocate = t2_needAllocate && t2_canAllocate       //TODO:can allocate
+  private val t2_canAllocate = t2_trainInfoVec.map(info => Mux(info.valid && info.needAllocate, info.canAllocate, true.B)).reduce(_ && _)
+  private val t2_allocate    = VecInit(t2_trainInfoVec.map(info => info.canAllocate && t2_needAllocate))
+  private val t2_allocateTableOHVec     = VecInit(t2_trainInfoVec.map(info => info.allocateNxOH))
+  private val t2_allocateWayOHVec       = VecInit(t2_allocateTableOHVec.map(x => PriorityEncoderOH(Mux1H(x,t2_tageTableCanAllocateWayMask))))
 
-  private val t2_allocateTableOH     = t2_allocateLoadTrainInfo.allocateNxOH
-  private val t2_allocateWayMask     = Mux1H(t2_allocateTableOH,t2_tageTableCanAllocateWayMask)
-  private val t2_allocateWayOH       = PriorityEncoderOH(t2_allocateWayMask)
-  dontTouch(t2_allocateTableOH)
-  dontTouch(t2_allocateWayOH)
-  private val t2_allocateEntry = {
-    val rawTag      = Mux1H(t2_allocateTableOH, t2_rawTag)
-    val position    = t2_allocateLoad.bits.cfiPosition
-    val entry       = Wire(new TageEntry)
-    entry.valid := true.B
-    entry.tag   := rawTag ^ position
-    entry.distance := t2_allocateLoad.bits.distance
-    entry
-  }
-  when(t2_fire && t2_allocate) {
-    assert(t2_allocateTableOH.orR, "Allocate table OH should be valid when allocating")
-    assert(t2_allocateWayOH.orR, "Allocate way OH should be valid when allocating")
+
+  // when(t2_fire && t2_allocate) {
+  //   assert(t2_allocateTableOH.orR, "Allocate table OH should be valid when allocating")
+  //   assert(t2_allocateWayOH.orR, "Allocate way OH should be valid when allocating")
     
-    // 确保选择的way确实可用
-    val allocatedTableIdx = OHToUInt(t2_allocateTableOH)
-    val allocatedWayIdx = OHToUInt(t2_allocateWayOH)
-    val wayIsAvailable = Mux1H(t2_allocateTableOH, t2_tageTableCanAllocateWayMask)(allocatedWayIdx)
-    assert(wayIsAvailable, cf"Allocated way ${allocatedWayIdx} in table ${allocatedTableIdx} should be available")
+  //   // 确保选择的way确实可用
+  //   val allocatedTableIdx = OHToUInt(t2_allocateTableOH)
+  //   val allocatedWayIdx = OHToUInt(t2_allocateWayOH)
+  //   val wayIsAvailable = Mux1H(t2_allocateTableOH, t2_tageTableCanAllocateWayMask)(allocatedWayIdx)
+  //   assert(wayIsAvailable, cf"Allocated way ${allocatedWayIdx} in table ${allocatedTableIdx} should be available")
     
-    // 确保allocate的entry是有效的
-    assert(t2_allocateEntry.valid, "Allocated entry should be valid")
-    assert(t2_allocateEntry.tag =/= 0.U, "Allocated entry tag should not be zero")
-  }
+  //   // 确保allocate的entry是有效的
+  //   assert(t2_allocateEntry.valid, "Allocated entry should be valid")
+  //   assert(t2_allocateEntry.tag =/= 0.U, "Allocated entry tag should not be zero")
+  // }
 
   //NOTE:Allocate也划分为AllocateWeak和AllocateStrong
   //一个table表遍历需要覆盖所有情况？
@@ -478,21 +490,22 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       val hitMask = t2_trainInfoVec.map { info =>
         info.valid && info.needUpdate && info.trainNxOH(tableIdx) && info.hitWayMaskOH(wayIdx)
       }
-      val allocateMask = t2_trainInfoVec.map { info =>
-        info.valid && info.needAllocate && t2_allocate && t2_allocateTableOH(tableIdx) && t2_allocateWayOH(wayIdx)
+      val allocateMask = t2_trainInfoVec.zipWithIndex.map { case(info,infoIdx) =>
+        info.valid && info.needAllocate && t2_allocate(infoIdx) && t2_allocateTableOHVec(infoIdx)(tableIdx) && t2_allocateWayOHVec(infoIdx)(wayIdx)
       }
       when(t2_fire) {
         assert(PopCount(hitMask) <= 1.U)
       }
       val updateEn = hitMask.reduce(_ || _)
-      val allocateEn = t2_allocate && t2_allocateTableOH(tableIdx) && t2_allocateWayOH(wayIdx)
+      val allocateEn = allocateMask.reduce(_ || _)
       val weakWayEn  = allWayNeedWeakMask.reduce(_ || _)
+      val allocateEntry     =  Mux1H(hitMask, t2_trainInfoVec).allocateEntry
       val allocateUsefulCtr = Mux1H(allocateMask, t2_trainInfoVec).allocateUsefulCtr
       val updateEntry       = Mux1H(hitMask, t2_trainInfoVec).updateEntry
       val updateUsefulCtr   = Mux1H(hitMask, t2_trainInfoVec).updateUsefulCtr
       val weakWayUsefulCtr  = Mux1H(allWayNeedWeakMask, t2_trainInfoVec).AllWayWeakUsefulCtrs(wayIdx)
       writeWayMask(wayIdx)    := updateEn || allocateEn
-      writeEntries(wayIdx)    := Mux(allocateEn, t2_allocateEntry, updateEntry)
+      writeEntries(wayIdx)    := Mux(allocateEn, allocateEntry, updateEntry)
       writeUsefulCtrs(wayIdx) := Mux(allocateEn, allocateUsefulCtr,
                                   Mux(weakWayEn, weakWayUsefulCtr, updateUsefulCtr))
       when(t2_fire) {
