@@ -77,7 +77,7 @@ class XSArgs(object):
         self.with_dramsim3 = 1 if args.with_dramsim3 else None
         self.is_release = 1 if args.release else None
         self.is_spike = "Spike" if args.spike else None
-        self.trace = 1 if args.trace or not args.disable_fork and not args.trace_fst else None
+        self.trace = 1 if args.trace else None
         self.trace_fst = "fst" if args.trace_fst else None
         self.simfrontend = 1 if args.simfrontend else None
         self.config = args.config
@@ -94,7 +94,7 @@ class XSArgs(object):
         self.diff = args.diff
         if args.spike and "nemu" in args.diff:
             self.diff = self.diff.replace("nemu-interpreter", "spike")
-        self.fork = not args.disable_fork
+        self.fork = (args.emulator != "gsim") and (not args.disable_fork)
         self.disable_diff = args.no_diff
         self.dump_db = args.dump_db
         self.gcpt_restore_bin = args.gcpt_restore_bin
