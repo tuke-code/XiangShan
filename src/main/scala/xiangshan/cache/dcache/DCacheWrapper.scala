@@ -845,13 +845,18 @@ class MissReadyGen(val n: Int)(implicit p: Parameters) extends XSModule {
   }
   io.in.zipWithIndex.map {
     case (r, idx) => {
-      if (idx == 0) {
-        r.ready := mqReadyVec(idx)
-      } else {
-        r.ready := mqReadyVec(idx) && !Cat(io.in.slice(0, idx).map(_.valid)).orR
-      }
+      r.ready := mqReadyVec(idx)
     }
   }
+  // io.in.zipWithIndex.map {
+  //   case (r, idx) => {
+  //     if (idx == 0) {
+  //       r.ready := mqReadyVec(idx)
+  //     } else {
+  //       r.ready := mqReadyVec(idx) && !Cat(io.in.slice(0, idx).map(_.valid)).orR
+  //     }
+  //   }
+  // }
 
 }
 
@@ -1470,8 +1475,8 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     missReadyGen.io.in(w + 1) <> ldu(w).io.miss_req
   }
 
-  for (w <- 0 until LoadPipelineWidth) { ldu(w).io.miss_resp := missQueue.io.resp }
-  mainPipe.io.miss_resp := missQueue.io.resp
+  mainPipe.io.miss_resp := missQueue.io.resp(0)
+  for (w <- 0 until LoadPipelineWidth) { ldu(w).io.miss_resp := missQueue.io.resp(w + 1) }
 
   if(StorePrefetchL1Enabled) {
     for (w <- 0 until backendParams.StaCnt) {
@@ -1516,7 +1521,9 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   wb.io.miss_req_conflict_check(4).bits  := missReqArb.io.out.bits.addr
   missQueue.io.wbq_block_miss_req := wb.io.block_miss_req(4)
 
-  missReqArb.io.out <> missQueue.io.req
+  // todo: remove interface
+  missReqArb.io.out <> DontCare
+  // missQueue.io.req <> DontCare
   missReadyGen.io.queryMQ <> missQueue.io.queryMQ
   io.cmoOpReq <> missQueue.io.cmo_req
   io.cmoOpResp <> missQueue.io.cmo_resp
