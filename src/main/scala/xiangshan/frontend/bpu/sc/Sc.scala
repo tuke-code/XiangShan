@@ -284,30 +284,22 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val s2_sumAboveThres = WireInit(VecInit.fill(NumWays)(false.B))
 
   for (i <- 0 until NumWays) {
-    val hit          = s2_hitMask(i)
-    val valid        = s2_providerValid(i)
+    val predValid    = s2_hitMask(i) && s2_providerValid(i)
     val sum          = s2_totalPercsum(i)
     val thres        = s2_thresholds(s2_wayIdx(i))
     val tageConfHigh = s2_providerCtr(i).isSaturatePositive || s2_providerCtr(i).isSaturateNegative
     val tageConfMid  = s2_providerCtr(i).isMid
     val tageConfLow  = s2_providerCtr(i).isWeak
-    val conf         = WireInit(false.B)
-    when(hit && valid && tageConfHigh) {
-      conf            := aboveThreshold(sum, thres >> 1)
-      s2_useScPred(i) := Mux(conf, true.B, false.B)
-    }.elsewhen(hit && valid && tageConfMid) {
-      conf            := aboveThreshold(sum, thres >> 2)
-      s2_useScPred(i) := Mux(conf, true.B, false.B)
-    }.elsewhen(hit && valid && tageConfLow) {
-      conf            := aboveThreshold(sum, thres >> 3)
-      s2_useScPred(i) := Mux(conf, true.B, false.B)
-    }.otherwise {
-      conf            := false.B
-      s2_useScPred(i) := false.B
-    }
-    // If the sum is greater than threshold/2, then the current threshold can already use the sc result under tage high Confidence.
-    // And if scWrang does not occur at this time, there is no need to update ctr/threshold again
-    s2_sumAboveThres(i) := aboveThreshold(sum, thres >> 1)
+    val conf = MuxCase(
+      false.B,
+      Seq(
+        (predValid && tageConfHigh) -> aboveThreshold(sum, thres >> 1),
+        (predValid && tageConfMid)  -> aboveThreshold(sum, thres >> 2),
+        (predValid && tageConfLow)  -> aboveThreshold(sum, thres >> 3)
+      )
+    )
+    s2_useScPred(i)     := conf
+    s2_sumAboveThres(i) := Mux(predValid, conf, true.B)
     dontTouch(tageConfHigh)
     dontTouch(tageConfMid)
     dontTouch(tageConfLow)
@@ -560,15 +552,21 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
     val writeDir = writeBiasDirMask.map(_(i))
     val inc      = PopCount(writeHit.zip(writeDir).map { case (hit, dir) => hit && dir })
     val dec      = PopCount(writeHit.zip(writeDir).map { case (hit, dir) => hit && !dir })
+
     newEntry.ctr := Mux(inc >= dec, oldEntry.ctr.getIncrease(inc - dec), oldEntry.ctr.getDecrease(dec - inc))
   }
-
+  dontTouch(writeBiasWayMask)
+  dontTouch(writeBiasDirMask)
   dontTouch(t1_writeBiasEntryVec)
+
+  when(t1_writeValid) {
+    scThreshold := t1_writeThresVec
+  }
 
   /*
    *  train pipeline stage 2
    */
-  private val t2_writeValid                 = RegEnable(t1_writeValid, false.B, t1_fire)
+  private val t2_writeValid                 = RegNext(t1_writeValid, init = false.B)
   private val t2_bankMask                   = RegEnable(t1_bankMask, t1_fire)
   private val t2_pathSetIdx                 = RegEnable(VecInit(t1_pathSetIdx), t1_fire)
   private val t2_globalSetIdx               = RegEnable(VecInit(t1_globalSetIdx), t1_fire)
@@ -583,7 +581,6 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val t2_writeBiasEntryVec          = RegEnable(t1_writeBiasEntryVec, t1_fire)
   private val t2_writeImliWayMask           = RegEnable(t1_writeImliWayMask, t1_fire)
   private val t2_writeImliEntryVec          = RegEnable(t1_writeImliEntryVec, t1_fire)
-  private val t2_writeThresVec              = RegEnable(t1_writeThresVec, t1_fire)
 
   // new entries write back to tables
   pathTable.zip(t2_pathSetIdx).zip(t2_writePathEntryVec).zip(t2_writePathWayMaskVec).foreach {
@@ -625,9 +622,9 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   biasTable.io.update.wayMask  := t2_writeBiasWayMask
   biasTable.io.update.entryVec := t2_writeBiasEntryVec
 
-  when(t2_writeValid) {
-    scThreshold := t2_writeThresVec
-  }
+  /*
+   *  PerfAccumulate
+   */
 
   private val scCorrectVec   = WireInit(VecInit.fill(NumWays)(false.B))
   private val scWrongVec     = WireInit(VecInit.fill(NumWays)(false.B))
