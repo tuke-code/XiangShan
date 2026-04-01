@@ -15,10 +15,6 @@ from request_apis import (
 )
 
 
-DEFAULT_LOAD_QUEUE_SIZE = 72
-DEFAULT_STORE_QUEUE_SIZE = 56
-
-
 @dataclass(frozen=True)
 class SequenceState:
     next_lq_ptr: QueuePtr
@@ -47,8 +43,8 @@ class ResetEnvSequence:
         require_issue_lanes=(),
         require_lq_ready: bool = False,
         require_sq_ready: bool = False,
-        reset_cycles: int = 20,
-        settle_cycles: int = 1,
+        reset_cycles: int | None = None,
+        settle_cycles: int | None = None,
     ) -> None:
         self.require_issue_lanes = tuple(require_issue_lanes)
         self.require_lq_ready = require_lq_ready
@@ -57,10 +53,12 @@ class ResetEnvSequence:
         self.settle_cycles = settle_cycles
 
     def run(self, env) -> SequenceState:
+        reset_cycles = env.config.sequence.reset_cycles if self.reset_cycles is None else self.reset_cycles
+        settle_cycles = env.config.sequence.reset_settle_cycles if self.settle_cycles is None else self.settle_cycles
         reset_env_and_wait_backend(
             env,
-            reset_cycles=self.reset_cycles,
-            settle_cycles=self.settle_cycles,
+            reset_cycles=reset_cycles,
+            settle_cycles=settle_cycles,
             require_issue_lanes=self.require_issue_lanes,
             require_lq_ready=self.require_lq_ready,
             require_sq_ready=self.require_sq_ready,
@@ -76,9 +74,9 @@ class ScalarLoadSequence:
         self,
         txn,
         *,
-        drain_cycles: int = 200,
+        drain_cycles: int | None = None,
         expected_completed_loads: int | None = None,
-        load_queue_size: int = DEFAULT_LOAD_QUEUE_SIZE,
+        load_queue_size: int | None = None,
         assert_no_outstanding: bool = False,
     ) -> None:
         self.txn = txn
@@ -88,9 +86,11 @@ class ScalarLoadSequence:
         self.assert_no_outstanding = assert_no_outstanding
 
     def run(self, env) -> ScalarLoadSequenceResult:
+        drain_cycles = env.config.sequence.load_drain_cycles if self.drain_cycles is None else self.drain_cycles
+        load_queue_size = env.config.sequence.load_queue_size if self.load_queue_size is None else self.load_queue_size
         send_load(env, self.txn)
         expect_load(env, self.txn)
-        env.drain_writebacks(max_cycles=self.drain_cycles)
+        env.drain_writebacks(max_cycles=drain_cycles)
         completed = env.get_completed_load_count()
         if self.expected_completed_loads is not None:
             assert completed == self.expected_completed_loads, (
@@ -100,7 +100,7 @@ class ScalarLoadSequence:
             env.assert_no_outstanding()
         return ScalarLoadSequenceResult(
             txn=self.txn,
-            next_lq_ptr=ptr_inc(self.txn.lq_ptr, self.load_queue_size),
+            next_lq_ptr=ptr_inc(self.txn.lq_ptr, load_queue_size),
             completed_load_count=completed,
         )
 
@@ -112,8 +112,8 @@ class ScalarStoreSequence:
         *,
         expected_mmio: bool | None = None,
         require_committed: bool = False,
-        materialize_cycles: int = 200,
-        store_queue_size: int = DEFAULT_STORE_QUEUE_SIZE,
+        materialize_cycles: int | None = None,
+        store_queue_size: int | None = None,
     ) -> None:
         self.txn = txn
         self.expected_mmio = expected_mmio
@@ -122,6 +122,12 @@ class ScalarStoreSequence:
         self.store_queue_size = store_queue_size
 
     def run(self, env) -> ScalarStoreSequenceResult:
+        materialize_cycles = (
+            env.config.sequence.store_materialize_cycles
+            if self.materialize_cycles is None
+            else self.materialize_cycles
+        )
+        store_queue_size = env.config.sequence.store_queue_size if self.store_queue_size is None else self.store_queue_size
         allocated_sq_ptr = send_store(env, self.txn)
         store_view = env.wait_store_materialized(
             allocated_sq_ptr.value,
@@ -129,23 +135,25 @@ class ScalarStoreSequence:
             expected_data=self.txn.data,
             expected_mmio=self.expected_mmio,
             require_committed=self.require_committed,
-            max_cycles=self.materialize_cycles,
+            max_cycles=materialize_cycles,
         )
         return ScalarStoreSequenceResult(
             txn=self.txn,
             allocated_sq_ptr=allocated_sq_ptr,
-            next_sq_ptr=ptr_inc(self.txn.sq_ptr, self.store_queue_size),
+            next_sq_ptr=ptr_inc(self.txn.sq_ptr, store_queue_size),
             store_view=store_view,
         )
 
 
 class FlushStoreBuffersSequence:
-    def __init__(self, *, max_cycles: int = 200, settle_cycles: int = 4) -> None:
+    def __init__(self, *, max_cycles: int | None = None, settle_cycles: int | None = None) -> None:
         self.max_cycles = max_cycles
         self.settle_cycles = settle_cycles
 
     def run(self, env) -> dict:
+        max_cycles = env.config.sequence.store_flush_cycles if self.max_cycles is None else self.max_cycles
+        settle_cycles = env.config.sequence.store_settle_cycles if self.settle_cycles is None else self.settle_cycles
         return env.flush_store_buffers_and_wait(
-            max_cycles=self.max_cycles,
-            settle_cycles=self.settle_cycles,
+            max_cycles=max_cycles,
+            settle_cycles=settle_cycles,
         )

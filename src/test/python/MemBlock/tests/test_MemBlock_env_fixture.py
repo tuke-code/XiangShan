@@ -24,6 +24,8 @@ def test_api_MemBlock_env_create(env):
     assert env.commit_agent is not None
     assert env.lsq_agent is not None
     assert env.issue_agent is not None
+    assert env.config.rob_size == 512
+    assert env.memory.strict_writeback_check is True
 
 
 def test_api_MemBlock_env_has_core_bundles(env):
@@ -52,16 +54,16 @@ def test_api_MemBlock_env_has_core_bundles(env):
     assert hasattr(env, "dcache_c")
     assert hasattr(env, "dcache_d")
     assert hasattr(env, "dcache_e")
-    assert len(env.lsq_enq_req) == 8
-    assert len(env.lsq_enq_resp) == 8
-    assert len(env.issue) == 7
-    assert len(env.writeback) == 7
-    assert len(env.store_data_inputs) == 2
-    assert len(env.store_addr_inputs) == 2
-    assert len(env.store_mask_inputs) == 2
-    assert len(env.store_addr_re_inputs) == 2
-    assert len(env.sbuffer_writes) == 2
-    assert len(env.sq_shadow_entries) == 56
+    assert len(env.lsq_enq_req) == env.config.lsq_enq_ports
+    assert len(env.lsq_enq_resp) == env.config.lsq_enq_ports
+    assert len(env.issue) == env.config.int_issue_ports
+    assert len(env.writeback) == env.config.int_writeback_ports
+    assert len(env.store_data_inputs) == env.config.store_pipeline_width
+    assert len(env.store_addr_inputs) == env.config.store_pipeline_width
+    assert len(env.store_mask_inputs) == env.config.store_pipeline_width
+    assert len(env.store_addr_re_inputs) == env.config.store_pipeline_width
+    assert len(env.sbuffer_writes) == env.config.sbuffer_write_ports
+    assert len(env.sq_shadow_entries) == env.config.store_queue_size
 
 
 def test_api_MemBlock_env_step_and_reset(env):

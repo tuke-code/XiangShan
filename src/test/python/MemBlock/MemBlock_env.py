@@ -46,18 +46,19 @@ from agents.commit_agent import CommitAgent
 from agents.csr_agent import CsrAgent
 from agents.issue_agent import IssueAgent
 from agents.lsq_agent import LsqAgent
+from env_config import DEFAULT_ENV_CONFIG, EnvConfig
 from memory_model import MemoryModel
 from monitors.mem_status_monitor import MemStatusMonitor
 
 
-LOAD_PIPELINE_WIDTH = 3
-LSQ_ENQ_PORTS = 8
-INT_ISSUE_PORTS = 7
-INT_WRITEBACK_PORTS = 7
-STORE_PIPELINE_WIDTH = 2
-SBUFFER_WRITE_PORTS = 2
-STORE_QUEUE_SIZE = 56
-ROB_SIZE = 512
+LOAD_PIPELINE_WIDTH = DEFAULT_ENV_CONFIG.load_pipeline_width
+LSQ_ENQ_PORTS = DEFAULT_ENV_CONFIG.lsq_enq_ports
+INT_ISSUE_PORTS = DEFAULT_ENV_CONFIG.int_issue_ports
+INT_WRITEBACK_PORTS = DEFAULT_ENV_CONFIG.int_writeback_ports
+STORE_PIPELINE_WIDTH = DEFAULT_ENV_CONFIG.store_pipeline_width
+SBUFFER_WRITE_PORTS = DEFAULT_ENV_CONFIG.sbuffer_write_ports
+STORE_QUEUE_SIZE = DEFAULT_ENV_CONFIG.store_queue_size
+ROB_SIZE = DEFAULT_ENV_CONFIG.rob_size
 
 
 @dataclass(frozen=True)
@@ -958,9 +959,11 @@ class MockDcacheClient:
 class MemBlockEnv:
     """MemBlock 顶层测试环境。"""
 
-    def __init__(self, dut) -> None:
+    def __init__(self, dut, config: EnvConfig | None = None) -> None:
         self.dut = dut
-        self.pending_ptr = PendingPtrDriver(dut)
+        self.config = DEFAULT_ENV_CONFIG if config is None else config
+        self._validate_structural_config()
+        self.pending_ptr = PendingPtrDriver(dut, rob_size=self.config.rob_size)
         self.commit_agent = CommitAgent(self)
 
         self.redirect = RedirectBundle.from_prefix("io_redirect_").bind(dut)
@@ -970,45 +973,45 @@ class MemBlockEnv:
         self.mock_csr = self.csr_agent
 
         self.lsq_enq_meta = LsqEnqMetaBundle.from_prefix("io_ooo_to_mem_enqLsq_").bind(dut)
-        self.lsq_enq_req = BundleList(LsqEnqReqBundle, "io_ooo_to_mem_enqLsq_req_#_", LSQ_ENQ_PORTS)
-        self.lsq_enq_resp = BundleList(LsqEnqRespBundle, "io_ooo_to_mem_enqLsq_resp_#_", LSQ_ENQ_PORTS)
+        self.lsq_enq_req = BundleList(LsqEnqReqBundle, "io_ooo_to_mem_enqLsq_req_#_", self.config.lsq_enq_ports)
+        self.lsq_enq_resp = BundleList(LsqEnqRespBundle, "io_ooo_to_mem_enqLsq_resp_#_", self.config.lsq_enq_ports)
         for bundle in self.lsq_enq_req:
             bundle.bind(dut)
         for bundle in self.lsq_enq_resp:
             bundle.bind(dut)
         self.lsq_agent = LsqAgent(self)
 
-        self.issue = BundleList(IntIssueBundle, "io_ooo_to_mem_intIssue_#_0_", INT_ISSUE_PORTS)
+        self.issue = BundleList(IntIssueBundle, "io_ooo_to_mem_intIssue_#_0_", self.config.int_issue_ports)
         for bundle in self.issue:
             bundle.bind(dut)
         self.issue_agent = IssueAgent(self)
         self.writeback = [
             IntWritebackBundle(f"io_mem_to_ooo_intWriteback_{idx}_0_", dut)
-            for idx in range(INT_WRITEBACK_PORTS)
+            for idx in range(self.config.int_writeback_ports)
         ]
         self.store_data_inputs = [
             StoreDataInputBundle(f"MemBlock_inner_lsq_io_std_storeDataIn_{idx}_", dut)
-            for idx in range(STORE_PIPELINE_WIDTH)
+            for idx in range(self.config.store_pipeline_width)
         ]
         self.store_addr_inputs = [
             StoreAddrInputBundle(f"MemBlock_inner_lsq_io_sta_storeAddrIn_{idx}_", dut)
-            for idx in range(STORE_PIPELINE_WIDTH)
+            for idx in range(self.config.store_pipeline_width)
         ]
         self.store_mask_inputs = [
             StoreMaskInputBundle(f"MemBlock_inner_lsq_io_sta_storeMaskIn_{idx}_", dut)
-            for idx in range(STORE_PIPELINE_WIDTH)
+            for idx in range(self.config.store_pipeline_width)
         ]
         self.store_addr_re_inputs = [
             StoreAddrReInputBundle(f"MemBlock_inner_lsq_io_sta_storeAddrInRe_{idx}_", dut)
-            for idx in range(STORE_PIPELINE_WIDTH)
+            for idx in range(self.config.store_pipeline_width)
         ]
         self.sbuffer_writes = [
             SbufferWriteBundle(f"MemBlock_inner_lsq_io_sbuffer_req_{idx}_", dut)
-            for idx in range(SBUFFER_WRITE_PORTS)
+            for idx in range(self.config.sbuffer_write_ports)
         ]
         self.sq_shadow_entries = [
             StoreQueueShadowEntry(idx, dut)
-            for idx in range(STORE_QUEUE_SIZE)
+            for idx in range(self.config.store_queue_size)
         ]
 
         self.mem_status = MemStatusBundle.from_dict(
@@ -1055,6 +1058,14 @@ class MemBlockEnv:
             store_addr_re_inputs=self.store_addr_re_inputs,
             sq_shadow_entries=self.sq_shadow_entries,
             sbuffer_writes=self.sbuffer_writes,
+            outer_delay=self.config.transport.outer_delay,
+            grant_delay_min=self.config.transport.grant_delay_min,
+            grant_delay_max=self.config.transport.grant_delay_max,
+            release_ack_delay=self.config.transport.release_ack_delay,
+            delay_seed=self.config.transport.delay_seed,
+            rob_size=self.config.rob_size,
+            store_queue_size=self.config.store_queue_size,
+            strict_writeback_check=self.config.strict_writeback_check,
         )
         self.mock_outer_buffer = self.memory
         self.mock_dcache_client = self.memory
@@ -1065,6 +1076,23 @@ class MemBlockEnv:
         self.dut.reset.value = 0
         self.dut.io_hartId.value = 0
         self.idle_inputs()
+
+    def _validate_structural_config(self) -> None:
+        expected = DEFAULT_ENV_CONFIG
+        structural_fields = (
+            "load_pipeline_width",
+            "lsq_enq_ports",
+            "int_issue_ports",
+            "int_writeback_ports",
+            "store_pipeline_width",
+            "sbuffer_write_ports",
+        )
+        for field_name in structural_fields:
+            if getattr(self.config, field_name) != getattr(expected, field_name):
+                raise ValueError(
+                    f"当前 MemBlockEnv 暂不支持动态修改 `{field_name}`，"
+                    f" expected={getattr(expected, field_name)}, got={getattr(self.config, field_name)}"
+                )
 
     def idle_inputs(self) -> None:
         """将 env 管理的输入口恢复到空闲值。"""

@@ -82,6 +82,7 @@ class MemoryModel:
         delay_seed: int = DEFAULT_DELAY_SEED,
         rob_size: int = 512,
         store_queue_size: int = 56,
+        strict_writeback_check: bool = True,
     ) -> None:
         self.dut = dut
         self.outer_a = outer_a
@@ -132,6 +133,7 @@ class MemoryModel:
             release_ack_delay=release_ack_delay,
             delay_seed=delay_seed,
         )
+        self.scoreboard.strict_writeback_check = bool(strict_writeback_check)
 
         self.drive_idle()
 

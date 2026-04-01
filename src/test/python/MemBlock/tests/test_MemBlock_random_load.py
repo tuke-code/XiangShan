@@ -22,8 +22,6 @@ from sequences.memblock_sequences import ResetEnvSequence, ScalarLoadSequence, S
 
 RANDOM_SEED = 20260324
 RANDOM_LOAD_COUNT = 1000
-VIRTUAL_LOAD_QUEUE_SIZE = 72
-PER_REQUEST_DRAIN_CYCLES = 256
 IO_ADDR_LIMIT = 0x80000000
 MEM_ADDR_BASE = 0x80000008
 RANDOM_ADDR_WINDOW_WORDS = 1 << 20
@@ -90,9 +88,7 @@ def _run_random_load_requests(env, requests: list[tuple[int, int]]) -> None:
         )
         result = ScalarLoadSequence(
             txn,
-            drain_cycles=PER_REQUEST_DRAIN_CYCLES,
             expected_completed_loads=completed_before + req_id + 1,
-            load_queue_size=VIRTUAL_LOAD_QUEUE_SIZE,
         ).run(env)
 
         stream_state = SequenceState(

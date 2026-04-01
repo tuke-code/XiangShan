@@ -24,11 +24,6 @@ from sequences.memblock_sequences import (
     ScalarStoreSequence,
 )
 
-
-STORE_PIPELINE_SETTLE_CYCLES = 4
-PER_REQUEST_DRAIN_CYCLES = 400
-VIRTUAL_LOAD_QUEUE_SIZE = 72
-VIRTUAL_STORE_QUEUE_SIZE = 56
 MMIO_STORE_ADDR = 0x1000
 CACHEABLE_STORE_ADDR = 0x80000008
 RANDOM_MIXED_SEED = 20260331
@@ -77,9 +72,7 @@ def _issue_and_check_scalar_load(
     )
     return ScalarLoadSequence(
         txn,
-        drain_cycles=PER_REQUEST_DRAIN_CYCLES,
         expected_completed_loads=expected_completed_loads,
-        load_queue_size=VIRTUAL_LOAD_QUEUE_SIZE,
     ).run(env).next_lq_ptr
 
 
@@ -107,7 +100,7 @@ def test_api_MemBlock_single_mmio_store_smoke(env):
     store = store_result.store_view
     _wait_for_counter_growth(env, "outer_write_request_count", outer_writes_before, max_cycles=300)
     env.pulse_store_commit(1)
-    env.Step(STORE_PIPELINE_SETTLE_CYCLES)
+    env.Step(env.config.sequence.store_settle_cycles)
     _wait_for_memory_quiesce(env, max_cycles=300)
 
     assert store.mmio, "MMIO store 未被 store shadow 标记为 mmio"
@@ -186,7 +179,7 @@ def test_api_MemBlock_single_cacheable_store_flush_smoke(env):
 
     drain_summary = FlushStoreBuffersSequence(
         max_cycles=400,
-        settle_cycles=STORE_PIPELINE_SETTLE_CYCLES,
+        settle_cycles=env.config.sequence.store_settle_cycles,
     ).run(env)
 
     assert not store.mmio, "cacheable store 被错误标记为 mmio"
@@ -254,8 +247,8 @@ def test_api_MemBlock_small_mixed_load_store_random(env):
         next_load_req_id += 1
 
     drain_summary = FlushStoreBuffersSequence(
-        max_cycles=PER_REQUEST_DRAIN_CYCLES,
-        settle_cycles=STORE_PIPELINE_SETTLE_CYCLES,
+        max_cycles=env.config.sequence.store_flush_cycles,
+        settle_cycles=env.config.sequence.store_settle_cycles,
     ).run(env)
 
     assert total_stores > 0, "mixed random 未生成任何 store"
