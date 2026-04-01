@@ -474,10 +474,16 @@ class DeltaTable()(implicit p: Parameters) extends BertiModule {
       status := DeltaStatus.NO_PREF
     }
 
-    def set(_delta: SInt): Unit = {
-      delta := _delta
-      coverageCnt := 1.U
-      status := DeltaStatus.NO_PREF
+    def set(_delta: SInt, isNewEntry: Bool = false.B): Bool = {
+      val isReplace = isNewEntry || delta === 0.S || coverageCnt === 0.U
+      when(isReplace){
+        delta := _delta
+        coverageCnt := 1.U
+        status := DeltaStatus.NO_PREF
+      }.otherwise{
+        coverageCnt := coverageCnt - 1.U
+      }
+      isReplace
     }
 
     def update(inc: UInt = 1.U): Unit = {
@@ -545,7 +551,7 @@ class DeltaTable()(implicit p: Parameters) extends BertiModule {
       counter := 1.U
 
       (0 until DtDeltaSize).map(i => deltaList(i).init())
-      deltaList(0).set(_delta)
+      deltaList(0).set(_delta, isNewEntry = true.B)
       bestDeltaIdx := 0.U
     }
 
@@ -583,17 +589,20 @@ class DeltaTable()(implicit p: Parameters) extends BertiModule {
         val (allocIdx3, canAlloc3) = PriorityEncoderWithFlag(invalidVec3)
         // It doesn't matter if allocIdx* === bestDeltaIdx, because the status is low anyway.
         when(canAlloc1) {
-          deltaList(allocIdx1).set(_delta)
-          stat_update_isDeltaReplace := true.B
-          stat_update_evictDelta := deltaList(allocIdx1).delta
+          when(deltaList(allocIdx1).set(_delta)){
+            stat_update_isDeltaReplace := true.B
+            stat_update_evictDelta := deltaList(allocIdx1).delta
+          }
         }.elsewhen(canAlloc2){
-          deltaList(allocIdx2).set(_delta)
-          stat_update_isDeltaReplace := true.B
-          stat_update_evictDelta := deltaList(allocIdx2).delta
+          when(deltaList(allocIdx2).set(_delta)){
+            stat_update_isDeltaReplace := true.B
+            stat_update_evictDelta := deltaList(allocIdx2).delta
+          }
         }.elsewhen(canAlloc3){
-          deltaList(allocIdx3).set(_delta)
-          stat_update_isDeltaReplace := true.B
-          stat_update_evictDelta := deltaList(allocIdx3).delta
+          when(deltaList(allocIdx3).set(_delta)){
+            stat_update_isDeltaReplace := true.B
+            stat_update_evictDelta := deltaList(allocIdx3).delta
+          }
         }.otherwise{
           // drop the new delta
         }
