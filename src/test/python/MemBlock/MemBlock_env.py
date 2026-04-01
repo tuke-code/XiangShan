@@ -1070,6 +1070,7 @@ class MemBlockEnv:
         self.mock_outer_buffer = self.memory
         self.mock_dcache_client = self.memory
         self.mem_status_monitor = MemStatusMonitor(self.mem_status, self.memory, self.commit_agent)
+        self._after_step_callbacks = []
 
         self.dut.StepRis(self.memory.on_memory_edge)
 
@@ -1128,9 +1129,11 @@ class MemBlockEnv:
             self.memory.after_cycle()
             if int(self.dut.reset.value) or int(self.dut.io_reset_backend.value):
                 self.commit_agent.reset()
-                continue
-            self.mem_status_monitor.after_cycle()
-            self.commit_agent.advance()
+            else:
+                self.mem_status_monitor.after_cycle()
+                self.commit_agent.advance()
+            for callback in tuple(self._after_step_callbacks):
+                callback()
 
     def reset(self, cycles: int = 10, settle_cycles: int = 5) -> None:
         """执行同步复位，并清空 mock 内部状态。"""
@@ -1369,6 +1372,17 @@ class MemBlockEnv:
         """移除 env 注册的 StepRis 回调。"""
 
         self.dut.xclock.RemoveStepRisCbByDesc(self.memory.on_memory_edge.__name__)
+
+    def add_after_step_callback(self, callback) -> None:
+        """注册在每次 `Step(1)` 结束后执行的 Python 回调。"""
+
+        if callback not in self._after_step_callbacks:
+            self._after_step_callbacks.append(callback)
+
+    def remove_after_step_callback(self, callback) -> None:
+        """移除先前注册的 after-step 回调。"""
+
+        self._after_step_callbacks = [cb for cb in self._after_step_callbacks if cb != callback]
 
     def Finish(self) -> None:
         """释放 DUT 资源。"""

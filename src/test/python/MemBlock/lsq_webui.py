@@ -68,6 +68,66 @@ class ScenarioStopped(RuntimeError):
     """Raised when the running scenario is cancelled or reset."""
 
 
+class ThreadBoundProxy:
+    """Resolve env/DUT access on the WebUI service loop thread."""
+
+    def __init__(self, service, resolver) -> None:
+        object.__setattr__(self, "_service", service)
+        object.__setattr__(self, "_resolver", resolver)
+
+    def _resolve_on_loop(self):
+        return self._resolver()
+
+    def __getattr__(self, name: str):
+        return ThreadBoundProxy(
+            self._service,
+            lambda resolver=self._resolver, attr_name=name: getattr(resolver(), attr_name),
+        )
+
+    def __getitem__(self, index):
+        return ThreadBoundProxy(
+            self._service,
+            lambda resolver=self._resolver, item=index: resolver()[item],
+        )
+
+    def __setattr__(self, name: str, value) -> None:
+        self._service._call_on_loop_sync(
+            lambda resolver=self._resolver, attr_name=name, attr_value=value: setattr(
+                resolver(),
+                attr_name,
+                self._service._unwrap_on_loop(attr_value),
+            )
+        )
+
+    def __call__(self, *args, **kwargs):
+        return self._service._call_on_loop_sync(
+            lambda resolver=self._resolver, call_args=args, call_kwargs=kwargs: resolver()(
+                *self._service._unwrap_on_loop(call_args),
+                **self._service._unwrap_on_loop(call_kwargs),
+            )
+        )
+
+    def __int__(self) -> int:
+        return int(self._service._call_on_loop_sync(self._resolve_on_loop))
+
+    def __index__(self) -> int:
+        return int(self)
+
+    def __bool__(self) -> bool:
+        return bool(self._service._call_on_loop_sync(self._resolve_on_loop))
+
+    def __len__(self) -> int:
+        return len(self._service._call_on_loop_sync(self._resolve_on_loop))
+
+    def __eq__(self, other) -> bool:
+        return self._service._call_on_loop_sync(
+            lambda resolver=self._resolver, rhs=other: resolver() == self._service._unwrap_on_loop(rhs)
+        )
+
+    def __repr__(self) -> str:
+        return repr(self._service._call_on_loop_sync(self._resolve_on_loop))
+
+
 class ScenarioEnvProxy:
     """Proxy env used to reuse the selected test case directly."""
 
@@ -77,9 +137,16 @@ class ScenarioEnvProxy:
         self._generation = generation
 
     def __getattr__(self, name: str):
-        return getattr(self._env, name)
+        return ThreadBoundProxy(
+            self._service,
+            lambda env=self._env, attr_name=name: getattr(env, attr_name),
+        )
+
+    def _env_call(self, func, *args, **kwargs):
+        return self._service._call_on_loop_sync(func, *args, generation=self._generation, **kwargs)
 
     def Step(self, cycles: int = 1) -> None:
+        cycles = int(cycles)
         for _ in range(max(0, cycles)):
             continuous_run = False
             while True:
@@ -91,19 +158,123 @@ class ScenarioEnvProxy:
                 if self._service._consume_driver_step_budget():
                     break
                 self._service._driver_run_event.wait(0.05)
-            self._env.Step(1)
-            self._service._loop.call_soon_threadsafe(self._service._record_driver_step, self._generation)
+            self._service._call_on_loop_sync(self._env.Step, 1, generation=self._generation)
             if continuous_run and self._service.tick_ms > 0:
                 if self._service._driver_stop_event.wait(self._service.tick_ms / 1000.0):
                     raise ScenarioStopped("scenario stopped")
 
     def reset(self, cycles: int = 10, settle_cycles: int = 5) -> None:
+        cycles = int(cycles)
+        settle_cycles = int(settle_cycles)
         if self._service._driver_stop_event.is_set():
             raise ScenarioStopped("scenario stopped")
-        self._env.reset(cycles=cycles, settle_cycles=settle_cycles)
+        self._service._call_on_loop_sync(
+            self._env.reset,
+            cycles=cycles,
+            settle_cycles=settle_cycles,
+            generation=self._generation,
+        )
 
     def idle_inputs(self) -> None:
-        self._env.idle_inputs()
+        self._env_call(self._env.idle_inputs)
+
+    def pulse_store_commit(self, count: int = 1) -> None:
+        count = int(count)
+        self._env_call(self._env.commit_agent.queue_store_commit, count)
+        self.Step(1)
+
+    def drain_writebacks(self, max_cycles: int = 200) -> None:
+        max_cycles = int(max_cycles)
+        for _ in range(max_cycles):
+            outstanding_expected = self._env_call(lambda: int(self._env.memory.outstanding_expected_count))
+            outstanding_txn = self._env_call(lambda: int(self._env.memory.outstanding_transaction_count))
+            if outstanding_expected == 0 and outstanding_txn == 0:
+                return
+            self.Step(1)
+        raise TimeoutError("等待 MemoryModel 收敛超时")
+
+    def wait_counter_growth(self, counter_name: str, baseline: int, max_cycles: int = 200) -> int:
+        baseline = int(baseline)
+        max_cycles = int(max_cycles)
+        for _ in range(max_cycles):
+            current = self._env_call(self._env.get_counter, counter_name)
+            if current > baseline:
+                return current
+            self.Step(1)
+        raise TimeoutError(f"等待 `{counter_name}` 增长超时")
+
+    def wait_memory_quiesce(self, max_cycles: int = 200) -> None:
+        max_cycles = int(max_cycles)
+        for _ in range(max_cycles):
+            outstanding = self._env_call(lambda: int(self._env.memory.outstanding_transaction_count))
+            if outstanding == 0:
+                return
+            self.Step(1)
+        raise TimeoutError("等待 MemoryModel 事务收敛超时")
+
+    def wait_store_materialized(
+        self,
+        sq_idx: int,
+        *,
+        expected_addr: int,
+        expected_data: int,
+        expected_mmio: bool | None = None,
+        require_committed: bool = False,
+        max_cycles: int = 200,
+    ):
+        sq_idx = int(sq_idx)
+        expected_addr = int(expected_addr)
+        expected_data = int(expected_data)
+        max_cycles = int(max_cycles)
+        for _ in range(max_cycles):
+            store = self._env_call(self._env.get_store_view, sq_idx)
+            if (
+                store is not None
+                and store.allocated
+                and store.addr == expected_addr
+                and store.data is not None
+                and (store.data & ((1 << 64) - 1)) == (expected_data & ((1 << 64) - 1))
+                and store.mask != 0
+                and (expected_mmio is None or store.mmio == expected_mmio)
+                and (not require_committed or store.committed)
+            ):
+                return store
+            self.Step(1)
+        store = self._env_call(self._env.get_store_view, sq_idx)
+        raise AssertionError(
+            "等待 pending store shadow 超时: "
+            f"sqIdx={sq_idx}, store={store}"
+        )
+
+    def flush_store_buffers_and_wait(self, max_cycles: int = 200, settle_cycles: int = 4) -> dict:
+        max_cycles = int(max_cycles)
+        settle_cycles = int(settle_cycles)
+        has_flush_sb = self._env_call(lambda: hasattr(self._env.dut, "io_ooo_to_mem_flushSb"))
+        if not has_flush_sb:
+            raise AttributeError("当前 DUT 未导出 `io_ooo_to_mem_flushSb`")
+
+        has_sfence = self._env_call(lambda: hasattr(self._env.dut, "io_ooo_to_mem_sfence_valid"))
+        if has_sfence:
+            self._env_call(setattr, self._env.dut.io_ooo_to_mem_sfence_valid, "value", 1)
+            self._env_call(setattr, self._env.dut.io_ooo_to_mem_sfence_bits_rs1, "value", 0)
+            self._env_call(setattr, self._env.dut.io_ooo_to_mem_sfence_bits_rs2, "value", 0)
+            self._env_call(setattr, self._env.dut.io_ooo_to_mem_sfence_bits_addr, "value", 0)
+            self._env_call(setattr, self._env.dut.io_ooo_to_mem_sfence_bits_id, "value", 0)
+            self._env_call(setattr, self._env.dut.io_ooo_to_mem_sfence_bits_hv, "value", 0)
+            self._env_call(setattr, self._env.dut.io_ooo_to_mem_sfence_bits_hg, "value", 0)
+        self._env_call(setattr, self._env.dut.io_ooo_to_mem_flushSb, "value", 1)
+        self.Step(1)
+        if has_sfence:
+            self._env_call(setattr, self._env.dut.io_ooo_to_mem_sfence_valid, "value", 0)
+        self._env_call(setattr, self._env.dut.io_ooo_to_mem_flushSb, "value", 0)
+
+        for _ in range(max_cycles):
+            sb_is_empty = self._env_call(lambda: int(self._env.mem_status.sbIsEmpty.value))
+            if sb_is_empty:
+                self.Step(settle_cycles)
+                return self._env_call(self._env.memory.finalize_and_check_drain)
+            self.Step(1)
+        raise TimeoutError("等待 sbuffer drain 结束超时")
 
 
 class StaticServer:
@@ -165,7 +336,11 @@ class MemBlockWebUIService:
         self._driver_run_event = ThreadEvent()
         self._driver_stop_event = ThreadEvent()
         self._driver_budget_lock = ThreadLock()
+        self._driver_cycle_lock = ThreadLock()
+        self._sampling_generation_lock = ThreadLock()
+        self._sampling_generation: int | None = None
         self._driver_step_budget = 0
+        self._driver_cycle = 0
         self._driver_flush_task: asyncio.Task | None = None
         self._driver_sample_dirty = False
         self._scenario_started = False
@@ -207,6 +382,7 @@ class MemBlockWebUIService:
 
     async def initialize(self) -> None:
         self._loop = asyncio.get_running_loop()
+        self.env.add_after_step_callback(self._on_env_step)
         self.static_server.start()
         await self.reset()
 
@@ -219,12 +395,84 @@ class MemBlockWebUIService:
             except Exception:
                 pass
         self.static_server.stop()
+        self.env.remove_after_step_callback(self._on_env_step)
         self.env.clear_callbacks()
         self.env.Finish()
 
     def _clear_driver_step_budget(self) -> None:
         with self._driver_budget_lock:
             self._driver_step_budget = 0
+
+    def _current_sampling_generation(self) -> int:
+        with self._sampling_generation_lock:
+            if self._sampling_generation is None:
+                return int(self._scenario_generation)
+            return int(self._sampling_generation)
+
+    def _reset_driver_cycle(self) -> None:
+        with self._driver_cycle_lock:
+            self._driver_cycle = 0
+
+    def _claim_next_driver_cycle(self) -> int:
+        with self._driver_cycle_lock:
+            self._driver_cycle += 1
+            return self._driver_cycle
+
+    def _unwrap_on_loop(self, value):
+        if isinstance(value, ThreadBoundProxy):
+            return value._resolve_on_loop()
+        if isinstance(value, tuple):
+            return tuple(self._unwrap_on_loop(item) for item in value)
+        if isinstance(value, list):
+            return [self._unwrap_on_loop(item) for item in value]
+        if isinstance(value, dict):
+            return {key: self._unwrap_on_loop(item) for key, item in value.items()}
+        return value
+
+    def _call_on_loop_impl(self, func, args, kwargs, generation: int | None):
+        if generation is not None:
+            with self._sampling_generation_lock:
+                self._sampling_generation = int(generation)
+        try:
+            return func(
+                *self._unwrap_on_loop(args),
+                **self._unwrap_on_loop(kwargs),
+            )
+        finally:
+            if generation is not None:
+                with self._sampling_generation_lock:
+                    self._sampling_generation = None
+
+    def _call_on_loop_sync(self, func, *args, generation: int | None = None, **kwargs):
+        if self._loop is None:
+            raise RuntimeError("event loop is not initialized")
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self._loop:
+            return self._call_on_loop_impl(func, args, kwargs, generation)
+        sync_future = asyncio.run_coroutine_threadsafe(
+            self._call_on_loop_rpc(func, args, kwargs, generation),
+            self._loop,
+        )
+        return sync_future.result()
+
+    async def _call_on_loop_rpc(self, func, args, kwargs, generation: int | None):
+        return self._call_on_loop_impl(func, args, kwargs, generation)
+
+    def _on_env_step(self) -> None:
+        sample_cycle = self._claim_next_driver_cycle()
+        raw = self.reader.read(sample_cycle)
+        generation = self._current_sampling_generation()
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+        if running_loop is self._loop:
+            self._record_driver_snapshot(generation, raw)
+            return
+        self._loop.call_soon_threadsafe(self._record_driver_snapshot, generation, raw)
 
     def _grant_driver_step_budget(self, cycles: int) -> None:
         with self._driver_budget_lock:
@@ -272,11 +520,11 @@ class MemBlockWebUIService:
             except Exception:
                 pass
 
-    def _record_driver_step(self, generation: int) -> None:
+    def _record_driver_snapshot(self, generation: int, raw: dict[str, Any]) -> None:
         if generation != self._scenario_generation:
             return
-        self.cycle += 1
-        self.last_raw = self.reader.read(self.cycle)
+        self.cycle = int(raw.get("cycle", self.cycle))
+        self.last_raw = raw
         self.tracker.update(self.last_raw)
         if self.run_until_condition:
             matches = self.tracker.matching_traces(self.run_until_condition, only_pending=True)
@@ -413,8 +661,16 @@ class MemBlockWebUIService:
             self.run_until_hit = None
             self.run_until_condition = None
             self.cycle = 0
-            self.env.reset(cycles=self.reset_cycles, settle_cycles=1)
-            self.last_raw = self.reader.read(self.cycle)
+            self._reset_driver_cycle()
+            self.last_raw = None
+            self._call_on_loop_sync(
+                self.env.reset,
+                cycles=self.reset_cycles,
+                settle_cycles=1,
+                generation=self._scenario_generation,
+            )
+            if self.last_raw is None:
+                self.last_raw = {"cycle": 0}
             self.tracker.load_reset_snapshot(self.last_raw)
         await self._broadcast_all(force=True)
         await self._broadcast_control_state()
