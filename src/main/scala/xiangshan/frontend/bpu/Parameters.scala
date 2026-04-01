@@ -64,6 +64,7 @@ trait HasBpuParameters extends HasFrontendParameters {
   def PhrHistoryLength: Int = frontendParameters.getPhrHistoryLength
 
   def NumAheadBtbPredictionEntries: Int = bpuParameters.abtbParameters.NumWays
+  def AheadBtbPerturbWidth:         Int = 4
 
   def NumBtbResultEntries: Int = bpuParameters.mbtbParameters.NumWay * bpuParameters.mbtbParameters.NumAlignBanks
 

@@ -31,7 +31,10 @@ import xiangshan.frontend.bpu.Prediction
 class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   class AheadBtbIO(implicit p: Parameters) extends BasePredictorIO with HasFastTrainIO {
     val redirectValid: Bool                       = Input(Bool())
+    val redirectHash:  UInt                       = Input(UInt(AheadBtbPerturbWidth.W))
     val overrideValid: Bool                       = Input(Bool())
+    val overrideHash:  UInt                       = Input(UInt(AheadBtbPerturbWidth.W))
+    val normalHash:    UInt                       = Input(UInt(AheadBtbPerturbWidth.W))
     val prediction:    Vec[Valid[Prediction]]     = Output(Vec(NumAheadBtbPredictionEntries, Valid(new Prediction)))
     val abtbResult:    Vec[Valid[AheadBtbResult]] = Output(Vec(NumAheadBtbPredictionEntries, Valid(new AheadBtbResult)))
     val abtbResultPos: Vec[UInt]                  = Output(Vec(NumAheadBtbPredictionEntries, UInt(CfiPositionWidth.W)))
@@ -81,7 +84,10 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   private val predictReqValid = io.stageCtrl.s0_fire
   private val predictionSent  = io.stageCtrl.s1_fire
   private val redirectValid   = io.redirectValid
+  private val redirectHash    = io.redirectHash
   private val overrideValid   = io.overrideValid
+  private val overrideHash    = io.overrideHash
+  private val normalHash      = io.normalHash
 
   s0_fire := io.enable && predictReqValid
   s1_fire := io.enable && s1_valid && s2_ready && predictReqValid
@@ -108,9 +114,18 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
      -------------------------------------------------------------------------------------------------------------- */
 
   private val s0_previousStartPc = io.startPc
-
-  private val s0_setIdx   = getSetIndex(s0_previousStartPc)
-  private val s0_bankIdx  = getBankIndex(s0_previousStartPc)
+  private val s0_simpleHash = MuxCase(
+    normalHash,
+    Seq(
+      redirectValid -> redirectHash,
+      overrideValid -> overrideHash
+    )
+  )
+  private val s0_hashIndex = s0_previousStartPc(log2Ceil(NumEntries / NumWays) - 1, 0) ^ s0_simpleHash
+  private val s0_setIdx    = s0_hashIndex(log2Ceil(NumEntries / NumWays) - 1, log2Ceil(NumBanks))
+  private val s0_bankIdx   = s0_hashIndex(log2Ceil(NumBanks) - 1, 0)
+  // private val s0_setIdx   = getSetIndex(s0_previousStartPc)
+  // private val s0_bankIdx  = getBankIndex(s0_previousStartPc)
   private val s0_bankMask = UIntToOH(s0_bankIdx)
 
   banks.zipWithIndex.foreach { case (b, i) =>
