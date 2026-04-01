@@ -16,6 +16,8 @@
   - DUT 创建、波形/覆盖率路径配置、`dut` fixture。
 - `MemBlock_env.py`
   - 顶层 `MemBlockEnv`、bundle 定义、环境 facade。
+- `env_config.py`
+  - 统一环境配置入口，收敛 queue 深度、transport 延迟、默认 sequence 时序、strict check 策略。
 - `request_apis.py`
   - 公共驱动 helper 和兼容型事务接口。
 - `transactions.py`
@@ -31,8 +33,12 @@
 
 - `agents/`
   - active driver agents，包括 CSR、commit、LSQ enqueue、issue。
+- `monitors/`
+  - passive monitors，包括 writeback、store、mem_status 三类被动观测器。
 - `model/`
-  - 已从 `MemoryModel` 中拆出的公共组件，例如 `RefMemory`、`TransportResponder`。
+  - 已从 `MemoryModel` 中拆出的公共组件，例如 `RefMemory`、`TransportResponder`、`Scoreboard`。
+- `sequences/`
+  - 可复用场景模板，例如 reset、scalar load/store、flush store buffer。
 - `tests/`
   - 测试集合。
 - `docs/`
@@ -43,7 +49,7 @@
 ## `docs/` 文档列表
 
 - `verification_env_design.md`
-  - 重构后的验证环境总设计，涵盖 `MemBlockEnv`、`transactions`、`agents`、`RefMemory`、`TransportResponder` 的分层关系、设计思路、实现方案和未来演进方向。
+  - 重构后的验证环境总设计，涵盖 `MemBlockEnv`、`agents`、`monitors`、`Scoreboard`、`sequences`、`EnvConfig` 的分层关系、设计思路、实现方案和未来演进方向。
 - `memory_model_design.md`
   - `MemoryModel` 当前保留职责、load commit-boundary compare、store drain 校验和继续向 scoreboard 拆分的背景。
 - `dut_port_behavior.md`

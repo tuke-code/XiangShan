@@ -24,15 +24,16 @@
 
 1. `MemBlock_api.py`
 2. `MemBlock_env.py`
-3. `memory_model.py`
+3. `sequences/`
 4. `request_apis.py`
-5. `tests/*.py`
+5. `monitors/` / `model/`
+6. `tests/*.py`
 
 一般不要跳层。
 
 ## 3. 标准测试初始化流程
 
-几乎所有真实 DUT 用例都应从一次完整复位开始。
+几乎所有真实 DUT 用例都应从一次完整复位开始。当前更推荐通过 `ResetEnvSequence` 完成，而不是在 testcase 中直接拼 `reset_env_and_wait_backend()`。
 
 标准过程是：
 
@@ -75,18 +76,15 @@ sequenceDiagram
 伪代码如下：
 
 ```python
-stream_state = _reset_env_and_state(env)
-env.memory.preload_u64(addr, data)
-enqueue_scalar_load(env, req_id, stream_state.next_lq_ptr, stream_state.sq_ptr)
-issue_scalar_load(env, req_id, addr, stream_state.next_lq_ptr, stream_state.sq_ptr)
-env.memory.expect_load(...)
-env.drain_writebacks()
-env.check_no_outstanding_transactions()
+state = ResetEnvSequence(require_issue_lanes=(0,), require_lq_ready=True).run(env)
+env.preload_u64(addr, data)
+txn = LoadTxn(req_id=req_id, addr=addr, lq_ptr=state.next_lq_ptr, sq_ptr=state.sq_ptr)
+ScalarLoadSequence(txn, expected_completed_loads=1, assert_no_outstanding=True).run(env)
 ```
 
 ### 4.1 为什么 `expect_load()` 放在 issue 后
 
-现有用例通常先 issue，再登记期望。
+当前 `ScalarLoadSequence` 已经把 “send_load + expect_load + drain_writebacks” 这一标准骨架封装起来。保留这一节，是为了说明 sequence 内部仍沿用了先 issue、再登记期望的顺序。
 
 这在当前环境中是可行的，原因是：
 
@@ -210,13 +208,11 @@ cacheable store 的关键点在于：
 
 标准流程是：
 
-1. enqueue store
-2. issue STD
-3. issue STA
-4. 等 committed store materialize
-5. 等 `sbuffer_drain_count` 增长
-6. 调用 `flush_store_buffers_and_wait()`
-7. 检查 `drain_summary`
+1. 运行 `ScalarStoreSequence`
+2. 等 committed store materialize
+3. 等 `sbuffer_drain_count` 增长
+4. 运行 `FlushStoreBuffersSequence`
+5. 检查 `drain_summary`
 
 ### 8.1 为什么不是每拍在线 compare
 

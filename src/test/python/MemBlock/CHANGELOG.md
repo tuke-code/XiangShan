@@ -110,25 +110,84 @@ commit: `58341892a`
 
 这一步的意义是：传输响应器和 compare / store retire 逻辑已经不再是一个不可分割的整体。后续如果 outer/dcache 路径回归异常，可以更明确地区分是 responder 问题还是 compare 问题。
 
+#### 5. 提取 `Scoreboard`
+
+commit: `d5c281507`
+
+主要改动：
+
+- 新增 `model/scoreboard.py`。
+- 将 `MemoryModel` 中剩余的 load compare、ROB 边界下的 store retire、drain 收尾校验独立出来。
+- `MemoryModel` 退化为 `RefMemory + TransportResponder + Scoreboard` 的组装层，并保留兼容 facade。
+- 增加 `Scoreboard` 的独立单测入口，验证它可以脱离 transport 单独检查 load compare 语义。
+
+这一步完成后，参考检查逻辑不再和传输响应器粘在一起。后续无论是扩 monitor 还是调整 compare 策略，边界都更稳定。
+
+#### 6. 引入 passive monitors
+
+commit: `6d5b22be5`
+
+主要改动：
+
+- 新增 `monitors/` 目录。
+- 新增：
+  - `writeback_monitor.py`
+  - `store_monitor.py`
+  - `mem_status_monitor.py`
+- 将原先 `Scoreboard`/`MemBlockEnv` 中直接读取 DUT 输出并更新状态的逻辑下沉到 monitor。
+- `Scoreboard` 改为只接收事件并维护检查状态，不再直接依赖 DUT 端口命名。
+
+这一步的意义是明确“观测事实”和“判断结果”的边界。今后如果 DUT 导出口名、shadow 结构或 status 位发生变化，更大概率只需要改 monitor。
+
+#### 7. 引入 sequence 层
+
+commit: `fa9a9eafa`
+
+主要改动：
+
+- 新增 `sequences/` 目录。
+- 新增可复用 sequence：
+  - `ResetEnvSequence`
+  - `ScalarLoadSequence`
+  - `ScalarStoreSequence`
+  - `FlushStoreBuffersSequence`
+- 将典型真实 DUT 用例迁移为 sequence 驱动，而不是在 testcase 中手工拼接 helper。
+
+这一步的核心收益是让测试场景开始成为一等对象。testcase 的关注点转移到“场景和断言”，而不是“每个 helper 该按什么顺序调用”。
+
+#### 8. 收敛统一 `EnvConfig`
+
+主要改动：
+
+- 新增 `env_config.py`。
+- 引入 `EnvConfig`、`TransportConfig`、`SequenceConfig`。
+- 将 queue 深度、ROB 深度、transport 默认延迟、strict check 策略、reset/drain/materialize/flush 默认周期统一收口。
+- `MemBlockEnv` 和 sequence 层开始从统一配置读取默认行为，而不是依赖分散常量。
+
+这一步不是追求“所有结构立即完全参数化”，而是先建立统一配置入口，并对当前不能动态改动的结构性参数做显式校验，避免假参数化。
+
 ### 本轮重构后环境的总体形态
 
 当前环境已经形成如下分层：
 
 ```text
 testcase
-  -> request_apis / transactions
+  -> sequences / request_apis / transactions
     -> MemBlockEnv facade
       -> active agents
+      -> passive monitors
       -> MemoryModel
          -> RefMemory
          -> TransportResponder
+         -> Scoreboard
       -> DUT
 ```
 
-这不是最终形态，但已经完成了最关键的两步：
+这不是终点，但已经完成了核心角色拆分：
 
 1. testcase 与内部实现解耦。
-2. 大一统 `MemoryModel` 开始被切成可独立维护的组件。
+2. `MemoryModel` 不再承担所有职责。
+3. 观测、驱动、检查、场景、配置各有明确归属。
 
 ### 兼容与约束
 
@@ -141,9 +200,9 @@ testcase
 
 因此，当前代码里仍然保留了一些“中间态”设计，例如：
 
-- `MemoryModel` 仍然承担 compare 和 store shadow 相关职责。
-- `request_apis.py` 仍然存在，而不是完全被 sequence 层替代。
-- env 仍保留一些兼容型公开方法，而不是完全退化成纯 assembler。
+- `MemoryModel` 仍作为 model facade 存在，而不是继续下沉成更薄的 assembler。
+- `request_apis.py` 仍保留为 sequence 之下的兼容薄层。
+- `EnvConfig` 目前对结构性端口宽度仍以校验为主，尚未完全支持动态重参数化。
 
 这些都属于有意保留的过渡层，而不是遗留错误。
 
@@ -165,29 +224,29 @@ testcase
 
 ### 后续演进方向
 
-当前最值得继续推进的方向有四个：
+当前最值得继续推进的方向主要有：
 
-1. 抽出独立 `Scoreboard`
-   - 把 `MemoryModel` 中剩余的 compare、commit-boundary、store retire 逻辑独立出来。
+1. 统一 monitor 事件对象
+   - 减少 monitor 到 scoreboard 的细粒度方法耦合。
 
-2. 引入 passive monitors
-   - `WritebackMonitor`
-   - `StoreMonitor`
-   - `MemStatusMonitor`
+2. 扩展 sequence 组合能力
+   - 增加 mixed traffic、异常路径、flush/replay、memory violation 等高层场景。
 
-3. 引入 sequence 层
-   - 把现在 testcase 中的场景拼接迁移为可复用的 sequence。
+3. 推进结构性参数化
+   - 让当前仍固定的端口宽度与 pipeline 配置逐步纳入真实可配范围。
 
-4. 收敛统一 `EnvConfig`
-   - 统一 queue 深度、lane、延迟、strict check 等参数。
+4. 收紧 legacy 接口
+   - 让新 testcase 优先依赖 sequence + env public API，而不是继续堆叠兼容 helper。
 
 ### 总结
 
-这次重构的价值，不在于目录看起来更“像 UVM”，而在于环境已经开始具备长期维护所需的最小结构化边界：
+这次重构的价值，不在于目录看起来更“像 UVM”，而在于环境已经具备长期维护所需的结构化边界：
 
 - 对外接口稳定。
 - active driver 已显式分层。
-- 黄金内存与传输响应器已独立。
-- testcase 不再绑定到模型内部容器。
+- passive monitor 已独立。
+- 黄金内存、传输响应器、scoreboard 已拆开。
+- testcase 已开始依赖 sequence，而不是内部容器或散装 helper。
+- 默认策略开始由统一 config 管理。
 
-这为下一步继续抽 scoreboard、monitor 和 sequence 提供了可持续的基础。
+这为后续继续扩异常场景、随机回归和更复杂的检查器提供了可持续的基础。

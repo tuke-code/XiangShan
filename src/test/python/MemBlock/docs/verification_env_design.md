@@ -2,457 +2,274 @@
 
 ## 1. 文档目的
 
-本文档总结 2026-04-01 这一轮重构后的 `src/test/python/MemBlock/` Python 验证环境设计。它不再只描述“现有脚本如何使用”，而是试图完整回答以下问题：
+本文档说明 `src/test/python/MemBlock/` 当前 Python 验证环境的完整设计形态，重点回答四个问题：
 
-1. 当前验证环境已经完成了哪些分层重构。
-2. 每一层的职责边界是什么，为什么要这样切。
-3. 这次重构解决了旧环境中的哪些痛点。
-4. 现阶段还保留了哪些兼容层，为什么没有一步到位继续拆。
-5. 后续如果继续向更清晰的 UVM 风格环境演进，下一步应该从哪里下手。
+1. 现在的环境分成了哪些层，每层职责是什么。
+2. 为什么这些边界要这样切，而不是继续维持单体式实现。
+3. 这些实现如何对应 toffee/picker 风格建议，以及 UVM 中 env/agent/monitor/scoreboard/sequence/config 的常见分工。
+4. 后续如果继续演进，哪些方向是低风险且有收益的。
 
-本文档基于当前目录下的以下实现整理：
+与早期版本相比，当前环境已经不再只是“一个大 env + 一个大 memory model + 一堆 helper 函数”的组合，而是形成了明确的五层结构：`testcase -> sequence/request API -> env facade -> agents/monitors -> model components`。这使得环境能够在不改变主回归语义的前提下持续重构。
 
-- `MemBlock_env.py`
-- `request_apis.py`
-- `transactions.py`
-- `agents/`
-- `memory_model.py`
-- `model/ref_memory.py`
-- `model/transport_responder.py`
-- `tests/`
+## 2. 设计目标与约束
 
-文档关注的是 Python 侧验证环境设计，而不是 MemBlock RTL 本体的微结构实现。
+本环境面向真实 MemBlock DUT，而不是纯 Python mock。设计时必须同时满足以下约束：
 
-## 2. 重构背景与目标
+1. 不能破坏现有 load commit-boundary compare 语义。
+2. 不能改变 store flush / drain 的最终可见性语义。
+3. 要允许 testcase 在较长时间内保持兼容，不能因为内部重构而反复大改用例。
+4. 要让行为驱动、被动观测、参考模型、场景组织、环境参数这五类职责逐步分离。
 
-重构前，环境虽然已经能稳定支撑真实 DUT 的 load/store 主路径回归，但整体结构更接近“单个超大 env + 单个超大 memory model + 一组 helper 函数”。这种组织方式在功能较少时很高效，但当需求扩展到更复杂的路径、更多测试人员协作、以及对 DUT 接口变化的长期适配时，会暴露出几个问题：
-
-1. `MemBlockEnv` 既负责端口绑定，又负责时钟推进、请求发送、状态查询、store commit 和环境管理，职责过重。
-2. `MemoryModel` 同时承担黄金内存、outer/dcache responder、load compare、store drain 收尾校验等多类逻辑，任何改动都容易影响多条路径。
-3. testcase 大量直接依赖 `env.memory.pending_stores`、`env.memory.completed_loads`、`env.memory.*count` 这类内部字段，导致测试与模型内部结构强耦合。
-4. `request_apis.py` 虽然屏蔽了部分 pin-level 驱动细节，但仍然主要是“函数式散装参数接口”，没有稳定的事务对象。
-
-这次重构的总体目标不是把环境一次性改造成完整的 UVM 体系，而是分阶段做到四点：
-
-1. testcase 面向公开 facade 和事务对象写，不再直接穿透到 `env.memory` 内部容器。
-2. active driver 逻辑显式下沉到 agent，`MemBlockEnv` 更接近组装层和协调层。
-3. 黄金内存和传输响应器从大一统 `MemoryModel` 中独立出来，降低单点复杂度。
-4. 保持当前 load/store 回归语义不变，避免在结构重构时同时引入行为变化。
+这与 UVM 的基本思想一致：driver 不应该承担 checker 职责，monitor 不应该偷偷写状态，scoreboard 不应该直接读 DUT 端口，sequence 不应该了解 env 内部容器，config 应该作为全局策略入口而不是散落常量。当前实现不是机械地复刻 UVM 命名，而是把这些边界转写成更适合 Python/toffee 生态的结构。
 
 ## 3. 当前目录结构
 
-重构后，验证环境的目录结构已经从原来的“平铺式脚本集合”开始向分层结构演进：
+当前目录可概括为：
 
 ```text
 MemBlock/
+  README.md
+  CHANGELOG.md
   MemBlock_api.py
   MemBlock_env.py
+  env_config.py
   request_apis.py
   transactions.py
   memory_model.py
   agents/
-    csr_agent.py
-    commit_agent.py
-    lsq_agent.py
-    issue_agent.py
+  monitors/
   model/
-    ref_memory.py
-    transport_responder.py
+  sequences/
   tests/
   docs/
 ```
 
-当前结构中最重要的变化是：
+其中：
 
-- `transactions.py` 提供事务对象。
+- `MemBlock_env.py` 是顶层装配点和对外 facade。
+- `env_config.py` 是统一参数入口。
 - `agents/` 持有主动驱动 DUT 的逻辑。
-- `model/` 持有从 `MemoryModel` 中剥离出来的通用组件。
-- `MemBlock_env.py` 仍然是顶层环境入口，但不再承担全部驱动细节。
+- `monitors/` 持有从 DUT 输出采样并发布事件的逻辑。
+- `model/` 持有参考模型、传输响应器、scoreboard。
+- `sequences/` 持有 testcase 可复用的场景模板。
+- `request_apis.py` 仍保留兼容型 helper，作为 sequence 之下的薄封装。
 
-这意味着环境已经从“单层大对象”转向“顶层 env 组装多个职责明确的部件”。
+这个目录结构的价值不是“更像某种教科书图”，而是让一个开发者在接手问题时能快速判断该改哪一层。例如：端口驱动问题先看 agent，状态采样问题先看 monitor，load/store 一致性判断先看 scoreboard，场景复用则先看 sequence。
 
-## 4. 顶层架构
+## 4. 顶层架构与数据流
 
-### 4.1 总体分层
-
-当前环境可以概括为如下分层：
+当前推荐的阅读和执行路径是：
 
 ```text
 pytest testcase
-  -> request_apis / transactions
+  -> sequences / request_apis
     -> MemBlockEnv facade
       -> active agents
+      -> passive monitors
       -> MemoryModel
          -> RefMemory
          -> TransportResponder
+         -> Scoreboard
       -> DUT
 ```
 
-从职责上看可以分为五层：
+从运行时关系看，主要有三条流：
 
-1. testcase 层
-   - 描述场景、初始化状态、断言结果。
-   - 不再直接操作 `env.memory.pending_stores` 这类内部容器。
+1. 驱动流
+   testcase 通过 `ScalarLoadSequence`、`ScalarStoreSequence` 等场景对象发起请求；sequence 再调用 `request_apis.py` 或 env facade，把 enqueue/issue/flush 等动作下沉到 `LsqAgent`、`IssueAgent`、`CommitAgent`、`CsrAgent`。
 
-2. 事务与公共 API 层
-   - `transactions.py` 定义 `LoadTxn`、`StoreTxn`、`QueuePtr`。
-   - `request_apis.py` 提供兼容型 helper，并逐步转向事务接口。
+2. 观测流
+   DUT 每拍推进后，`StoreMonitor`、`WritebackMonitor`、`MemStatusMonitor` 分别观测 store shadow、writeback、mem_status 等输出，把事件发布给 scoreboard 或 commit path，而不是由 env 或 scoreboard 直接散读端口。
 
-3. env facade 层
-   - `MemBlockEnv` 对外提供稳定入口，如 preload、expect、wait、stats、flush。
-   - testcase 应优先面向这一层写。
+3. 参考与检查流
+   `RefMemory` 提供黄金内存视图；`TransportResponder` 提供 outer/dcache 最小响应器；`Scoreboard` 根据 monitor 发布的事件完成 load compare、ROB 边界下的 store retire，以及 drain 收尾校验。
 
-4. active driver 层
-   - `csr_agent.py`
-   - `commit_agent.py`
-   - `lsq_agent.py`
-   - `issue_agent.py`
-   - 这层直接负责驱动 DUT 输入。
+这三条流被拆开后，问题定位明显更清晰。比如 load 写回错了，先看 sequence 是否登记了期望，再看 writeback monitor 是否采到了正确事件，再看 scoreboard compare 是否按 ROB 边界退休 store，最后才看 DUT。
 
-5. 模型与响应层
-   - `RefMemory` 维护黄金内存。
-   - `TransportResponder` 负责 outer/dcache 请求响应。
-   - `MemoryModel` 暂时仍持有 compare、store shadow 和收尾校验逻辑，并组合前述组件。
+## 5. `MemBlockEnv` 的职责
 
-### 4.2 设计思路
+`MemBlockEnv` 当前只做三件事：
 
-这里采用的是“先把最容易稳定下来的边界收出来，再逐步继续拆”的思路，而不是追求一次性完美抽象。原因很现实：
+1. 组装
+   创建 bundle、agent、monitor、`MemoryModel`，并把 `memory.on_memory_edge` 注册到时钟回调。
 
-1. MemBlock 环境直接服务真实 DUT 回归，结构重构不能牺牲当前主路径可用性。
-2. load commit-boundary compare、store drain 校验、sbuffer/outer 双路径这些逻辑彼此之间存在时序耦合，一次性全拆风险很高。
-3. 先把 testcase 和内部实现解耦，可以显著降低后续继续拆模型时的连带改动。
+2. 协调
+   负责 `Step()`、`reset()`、`idle_inputs()` 等顶层时序编排；同时在每拍末尾调用 `MemStatusMonitor` 与 `CommitAgent.advance()`，维持 pending pointer 和 commit 相关闭环。
 
-因此本轮实现优先顺序是：
+3. 对外暴露稳定 facade
+   例如 `preload_u64()`、`expect_scalar_load()`、`get_counter()`、`wait_store_materialized()`、`wait_memory_quiesce()`、`flush_store_buffers_and_wait()`、`assert_no_outstanding()`。
 
-1. 收口 facade。
-2. 引入事务对象。
-3. 抽出 active agents。
-4. 抽出 `RefMemory`。
-5. 抽出 `TransportResponder`。
+这相当于 UVM 中 env 的角色，但实现上更轻量。env 不再直接做 pin-level issue，也不再直接承担 compare 逻辑，而是尽量只负责装配、调度和对外接口稳定性。
 
-而 monitor、scoreboard、sequence、统一 config 则留到未来继续演进。
+## 6. Active Agents
 
-## 5. `MemBlockEnv` 的角色变化
+当前 active agents 包括：
 
-### 5.1 重构前
+- `CsrAgent`
+- `CommitAgent`
+- `LsqAgent`
+- `IssueAgent`
 
-旧版 `MemBlockEnv` 同时负责：
+它们共同特点是“主动写 DUT 输入”。这和 monitor 的只读性质形成了明确对照。
 
-- 绑定 bundle
-- 管理默认输入值
-- 维护 `PendingPtrDriver`
-- 处理 CSR 默认态
-- 驱动 enqueue / issue
-- 提供 response injection
-- 提供 reset / step / flush / drain
-- 作为 testcase 查询内部状态的入口
+这种划分与 UVM driver 的思想一致，但比传统 driver/seq_item 体系更简单：Python 场景对象不直接碰 pin，agent 统一持有时序细节；testcase 只描述“我要发一个 load/store/flush”，不描述“第几拍拉哪个 valid”。这既降低了 testcase 冗余，也避免多个用例各自复制握手时序。
 
-这使得 `MemBlockEnv` 成为了事实上的“超级对象”。
+## 7. Passive Monitors
 
-### 5.2 重构后
-
-当前 `MemBlockEnv` 的职责已经明显收敛为三类：
-
-1. 顶层组装
-   - 创建 bundle
-   - 创建 agent
-   - 创建 `MemoryModel`
-   - 把 `memory.on_memory_edge` 注册到 `StepRis`
-
-2. 时钟与环境协调
-   - `idle_inputs()`
-   - `Step()`
-   - `reset()`
-   - `flush_store_buffers_and_wait()`
-
-3. 对外 facade
-   - `preload_u64()`
-   - `expect_scalar_load()`
-   - `get_transport_stats()`
-   - `get_completed_load_count()`
-   - `get_counter()`
-   - `get_store_view()`
-   - `wait_store_materialized()`
-   - `wait_counter_growth()`
-   - `wait_memory_quiesce()`
-   - `assert_no_outstanding()`
-
-换句话说，当前 `MemBlockEnv` 已经更像“顶层 env + facade”，而不是“所有逻辑都往里塞的工具箱”。
-
-### 5.3 这样设计的价值
-
-主要价值有三个：
-
-1. testcase 不需要知道 `MemoryModel` 内部字段名字。
-2. 后续 `MemoryModel` 再拆分时，tests 可以基本不动。
-3. env 的公开行为已经可以稳定下来，便于写更系统的冒烟测试。
-
-## 6. 事务层设计
-
-### 6.1 `QueuePtr`
-
-`QueuePtr` 被保留为独立 dataclass，而不是重新塞回 helper 函数。原因是当前环境里 LQ/SQ 指针既参与 enqueue，也参与 testcase 侧的虚拟流量状态维护。把它显式建模可以避免多处散装传 `(flag, value)`。
-
-### 6.2 `LoadTxn`
-
-`LoadTxn` 当前封装了：
-
-- `req_id`
-- `addr`
-- `lq_ptr`
-- `sq_ptr`
-- `size`
-- `mask`
-- `pdest`
-- `enq_port`
-- `issue_lane`
-
-同时通过 property 统一导出：
-
-- `rob_idx_flag`
-- `rob_idx_value`
-- `resolved_pdest`
-
-这使得 load 的 enqueue、issue、expect 三个步骤不需要分别重新计算同一套 ROB / pdest 信息。
-
-### 6.3 `StoreTxn`
-
-`StoreTxn` 当前封装了：
-
-- `req_id`
-- `sq_ptr`
-- `addr`
-- `data`
-- `mask`
-- `enq_port`
-- `sta_lane`
-- `std_lane`
-
-它的重点不是让 store 立即变成完整的 UVM sequence item，而是先把 testcase 和 helper 中原本分散的参数组合收口到一个对象上。
-
-### 6.4 兼容策略
-
-当前并没有直接删除旧 `enqueue_scalar_*` / `issue_scalar_*` 接口，而是增加：
-
-- `send_load(env, txn)`
-- `expect_load(env, txn)`
-- `send_store(env, txn)`
-
-这样做的原因是：
-
-1. 旧测试和工具脚本还能继续跑。
-2. 新写法可以逐步迁移到事务对象。
-3. 同一条事务的字段填充逻辑开始集中，减少重复实现。
-
-## 7. Agent 设计
-
-### 7.1 `CsrAgent`
-
-`CsrAgent` 当前负责：
-
-- 驱动 CSR 默认值
-- 恢复到默认 M-mode
-- 封装原来 `MockCSRInterface` 的职责
-
-它的意义不在于“提供很多复杂 CSR 功能”，而在于把“环境默认态配置”从 `MemBlockEnv` 里拿出去。以后如果需要加 VS/VS-stage、虚拟化、PMA 或异常路径相关 CSR 场景，可以继续在这个 agent 上扩展，而不是把字段设置逻辑重新散落到 env 和 testcase。
-
-### 7.2 `CommitAgent`
-
-`CommitAgent` 是对 `PendingPtrDriver` 的一层封装，负责：
-
-- `pendingPtr` 驱动
-- load issued / completed 记录
-- 提交边界推进
-- `scommit` 脉冲排队
-
-这层抽象的重要意义是明确：`pendingPtr` 和 `scommit` 是一种“提交边界驱动”能力，而不是 env 杂项功能的一部分。未来如果要把 commit 相关逻辑进一步改成更完整的 commit-side agent，这个边界已经有了。
-
-### 7.3 `LsqAgent`
-
-`LsqAgent` 负责：
-
-- 等待 load/store enqueue ready
-- 驱动 `enqLsq`
-- 读取 store 分配后的真实 `sqIdx`
-
-把这部分从 `request_apis.py` 和 env 中抽出来之后，enq 逻辑的职责边界变得很清晰：只管 LSQ 分配，不管 issue、不管 compare。
-
-### 7.4 `IssueAgent`
-
-`IssueAgent` 负责：
-
-- issue ready 等待
-- load / STD / STA 的 lane 驱动
-- load 握手成功后的 `env.note_load_issued()`
-
-它的重要价值在于：issue 侧的 pin-level 细节，包括 optional signal 补齐、lane 握手、后端 reset 中断，都不再散落在外部 helper 里。未来如果要支持新的 issue lane 或新字段，也只需要修改这一层。
-
-## 8. `MemoryModel` 的新边界
-
-### 8.1 当前保留的职责
-
-这轮重构后，`MemoryModel` 仍然持有以下逻辑：
-
-- expected load 管理
-- observed writeback 管理
-- commit-boundary compare
-- store shadow 观测
-- store retire 语义
-- drain 结果校验
-
-也就是说，它现在更接近“scoreboard + store observation coordinator”，但还不是完全独立的 scoreboard。
-
-### 8.2 `RefMemory`
-
-`RefMemory` 是第一块被抽出来的通用组件，负责：
-
-- `preload_bytes`
-- `preload_u64`
-- `fill_random`
-- `read`
-- `read_masked`
-- `read_cacheline`
-- `apply_masked_write`
-
-抽这一层的动机很直接：黄金内存本身不应该和 TL responder、writeback compare 或 store shadow 采样绑死在一起。把它抽出后有三个直接收益：
-
-1. 黄金内存的读写接口变得单一、稳定。
-2. `TransportResponder` 与 compare 逻辑都可以共享同一份权威内存视图。
-3. `RefMemory` 可以单独单测，降低回归定位成本。
-
-### 8.3 `TransportResponder`
-
-`TransportResponder` 是第二块被抽出来的组件，负责：
-
-- outer TL-A/TL-D 请求与响应闭环
-- dcache A/B/C/D/E 请求与响应闭环
-- 响应延迟建模
-- transport 计数器维护
-- 事务 outstanding 状态统计
-- 将 outer put 记录到 `drain_log`
-
-这一步很关键，因为在旧结构里 responder 和 compare 都在同一个 `MemoryModel` 类里。拆出 responder 后，现在可以更清楚地回答：
-
-- 如果 outer/dcache 的 ready/response 队列有问题，是 responder 的责任。
-- 如果 compare 边界、写回登记或 store retire 逻辑有问题，是 `MemoryModel` 剩余部分的责任。
-
-### 8.4 当前仍保留的兼容层
-
-为了不一次性改穿所有调用点，`MemoryModel` 仍然保留了以下兼容 facade：
-
-- `stats`
-- `outstanding_transaction_count`
-- `enqueue_outer_response`
-- `enqueue_b_response`
-- `enqueue_d_response`
-- 若干 transport counter property
-
-这些 facade 实际上已经转调到 `TransportResponder`，但对 env 和 tests 来说接口暂时保持不变。这是刻意保留的兼容策略，避免本轮重构同时强制修改所有上层代码。
-
-## 9. testcase 写法的变化
-
-当前 testcase 的一个重要变化是：真实 DUT 测试已经不再直接通过 `env.memory` 内部字段驱动主流程。
-
-### 9.1 load testcase
-
-新写法更接近：
-
-1. reset 环境。
-2. `env.preload_u64()` 预置黄金内存。
-3. 构造 `LoadTxn`。
-4. `send_load(env, txn)`。
-5. `expect_load(env, txn)`。
-6. `env.drain_writebacks()`。
-7. `env.get_completed_load_count()` 和 `env.assert_no_outstanding()` 断言。
-
-### 9.2 store testcase
-
-store 用例也从直接读取 `env.memory.pending_stores` 改成：
-
-1. 构造 `StoreTxn`。
-2. `send_store(env, txn)`。
-3. `env.wait_store_materialized(...)`。
-4. `env.get_counter(...)` 检查 outer / sbuffer 计数。
-5. `env.flush_store_buffers_and_wait()`。
-
-### 9.3 这种迁移的意义
-
-最大意义在于 testcase 开始依赖“行为接口”，而不是“内部实现容器”。这会显著降低未来继续拆 model/monitor/scoreboard 时的改动范围。
-
-## 10. 当前设计仍然刻意没有做的事
-
-为了控制重构风险，本轮没有继续做以下事项：
-
-1. 没有把 `MemoryModel` 完全拆成独立 scoreboard。
-2. 没有引入 passive monitor 层。
-3. 没有引入 sequence / virtual sequence 层。
-4. 没有统一抽出 `EnvConfig`。
-5. 没有新增功能覆盖收集器。
-
-这些不是不重要，而是它们比 facade、agent、ref memory、responder 的拆分更容易引入行为变化。当前策略是先把“最明显的职责混叠”拆掉，再继续向更标准的验证分层演进。
-
-## 11. 未来演进方向
-
-### 11.1 独立 `Scoreboard`
-
-下一步最值得做的是把 `MemoryModel` 中剩余的 compare 和 store retire 逻辑独立成 `Scoreboard`。理想形态下：
-
-- `RefMemory` 只管黄金内存。
-- `TransportResponder` 只管 TL 响应。
-- `Scoreboard` 只管 expected / observed / commit-boundary compare。
-
-这一步完成后，`memory_model.py` 很可能会退化成“兼容层或编排层”。
-
-### 11.2 passive monitors
-
-建议新增：
+`monitors/` 是本轮重构的关键新增层，包括：
 
 - `WritebackMonitor`
 - `StoreMonitor`
 - `MemStatusMonitor`
 
-其职责是从 DUT 采样事件，再交由 scoreboard 处理。当前 `MemoryModel` 仍然直接扫 bundle，这在规模继续扩大后不够清晰。
+它们的核心原则是：
 
-### 11.3 sequence 库
+1. 只读 DUT 输出，不主动驱动业务含义上的输入。
+2. 不持有参考模型语义，只把观测到的事实翻译成事件。
+3. 不做最终判定，最终判定统一交给 scoreboard 或 env 协调逻辑。
 
-当前 `request_apis.py` 已经有了事务层基础，但还没有真正把测试场景抽象成 sequence。未来建议按以下方向演进：
+例如：
 
-- `SingleLoadSequence`
-- `SingleStoreSequence`
-- `StoreThenLoadSameAddrSequence`
-- `MixedLoadStoreRandomSequence`
+- `WritebackMonitor` 不判断数据是否正确，只负责把 load/store writeback 事件发布给 scoreboard。
+- `StoreMonitor` 不判断 store 是否应该退休，只负责把 SQ shadow、addr/data/mask、sbuffer drain 等事实同步给 scoreboard。
+- `MemStatusMonitor` 不决定测试是否通过，只负责把 `lqDeq` 和完成 ROB 传播给 commit/scoreboard 流水。
 
-届时 testcase 会更偏向“选择 sequence + 断言结果”，而不是手工拼接大量请求步骤。
+这个层次的引入，把过去 `MemoryModel` 中“大量直接读 bundle 并更新状态”的做法拆开了。现在 scoreboard 已不直接依赖 DUT 端口命名，因此未来如果 DUT 输出前缀、shadow 结构、或某些 status 信号发生变化，修改成本更多集中在 monitor，而不是扩散到 compare 主逻辑。
 
-### 11.4 统一 config
+## 8. Model 层设计
 
-当前常量仍散落在多个文件中，例如 queue 深度、lane 选择、默认延迟、随机种子等。后续应收敛为 `EnvConfig`，至少统一以下信息：
+### 8.1 `RefMemory`
 
-- issue lane
-- LQ/SQ/ROB depth
-- outer/dcache delay
-- strict check 开关
-- PMA 地址边界
-- 是否启用某些内部 probe
+`RefMemory` 负责黄金内存本体，包括 preload、random fill、masked read/write、cacheline read 等。它是 scoreboard 和 transport 的共享基础，不再掺杂时序和端口语义。
 
-### 11.5 coverage collector
+### 8.2 `TransportResponder`
 
-未来验证环境如果要进一步系统化，必须补上功能覆盖，而不仅仅是断言和计数器。建议 coverage 起点包括：
+`TransportResponder` 负责 outer TL 和 dcache TL-C 的最小闭环、延迟模型、outstanding 统计、grant/release 响应组织。它只关心传输，不关心 load 是否 compare 成功，也不关心 store 是否该退休。
 
-- MMIO / cacheable / NC
-- load/store 类型
-- 同址 store-load 顺序
-- sbuffer drain 与 outer 写出
-- ROB wrap / LQ wrap / SQ wrap
-- 事务延迟桶
+### 8.3 `Scoreboard`
 
-## 12. 结论
+`Scoreboard` 是当前检查逻辑的核心。它负责：
 
-这轮重构的意义，不是把 MemBlock Python 环境直接改造成“完整 UVM”，而是完成了几个关键的基础性动作：
+1. 维护待 compare 的 load 期望。
+2. 维护已观测 writeback。
+3. 按 commit boundary 推进 load compare。
+4. 按 ROB 边界退休 older store 到黄金内存。
+5. 记录和检查 sbuffer/outer drain 事件。
+6. 在测试收尾时执行 `finalize_and_check_drain()`。
 
-1. testcase 与 `MemoryModel` 内部容器的直接耦合被明显削弱。
-2. env 的对外稳定接口已经形成。
-3. active driver 已经具备 agent 形态。
-4. 黄金内存和传输响应器已经从单一大类中分离出来。
+它现在已经是独立组件，而不是 `MemoryModel` 的私有实现细节。UVM 语义上，它已经承担 scoreboard + reference state machine 的角色，只是为降低层数仍由 `MemoryModel` 统一装配。
 
-从工程维护角度看，这比继续在旧结构上堆功能重要得多。因为只有先把边界清出来，后续 monitor、scoreboard、sequence、coverage 才有稳定落点。当前环境已经从“能跑的单体脚本环境”走到了“可持续演进的分层环境”的第一阶段，这正是本轮重构最核心的价值。
+### 8.4 `MemoryModel`
+
+当前 `MemoryModel` 更准确地说是 model facade。它不再自己完成所有逻辑，而是组合：
+
+- `RefMemory`
+- `TransportResponder`
+- `Scoreboard`
+- `WritebackMonitor`
+- `StoreMonitor`
+
+它对上保持兼容接口，对下协调 transport、scoreboard 和 monitor 的调用顺序。这种设计很实用：上层 testcase 仍可通过 `env.memory` 访问兼容 API，但内部职责已被切开。
+
+## 9. Sequence 层设计
+
+`sequences/` 目录引入后，testcase 不再需要直接拼接 `send_load()`、`expect_load()`、`wait_store_materialized()`、`flush_store_buffers_and_wait()` 这些细节，而是优先复用场景对象：
+
+- `ResetEnvSequence`
+- `ScalarLoadSequence`
+- `ScalarStoreSequence`
+- `FlushStoreBuffersSequence`
+
+这与 UVM sequence 的思想非常接近，但保留了 Python 侧更直接的表达方式。它的主要收益有三点：
+
+1. 时序约束收敛
+   例如 reset 后要等待 backend deassert、load 后要 drain、store 后要 wait materialized，这些规则不再散落在各测试文件。
+
+2. 指针推进收敛
+   LQ/SQ 指针推进由 sequence 结果统一返回，避免 testcase 重复写 `ptr_inc()` 并手工维护多份常量。
+
+3. 语义清晰
+   testcase 更接近“执行一个场景并断言结果”，而不是“手工执行若干 helper 并推测时序是否已经满足”。
+
+当前 sequence 层仍是轻量版本，没有再额外引入 sequencer arbitration、virtual sequence、随机约束类等复杂设施。这是刻意的：在 Python/toffee 环境里，先把高频场景模板化，比过早照搬完整 UVM 术语更有收益。
+
+## 10. `EnvConfig` 统一参数入口
+
+`env_config.py` 提供了当前环境的统一配置对象。它的目标不是立即把所有结构都做成完全可参数化，而是先把“运行策略参数”和“高频默认值”收口，包括：
+
+- queue 深度与 ROB 深度
+- transport 延迟模型
+- strict writeback check 策略
+- reset / drain / materialize / flush 等默认周期
+
+当前实现对“结构性参数”和“运行时参数”采取区别对待：
+
+1. 运行时参数可以直接通过 `EnvConfig` 改写并生效。
+2. 某些结构性参数仍与 bundle 声明方式绑定，例如固定宽度的 `SignalList`。这类参数目前只允许使用默认值，env 会显式做校验，避免用户以为改了配置就真的改了端口结构。
+
+这是一种工程上更稳妥的中间态：配置先统一，能力再逐步开放，而不是一开始就宣称“完全参数化”却暗含大量无效项。
+
+## 11. testcase 分工建议
+
+当前推荐的 testcase 分工是：
+
+1. testcase
+   只描述业务场景、初始化数据、统计断言、最终结果断言。
+
+2. sequence
+   封装高频交互流程与默认等待规则。
+
+3. env facade
+   提供稳定能力入口。
+
+4. agent / monitor
+   分别承担主动驱动与被动采样。
+
+5. scoreboard / ref memory / transport
+   承担参考行为、传输闭环和最终检查。
+
+如果未来要增加更复杂场景，例如 memory violation、misalign、异常 load/store、多 lane 并发回归，优先扩 sequence 和 monitor；只有在行为语义真正变化时才修改 scoreboard 或 transport。
+
+## 12. 与 toffee/picker 和 UVM 的对照
+
+从 toffee/picker 的实践建议看，当前环境已经遵循了几条关键原则：
+
+1. testcase 不直接写 pin-level 细节。
+2. 环境能力通过 facade 和事务对象暴露。
+3. 将时序模板收进 sequence，而不是散布到测试代码。
+4. 通过 monitor/scoreboard 解耦“观测事实”和“结果判断”。
+
+从 UVM 的角度看，当前环境可以映射为：
+
+- `MemBlockEnv` 对应 env
+- `CsrAgent/LsqAgent/IssueAgent/CommitAgent` 对应 active agent 的 driver 部分
+- `WritebackMonitor/StoreMonitor/MemStatusMonitor` 对应 passive monitor
+- `Scoreboard` 对应 scoreboard
+- `RefMemory` 对应 reference model 的存储核心
+- `ScalarLoadSequence/ScalarStoreSequence/...` 对应 sequence
+- `EnvConfig` 对应 config object
+
+这说明当前重构已经不是“只是把文件拆开”，而是完成了验证环境角色模型的重建。
+
+## 13. 未来演进方向
+
+后续继续演进时，最值得做的方向有：
+
+1. 把结构性端口宽度也逐步纳入可验证的 config 能力，而不是仅做默认值校验。
+2. 为 monitor 增加统一事件类型，减少 monitor 到 scoreboard 的细粒度方法耦合。
+3. 在 sequence 层引入更高层的组合场景，例如 mixed traffic、flush/replay、异常路径模板。
+4. 把 memory violation、异常位、MMIO 特殊路径的检查进一步对象化。
+5. 将当前部分 facade 兼容接口逐步标注为 legacy，让新的 testcase 只依赖 sequence + env public API。
+
+## 14. 总结
+
+本轮重构后的 MemBlock Python 验证环境已经形成了清晰、可持续的结构：
+
+- env 负责装配和协调。
+- agent 负责主动驱动。
+- monitor 负责被动观测。
+- scoreboard 负责判定。
+- sequence 负责场景复用。
+- config 负责统一默认策略。
+
+这套结构既吸收了 UVM 的分层思想，也保持了 Python/toffee 环境所需要的直接性和可维护性。它的最大价值不是“更抽象”，而是让环境能够在真实 DUT 长期演进过程中保持稳定、可扩展、可定位问题。
