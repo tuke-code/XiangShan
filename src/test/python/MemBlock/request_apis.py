@@ -120,6 +120,11 @@ def send_load(env, txn: LoadTxn) -> None:
         lq_ptr=txn.lq_ptr,
         sq_ptr=txn.sq_ptr,
         lane=txn.issue_lane,
+        store_set_hit=txn.store_set_hit,
+        load_wait_bit=txn.load_wait_bit,
+        load_wait_strict=txn.load_wait_strict,
+        wait_for_rob_idx_flag=txn.wait_for_rob_idx_flag,
+        wait_for_rob_idx_value=txn.wait_for_rob_idx_value,
     )
 
 
@@ -173,8 +178,24 @@ def issue_scalar_load(
     lq_ptr: QueuePtr,
     sq_ptr: QueuePtr,
     lane: int = DEFAULT_LOAD_ISSUE_LANE,
+    store_set_hit: int = 0,
+    load_wait_bit: int = 0,
+    load_wait_strict: int = 0,
+    wait_for_rob_idx_flag: int | None = None,
+    wait_for_rob_idx_value: int | None = None,
 ) -> None:
-    env.issue_agent.issue_scalar_load(req_id, addr, lq_ptr, sq_ptr, lane=lane)
+    env.issue_agent.issue_scalar_load(
+        req_id,
+        addr,
+        lq_ptr,
+        sq_ptr,
+        lane=lane,
+        store_set_hit=store_set_hit,
+        load_wait_bit=load_wait_bit,
+        load_wait_strict=load_wait_strict,
+        wait_for_rob_idx_flag=wait_for_rob_idx_flag,
+        wait_for_rob_idx_value=wait_for_rob_idx_value,
+    )
 
 
 def issue_scalar_std(

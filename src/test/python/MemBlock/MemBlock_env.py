@@ -59,6 +59,28 @@ STORE_PIPELINE_WIDTH = DEFAULT_ENV_CONFIG.store_pipeline_width
 SBUFFER_WRITE_PORTS = DEFAULT_ENV_CONFIG.sbuffer_write_ports
 STORE_QUEUE_SIZE = DEFAULT_ENV_CONFIG.store_queue_size
 ROB_SIZE = DEFAULT_ENV_CONFIG.rob_size
+LOAD_REPLAY_CAUSE_LABELS = [
+    "UNCACHE",
+    "SMF",
+    "MA",
+    "TM",
+    "FF",
+    "DR",
+    "DM",
+    "WF",
+    "BC",
+    "RAR",
+    "RAW",
+    "NK",
+    "MF",
+]
+
+
+def _read_signal_int(signal, default: int = 0) -> int:
+    try:
+        return int(signal.value)
+    except Exception:
+        return int(default)
 
 
 @dataclass(frozen=True)
@@ -1243,6 +1265,301 @@ class MemBlockEnv:
         if counter_name in stats:
             return int(stats[counter_name])
         raise AttributeError(f"未知计数器 `{counter_name}`")
+
+    def _current_cycle(self) -> int:
+        return int(getattr(self.memory, "_cycle", 0))
+
+    def _read_optional_dut_signal(self, signal_name: str, default: int = 0) -> int:
+        return _read_signal_int(getattr(self.dut, signal_name, None), default)
+
+    def _normalize_replay_cause(self, cause: str | None) -> str | None:
+        if cause is None:
+            return None
+        upper = str(cause).upper()
+        if upper == "UNCACHE":
+            return "NC"
+        return upper
+
+    def _decode_replay_cause_mask(self, cause_mask: int) -> str | None:
+        mask = int(cause_mask)
+        if mask == 0:
+            return None
+        for cause_idx, label in enumerate(LOAD_REPLAY_CAUSE_LABELS):
+            if mask & (1 << cause_idx):
+                return self._normalize_replay_cause(label)
+        return None
+
+    def _replay_event_matches(
+        self,
+        event: dict,
+        *,
+        cause: str | None = None,
+        source: str | tuple[str, ...] | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        sq_idx: int | None = None,
+    ) -> bool:
+        if cause is not None and self._normalize_replay_cause(event.get("cause")) != self._normalize_replay_cause(cause):
+            return False
+        if source is not None:
+            sources = (source,) if isinstance(source, str) else tuple(source)
+            if event.get("source") not in sources:
+                return False
+        if rob_idx_flag is not None and event.get("rob_idx_flag") != int(rob_idx_flag):
+            return False
+        if rob_idx_value is not None and event.get("rob_idx_value") != int(rob_idx_value):
+            return False
+        if sq_idx is not None and event.get("sq_idx_value") != int(sq_idx):
+            return False
+        return True
+
+    def sample_replay_state(self) -> dict:
+        """采样当前拍 replay 相关真实 DUT 状态。"""
+
+        cycle = self._current_cycle()
+        replay_lanes = []
+        ldu_lanes = []
+        nc_out_lanes = []
+        replay_queue_entries = []
+        events = []
+
+        replay_queue_size = int(getattr(self.config.sequence, "load_queue_size", 72))
+        replay_queue_by_index = {}
+        for idx in range(replay_queue_size):
+            allocated = self._read_optional_dut_signal(f"MemBlock_inner_lsq_loadQueue_loadQueueReplay_allocated_{idx}")
+            if not allocated:
+                continue
+            replay_queue_entry = {
+                "cycle": cycle,
+                "source": "replay_queue",
+                "lane": None,
+                "sched_index": idx,
+                "rob_idx_flag": self._read_optional_dut_signal(
+                    f"MemBlock_inner_lsq_loadQueue_loadQueueReplay_uop_{idx}_robIdx_flag"
+                ),
+                "rob_idx_value": self._read_optional_dut_signal(
+                    f"MemBlock_inner_lsq_loadQueue_loadQueueReplay_uop_{idx}_robIdx_value"
+                ),
+                "lq_idx_flag": self._read_optional_dut_signal(
+                    f"MemBlock_inner_lsq_loadQueue_loadQueueReplay_uop_{idx}_lqIdx_flag"
+                ),
+                "lq_idx_value": self._read_optional_dut_signal(
+                    f"MemBlock_inner_lsq_loadQueue_loadQueueReplay_uop_{idx}_lqIdx_value"
+                ),
+                "sq_idx_flag": self._read_optional_dut_signal(
+                    f"MemBlock_inner_lsq_loadQueue_loadQueueReplay_uop_{idx}_sqIdx_flag"
+                ),
+                "sq_idx_value": self._read_optional_dut_signal(
+                    f"MemBlock_inner_lsq_loadQueue_loadQueueReplay_uop_{idx}_sqIdx_value"
+                ),
+                "vaddr": self._read_optional_dut_signal(f"MemBlock_inner_lsq_loadQueue_loadQueueReplay_debug_vaddr_{idx}"),
+                "paddr": None,
+                "cause": self._decode_replay_cause_mask(
+                    self._read_optional_dut_signal(f"MemBlock_inner_lsq_loadQueue_loadQueueReplay_cause_{idx}")
+                ),
+            }
+            replay_queue_entries.append(replay_queue_entry)
+            replay_queue_by_index[idx] = replay_queue_entry
+            events.append(replay_queue_entry)
+
+        for idx in range(self.config.load_pipeline_width):
+            replay_prefix = f"MemBlock_inner_lsq_io_replay_{idx}"
+            replay_valid = self._read_optional_dut_signal(f"{replay_prefix}_valid")
+            replay_ready = self._read_optional_dut_signal(f"{replay_prefix}_ready")
+            if replay_valid:
+                replay_queue_idx = self._read_optional_dut_signal(f"{replay_prefix}_bits_replayQueueIdx", -1)
+                replay_queue_entry = replay_queue_by_index.get(replay_queue_idx)
+                replay_lane = {
+                    "cycle": cycle,
+                    "source": "replay_lane",
+                    "lane": idx,
+                    "valid": replay_valid,
+                    "ready": replay_ready,
+                    "sched_index": replay_queue_idx,
+                    "rob_idx_flag": self._read_optional_dut_signal(f"{replay_prefix}_bits_uop_robIdx_flag"),
+                    "rob_idx_value": self._read_optional_dut_signal(f"{replay_prefix}_bits_uop_robIdx_value"),
+                    "lq_idx_flag": self._read_optional_dut_signal(f"{replay_prefix}_bits_uop_lqIdx_flag"),
+                    "lq_idx_value": self._read_optional_dut_signal(f"{replay_prefix}_bits_uop_lqIdx_value"),
+                    "sq_idx_flag": self._read_optional_dut_signal(f"{replay_prefix}_bits_uop_sqIdx_flag"),
+                    "sq_idx_value": self._read_optional_dut_signal(f"{replay_prefix}_bits_uop_sqIdx_value"),
+                    "vaddr": self._read_optional_dut_signal(f"{replay_prefix}_bits_vaddr"),
+                    "paddr": None,
+                    "cause": (
+                        "NC"
+                        if self._read_optional_dut_signal(f"{replay_prefix}_bits_ncReplay")
+                        or self._read_optional_dut_signal(f"{replay_prefix}_bits_uncacheReplay")
+                        else "DM"
+                        if self._read_optional_dut_signal(f"{replay_prefix}_bits_forwardDChannel")
+                        else "TM"
+                        if self._read_optional_dut_signal(f"{replay_prefix}_bits_tlbMiss")
+                        else None if replay_queue_entry is None else replay_queue_entry.get("cause")
+                    ),
+                }
+                replay_lanes.append(replay_lane)
+                events.append(replay_lane)
+
+            ldu_prefix = f"MemBlock_inner_lsq_io_ldu_ldin_{idx}"
+            ldu_valid = self._read_optional_dut_signal(f"{ldu_prefix}_valid")
+            if ldu_valid and self._read_optional_dut_signal(f"{ldu_prefix}_bits_isLoadReplay"):
+                cause = None
+                for cause_idx, label in enumerate(LOAD_REPLAY_CAUSE_LABELS):
+                    if self._read_optional_dut_signal(f"{ldu_prefix}_bits_rep_info_cause_{cause_idx}"):
+                        cause = self._normalize_replay_cause(label)
+                        break
+                ldu_lane = {
+                    "cycle": cycle,
+                    "source": "ldu",
+                    "lane": idx,
+                    "valid": ldu_valid,
+                    "sched_index": self._read_optional_dut_signal(f"{ldu_prefix}_bits_schedIndex", -1),
+                    "rob_idx_flag": self._read_optional_dut_signal(f"{ldu_prefix}_bits_uop_robIdx_flag"),
+                    "rob_idx_value": self._read_optional_dut_signal(f"{ldu_prefix}_bits_uop_robIdx_value"),
+                    "lq_idx_flag": self._read_optional_dut_signal(f"{ldu_prefix}_bits_uop_lqIdx_flag"),
+                    "lq_idx_value": self._read_optional_dut_signal(f"{ldu_prefix}_bits_uop_lqIdx_value"),
+                    "sq_idx_flag": self._read_optional_dut_signal(f"{ldu_prefix}_bits_uop_sqIdx_flag"),
+                    "sq_idx_value": self._read_optional_dut_signal(f"{ldu_prefix}_bits_uop_sqIdx_value"),
+                    "vaddr": self._read_optional_dut_signal(f"{ldu_prefix}_bits_fullva"),
+                    "paddr": self._read_optional_dut_signal(f"{ldu_prefix}_bits_paddr"),
+                    "cause": cause,
+                }
+                ldu_lanes.append(ldu_lane)
+                events.append(ldu_lane)
+
+            nc_prefix = f"MemBlock_inner_lsq_io_ncOut_{idx}"
+            nc_valid = self._read_optional_dut_signal(f"{nc_prefix}_valid")
+            if nc_valid:
+                nc_lane = {
+                    "cycle": cycle,
+                    "source": "nc_out",
+                    "lane": idx,
+                    "valid": nc_valid,
+                    "ready": self._read_optional_dut_signal(f"{nc_prefix}_ready"),
+                    "sched_index": self._read_optional_dut_signal(f"{nc_prefix}_bits_schedIndex", -1),
+                    "rob_idx_flag": self._read_optional_dut_signal(f"{nc_prefix}_bits_uop_robIdx_flag"),
+                    "rob_idx_value": self._read_optional_dut_signal(f"{nc_prefix}_bits_uop_robIdx_value"),
+                    "lq_idx_flag": self._read_optional_dut_signal(f"{nc_prefix}_bits_uop_lqIdx_flag"),
+                    "lq_idx_value": self._read_optional_dut_signal(f"{nc_prefix}_bits_uop_lqIdx_value"),
+                    "sq_idx_flag": self._read_optional_dut_signal(f"{nc_prefix}_bits_uop_sqIdx_flag"),
+                    "sq_idx_value": self._read_optional_dut_signal(f"{nc_prefix}_bits_uop_sqIdx_value"),
+                    "vaddr": self._read_optional_dut_signal(f"{nc_prefix}_bits_vaddr"),
+                    "paddr": self._read_optional_dut_signal(f"{nc_prefix}_bits_paddr"),
+                    "cause": "NC",
+                }
+                nc_out_lanes.append(nc_lane)
+                events.append(nc_lane)
+
+        memory_violation = {
+            "cycle": cycle,
+            "source": "memory_violation",
+            "valid": _read_signal_int(self.mem_status.memoryViolation_valid, 0),
+            "level": _read_signal_int(self.mem_status.memoryViolation_bits_level, 0),
+            "rob_idx_flag": _read_signal_int(self.mem_status.memoryViolation_bits_robIdx_flag, 0),
+            "rob_idx_value": _read_signal_int(self.mem_status.memoryViolation_bits_robIdx_value, 0),
+            "target": _read_signal_int(self.mem_status.memoryViolation_bits_target, 0),
+            "cause": "VIOLATION",
+        }
+        if memory_violation["valid"]:
+            events.append(memory_violation)
+
+        return {
+            "cycle": cycle,
+            "replay_lanes": replay_lanes,
+            "ldu_lanes": ldu_lanes,
+            "nc_out_lanes": nc_out_lanes,
+            "replay_queue_entries": replay_queue_entries,
+            "memory_violation": memory_violation,
+            "events": events,
+        }
+
+    def wait_replay_event(
+        self,
+        *,
+        cause: str | None = None,
+        source: str | tuple[str, ...] | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        sq_idx: int | None = None,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待一条匹配过滤条件的 replay 观测事件。"""
+
+        for _ in range(max_cycles):
+            replay_state = self.sample_replay_state()
+            for event in replay_state["events"]:
+                if self._replay_event_matches(
+                    event,
+                    cause=cause,
+                    source=source,
+                    rob_idx_flag=rob_idx_flag,
+                    rob_idx_value=rob_idx_value,
+                    sq_idx=sq_idx,
+                ):
+                    return event
+            self.Step(1)
+        raise TimeoutError(
+            "等待 replay 事件超时: "
+            f"cause={cause}, source={source}, rob=({rob_idx_flag},{rob_idx_value}), sq_idx={sq_idx}"
+        )
+
+    def wait_nc_replay_or_nc_out(
+        self,
+        *,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待 NC/uncache replay 或 `nc_out` 可见事件。"""
+
+        return self.wait_replay_event(
+            cause="NC",
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+            max_cycles=max_cycles,
+        )
+
+    def collect_replay_window(
+        self,
+        cycles: int,
+        *,
+        cause: str | None = None,
+        source: str | tuple[str, ...] | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        sq_idx: int | None = None,
+    ) -> list[dict]:
+        """在一个时间窗口内收集 replay 观测事件。"""
+
+        events = []
+        seen = set()
+        for step_idx in range(max(0, int(cycles))):
+            replay_state = self.sample_replay_state()
+            for event in replay_state["events"]:
+                if not self._replay_event_matches(
+                    event,
+                    cause=cause,
+                    source=source,
+                    rob_idx_flag=rob_idx_flag,
+                    rob_idx_value=rob_idx_value,
+                    sq_idx=sq_idx,
+                ):
+                    continue
+                event_key = (
+                    event.get("cycle"),
+                    event.get("source"),
+                    event.get("lane"),
+                    event.get("sched_index"),
+                    event.get("cause"),
+                    event.get("rob_idx_flag"),
+                    event.get("rob_idx_value"),
+                    event.get("sq_idx_value"),
+                )
+                if event_key in seen:
+                    continue
+                seen.add(event_key)
+                events.append(event)
+            if step_idx != cycles - 1:
+                self.Step(1)
+        return events
 
     def get_store_view(self, sq_idx: int) -> StoreView | None:
         """返回某个 SQ slot 的只读 store 视图。"""

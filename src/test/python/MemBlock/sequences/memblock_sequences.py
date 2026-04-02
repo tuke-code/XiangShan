@@ -9,7 +9,10 @@ from request_apis import (
     LoadTxn,
     QueuePtr,
     StoreTxn,
+    enqueue_scalar_store,
     expect_load,
+    issue_scalar_sta,
+    issue_scalar_std,
     ptr_inc,
     reset_env_and_wait_backend,
     send_load,
@@ -76,8 +79,50 @@ class ScalarMixedTrafficSequenceResult:
     drain_summary: dict | None
 
 
+@dataclass(frozen=True)
+class ScalarForwardFailReplaySequenceResult:
+    store_sq_ptr: QueuePtr
+    replay_event: dict
+    load_result: ScalarLoadSequenceResult
+    final_state: SequenceState
+    committed_store_view: object
+
+
+@dataclass(frozen=True)
+class ScalarCacheMissReplaySequenceResult:
+    load_result: ScalarLoadSequenceResult
+    replay_event: dict
+    final_state: SequenceState
+    transport_stats_before: dict[str, int]
+    transport_stats_after: dict[str, int]
+
+
+@dataclass(frozen=True)
+class ScalarNcReplaySequenceResult:
+    load_result: ScalarLoadSequenceResult
+    replay_event: dict
+    final_state: SequenceState
+    transport_stats_before: dict[str, int]
+    transport_stats_after: dict[str, int]
+
+
 def _snapshot_transport_stats(env) -> dict[str, int]:
     return {key: int(value) for key, value in env.get_transport_stats().items()}
+
+
+def _wait_store_addr_observed(env, sq_idx: int, expected_addr: int, max_cycles: int = 200):
+    for _ in range(max_cycles):
+        store = env.get_store_view(sq_idx)
+        if store is not None and store.allocated and store.addr == expected_addr:
+            return store
+        env.Step(1)
+    raise TimeoutError(f"等待 store 地址收敛超时: sqIdx={sq_idx}, addr=0x{expected_addr:x}")
+
+
+def _resolve_replay_drain_cycles(env, drain_cycles: int | None) -> int:
+    if drain_cycles is not None:
+        return int(drain_cycles)
+    return max(int(env.config.sequence.load_drain_cycles), 1024)
 
 
 class ResetEnvSequence:
@@ -507,4 +552,201 @@ class ScalarMixedTrafficSequence:
             total_loads=total_loads,
             completed_load_count=env.get_completed_load_count(),
             drain_summary=drain_summary,
+        )
+
+
+class ScalarForwardFailReplaySequence:
+    def __init__(
+        self,
+        store_txn,
+        *,
+        initial_lq_ptr: QueuePtr,
+        load_req_id: int,
+        replay_wait_cycles: int = 200,
+        materialize_cycles: int = 200,
+        drain_cycles: int | None = None,
+        size: int = 8,
+        mask: int = 0xFF,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.store_txn = store_txn
+        self.initial_lq_ptr = initial_lq_ptr
+        self.load_req_id = load_req_id
+        self.replay_wait_cycles = replay_wait_cycles
+        self.materialize_cycles = materialize_cycles
+        self.drain_cycles = drain_cycles
+        self.size = size
+        self.mask = mask
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarForwardFailReplaySequenceResult:
+        completed_before = env.get_completed_load_count()
+        store_sq_ptr = enqueue_scalar_store(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=self.store_txn.sq_ptr,
+            enq_port=self.store_txn.enq_port,
+        )
+        issue_scalar_sta(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=store_sq_ptr,
+            addr=self.store_txn.addr,
+            lane=self.store_txn.sta_lane,
+        )
+        _wait_store_addr_observed(env, store_sq_ptr.value, self.store_txn.addr, max_cycles=self.materialize_cycles)
+
+        load_txn = LoadTxn(
+            req_id=self.load_req_id,
+            addr=self.store_txn.addr,
+            lq_ptr=self.initial_lq_ptr,
+            sq_ptr=ptr_inc(self.store_txn.sq_ptr, env.config.sequence.store_queue_size),
+            size=self.size,
+            mask=self.mask,
+            store_set_hit=1,
+        )
+        send_load(env, load_txn)
+        expect_load(env, load_txn)
+        replay_event = env.wait_replay_event(
+            cause="FF",
+            rob_idx_flag=load_txn.rob_idx_flag,
+            rob_idx_value=load_txn.rob_idx_value,
+            max_cycles=self.replay_wait_cycles,
+        )
+
+        issue_scalar_std(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=store_sq_ptr,
+            data=self.store_txn.data,
+            lane=self.store_txn.std_lane,
+        )
+        env.pulse_store_commit(1)
+        committed_store_view = env.wait_store_materialized(
+            store_sq_ptr.value,
+            expected_addr=self.store_txn.addr,
+            expected_data=self.store_txn.data,
+            expected_mmio=False,
+            require_committed=True,
+            max_cycles=self.materialize_cycles,
+        )
+        env.drain_writebacks(max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles))
+        completed = env.get_completed_load_count()
+        assert completed == completed_before + 1, f"forward-fail replay load req_id={load_txn.req_id} 未完成"
+        load_result = ScalarLoadSequenceResult(
+            txn=load_txn,
+            next_lq_ptr=ptr_inc(load_txn.lq_ptr, env.config.sequence.load_queue_size),
+            completed_load_count=completed,
+        )
+        final_state = SequenceState(
+            next_lq_ptr=load_result.next_lq_ptr,
+            sq_ptr=ptr_inc(self.store_txn.sq_ptr, env.config.sequence.store_queue_size),
+        )
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+        return ScalarForwardFailReplaySequenceResult(
+            store_sq_ptr=store_sq_ptr,
+            replay_event=replay_event,
+            load_result=load_result,
+            final_state=final_state,
+            committed_store_view=committed_store_view,
+        )
+
+
+class ScalarCacheMissReplaySequence:
+    def __init__(
+        self,
+        txn,
+        *,
+        replay_wait_cycles: int = 200,
+        drain_cycles: int | None = None,
+        expected_completed_loads: int | None = None,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.txn = txn
+        self.replay_wait_cycles = replay_wait_cycles
+        self.drain_cycles = drain_cycles
+        self.expected_completed_loads = expected_completed_loads
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarCacheMissReplaySequenceResult:
+        stats_before = _snapshot_transport_stats(env)
+        send_load(env, self.txn)
+        expect_load(env, self.txn)
+        replay_event = env.wait_replay_event(
+            cause="DM",
+            rob_idx_flag=self.txn.rob_idx_flag,
+            rob_idx_value=self.txn.rob_idx_value,
+            max_cycles=self.replay_wait_cycles,
+        )
+        env.drain_writebacks(max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles))
+        completed = env.get_completed_load_count()
+        if self.expected_completed_loads is not None:
+            assert completed == self.expected_completed_loads, f"cache-miss replay load req_id={self.txn.req_id} 未完成"
+        load_result = ScalarLoadSequenceResult(
+            txn=self.txn,
+            next_lq_ptr=ptr_inc(self.txn.lq_ptr, env.config.sequence.load_queue_size),
+            completed_load_count=completed,
+        )
+        final_state = SequenceState(
+            next_lq_ptr=load_result.next_lq_ptr,
+            sq_ptr=self.txn.sq_ptr,
+        )
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+        return ScalarCacheMissReplaySequenceResult(
+            load_result=load_result,
+            replay_event=replay_event,
+            final_state=final_state,
+            transport_stats_before=stats_before,
+            transport_stats_after=_snapshot_transport_stats(env),
+        )
+
+
+class ScalarNcReplaySequence:
+    def __init__(
+        self,
+        txn,
+        *,
+        replay_wait_cycles: int = 200,
+        drain_cycles: int | None = None,
+        expected_completed_loads: int | None = None,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.txn = txn
+        self.replay_wait_cycles = replay_wait_cycles
+        self.drain_cycles = drain_cycles
+        self.expected_completed_loads = expected_completed_loads
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarNcReplaySequenceResult:
+        stats_before = _snapshot_transport_stats(env)
+        send_load(env, self.txn)
+        expect_load(env, self.txn)
+        replay_event = env.wait_nc_replay_or_nc_out(
+            rob_idx_flag=self.txn.rob_idx_flag,
+            rob_idx_value=self.txn.rob_idx_value,
+            max_cycles=self.replay_wait_cycles,
+        )
+        env.drain_writebacks(max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles))
+        completed = env.get_completed_load_count()
+        if self.expected_completed_loads is not None:
+            assert completed == self.expected_completed_loads, f"nc replay load req_id={self.txn.req_id} 未完成"
+        load_result = ScalarLoadSequenceResult(
+            txn=self.txn,
+            next_lq_ptr=ptr_inc(self.txn.lq_ptr, env.config.sequence.load_queue_size),
+            completed_load_count=completed,
+        )
+        final_state = SequenceState(
+            next_lq_ptr=load_result.next_lq_ptr,
+            sq_ptr=self.txn.sq_ptr,
+        )
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+        return ScalarNcReplaySequenceResult(
+            load_result=load_result,
+            replay_event=replay_event,
+            final_state=final_state,
+            transport_stats_before=stats_before,
+            transport_stats_after=_snapshot_transport_stats(env),
         )

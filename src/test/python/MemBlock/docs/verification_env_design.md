@@ -179,6 +179,9 @@ pytest testcase
 - `ScalarLoadSequence`
 - `ScalarStoreSequence`
 - `FlushStoreBuffersSequence`
+- `ScalarForwardFailReplaySequence`
+- `ScalarCacheMissReplaySequence`
+- `ScalarNcReplaySequence`
 
 这与 UVM sequence 的思想非常接近，但保留了 Python 侧更直接的表达方式。它的主要收益有三点：
 
@@ -192,6 +195,15 @@ pytest testcase
    testcase 更接近“执行一个场景并断言结果”，而不是“手工执行若干 helper 并推测时序是否已经满足”。
 
 当前 sequence 层仍是轻量版本，没有再额外引入 sequencer arbitration、virtual sequence、随机约束类等复杂设施。这是刻意的：在 Python/toffee 环境里，先把高频场景模板化，比过早照搬完整 UVM 术语更有收益。
+
+与之配套，`MemBlockEnv` 现在还对 replay 观测提供了稳定 facade：
+
+- `sample_replay_state()`
+- `wait_replay_event()`
+- `wait_nc_replay_or_nc_out()`
+- `collect_replay_window()`
+
+这意味着 replay testcase 可以继续保持 “sequence 描述事务 + env 提供观测入口” 的边界，而不必在测试文件里手工拼装 `MemBlock_inner_lsq_*` 的内部信号轮询。
 
 ## 10. `EnvConfig` 统一参数入口
 

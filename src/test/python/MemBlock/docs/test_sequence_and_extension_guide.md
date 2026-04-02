@@ -127,6 +127,37 @@ ScalarLoadSequence(txn, expected_completed_loads=1, assert_no_outstanding=True).
 5. `ScalarMixedTrafficSequence`
    - 顺序执行一组 `("store", addr, data)` / `("load", addr, None)` 操作，并可在结尾自动 flush。
 
+6. `ScalarForwardFailReplaySequence`
+   - 封装 `STA -> younger same-addr load -> replay -> STD -> commit -> load complete`。
+   - 用于真实 DUT 下的 `FF` replay 冒烟。
+
+7. `ScalarCacheMissReplaySequence`
+   - 封装单条 cold cacheable load 的 `DM` replay 观测与最终收敛。
+
+8. `ScalarNcReplaySequence`
+   - 封装单条 IO/uncache load 的 `NC` replay / `nc_out` 观测与最终收敛。
+
+### 4.4 replay 观测辅助 API
+
+当前 env 已经把真实 DUT replay 观测收口成公共 helper，testcase 不需要自己逐拍扫内部信号：
+
+1. `env.sample_replay_state()`
+   - 返回当前拍的 replay 相关快照。
+   - 包含 `replay_queue_entries`、`replay_lanes`、`ldu_lanes`、`nc_out_lanes` 和 `memory_violation`。
+
+2. `env.wait_replay_event(...)`
+   - 在限定周期内等待一条匹配条件的 replay 事件。
+   - 支持按 `cause/source/rob_idx/sq_idx` 过滤。
+
+3. `env.wait_nc_replay_or_nc_out(...)`
+   - 针对 NC/uncache load 的快捷等待接口。
+   - 接受 replay queue、replay lane、`ldu` replay 或 `nc_out` 任一可见来源。
+
+4. `env.collect_replay_window(cycles, ...)`
+   - 在一个窗口里收集 replay 事件列表，适合做小范围 trace 断言。
+
+这些 helper 的判定真值固定来自真实 DUT 导出的 replay 相关端口，而不是 Python 侧 mock tracker。
+
 ## 5. IO 地址 load 路径
 
 当地址位于 `< 0x80000000` 的区间时，现有测试假设它走 IO / uncache 路径。
@@ -487,13 +518,37 @@ store 最终结束应优先用：
 
 ### 19.1 replay / violation
 
-如果要增加 replay 或 violation 场景，建议优先利用：
+当前真实 DUT 环境已经内建了一批可直接复用的 replay 能力：
 
-- `memoryViolation_*`
-- `redirect`
-- `pendingPtr`
+- replay sequence
+  - `ScalarForwardFailReplaySequence`
+  - `ScalarCacheMissReplaySequence`
+  - `ScalarNcReplaySequence`
+- replay helper
+  - `sample_replay_state()`
+  - `wait_replay_event()`
+  - `wait_nc_replay_or_nc_out()`
+  - `collect_replay_window()`
 
-先构造最小单条或双条事务，不要直接上随机流。
+当前版本最稳定的 replay 覆盖对象是：
+
+1. `FF`
+   - older store 地址已知、数据未就绪时的 forward-fail replay。
+2. `DM`
+   - cold cacheable load 的 dcache miss replay。
+3. `NC`
+   - IO/uncache load 的 replay / `nc_out` 可见路径。
+
+继续扩 replay 或 violation 场景时，仍建议遵循以下顺序：
+
+1. 先构造最小单条或双条事务。
+2. 先断言 replay 事件出现，再断言最终 writeback compare 通过。
+3. 若涉及 redirect / violation，再额外结合：
+   - `memoryViolation_*`
+   - `redirect`
+   - `pendingPtr`
+
+不要一开始就把 replay、redirect、backpressure 和随机流混在同一个 testcase 里。
 
 ### 19.2 异常 store
 

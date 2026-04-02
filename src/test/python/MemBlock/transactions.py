@@ -27,6 +27,11 @@ class LoadTxn:
     pdest: int | None = None
     enq_port: int = 0
     issue_lane: int = 0
+    store_set_hit: int = 0
+    load_wait_bit: int = 0
+    load_wait_strict: int = 0
+    wait_for_rob_idx_flag: int | None = None
+    wait_for_rob_idx_value: int | None = None
 
     @property
     def rob_idx_flag(self) -> int:

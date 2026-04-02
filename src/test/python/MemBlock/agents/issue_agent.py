@@ -36,7 +36,19 @@ class IssueAgent:
         self.env.idle_inputs()
         raise TimeoutError(f"等待 `issue[{lane}]` 完成握手超时")
 
-    def issue_scalar_load(self, req_id: int, addr: int, lq_ptr, sq_ptr, lane: int = 0) -> None:
+    def issue_scalar_load(
+        self,
+        req_id: int,
+        addr: int,
+        lq_ptr,
+        sq_ptr,
+        lane: int = 0,
+        store_set_hit: int = 0,
+        load_wait_bit: int = 0,
+        load_wait_strict: int = 0,
+        wait_for_rob_idx_flag: int | None = None,
+        wait_for_rob_idx_value: int | None = None,
+    ) -> None:
         def _drive() -> None:
             issue = self.env.issue[lane]
             prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
@@ -55,11 +67,19 @@ class IssueAgent:
             _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_flag", 0)
             _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_value", req_id & 0x3F)
             _set_optional_signal(self.env.dut, f"{prefix}ftqOffset", 0)
-            _set_optional_signal(self.env.dut, f"{prefix}loadWaitBit", 0)
-            _set_optional_signal(self.env.dut, f"{prefix}waitForRobIdx_flag", 0)
-            _set_optional_signal(self.env.dut, f"{prefix}waitForRobIdx_value", 0)
-            _set_optional_signal(self.env.dut, f"{prefix}storeSetHit", 0)
-            _set_optional_signal(self.env.dut, f"{prefix}loadWaitStrict", 0)
+            _set_optional_signal(self.env.dut, f"{prefix}loadWaitBit", int(load_wait_bit))
+            _set_optional_signal(
+                self.env.dut,
+                f"{prefix}waitForRobIdx_flag",
+                0 if wait_for_rob_idx_flag is None else int(wait_for_rob_idx_flag),
+            )
+            _set_optional_signal(
+                self.env.dut,
+                f"{prefix}waitForRobIdx_value",
+                0 if wait_for_rob_idx_value is None else int(wait_for_rob_idx_value),
+            )
+            _set_optional_signal(self.env.dut, f"{prefix}storeSetHit", int(store_set_hit))
+            _set_optional_signal(self.env.dut, f"{prefix}loadWaitStrict", int(load_wait_strict))
             _set_optional_signal(self.env.dut, f"{prefix}ssid", 0)
             _set_optional_signal(self.env.dut, f"{prefix}lqIdx_flag", lq_ptr.flag)
             _set_optional_signal(self.env.dut, f"{prefix}lqIdx_value", lq_ptr.value)
