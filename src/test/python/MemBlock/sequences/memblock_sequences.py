@@ -106,6 +106,17 @@ class ScalarNcReplaySequenceResult:
     transport_stats_after: dict[str, int]
 
 
+@dataclass(frozen=True)
+class ScalarRawReplaySequenceResult:
+    store_sq_ptr: QueuePtr
+    nuke_query_event: dict
+    replay_event: dict
+    committed_store_view: object
+    final_state: SequenceState
+    issued_loads: tuple[LoadTxn, ...]
+    completed_load_count: int
+
+
 def _snapshot_transport_stats(env) -> dict[str, int]:
     return {key: int(value) for key, value in env.get_transport_stats().items()}
 
@@ -749,4 +760,123 @@ class ScalarNcReplaySequence:
             final_state=final_state,
             transport_stats_before=stats_before,
             transport_stats_after=_snapshot_transport_stats(env),
+        )
+
+
+class ScalarRawReplaySequence:
+    def __init__(
+        self,
+        store_txn,
+        *,
+        initial_lq_ptr: QueuePtr,
+        load_addresses,
+        first_load_req_id: int,
+        nuke_wait_cycles: int = 200,
+        replay_wait_cycles: int = 400,
+        materialize_cycles: int = 200,
+        drain_cycles: int | None = None,
+        size: int = 8,
+        mask: int = 0xFF,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.store_txn = store_txn
+        self.initial_lq_ptr = initial_lq_ptr
+        self.load_addresses = tuple(int(addr) for addr in load_addresses)
+        self.first_load_req_id = first_load_req_id
+        self.nuke_wait_cycles = nuke_wait_cycles
+        self.replay_wait_cycles = replay_wait_cycles
+        self.materialize_cycles = materialize_cycles
+        self.drain_cycles = drain_cycles
+        self.size = size
+        self.mask = mask
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarRawReplaySequenceResult:
+        if not self.load_addresses:
+            raise ValueError("RAW replay sequence requires at least one younger load")
+
+        completed_before = env.get_completed_load_count()
+        store_queue_size = env.config.sequence.store_queue_size
+        load_queue_size = env.config.sequence.load_queue_size
+
+        store_sq_ptr = enqueue_scalar_store(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=self.store_txn.sq_ptr,
+            enq_port=self.store_txn.enq_port,
+        )
+        younger_sq_ptr = ptr_inc(self.store_txn.sq_ptr, store_queue_size)
+
+        next_lq_ptr = self.initial_lq_ptr
+        load_txns = []
+        for load_idx, addr in enumerate(self.load_addresses):
+            load_txn = LoadTxn(
+                req_id=self.first_load_req_id + load_idx,
+                addr=addr,
+                lq_ptr=next_lq_ptr,
+                sq_ptr=younger_sq_ptr,
+                size=self.size,
+                mask=self.mask,
+            )
+            send_load(env, load_txn)
+            expect_load(env, load_txn)
+            load_txns.append(load_txn)
+            next_lq_ptr = ptr_inc(next_lq_ptr, load_queue_size)
+
+        nuke_query_event = env.wait_nuke_query_backpressure(
+            kind="raw",
+            sq_idx=younger_sq_ptr.value,
+            max_cycles=self.nuke_wait_cycles,
+        )
+        replay_event = env.wait_replay_event(
+            cause="RAW",
+            sq_idx=younger_sq_ptr.value,
+            max_cycles=self.replay_wait_cycles,
+        )
+
+        issue_scalar_std(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=store_sq_ptr,
+            data=self.store_txn.data,
+            lane=self.store_txn.std_lane,
+        )
+        issue_scalar_sta(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=store_sq_ptr,
+            addr=self.store_txn.addr,
+            lane=self.store_txn.sta_lane,
+        )
+        env.pulse_store_commit(1)
+        committed_store_view = env.wait_store_materialized(
+            store_sq_ptr.value,
+            expected_addr=self.store_txn.addr,
+            expected_data=self.store_txn.data,
+            expected_mmio=False,
+            require_committed=True,
+            max_cycles=self.materialize_cycles,
+        )
+        env.drain_writebacks(max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles))
+        completed = env.get_completed_load_count()
+        assert completed == completed_before + len(load_txns), (
+            f"RAW replay 场景未完成全部 younger loads: completed={completed}, "
+            f"expected={completed_before + len(load_txns)}"
+        )
+
+        final_state = SequenceState(
+            next_lq_ptr=next_lq_ptr,
+            sq_ptr=younger_sq_ptr,
+        )
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+
+        return ScalarRawReplaySequenceResult(
+            store_sq_ptr=store_sq_ptr,
+            nuke_query_event=nuke_query_event,
+            replay_event=replay_event,
+            committed_store_view=committed_store_view,
+            final_state=final_state,
+            issued_loads=tuple(load_txns),
+            completed_load_count=completed,
         )

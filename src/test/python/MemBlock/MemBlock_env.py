@@ -1471,6 +1471,45 @@ class MemBlockEnv:
             "events": events,
         }
 
+    def sample_nuke_query_state(self) -> dict:
+        """采样当前拍 RAW/RAR nuke query 的请求握手状态。"""
+
+        cycle = self._current_cycle()
+        raw_queries = []
+        rar_queries = []
+
+        for kind, bucket in (("raw", raw_queries), ("rar", rar_queries)):
+            for idx in range(self.config.load_pipeline_width):
+                prefix = f"MemBlock_inner_lsq_io_ldu_{kind}NukeQuery_{idx}_req"
+                valid = self._read_optional_dut_signal(f"{prefix}_valid")
+                if not valid:
+                    continue
+                bucket.append(
+                    {
+                        "cycle": cycle,
+                        "kind": kind.upper(),
+                        "source": f"{kind}_nuke_query",
+                        "lane": idx,
+                        "valid": valid,
+                        "ready": self._read_optional_dut_signal(f"{prefix}_ready"),
+                        "rob_idx_flag": self._read_optional_dut_signal(f"{prefix}_bits_robIdx_flag"),
+                        "rob_idx_value": self._read_optional_dut_signal(f"{prefix}_bits_robIdx_value"),
+                        "lq_idx_flag": self._read_optional_dut_signal(f"{prefix}_bits_lqIdx_flag"),
+                        "lq_idx_value": self._read_optional_dut_signal(f"{prefix}_bits_lqIdx_value"),
+                        "sq_idx_flag": self._read_optional_dut_signal(f"{prefix}_bits_sqIdx_flag"),
+                        "sq_idx_value": self._read_optional_dut_signal(f"{prefix}_bits_sqIdx_value"),
+                        "paddr": self._read_optional_dut_signal(f"{prefix}_bits_paddr"),
+                        "data_valid": self._read_optional_dut_signal(f"{prefix}_bits_dataValid"),
+                        "nc": self._read_optional_dut_signal(f"{prefix}_bits_nc"),
+                    }
+                )
+
+        return {
+            "cycle": cycle,
+            "raw_queries": raw_queries,
+            "rar_queries": rar_queries,
+        }
+
     def wait_replay_event(
         self,
         *,
@@ -1515,6 +1554,41 @@ class MemBlockEnv:
             rob_idx_flag=rob_idx_flag,
             rob_idx_value=rob_idx_value,
             max_cycles=max_cycles,
+        )
+
+    def wait_nuke_query_backpressure(
+        self,
+        *,
+        kind: str,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        sq_idx: int | None = None,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待 RAW/RAR nuke query 出现 `valid && !ready`。"""
+
+        normalized_kind = str(kind).strip().lower()
+        if normalized_kind not in {"raw", "rar"}:
+            raise ValueError(f"unsupported nuke query kind: {kind}")
+
+        for _ in range(max_cycles):
+            query_state = self.sample_nuke_query_state()
+            queries = query_state["raw_queries"] if normalized_kind == "raw" else query_state["rar_queries"]
+            for event in queries:
+                if not event["valid"] or event["ready"]:
+                    continue
+                if rob_idx_flag is not None and event["rob_idx_flag"] != int(rob_idx_flag):
+                    continue
+                if rob_idx_value is not None and event["rob_idx_value"] != int(rob_idx_value):
+                    continue
+                if sq_idx is not None and event["sq_idx_value"] != int(sq_idx):
+                    continue
+                return event
+            self.Step(1)
+
+        raise TimeoutError(
+            "等待 nuke query backpressure 超时: "
+            f"kind={normalized_kind}, rob=({rob_idx_flag},{rob_idx_value}), sq_idx={sq_idx}"
         )
 
     def collect_replay_window(

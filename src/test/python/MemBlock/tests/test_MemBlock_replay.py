@@ -6,6 +6,7 @@ MemBlock 真实 DUT replay 场景测试。
   1. `FF`: store 地址已知、数据未就绪时，同地址 younger load 触发 forward-fail replay
   2. `DM`: cold cacheable load 触发 dcache miss replay
   3. `NC`: IO/uncache load 走 nc/outer 路径并出现 replay/nc_out 观测
+  4. `RAW`: older store 地址长期未就绪，挤满 LQRAW 后 younger loads 触发 raw replay
 """
 
 from request_apis import LoadTxn, QueuePtr, StoreTxn
@@ -15,6 +16,7 @@ from sequences.memblock_sequences import (
     ScalarCacheMissReplaySequence,
     ScalarForwardFailReplaySequence,
     ScalarNcReplaySequence,
+    ScalarRawReplaySequence,
     SequenceState,
 )
 
@@ -24,6 +26,10 @@ FORWARD_FAIL_STORE_DATA = 0xCAFEBABE11223344
 CACHE_MISS_ADDR = 0x80000280
 NC_REPLAY_ADDR = 0x2000
 NC_REPLAY_DATA = 0x5566778899AABBCC
+RAW_REPLAY_STORE_ADDR = 0x80000600
+RAW_REPLAY_STORE_DATA = 0x0BADF00D11223344
+RAW_REPLAY_LOAD_BASE = 0x80000400
+RAW_REPLAY_LOAD_COUNT = 36
 
 
 def _reset_env_and_state(env) -> SequenceState:
@@ -112,6 +118,42 @@ def test_api_MemBlock_scalar_nc_replay_smoke(env):
     assert result.replay_event["cause"] == "NC", "NC replay 原因不匹配"
     assert result.transport_stats_after["outer_request_count"] > result.transport_stats_before["outer_request_count"]
     assert result.transport_stats_after["dcache_a_request_count"] == result.transport_stats_before["dcache_a_request_count"]
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_scalar_raw_replay_smoke(env):
+    """
+    older store 长时间缺少 STA/STD，填满 LQRAW 后应观测到 RAW replay 与 rawNukeQuery backpressure。
+    """
+
+    initial_state = _reset_env_and_state(env)
+    load_addresses = [RAW_REPLAY_LOAD_BASE + ((idx % 8) * 8) for idx in range(RAW_REPLAY_LOAD_COUNT)]
+    for idx, addr in enumerate(load_addresses):
+        env.preload_u64(addr, 0x1000_0000_0000_0000 + idx)
+
+    result = ScalarRawReplaySequence(
+        StoreTxn(
+            req_id=0,
+            sq_ptr=initial_state.sq_ptr,
+            addr=RAW_REPLAY_STORE_ADDR,
+            data=RAW_REPLAY_STORE_DATA,
+        ),
+        initial_lq_ptr=initial_state.next_lq_ptr,
+        load_addresses=load_addresses,
+        first_load_req_id=1,
+        assert_no_outstanding=True,
+    ).run(env)
+
+    assert result.nuke_query_event["kind"] == "RAW", "RAW nuke query 类型不匹配"
+    assert result.nuke_query_event["valid"] == 1 and result.nuke_query_event["ready"] == 0, "未观测到 rawNukeQuery backpressure"
+    assert result.replay_event["cause"] == "RAW", "RAW replay 原因不匹配"
+    assert result.replay_event["source"] in {"replay_queue", "replay_lane", "ldu"}, "RAW replay 观测来源异常"
+    assert result.replay_event["sq_idx_value"] == 1, "RAW replay 对应的 younger sqIdx 不匹配"
+    assert result.committed_store_view.committed, "RAW replay 场景中的 older store 未进入 committed"
+    assert result.completed_load_count == RAW_REPLAY_LOAD_COUNT, "RAW replay 场景并未完成全部 younger loads"
+
+    drain_summary = FlushStoreBuffersSequence().run(env)
+    assert drain_summary["drain_event_count"] > 0, "RAW replay 场景未能在收尾阶段 drain older store"
     env.assert_no_outstanding()
 
 
