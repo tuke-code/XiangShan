@@ -7,15 +7,17 @@ MemBlock 真实 DUT replay 场景测试。
   2. `DM`: cold cacheable load 触发 dcache miss replay
   3. `NC`: IO/uncache load 走 nc/outer 路径并出现 replay/nc_out 观测
   4. `RAW`: older store 地址长期未就绪，挤满 LQRAW 后 younger loads 触发 raw replay
+  5. `RAR`: 更老 load 因精确 load-wait 暂停，更年轻同地址 load 完成后在 probe release 下触发 ld-ld violation
 """
 
-from request_apis import LoadTxn, QueuePtr, StoreTxn
+from request_apis import LoadTxn, StoreTxn, ptr_inc
 from sequences.memblock_sequences import (
     FlushStoreBuffersSequence,
     ResetEnvSequence,
     ScalarCacheMissReplaySequence,
     ScalarForwardFailReplaySequence,
     ScalarNcReplaySequence,
+    ScalarRarViolationSequence,
     ScalarRawReplaySequence,
     SequenceState,
 )
@@ -30,6 +32,11 @@ RAW_REPLAY_STORE_ADDR = 0x80000600
 RAW_REPLAY_STORE_DATA = 0x0BADF00D11223344
 RAW_REPLAY_LOAD_BASE = 0x80000400
 RAW_REPLAY_LOAD_COUNT = 36
+RAR_OLDER_STORE_ADDR = 0x80000700
+RAR_OLDER_STORE_DATA = 0x2233445566778899
+RAR_ADDR = 0x80000880
+RAR_OLD_DATA = 0x1020304050607080
+RAR_NEW_DATA = 0x8877665544332211
 
 
 def _reset_env_and_state(env) -> SequenceState:
@@ -154,6 +161,63 @@ def test_api_MemBlock_scalar_raw_replay_smoke(env):
 
     drain_summary = FlushStoreBuffersSequence().run(env)
     assert drain_summary["drain_event_count"] > 0, "RAW replay 场景未能在收尾阶段 drain older store"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_scalar_rar_violation_smoke(env):
+    """
+    更老 load 因精确 load-wait 暂停时，更年轻同地址 load 完成后若收到 probe release，应触发真实的 ld-ld violation。
+    """
+
+    initial_state = _reset_env_and_state(env)
+    env.preload_u64(RAR_ADDR, RAR_OLD_DATA)
+    younger_sq_ptr = ptr_inc(initial_state.sq_ptr, env.config.sequence.store_queue_size)
+    younger_lq_ptr = ptr_inc(initial_state.next_lq_ptr, env.config.sequence.load_queue_size)
+
+    result = ScalarRarViolationSequence(
+        fake_store_txn=StoreTxn(
+            req_id=0,
+            sq_ptr=initial_state.sq_ptr,
+            addr=RAR_OLDER_STORE_ADDR,
+            data=RAR_OLDER_STORE_DATA,
+        ),
+        older_load_txn=LoadTxn(
+            req_id=1,
+            addr=RAR_ADDR,
+            lq_ptr=initial_state.next_lq_ptr,
+            sq_ptr=younger_sq_ptr,
+            load_wait_bit=1,
+            load_wait_strict=0,
+            store_set_hit=1,
+            wait_for_rob_idx_flag=0,
+            wait_for_rob_idx_value=0,
+        ),
+        younger_load_txn=LoadTxn(
+            req_id=2,
+            addr=RAR_ADDR,
+            lq_ptr=younger_lq_ptr,
+            sq_ptr=younger_sq_ptr,
+        ),
+        release_new_value=RAR_NEW_DATA,
+        assert_no_outstanding=True,
+    ).run(env)
+
+    assert result.release_event["valid"] == 1, "RAR 场景未观测到 cacheline release"
+    assert (int(result.release_event["paddr"]) & ~0x3F) == (RAR_ADDR & ~0x3F), "RAR release cacheline 不匹配"
+    assert result.younger_writeback["rob_idx_value"] == 2, "RAR 场景 younger load 未先完成首次写回"
+    assert result.younger_writeback["data"] == RAR_OLD_DATA, "RAR 场景 younger load 首次写回未读到旧值"
+    assert result.rar_nuke_response["resp_valid"] == 1 and result.rar_nuke_response["nuke"] == 1, "RAR nuke response 未命中"
+    assert result.rar_nuke_response["rob_idx_value"] == 1, "RAR nuke response 未对应 older load"
+    assert result.older_writeback["rob_idx_value"] == 1, "RAR 场景 older load 未在 release 后写回"
+    assert result.older_writeback["data"] == RAR_NEW_DATA, "RAR 场景 older load 未读到 probe 后的新值"
+    if result.violation_event is not None:
+        assert result.violation_event["source"] == "memory_violation", "RAR violation 事件来源异常"
+        assert result.violation_event["rob_idx_value"] == 1, "RAR violation 未对应 older load"
+    assert result.fake_store_view.committed, "RAR 场景中的依赖 store 未进入 committed"
+    assert result.completed_load_count == 1, "RAR 场景应仅完成 older load 的 commit-boundary compare"
+
+    drain_summary = FlushStoreBuffersSequence().run(env)
+    assert drain_summary["drain_event_count"] > 0, "RAR 场景收尾未成功 drain 辅助 store"
     env.assert_no_outstanding()
 
 

@@ -74,6 +74,7 @@ LOAD_REPLAY_CAUSE_LABELS = [
     "NK",
     "MF",
 ]
+TL_B_PROBE = 6
 
 
 def _read_signal_int(signal, default: int = 0) -> int:
@@ -1093,6 +1094,7 @@ class MemBlockEnv:
         self.mock_dcache_client = self.memory
         self.mem_status_monitor = MemStatusMonitor(self.mem_status, self.memory, self.commit_agent)
         self._after_step_callbacks = []
+        self._last_rar_query_req_by_lane = {}
 
         self.dut.StepRis(self.memory.on_memory_edge)
 
@@ -1163,6 +1165,7 @@ class MemBlockEnv:
         self.idle_inputs()
         self.memory.reset_runtime_state()
         self.commit_agent.reset()
+        self._last_rar_query_req_by_lane = {}
         self.dut.reset.value = 1
         self.Step(cycles)
         self.dut.reset.value = 0
@@ -1207,6 +1210,29 @@ class MemBlockEnv:
 
         self.memory.enqueue_b_response(delay_cycles=delay_cycles, **kwargs)
 
+    def inject_dcache_probe(
+        self,
+        cacheline_addr: int,
+        *,
+        param: int = 0,
+        size: int = 6,
+        source: int = 0,
+        delay_cycles: int = 0,
+    ) -> None:
+        """向 DCache B 通道注入一笔 Probe 请求。"""
+
+        self.inject_dcache_b_response(
+            delay_cycles=delay_cycles,
+            opcode=TL_B_PROBE,
+            param=param,
+            size=size,
+            source=source,
+            address=int(cacheline_addr),
+            mask=0,
+            data=0,
+            corrupt=0,
+        )
+
     def inject_dcache_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
         """向 DCache D 通道注入一笔响应。"""
 
@@ -1244,6 +1270,54 @@ class MemBlockEnv:
             addr=addr,
             size=size,
             mask=mask,
+        )
+
+    def wait_load_writeback_observed(
+        self,
+        *,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        data: int | None = None,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待某条 load writeback 在 intWriteback 口被观测到。"""
+
+        for _ in range(max_cycles):
+            for lane, bundle in enumerate(self.writeback):
+                if not bundle.connected("valid") or bundle.read("valid", 0) == 0:
+                    continue
+                if bundle.connected("ready") and bundle.read("ready", 0) == 0:
+                    continue
+                if bundle.connected("isFromLoadUnit") and bundle.read("isFromLoadUnit", 0) == 0:
+                    continue
+                if bundle.connected("toRob_valid") and bundle.read("toRob_valid", 0) == 0:
+                    continue
+
+                event = {
+                    "cycle": self._current_cycle(),
+                    "lane": lane,
+                    "rob_idx_flag": bundle.read("robIdx_flag", 0),
+                    "rob_idx_value": bundle.read("robIdx_value", 0),
+                    "lq_idx_flag": bundle.read("lqIdx_flag", 0),
+                    "lq_idx_value": bundle.read("lqIdx_value", 0),
+                    "pdest": bundle.read("pdest", 0),
+                    "data": bundle.read("data_0", 0),
+                    "int_wen": bundle.read("intWen", 0),
+                }
+                if event["int_wen"] == 0:
+                    continue
+                if rob_idx_flag is not None and event["rob_idx_flag"] != int(rob_idx_flag):
+                    continue
+                if rob_idx_value is not None and event["rob_idx_value"] != int(rob_idx_value):
+                    continue
+                if data is not None and event["data"] != int(data):
+                    continue
+                return event
+            self.Step(1)
+
+        raise TimeoutError(
+            "等待 load writeback 观测超时: "
+            f"rob=({rob_idx_flag},{rob_idx_value}), data={data}"
         )
 
     def get_transport_stats(self) -> dict[str, int]:
@@ -1477,6 +1551,7 @@ class MemBlockEnv:
         cycle = self._current_cycle()
         raw_queries = []
         rar_queries = []
+        rar_responses = []
 
         for kind, bucket in (("raw", raw_queries), ("rar", rar_queries)):
             for idx in range(self.config.load_pipeline_width):
@@ -1503,11 +1578,51 @@ class MemBlockEnv:
                         "nc": self._read_optional_dut_signal(f"{prefix}_bits_nc"),
                     }
                 )
+                if kind != "rar":
+                    continue
+                self._last_rar_query_req_by_lane[idx] = dict(bucket[-1])
+                resp_prefix = f"MemBlock_inner_lsq_io_ldu_{kind}NukeQuery_{idx}_resp"
+                rar_responses.append(
+                    {
+                        "cycle": cycle,
+                        "kind": "RAR",
+                        "source": "rar_nuke_response",
+                        "lane": idx,
+                        "resp_valid": self._read_optional_dut_signal(f"{resp_prefix}_valid"),
+                        "nuke": self._read_optional_dut_signal(f"{resp_prefix}_bits_nuke"),
+                    }
+                )
+            if kind == "rar":
+                for idx in range(self.config.load_pipeline_width):
+                    if idx < len(rar_responses):
+                        continue
+                    resp_prefix = f"MemBlock_inner_lsq_io_ldu_{kind}NukeQuery_{idx}_resp"
+                    rar_responses.append(
+                        {
+                            "cycle": cycle,
+                            "kind": "RAR",
+                            "source": "rar_nuke_response",
+                            "lane": idx,
+                            "resp_valid": self._read_optional_dut_signal(f"{resp_prefix}_valid"),
+                            "nuke": self._read_optional_dut_signal(f"{resp_prefix}_bits_nuke"),
+                        }
+                    )
 
         return {
             "cycle": cycle,
             "raw_queries": raw_queries,
             "rar_queries": rar_queries,
+            "rar_responses": rar_responses,
+        }
+
+    def sample_release_state(self) -> dict:
+        """采样当前拍 LSQ release 提示。"""
+
+        return {
+            "cycle": self._current_cycle(),
+            "source": "release",
+            "valid": self._read_optional_dut_signal("MemBlock_inner_lsq_io_release_valid"),
+            "paddr": self._read_optional_dut_signal("MemBlock_inner_lsq_io_release_bits_paddr"),
         }
 
     def wait_replay_event(
@@ -1556,6 +1671,42 @@ class MemBlockEnv:
             max_cycles=max_cycles,
         )
 
+    def wait_release_event(
+        self,
+        *,
+        paddr: int | None = None,
+        cacheline_addr: int | None = None,
+        line_bytes: int = 64,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待 LSQ release 事件，可按 paddr 或 cacheline 过滤。"""
+
+        normalized_paddr = None if paddr is None else int(paddr)
+        normalized_line = None if cacheline_addr is None else int(cacheline_addr) & ~(int(line_bytes) - 1)
+
+        for _ in range(max_cycles):
+            event = self.sample_release_state()
+            if not event["valid"]:
+                self.Step(1)
+                continue
+            event_paddr = int(event["paddr"])
+            if normalized_paddr is not None and event_paddr != normalized_paddr:
+                self.Step(1)
+                continue
+            if normalized_line is not None and (event_paddr & ~(int(line_bytes) - 1)) != normalized_line:
+                self.Step(1)
+                continue
+            return event
+        detail = (
+            f"paddr={normalized_paddr}, cacheline=0x{normalized_line:x}"
+            if normalized_line is not None
+            else f"paddr={normalized_paddr}"
+        )
+        raise TimeoutError(
+            "等待 release 事件超时: "
+            f"{detail}"
+        )
+
     def wait_nuke_query_backpressure(
         self,
         *,
@@ -1589,6 +1740,43 @@ class MemBlockEnv:
         raise TimeoutError(
             "等待 nuke query backpressure 超时: "
             f"kind={normalized_kind}, rob=({rob_idx_flag},{rob_idx_value}), sq_idx={sq_idx}"
+        )
+
+    def wait_rar_nuke_response(
+        self,
+        *,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        lq_idx_flag: int | None = None,
+        lq_idx_value: int | None = None,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待一条 RAR nuke response，并回填最近一次同 lane req 元信息。"""
+
+        for _ in range(max_cycles):
+            query_state = self.sample_nuke_query_state()
+
+            for resp in query_state["rar_responses"]:
+                if not resp["resp_valid"] or not resp["nuke"]:
+                    continue
+                event = dict(resp)
+                event.update(self._last_rar_query_req_by_lane.get(resp["lane"], {}))
+                event["resp_valid"] = resp["resp_valid"]
+                event["nuke"] = resp["nuke"]
+                if rob_idx_flag is not None and event.get("rob_idx_flag") != int(rob_idx_flag):
+                    continue
+                if rob_idx_value is not None and event.get("rob_idx_value") != int(rob_idx_value):
+                    continue
+                if lq_idx_flag is not None and event.get("lq_idx_flag") != int(lq_idx_flag):
+                    continue
+                if lq_idx_value is not None and event.get("lq_idx_value") != int(lq_idx_value):
+                    continue
+                return event
+            self.Step(1)
+
+        raise TimeoutError(
+            "等待 RAR nuke response 超时: "
+            f"rob=({rob_idx_flag},{rob_idx_value}), lq=({lq_idx_flag},{lq_idx_value})"
         )
 
     def collect_replay_window(

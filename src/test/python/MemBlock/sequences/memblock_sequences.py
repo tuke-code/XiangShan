@@ -117,6 +117,21 @@ class ScalarRawReplaySequenceResult:
     completed_load_count: int
 
 
+@dataclass(frozen=True)
+class ScalarRarViolationSequenceResult:
+    fake_store_sq_ptr: QueuePtr
+    older_load: LoadTxn
+    younger_load: LoadTxn
+    younger_writeback: dict
+    older_writeback: dict
+    release_event: dict
+    rar_nuke_response: dict
+    violation_event: dict | None
+    final_state: SequenceState
+    fake_store_view: object
+    completed_load_count: int
+
+
 def _snapshot_transport_stats(env) -> dict[str, int]:
     return {key: int(value) for key, value in env.get_transport_stats().items()}
 
@@ -134,6 +149,15 @@ def _resolve_replay_drain_cycles(env, drain_cycles: int | None) -> int:
     if drain_cycles is not None:
         return int(drain_cycles)
     return max(int(env.config.sequence.load_drain_cycles), 1024)
+
+
+def _wait_completed_load_count(env, target_count: int, max_cycles: int = 200) -> int:
+    for _ in range(max_cycles):
+        completed = env.get_completed_load_count()
+        if completed >= int(target_count):
+            return completed
+        env.Step(1)
+    raise TimeoutError(f"等待 completed_load_count 达到 {target_count} 超时")
 
 
 class ResetEnvSequence:
@@ -880,3 +904,141 @@ class ScalarRawReplaySequence:
             issued_loads=tuple(load_txns),
             completed_load_count=completed,
         )
+
+
+class ScalarRarViolationSequence:
+    def __init__(
+        self,
+        *,
+        fake_store_txn,
+        older_load_txn,
+        younger_load_txn,
+        release_new_value: int,
+        probe_param: int = 2,
+        replay_wait_cycles: int = 400,
+        violation_wait_cycles: int = 200,
+        materialize_cycles: int = 200,
+        drain_cycles: int | None = None,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.fake_store_txn = fake_store_txn
+        self.older_load_txn = older_load_txn
+        self.younger_load_txn = younger_load_txn
+        self.release_new_value = int(release_new_value)
+        self.probe_param = int(probe_param)
+        self.replay_wait_cycles = replay_wait_cycles
+        self.violation_wait_cycles = violation_wait_cycles
+        self.materialize_cycles = materialize_cycles
+        self.drain_cycles = drain_cycles
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarRarViolationSequenceResult:
+        completed_before = env.get_completed_load_count()
+        cacheline_addr = self.younger_load_txn.addr & ~0x3F
+        previous_strict = env.memory.strict_writeback_check
+        env.memory.strict_writeback_check = False
+        try:
+            fake_store_sq_ptr = enqueue_scalar_store(
+                env,
+                req_id=self.fake_store_txn.req_id,
+                sq_ptr=self.fake_store_txn.sq_ptr,
+                enq_port=self.fake_store_txn.enq_port,
+            )
+            issue_scalar_std(
+                env,
+                req_id=self.fake_store_txn.req_id,
+                sq_ptr=fake_store_sq_ptr,
+                data=self.fake_store_txn.data,
+                lane=self.fake_store_txn.std_lane,
+            )
+
+            send_load(env, self.older_load_txn)
+            expect_load(env, self.older_load_txn)
+            env.wait_replay_event(
+                cause="MA",
+                rob_idx_flag=self.older_load_txn.rob_idx_flag,
+                rob_idx_value=self.older_load_txn.rob_idx_value,
+                max_cycles=self.replay_wait_cycles,
+            )
+
+            send_load(env, self.younger_load_txn)
+            younger_writeback = env.wait_load_writeback_observed(
+                rob_idx_flag=self.younger_load_txn.rob_idx_flag,
+                rob_idx_value=self.younger_load_txn.rob_idx_value,
+                data=env.memory.read(self.younger_load_txn.addr, self.younger_load_txn.size),
+                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+            )
+
+            env.preload_u64(self.younger_load_txn.addr, self.release_new_value)
+            env.inject_dcache_probe(cacheline_addr, param=self.probe_param)
+            release_event = env.wait_release_event(
+                cacheline_addr=cacheline_addr,
+                max_cycles=self.violation_wait_cycles,
+            )
+
+            issue_scalar_sta(
+                env,
+                req_id=self.fake_store_txn.req_id,
+                sq_ptr=fake_store_sq_ptr,
+                addr=self.fake_store_txn.addr,
+                lane=self.fake_store_txn.sta_lane,
+            )
+            env.pulse_store_commit(1)
+            fake_store_view = env.wait_store_materialized(
+                fake_store_sq_ptr.value,
+                expected_addr=self.fake_store_txn.addr,
+                expected_data=self.fake_store_txn.data,
+                expected_mmio=False,
+                require_committed=True,
+                max_cycles=self.materialize_cycles,
+            )
+
+            rar_nuke_response = env.wait_rar_nuke_response(
+                rob_idx_flag=self.older_load_txn.rob_idx_flag,
+                rob_idx_value=self.older_load_txn.rob_idx_value,
+                lq_idx_flag=self.older_load_txn.lq_ptr.flag,
+                lq_idx_value=self.older_load_txn.lq_ptr.value,
+                max_cycles=self.violation_wait_cycles,
+            )
+            older_writeback = env.wait_load_writeback_observed(
+                rob_idx_flag=self.older_load_txn.rob_idx_flag,
+                rob_idx_value=self.older_load_txn.rob_idx_value,
+                data=self.release_new_value,
+                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+            )
+            violation_candidates = env.collect_replay_window(
+                min(16, self.violation_wait_cycles),
+                source="memory_violation",
+                rob_idx_flag=self.older_load_txn.rob_idx_flag,
+                rob_idx_value=self.older_load_txn.rob_idx_value,
+            )
+            violation_event = violation_candidates[0] if violation_candidates else None
+
+            completed = _wait_completed_load_count(
+                env,
+                completed_before + 1,
+                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+            )
+
+            final_state = SequenceState(
+                next_lq_ptr=ptr_inc(self.younger_load_txn.lq_ptr, env.config.sequence.load_queue_size),
+                sq_ptr=ptr_inc(self.fake_store_txn.sq_ptr, env.config.sequence.store_queue_size),
+            )
+            if self.assert_no_outstanding:
+                env.assert_no_outstanding()
+
+            return ScalarRarViolationSequenceResult(
+                fake_store_sq_ptr=fake_store_sq_ptr,
+                older_load=self.older_load_txn,
+                younger_load=self.younger_load_txn,
+                younger_writeback=younger_writeback,
+                older_writeback=older_writeback,
+                release_event=release_event,
+                rar_nuke_response=rar_nuke_response,
+                violation_event=violation_event,
+                final_state=final_state,
+                fake_store_view=fake_store_view,
+                completed_load_count=completed,
+            )
+        finally:
+            env.memory.strict_writeback_check = previous_strict
