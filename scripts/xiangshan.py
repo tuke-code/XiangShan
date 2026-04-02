@@ -291,7 +291,7 @@ class XiangShan(object):
         instr_trace_args = f"--instr-trace {instr_trace}" if instr_trace_valid else ""
         gcpt_restore_args = f"-r {self.args.gcpt_restore_bin}" if len(self.args.gcpt_restore_bin) != 0 else ""
         flash_args = f"--flash {self.args.flash}" if self.args.flash is not None else ""
-        return_code = self.__exec_cmd(f'ulimit -s {32 * 1024}; {numa_args} $NOOP_HOME/build/emu -i {workload} {emu_args} {fork_args} {diff_args} {chiseldb_args} {gcpt_restore_args} {instr_trace_args} {flash_args}')
+        return_code = self.__exec_cmd(f'ulimit -s {32 * 1024}; {numa_args} stdbuf -o0 -e0 $NOOP_HOME/build/emu -i {workload} {emu_args} {fork_args} {diff_args} {chiseldb_args} {gcpt_restore_args} {instr_trace_args} {flash_args}')
         return return_code
 
     def run_simv(self, workload):
