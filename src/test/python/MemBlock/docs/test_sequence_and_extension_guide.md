@@ -137,6 +137,14 @@ ScalarLoadSequence(txn, expected_completed_loads=1, assert_no_outstanding=True).
 8. `ScalarNcReplaySequence`
    - 封装单条 IO/uncache load 的 `NC` replay / `nc_out` 观测与最终收敛。
 
+9. `ScalarRawReplaySequence`
+   - 封装 `older store 只分配不补全地址/数据 -> 多条 younger load -> RAW backpressure/replay -> store release -> load 收敛`。
+   - 用于真实 DUT 下的 `RAW` replay 冒烟。
+
+10. `ScalarRarViolationSequence`
+   - 封装 `older load 因精确 load-wait 暂停 -> younger same-addr load 先完成 -> probe/release -> RAR nuke -> older load 重新写回`。
+   - 用于真实 DUT 下的 `RAR` ld-ld violation 冒烟。
+
 ### 4.4 replay 观测辅助 API
 
 当前 env 已经把真实 DUT replay 观测收口成公共 helper，testcase 不需要自己逐拍扫内部信号：
@@ -155,6 +163,22 @@ ScalarLoadSequence(txn, expected_completed_loads=1, assert_no_outstanding=True).
 
 4. `env.collect_replay_window(cycles, ...)`
    - 在一个窗口里收集 replay 事件列表，适合做小范围 trace 断言。
+
+5. `env.wait_nuke_query_backpressure(kind=..., ...)`
+   - 等待 `RAW/RAR` nuke query 出现 `valid && !ready`。
+   - 适合 `RAW` 或后续 `RAR full` 场景。
+
+6. `env.wait_release_event(...)`
+   - 等待 `MemBlock_inner_lsq_io_release_*` 导出的 cacheline release 事件。
+   - 适合 `RAR` ld-ld violation 场景。
+
+7. `env.wait_rar_nuke_response(...)`
+   - 等待 `rarNukeQuery.resp.valid && bits.nuke`。
+   - 返回时会回填最近一次同 lane 的 req 元信息，方便 testcase 直接按 `rob/lq` 断言。
+
+8. `env.wait_load_writeback_observed(...)`
+   - 直接在 `intWriteback` 口等待某条 load 的写回，而不要求它已经进入 commit compare。
+   - 适合像 `RAR` 这样需要区分“younger 已先写回，但 commit compare 仍被 older 阻塞”的场景。
 
 这些 helper 的判定真值固定来自真实 DUT 导出的 replay 相关端口，而不是 Python 侧 mock tracker。
 
@@ -524,11 +548,17 @@ store 最终结束应优先用：
   - `ScalarForwardFailReplaySequence`
   - `ScalarCacheMissReplaySequence`
   - `ScalarNcReplaySequence`
+  - `ScalarRawReplaySequence`
+  - `ScalarRarViolationSequence`
 - replay helper
   - `sample_replay_state()`
   - `wait_replay_event()`
   - `wait_nc_replay_or_nc_out()`
   - `collect_replay_window()`
+  - `wait_nuke_query_backpressure()`
+  - `wait_release_event()`
+  - `wait_rar_nuke_response()`
+  - `wait_load_writeback_observed()`
 
 当前版本最稳定的 replay 覆盖对象是：
 
@@ -538,6 +568,10 @@ store 最终结束应优先用：
    - cold cacheable load 的 dcache miss replay。
 3. `NC`
    - IO/uncache load 的 replay / `nc_out` 可见路径。
+4. `RAW`
+   - older store 长时间不补全地址时的 raw backpressure / replay。
+5. `RAR`
+   - older load 被精确 load-wait 挂住、younger same-addr load 先完成并在 probe/release 下触发的 ld-ld violation。
 
 继续扩 replay 或 violation 场景时，仍建议遵循以下顺序：
 
@@ -547,6 +581,16 @@ store 最终结束应优先用：
    - `memoryViolation_*`
    - `redirect`
    - `pendingPtr`
+
+`ScalarRarViolationSequence` 的推荐使用方式固定为：
+
+1. 先分配一条 fake older store，但只发 `STD`，故意不发 `STA`。
+2. 让 older load 带 `loadWaitBit/storeSetHit/waitForRobIdx`，精确等待这条 fake store。
+3. 发 younger same-addr load，并直接用 `wait_load_writeback_observed()` 证明它先拿到旧值。
+4. 通过 `inject_dcache_probe()` 和 `wait_release_event()` 构造真实 release。
+5. 再补 fake store 的 `STA` 释放 older load。
+6. 用 `wait_rar_nuke_response()` 断言真实的 `RAR nuke` 命中。
+7. 最后等待 older load 写回新值，并在 commit-boundary compare 完成后收尾。
 
 不要一开始就把 replay、redirect、backpressure 和随机流混在同一个 testcase 里。
 

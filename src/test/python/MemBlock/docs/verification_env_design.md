@@ -182,6 +182,8 @@ pytest testcase
 - `ScalarForwardFailReplaySequence`
 - `ScalarCacheMissReplaySequence`
 - `ScalarNcReplaySequence`
+- `ScalarRawReplaySequence`
+- `ScalarRarViolationSequence`
 
 这与 UVM sequence 的思想非常接近，但保留了 Python 侧更直接的表达方式。它的主要收益有三点：
 
@@ -202,8 +204,19 @@ pytest testcase
 - `wait_replay_event()`
 - `wait_nc_replay_or_nc_out()`
 - `collect_replay_window()`
+- `wait_nuke_query_backpressure()`
+- `wait_release_event()`
+- `wait_rar_nuke_response()`
+- `wait_load_writeback_observed()`
 
 这意味着 replay testcase 可以继续保持 “sequence 描述事务 + env 提供观测入口” 的边界，而不必在测试文件里手工拼装 `MemBlock_inner_lsq_*` 的内部信号轮询。
+
+其中：
+
+- `ScalarRawReplaySequence` 负责“older store 长时间未补全 -> younger loads 触发 `RAW` replay/backpressure”的真实 DUT 模板。
+- `ScalarRarViolationSequence` 负责“older load 因精确 load-wait 暂停 -> younger same-addr load 先写回旧值 -> probe/release -> `RAR nuke` -> older load 写回新值”的真实 DUT 模板。
+- `wait_release_event()` 与 `wait_rar_nuke_response()` 把 `RAR` 场景所需的 release / query-response 观测也收口进 env facade。
+- `wait_load_writeback_observed()` 允许 testcase 直接证明某条 load 已经先写回，而不要求它已经穿过 commit-boundary compare，这对 `RAR` 这类“younger 先写回、older 后退休”的场景很重要。
 
 ## 10. `EnvConfig` 统一参数入口
 
