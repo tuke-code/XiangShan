@@ -105,6 +105,28 @@ ScalarLoadSequence(txn, expected_completed_loads=1, assert_no_outstanding=True).
 
 这个检查是为了避免“主断言已过，但后台还有未完成事务”的假阳性。
 
+### 4.3 推荐优先复用的高层 sequence
+
+当 testcase 不再是“单笔 primitive”而是“一个完整场景”时，更推荐直接使用高层 sequence，而不是在测试文件里手工拼循环和指针推进。
+
+当前建议优先复用：
+
+1. `ScalarLoadBurstSequence`
+   - 顺序执行一组 `(req_id, addr)` 标量 load。
+   - 自动维护 `next_lq_ptr`、完成数和 transport stats 快照。
+
+2. `ScalarStoreCommitSequence`
+   - 在 `ScalarStoreSequence` 之后追加 `pulse_store_commit()`、settle 和可选 quiesce。
+
+3. `ScalarStoreThenLoadSequence`
+   - 封装 `older store -> younger load` 的标准时序，适合 same-addr / unrelated-addr 两类场景。
+
+4. `ScalarStoreFlushSequence`
+   - 封装 `store -> sbuffer drain growth -> flushSb -> drain summary check`。
+
+5. `ScalarMixedTrafficSequence`
+   - 顺序执行一组 `("store", addr, data)` / `("load", addr, None)` 操作，并可在结尾自动 flush。
+
 ## 5. IO 地址 load 路径
 
 当地址位于 `< 0x80000000` 的区间时，现有测试假设它走 IO / uncache 路径。
@@ -208,10 +230,10 @@ cacheable store 的关键点在于：
 
 标准流程是：
 
-1. 运行 `ScalarStoreSequence`
+1. 运行 `ScalarStoreSequence` 或 `ScalarStoreFlushSequence`
 2. 等 committed store materialize
 3. 等 `sbuffer_drain_count` 增长
-4. 运行 `FlushStoreBuffersSequence`
+4. 运行 `FlushStoreBuffersSequence`，或直接读取 `ScalarStoreFlushSequenceResult.drain_summary`
 5. 检查 `drain_summary`
 
 ### 8.1 为什么不是每拍在线 compare
@@ -237,6 +259,13 @@ store 可能经历：
 ## 9. Store 后接同地址 load 的场景
 
 `test_api_MemBlock_single_cacheable_store_then_load_same_addr` 是当前最重要的时序案例之一。
+
+现在更推荐直接通过 `ScalarStoreThenLoadSequence` 表达这个场景，而不是在 testcase 中手工维护：
+
+- `sq_ptr`
+- `lq_ptr`
+- store materialize / committed 等待
+- load 发起后的 completed_load 断言
 
 它验证的是：
 

@@ -13,15 +13,16 @@ MemBlock 真实 DUT store 冒烟测试。
 import random
 
 from request_apis import (
-    LoadTxn,
     QueuePtr,
     StoreTxn,
 )
 from sequences.memblock_sequences import (
-    FlushStoreBuffersSequence,
     ResetEnvSequence,
-    ScalarLoadSequence,
-    ScalarStoreSequence,
+    ScalarMixedTrafficSequence,
+    ScalarStoreCommitSequence,
+    ScalarStoreFlushSequence,
+    ScalarStoreThenLoadSequence,
+    SequenceState,
 )
 
 MMIO_STORE_ADDR = 0x1000
@@ -46,36 +47,6 @@ def _store_data_low64_matches(store, expected_data: int) -> bool:
     return (int(store.data) & ((1 << 64) - 1)) == (expected_data & ((1 << 64) - 1))
 
 
-def _wait_for_counter_growth(env, attr_name: str, baseline: int, max_cycles: int = 200) -> int:
-    return env.wait_counter_growth(attr_name, baseline, max_cycles=max_cycles)
-
-
-def _wait_for_memory_quiesce(env, max_cycles: int = 200) -> None:
-    env.wait_memory_quiesce(max_cycles=max_cycles)
-
-
-def _issue_and_check_scalar_load(
-    env,
-    req_id: int,
-    lq_ptr: QueuePtr,
-    sq_ptr: QueuePtr,
-    addr: int,
-    expected_completed_loads: int,
-) -> QueuePtr:
-    txn = LoadTxn(
-        req_id=req_id,
-        addr=addr,
-        lq_ptr=lq_ptr,
-        sq_ptr=sq_ptr,
-        size=8,
-        mask=0xFF,
-    )
-    return ScalarLoadSequence(
-        txn,
-        expected_completed_loads=expected_completed_loads,
-    ).run(env).next_lq_ptr
-
-
 def test_api_MemBlock_single_mmio_store_smoke(env):
     """
     单条 MMIO store 真实 DUT 冒烟。
@@ -93,15 +64,16 @@ def test_api_MemBlock_single_mmio_store_smoke(env):
     outer_writes_before = env.get_counter("outer_write_request_count")
     sbuffer_drains_before = env.get_counter("sbuffer_drain_count")
 
-    store_result = ScalarStoreSequence(
+    store_result = ScalarStoreCommitSequence(
         StoreTxn(req_id=req_id, sq_ptr=sq_ptr, addr=MMIO_STORE_ADDR, data=store_data),
         expected_mmio=True,
+        settle_cycles=env.config.sequence.store_settle_cycles,
+        wait_quiesce=True,
+        quiesce_cycles=300,
     ).run(env)
-    store = store_result.store_view
-    _wait_for_counter_growth(env, "outer_write_request_count", outer_writes_before, max_cycles=300)
-    env.pulse_store_commit(1)
-    env.Step(env.config.sequence.store_settle_cycles)
-    _wait_for_memory_quiesce(env, max_cycles=300)
+    store = store_result.committed_store_view
+    env.wait_counter_growth("outer_write_request_count", outer_writes_before, max_cycles=300)
+    env.wait_memory_quiesce(max_cycles=300)
 
     assert store.mmio, "MMIO store 未被 store shadow 标记为 mmio"
     assert store.addr == MMIO_STORE_ADDR, "MMIO store shadow 地址不匹配"
@@ -125,30 +97,25 @@ def test_api_MemBlock_single_cacheable_store_then_load_same_addr(env):
     load_req_id = 1
     store_data = 0x8877665544332211
 
-    sq_ptr = _reset_env_and_state(env)
-    lq_ptr = QueuePtr(flag=0, value=0)
+    initial_state = SequenceState(
+        next_lq_ptr=QueuePtr(flag=0, value=0),
+        sq_ptr=_reset_env_and_state(env),
+    )
 
-    store_result = ScalarStoreSequence(
-        StoreTxn(req_id=store_req_id, sq_ptr=sq_ptr, addr=CACHEABLE_STORE_ADDR, data=store_data),
+    result = ScalarStoreThenLoadSequence(
+        StoreTxn(req_id=store_req_id, sq_ptr=initial_state.sq_ptr, addr=CACHEABLE_STORE_ADDR, data=store_data),
+        initial_lq_ptr=initial_state.next_lq_ptr,
+        load_req_id=load_req_id,
         expected_mmio=False,
         require_committed=True,
         materialize_cycles=300,
     ).run(env)
-    store = store_result.store_view
-
-    lq_ptr = _issue_and_check_scalar_load(
-        env,
-        req_id=load_req_id,
-        lq_ptr=lq_ptr,
-        sq_ptr=store_result.next_sq_ptr,
-        addr=CACHEABLE_STORE_ADDR,
-        expected_completed_loads=1,
-    )
+    store = result.store_result.store_view
 
     assert store.committed, "older store 未进入 committed 状态"
     assert store.addr == CACHEABLE_STORE_ADDR, "store shadow 地址不匹配"
     assert _store_data_low64_matches(store, store_data), "store shadow 数据不匹配"
-    assert lq_ptr.value == 1, "load queue 指针未按预期前移"
+    assert result.final_state.next_lq_ptr.value == 1, "load queue 指针未按预期前移"
     env.assert_no_outstanding()
 
 
@@ -166,27 +133,23 @@ def test_api_MemBlock_single_cacheable_store_flush_smoke(env):
     store_data = 0xAABBCCDDEEFF0011
 
     sq_ptr = _reset_env_and_state(env)
-    outer_writes_before = env.get_counter("outer_write_request_count")
-    sbuffer_drains_before = env.get_counter("sbuffer_drain_count")
-
-    store = ScalarStoreSequence(
+    result = ScalarStoreFlushSequence(
         StoreTxn(req_id=req_id, sq_ptr=sq_ptr, addr=CACHEABLE_STORE_ADDR, data=store_data),
         expected_mmio=False,
         require_committed=True,
         materialize_cycles=300,
-    ).run(env).store_view
-    _wait_for_counter_growth(env, "sbuffer_drain_count", sbuffer_drains_before, max_cycles=300)
-
-    drain_summary = FlushStoreBuffersSequence(
+        sbuffer_wait_cycles=300,
         max_cycles=400,
         settle_cycles=env.config.sequence.store_settle_cycles,
     ).run(env)
+    store = result.store_result.store_view
+    drain_summary = result.drain_summary
 
     assert not store.mmio, "cacheable store 被错误标记为 mmio"
     assert store.addr == CACHEABLE_STORE_ADDR, "cacheable store shadow 地址不匹配"
     assert _store_data_low64_matches(store, store_data), "cacheable store shadow 数据不匹配"
-    assert env.get_counter("sbuffer_drain_count") > sbuffer_drains_before, "cacheable store 未进入 sbuffer"
-    assert env.get_counter("outer_write_request_count") == outer_writes_before, "cacheable store 不应走 outer/mmio 写路径"
+    assert result.sbuffer_drain_delta > 0, "cacheable store 未进入 sbuffer"
+    assert result.outer_write_delta == 0, "cacheable store 不应走 outer/mmio 写路径"
     assert drain_summary["drain_event_count"] > 0, "flushSb 后未记录到任何 drain 事件"
     assert drain_summary["touched_byte_count"] >= 8, "drain 覆盖字节数异常"
     env.assert_no_outstanding()
@@ -204,11 +167,10 @@ def test_api_MemBlock_small_mixed_load_store_random(env):
     """
 
     rng = random.Random(RANDOM_MIXED_SEED)
-    sq_ptr = _reset_env_and_state(env)
-    lq_ptr = QueuePtr(flag=0, value=0)
-    next_load_req_id = 1
-    total_stores = 0
-    total_loads = 0
+    initial_state = SequenceState(
+        next_lq_ptr=QueuePtr(flag=0, value=0),
+        sq_ptr=_reset_env_and_state(env),
+    )
 
     for addr in RANDOM_ADDR_POOL:
         env.preload_u64(addr, rng.getrandbits(64))
@@ -223,37 +185,22 @@ def test_api_MemBlock_small_mixed_load_store_random(env):
         else:
             operations.append(("load", rng.choice(RANDOM_ADDR_POOL), None))
 
-    for op_kind, addr, maybe_data in operations:
-        if op_kind == "store":
-            store_data = int(maybe_data)
-            sq_ptr = ScalarStoreSequence(
-                StoreTxn(req_id=0, sq_ptr=sq_ptr, addr=addr, data=store_data),
-                expected_mmio=False,
-                require_committed=True,
-                materialize_cycles=300,
-            ).run(env).next_sq_ptr
-            total_stores += 1
-            continue
-
-        lq_ptr = _issue_and_check_scalar_load(
-            env,
-            req_id=next_load_req_id,
-            lq_ptr=lq_ptr,
-            sq_ptr=sq_ptr,
-            addr=addr,
-            expected_completed_loads=total_loads + 1,
-        )
-        total_loads += 1
-        next_load_req_id += 1
-
-    drain_summary = FlushStoreBuffersSequence(
-        max_cycles=env.config.sequence.store_flush_cycles,
-        settle_cycles=env.config.sequence.store_settle_cycles,
+    result = ScalarMixedTrafficSequence(
+        operations,
+        initial_state=initial_state,
+        store_req_id=0,
+        first_load_req_id=1,
+        expected_store_mmio=False,
+        require_store_committed=True,
+        store_materialize_cycles=300,
+        flush=True,
+        flush_max_cycles=env.config.sequence.store_flush_cycles,
+        flush_settle_cycles=env.config.sequence.store_settle_cycles,
     ).run(env)
 
-    assert total_stores > 0, "mixed random 未生成任何 store"
-    assert total_loads > 0, "mixed random 未生成任何 load"
-    assert env.get_completed_load_count() == total_loads, "mixed random load 未全部完成 compare"
+    assert result.total_stores > 0, "mixed random 未生成任何 store"
+    assert result.total_loads > 0, "mixed random 未生成任何 load"
+    assert env.get_completed_load_count() == result.total_loads, "mixed random load 未全部完成 compare"
     assert env.get_counter("sbuffer_drain_count") > 0, "mixed random 未观测到任何 sbuffer drain"
-    assert drain_summary["drain_event_count"] > 0, "mixed random flush 后未记录到 drain 事件"
+    assert result.drain_summary["drain_event_count"] > 0, "mixed random flush 后未记录到 drain 事件"
     env.assert_no_outstanding()

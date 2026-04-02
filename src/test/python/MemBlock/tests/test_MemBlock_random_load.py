@@ -17,7 +17,12 @@ import random
 from request_apis import (
     LoadTxn,
 )
-from sequences.memblock_sequences import ResetEnvSequence, ScalarLoadSequence, SequenceState
+from sequences.memblock_sequences import (
+    ResetEnvSequence,
+    ScalarLoadBurstSequence,
+    ScalarLoadSequence,
+    SequenceState,
+)
 
 
 RANDOM_SEED = 20260324
@@ -25,12 +30,6 @@ RANDOM_LOAD_COUNT = 1000
 IO_ADDR_LIMIT = 0x80000000
 MEM_ADDR_BASE = 0x80000008
 RANDOM_ADDR_WINDOW_WORDS = 1 << 20
-TRANSPORT_STAT_KEYS = (
-    "outer_request_count",
-    "dcache_a_request_count",
-    "dcache_d_response_count",
-    "dcache_e_request_count",
-)
 
 
 def _reset_env_and_state(env) -> SequenceState:
@@ -48,11 +47,6 @@ def _reset_env_and_state(env) -> SequenceState:
     ).run(env)
 
 
-def _snapshot_transport_stats(env) -> dict[str, int]:
-    stats = env.get_transport_stats()
-    return {key: int(stats[key]) for key in TRANSPORT_STAT_KEYS}
-
-
 def _random_addr(rng: random.Random, addr_base: int) -> int:
     return addr_base + (rng.randrange(0, RANDOM_ADDR_WINDOW_WORDS) << 3)
 
@@ -67,34 +61,13 @@ def _prepare_random_requests(env, addr_base: int) -> list[tuple[int, int]]:
     return requests
 
 
-def _run_random_load_requests(env, requests: list[tuple[int, int]]) -> None:
+def _run_random_load_requests(env, requests: list[tuple[int, int]]):
     completed_before = env.get_completed_load_count()
     stream_state = _reset_env_and_state(env)
-
-    for req_id, random_addr in requests:
-        assert int(env.dut.io_reset_backend.value) == 0, (
-            f"连续流量过程中 backend 在请求 {req_id} 前重新进入 reset"
-        )
-
-        current_lq_ptr = stream_state.next_lq_ptr
-
-        txn = LoadTxn(
-            req_id=req_id,
-            addr=random_addr,
-            lq_ptr=current_lq_ptr,
-            sq_ptr=stream_state.sq_ptr,
-            size=8,
-            mask=0xFF,
-        )
-        result = ScalarLoadSequence(
-            txn,
-            expected_completed_loads=completed_before + req_id + 1,
-        ).run(env)
-
-        stream_state = SequenceState(
-            next_lq_ptr=result.next_lq_ptr,
-            sq_ptr=stream_state.sq_ptr,
-        )
+    result = ScalarLoadBurstSequence(
+        requests,
+        initial_state=stream_state,
+    ).run(env)
 
     assert env.issue[0].ready.value == 1, "随机 load 流结束后 `issue[0]` 不再 ready"
     assert env.lsq_status.lqCanAccept.value == 1, "随机 load 流结束后 `lqCanAccept` 变为 0"
@@ -102,6 +75,7 @@ def _run_random_load_requests(env, requests: list[tuple[int, int]]) -> None:
         "1000 个随机 load 未全部完成校验"
     )
     env.assert_no_outstanding()
+    return result
 
 
 def _assert_random_io_transport(stats_before: dict[str, int], stats_after: dict[str, int]) -> None:
@@ -178,10 +152,8 @@ def test_api_MemBlock_random_io_1000_load_requests(env):
 
     requests = _prepare_random_requests(env, addr_base=0)
     assert all(0 <= addr < IO_ADDR_LIMIT for _, addr in requests), "random_io 请求地址超出 IO 地址空间"
-    stats_before = _snapshot_transport_stats(env)
-    _run_random_load_requests(env, requests)
-    stats_after = _snapshot_transport_stats(env)
-    _assert_random_io_transport(stats_before, stats_after)
+    result = _run_random_load_requests(env, requests)
+    _assert_random_io_transport(result.transport_stats_before, result.transport_stats_after)
 
 
 def test_api_MemBlock_mem_io_1000_load_requests(env):
@@ -196,7 +168,5 @@ def test_api_MemBlock_mem_io_1000_load_requests(env):
 
     requests = _prepare_random_requests(env, addr_base=MEM_ADDR_BASE)
     assert all(addr > IO_ADDR_LIMIT for _, addr in requests), "mem_io 请求地址未落入 cacheable 地址空间"
-    stats_before = _snapshot_transport_stats(env)
-    _run_random_load_requests(env, requests)
-    stats_after = _snapshot_transport_stats(env)
-    _assert_mem_io_transport(stats_before, stats_after)
+    result = _run_random_load_requests(env, requests)
+    _assert_mem_io_transport(result.transport_stats_before, result.transport_stats_after)
