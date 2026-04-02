@@ -22,20 +22,22 @@ import utility.CircularQueuePtr
 import utility.HasCircularQueuePtrHelper
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
-import utils.EnumUInt
 import xiangshan.frontend.ftq.BpuFlushInfo
 import xiangshan.frontend.ftq.FtqPtr
 
 class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     with ICacheMissUpdateHelper
-    with HasCircularQueuePtrHelper {
+    with HasCircularQueuePtrHelper
+    with ICacheDataHelper {
 
   class ICacheWayLookupIO(implicit p: Parameters) extends ICacheBundle {
-    val flush:        Bool                              = Input(Bool())
-    val flushFromBpu: BpuFlushInfo                      = Input(new BpuFlushInfo)
-    val read:         DecoupledIO[WayLookupBundle]      = DecoupledIO(new WayLookupBundle)
-    val write:        DecoupledIO[WayLookupWriteBundle] = Flipped(DecoupledIO(new WayLookupWriteBundle))
-    val update:       Valid[MissRespBundle]             = Flipped(ValidIO(new MissRespBundle))
+    val flush:           Bool                                   = Input(Bool())
+    val flushFromBpu:    BpuFlushInfo                           = Input(new BpuFlushInfo)
+    val read:            DecoupledIO[Vec[WayLookupBundle]]      = DecoupledIO(Vec(2, new WayLookupBundle))
+    val secondReadValid: Bool                                   = Input(Bool())
+    val write:           DecoupledIO[Vec[WayLookupWriteBundle]] = Flipped(DecoupledIO(Vec(2, new WayLookupWriteBundle)))
+    val secondWriteValid: Bool                  = Input(Bool())
+    val update:           Valid[MissRespBundle] = Flipped(ValidIO(new MissRespBundle))
 
     val perf: WayLookupPerfInfo = Output(new WayLookupPerfInfo)
   }
@@ -59,7 +61,11 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   private val tailFtqIdx = RegInit(0.U.asTypeOf(new FtqPtr))
 
   private val empty = readPtr === writePtr
-  private val full  = (readPtr.value === writePtr.value) && (readPtr.flag ^ writePtr.flag)
+
+  private val numValidEntries = distanceBetween(writePtr, readPtr)
+  private val numFreeEntries  = WayLookupSize.U - numValidEntries
+  dontTouch(numValidEntries)
+  dontTouch(numFreeEntries)
 
   // NOTE: May be unportable, we have bp3 == pf2 now, and WayLookup is written in pf1,
   // so the tailing 0 (already bypassed to if1) or 1 (if1 stall, stored here) entries might be flushed by bp3,
@@ -74,27 +80,32 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   }.elsewhen(bpuS3FlushValid && !empty) {
     writePtr := bpuS3FlushPtr
   }.elsewhen(io.write.fire) {
-    writePtr := writePtr + 1.U
+    val enqCnt = Mux(io.secondWriteValid, 2.U, 1.U)
+    writePtr := writePtr + enqCnt
   }
 
   when(io.flush) {
     readPtr.value := 0.U
     readPtr.flag  := false.B
   }.elsewhen(io.read.fire) {
-    readPtr := readPtr + 1.U
+    val deqCnt = Mux(io.secondReadValid, 2.U, 1.U)
+    readPtr := readPtr + deqCnt
   }
 
   when(io.flush) {
     tailFtqIdx.value := 0.U
     tailFtqIdx.flag  := false.B
   }.elsewhen(io.write.fire) {
-    tailFtqIdx := io.write.bits.ftqIdx
+    tailFtqIdx := Mux(io.secondWriteValid, io.write.bits(1).ftqIdx, io.write.bits(0).ftqIdx)
   }
 
   // we can store only the first exception encountered, as exceptions must trigger a redirection (and thus a flush)
   private val exceptionEntry = RegInit(0.U.asTypeOf(Valid(new WayLookupExceptionEntry)))
   private val exceptionPtr   = RegInit(ICacheWayLookupPtr(false.B, 0.U))
-  private val exceptionHit   = exceptionPtr === readPtr && exceptionEntry.valid
+  private val exceptionHit = VecInit(
+    exceptionPtr === readPtr && exceptionEntry.valid,
+    exceptionPtr === (readPtr + 1.U) && exceptionEntry.valid
+  )
 
   when(io.flush || bpuS3FlushValid && exceptionPtr === bpuS3FlushPtr) {
     // When flushed by bp3
@@ -122,14 +133,30 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
 
   /* *** read *** */
   // if the entry is empty, but there is a valid write, we can bypass it to read port (maybe timing critical)
-  private val canBypass = empty && io.write.valid && !exceptionEntry.valid
-  private val canRead   = !empty && !updateStall
-  io.read.valid := canRead || canBypass
-  when(canBypass) {
-    io.read.bits := io.write.bits
+//  private val canBypass = empty && io.write.valid && !exceptionEntry.valid
+  private val canBypassOne =
+    empty && io.write.valid && !io.secondWriteValid && !exceptionEntry.valid // FIXME
+//  private val canBypassTwo =
+//    empty && io.fromPrefetch.valid && twoPrefetchValid && !exceptionEntry.valid  // FIXME
+  private val canRead = !empty && !updateStall
+  io.read.valid := canRead || canBypassOne
+
+  when(canBypassOne) {
+    io.read.bits(0) := io.write.bits(0)
+    io.read.bits(1) := 0.U.asTypeOf(io.read.bits(1))
   }.otherwise {
-    io.read.bits.entry          := entries(readPtr.value)
-    io.read.bits.exceptionEntry := Mux(exceptionHit, exceptionEntry.bits, 0.U.asTypeOf(new WayLookupExceptionEntry))
+    io.read.bits(0).entry := entries(readPtr.value)
+    io.read.bits(0).exceptionEntry := Mux(
+      exceptionHit(0),
+      exceptionEntry.bits,
+      0.U.asTypeOf(new WayLookupExceptionEntry)
+    )
+    io.read.bits(1).entry := entries((readPtr + 1.U).value)
+    io.read.bits(1).exceptionEntry := Mux(
+      exceptionHit(1),
+      exceptionEntry.bits,
+      0.U.asTypeOf(new WayLookupExceptionEntry)
+    )
   }
 
   /**
@@ -139,12 +166,16 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     */
   // stall write if there is an exceptions to save power (i.e. wait for flush)
   // this will stall the prefetch pipe
-  io.write.ready := !full && !exceptionEntry.valid
+  io.write.ready := numFreeEntries >= 2.U && !exceptionEntry.valid
   when(io.write.fire) {
-    entries(writePtr.value) := io.write.bits.entry
-    when(io.write.bits.itlbException.hasException) {
+    entries(writePtr.value) := io.write.bits(0).entry
+    when(io.secondWriteValid) {
+      entries(writePtr.value + 1.U) := io.write.bits(1).entry
+    }
+    // do not allow 2-prefetch when has backend exception
+    when(io.write.bits(0).itlbException.hasException) {
       exceptionEntry.valid := true.B
-      exceptionEntry.bits  := io.write.bits.exceptionEntry
+      exceptionEntry.bits  := io.write.bits(0).exceptionEntry
       exceptionPtr         := writePtr
     }
   }

@@ -19,6 +19,8 @@ import chisel3._
 import chisel3.util._
 import ftq.BpuFlushInfo
 import ftq.FtqPtr
+import ftq.FtqToMainPipeBundle
+import ftq.FtqToPrefetchBundle
 import org.chipsalliance.cde.config.Parameters
 import utility.InstSeqNum
 import utility.XSError
@@ -37,12 +39,13 @@ import xiangshan.frontend.bpu.BpuRedirect
 import xiangshan.frontend.bpu.BpuTrain
 import xiangshan.frontend.bpu.BranchAttribute
 import xiangshan.frontend.bpu.BranchInfo
-import xiangshan.frontend.bpu.mbtb.MainBtbMeta
 import xiangshan.frontend.ibuffer.IBufPtr
+import xiangshan.frontend.icache.HasICacheParameters
 import xiangshan.frontend.icache.ICacheCacheLineHelper
 import xiangshan.frontend.icache.ICachePerfInfo
 import xiangshan.frontend.icache.ICacheRespBundle
 import xiangshan.frontend.icache.ICacheTopdownInfo
+import xiangshan.frontend.icache.MainPipeToIfuIO
 import xiangshan.frontend.instruncache.InstrUncacheReq
 import xiangshan.frontend.instruncache.InstrUncacheResp
 
@@ -95,22 +98,21 @@ class FtqPrefetchRequest(implicit p: Parameters) extends FrontendBundle with ICa
 }
 
 class FtqFetchRequest(implicit p: Parameters) extends FrontendBundle with ICacheCacheLineHelper {
+  val valid:              Bool       = Bool()
   val startVAddr:         PrunedAddr = PrunedAddr(VAddrBits)
-  val nextCachelineVAddr: PrunedAddr = PrunedAddr(VAddrBits)
+  val nextLineVAddr:      PrunedAddr = PrunedAddr(VAddrBits)
+  val isCrossLine:        Bool       = Bool()
   val ftqIdx:             FtqPtr     = new FtqPtr
-  val takenCfiOffset:     UInt       = UInt(CfiPositionWidth.W)
+  val bankSel:            Vec[UInt]  = Vec(PortNumber, UInt(DataBanks.W))
+  val vSetIdx:            Vec[UInt]  = Vec(PortNumber, UInt(idxBits.W))
   val isBackendException: Bool       = Bool()
-
-  def crossCacheline: Bool = super.isCrossLine(this.startVAddr, this.takenCfiOffset)
 }
 
 class FtqToICacheIO(implicit p: Parameters) extends FrontendBundle {
-  // NOTE: req.bits must be prepared in T cycle
-  // while req.valid is set true in T + 1 cycle
-  val fetchReq:      DecoupledIO[FtqFetchRequest]    = Decoupled(new FtqFetchRequest)
-  val prefetchReq:   DecoupledIO[FtqPrefetchRequest] = Decoupled(new FtqPrefetchRequest)
-  val flushFromBpu:  BpuFlushInfo                    = new BpuFlushInfo
-  val redirectFlush: Bool                            = Output(Bool())
+  val toPrefetch:    DecoupledIO[FtqToPrefetchBundle] = Decoupled(new FtqToPrefetchBundle)
+  val toMainPipe:    DecoupledIO[FtqToMainPipeBundle] = Decoupled(new FtqToMainPipeBundle)
+  val flushFromBpu:  BpuFlushInfo                     = new BpuFlushInfo
+  val redirectFlush: Bool                             = Output(Bool())
 }
 
 class ICacheToIfuIO(implicit p: Parameters) extends FrontendBundle {

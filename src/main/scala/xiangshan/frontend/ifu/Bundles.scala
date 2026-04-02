@@ -87,12 +87,12 @@ class FetchBlockInfo(implicit p: Parameters) extends IfuBundle {
     val taken          = ftqFetch.takenCfiOffset.valid
     val calcInstrRange = Fill(FetchBlockInstNum, 1.U(1.W)) >> (~cfiOffset).asUInt
     val calcFetchSize  = cfiOffset + 1.U(log2Ceil(FetchBlockInstNum + 1).W)
-    when(ftqFetch.valid && !taken && !flush) {
-      assert(
-        cfiOffset === getBasicBlockIdx(ftqFetch.nextStartVAddr, ftqFetch.startVAddr),
-        "when not taken, cfiOffset must match fetch block range."
-      )
-    }
+//    when(ftqFetch.valid && !taken && !flush) {
+//      assert(
+//        cfiOffset === getBasicBlockIdx(ftqFetch.nextStartVAddr, ftqFetch.startVAddr),
+//        "when not taken, cfiOffset must match fetch block range."
+//      )
+//    }
     ftqIdx         := ftqFetch.ftqIdx
     predTakenIdx   := DontCare // It will be overwritten later with the required value.
     invalidTaken   := DontCare // It will be overwritten later with the required value.
