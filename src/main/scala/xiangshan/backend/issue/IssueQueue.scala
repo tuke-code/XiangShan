@@ -1042,7 +1042,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     val simpLeftOne = simpLeftOneCaseVec.map(_ === VecInit(validVecRegNext.drop(params.numEnq).take(params.numSimp)).asUInt).reduce(_ | _)
     val simpCanotIn = Wire(Bool())
     if (params.numEnq > 2)
-      simpCanotIn := PopCount(validVecRegNext.drop(params.numEnq)) > (params.numSimp - params.numEnq).U
+      simpCanotIn := PopCount(validVecRegNext.drop(params.numEnq).take(params.numSimp)) > (params.numSimp - params.numEnq).U
     else
       simpCanotIn := simpLeftOne || validVecRegNext.drop(params.numEnq).take(params.numSimp).reduce(_ & _)
     othersCanotIn := simpCanotIn
