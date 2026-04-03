@@ -86,6 +86,7 @@ class TrainReqBundle()(implicit p: Parameters) extends DCacheBundle {
 class SourcePrefetchReq()(implicit p: Parameters) extends DCacheBundle {
   val triggerPC = UInt(VAddrBits.W)
   val triggerVA = UInt(VAddrBits.W)
+  val triggerPA = UInt(PAddrBits.W)
   val prefetchVA = UInt(VAddrBits.W)
   val prefetchTarget = UInt(PrefetchTarget.PfTgtBits.W)
 }

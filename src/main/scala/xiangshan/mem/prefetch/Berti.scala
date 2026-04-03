@@ -35,7 +35,10 @@ case class BertiParams
   ht_replacement_policy: String = "fifo",
   dt_way_cnt: Int = 64, // 16,
   dt_delta_size: Int = 4, // 16,
-  use_byte_addr: Boolean = false,
+  addr_list_size: Int = 6,
+  max_deltafound: Int = 4,
+  aggressive_pf: Boolean = false,
+  use_byte_addr: Boolean = true,
 ) extends PrefetcherParams{
   override def TRAIN_FILTER_SIZE = 6
   override def PREFETCH_FILTER_SIZE = 16
@@ -55,9 +58,9 @@ trait HasBertiHelper extends HasCircularQueuePtrHelper with HasDCacheParameters 
   def _name: String = bertiParams.name
 
   def PcOffsetWidth: Int = 2
-  def DeltaWidth: Int = 13
   def HtPcTagWidth: Int = 7
-  def HtLineVAddrWidth: Int = 24
+  def HtLineVAddrWidth: Int = if (useByteAddr) VAddrBits else 24
+  def DeltaWidth: Int = if (useByteAddr) HtLineVAddrWidth + 1 else 13
   def HtLineOffsetWidth: Int = DCacheLineOffset
   def DtPcTagWidth: Int = 10
   def DtCntWidth: Int = 4
@@ -71,13 +74,25 @@ trait HasBertiHelper extends HasCircularQueuePtrHelper with HasDCacheParameters 
   def HtWaySize: Int = bertiParams.ht_way_cnt
   def DtDeltaSize: Int = bertiParams.dt_delta_size
   def DtDeltaIndexWidth: Int = log2Up(DtDeltaSize)
+  def MaxHistoryDepth: Int = bertiParams.addr_list_size
+  def MaxDeltaFound: Int = bertiParams.max_deltafound
+  def AggressivePF: Boolean = bertiParams.aggressive_pf
 
   def HtSetWidth: Int = log2Up(HtSetSize)
   def DtWayWidth: Int = log2Up(DtWaySize)
 
-  def DELTA_MIN: Int = -(1 << (DeltaWidth - 1))
-  def DELTA_MAX: Int = (1 << (DeltaWidth - 1)) - 1
+  def DELTA_MIN: BigInt = -(BigInt(1) << (DeltaWidth - 1))
+  def DELTA_MAX: BigInt = (BigInt(1) << (DeltaWidth - 1)) - 1
   def DELTA_THRESHOLD: Int = if (useByteAddr) blockBytes else 1 // 64 Bytes = 1 line
+
+  def isDeltaOverflow(delta: SInt): Bool = {
+    delta < DELTA_MIN.S(delta.getWidth.W) || delta > DELTA_MAX.S(delta.getWidth.W)
+  }
+
+  def isDeltaTooShort(delta: SInt): Bool = {
+    val threshold = DELTA_THRESHOLD.S(delta.getWidth.W)
+    delta <= threshold && delta >= (-DELTA_THRESHOLD).S(delta.getWidth.W)
+  }
 
   def _getLineVAddr(vaddr: UInt): UInt = {
     vaddr(vaddr.getWidth - 1, HtLineOffsetWidth)
@@ -85,13 +100,13 @@ trait HasBertiHelper extends HasCircularQueuePtrHelper with HasDCacheParameters 
 
   def _signedExtend(x: UInt, width: Int): UInt = {
     if (x.getWidth >= width) {
-      x
+      x(width - 1, 0)
     } else {
       Cat(Fill(width - x.getWidth, x.head(1)), x)
     }
   }
 
-  def getPCHash(pc: UInt): UInt = (pc >> 1) ^ (pc >> 4)
+  def getPCHash(pc: UInt): UInt = pc >> 1
 
   def getTrainBaseAddr(vaddr: UInt): UInt = {
     if (useByteAddr) {
@@ -618,6 +633,7 @@ class DeltaTable()(implicit p: Parameters) extends BertiModule {
           res.valid := train.valid
           res.bits.triggerPC := train.bits.pc
           res.bits.triggerVA := train.bits.vaddr
+          res.bits.triggerPA := train.bits.paddr
           res.bits.prefetchVA := getPrefetchVAddr(train.bits.vaddr, deltaInfo.delta)
           when(deltaInfo.status === DeltaStatus.L1_PREF) {
             res.bits.prefetchTarget := PrefetchTarget.L1.id.U
@@ -687,6 +703,7 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
   def LineOffsetWidth: Int = DCacheLineOffset
   def VLineWidth: Int = VAddrBits - LineOffsetWidth
   def PLineWidth: Int = PAddrBits - LineOffsetWidth
+  def RecentFilterSize: Int = 8
   def getLine(addr: UInt): UInt = addr(addr.getWidth - 1, LineOffsetWidth)
   def sizeMap[T <: Data](f: Int => T) = VecInit((0 until size).map(f))
 
@@ -700,15 +717,27 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
     def getPrefetchVA: UInt = Cat(vline, 0.U(LineOffsetWidth.W))
     def getPrefetchPA: UInt = Cat(pline, 0.U(LineOffsetWidth.W))
     def getPrefetchAlias: UInt = get_alias(getPrefetchPA)
+    def samePage(src: SourcePrefetchReq): Bool =
+      src.triggerVA(VAddrBits - 1, PageOffsetWidth) === src.prefetchVA(VAddrBits - 1, PageOffsetWidth)
+    def triggerInPmem(src: SourcePrefetchReq): Bool =
+      PmemRanges.map(_.cover(src.triggerPA)).reduce(_ || _)
+    def samePageFast(src: SourcePrefetchReq): Bool =
+      samePage(src) && triggerInPmem(src)
+    def getFastPrefetchPA(src: SourcePrefetchReq): UInt =
+      Cat(src.triggerPA(PAddrBits - 1, PageOffsetWidth), src.prefetchVA(PageOffsetWidth - 1, 0))
     def fromSourcePrefetchReq(src: SourcePrefetchReq): Unit ={
       this.vline := getLine(src.prefetchVA)
-      this.pline := 0.U
-      this.pvalid := false.B
+      this.pline := Mux(samePageFast(src), getLine(getFastPrefetchPA(src)), 0.U)
+      this.pvalid := samePageFast(src)
       this.target := src.prefetchTarget
     }
-    def updateEntryMerge(target: UInt): Unit = {
-      when(target < this.target){
-        this.target := target
+    def updateEntryMerge(src: SourcePrefetchReq): Unit = {
+      when(src.prefetchTarget < this.target){
+        this.target := src.prefetchTarget
+      }
+      when(samePageFast(src)) {
+        this.pline := getLine(getFastPrefetchPA(src))
+        this.pvalid := true.B
       }
     }
     def updateTlbResp(paddr: UInt): Unit = {
@@ -735,6 +764,9 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
   val replacer = ReplacementPolicy.fromString("plru", size)
   val tlbReqArb = Module(new RRArbiterInit(new TlbReq, size))
   val pfIdxArb = Module(new RRArbiterInit(UInt(BufferIndexWidth.W), size))
+  val recentLines = Reg(Vec(RecentFilterSize, UInt(VLineWidth.W)))
+  val recentValids = RegInit(VecInit(Seq.fill(RecentFilterSize)(false.B)))
+  val recentPtr = RegInit(0.U(log2Up(RecentFilterSize).W))
   
   /*** io default */
   io.l1_req.valid := false.B
@@ -761,8 +793,13 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
   // e0
   val e0_matchPrev = e1_fire && e0_srcValid && getLine(e1_src.prefetchVA) === getLine(e0_src.prefetchVA)
   val e0_matchVec = sizeMap(i => e0_srcValid && valids(i) && entries(i).vline === getLine(e0_src.prefetchVA))
+  val e0_recentMatch = VecInit((0 until RecentFilterSize).map(i =>
+    e0_srcValid && recentValids(i) && recentLines(i) === getLine(e0_src.prefetchVA)
+  )).asUInt.orR
   assert(PopCount(e0_matchVec) <= 1.U, s"matchVec should not have more than one match in ${this.getClass.getSimpleName}")
   val e0_allocIdx = replacer.way
+  val e0_samePageFast = e0_srcValid &&
+    e0_src.triggerVA(VAddrBits - 1, PageOffsetWidth) === e0_src.prefetchVA(VAddrBits - 1, PageOffsetWidth)
   when(e0_matchPrev){
     e0_selIdx := e1_selIdx
   }.elsewhen(e0_matchVec.orR){
@@ -771,7 +808,7 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
     e0_selIdx := e0_allocIdx
   }
   val e0_update =  e0_matchPrev || e0_matchVec.orR
-  e0_fire := e0_srcValid
+  e0_fire := e0_srcValid && !e0_recentMatch
   when(e0_fire){
     replacer.access(e0_selIdx)
   }
@@ -780,7 +817,7 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
   val e1_update = RegNext(e0_fire && e0_update)
   val e1_alloc = RegNext(e0_fire && !e0_update)
   when(e1_update){
-    entries(e1_selIdx).updateEntryMerge(e1_src.prefetchTarget)
+    entries(e1_selIdx).updateEntryMerge(e1_src)
   }.elsewhen(e1_alloc){
     entries(e1_selIdx).fromSourcePrefetchReq(e1_src)
     valids(e1_selIdx) := true.B
@@ -788,6 +825,7 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
   XSPerfAccumulate("src_req_fire", e0_fire)
   XSPerfAccumulate("src_req_fire_update", e0_fire && e0_update)
   XSPerfAccumulate("src_req_fire_alloc", e0_fire && !e0_update)
+  XSPerfAccumulate("src_req_same_page_fast", e0_fire && e0_samePageFast)
 
   /******************************************************************
    * tlb
@@ -843,16 +881,13 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
   val s3_updateValid = s3_tlbRespValid && !s3_tlbRespBits.miss
   val s3_updateIndex = OHToUInt(s3_tlbFireOH.asUInt)
   val s3_drop1 = s3_tlbRespValid && s3_tlbRespBits.miss
-  val s3_drop2 = s3_updateValid && (
-    // is region addr in pmem ranges
-    !PmemRanges.map(_.cover(s3_tlbRespBits.paddr.head)).reduce(_ || _) ||
-    // page/access fault
-    s3_tlbRespBits.excp.head.pf.ld || s3_tlbRespBits.excp.head.gpf.ld || s3_tlbRespBits.excp.head.af.ld ||
-    // uncache
-    s3_pmpResp.mmio || Pbmt.isUncache(s3_tlbRespBits.pbmt.head) ||
-    // pmp access fault
-    s3_pmpResp.ld
+  val s3_notPmem = s3_updateValid && !PmemRanges.map(_.cover(s3_tlbRespBits.paddr.head)).reduce(_ || _)
+  val s3_pageFault = s3_updateValid && (
+    s3_tlbRespBits.excp.head.pf.ld || s3_tlbRespBits.excp.head.gpf.ld || s3_tlbRespBits.excp.head.af.ld
   )
+  val s3_uncache = s3_updateValid && (s3_pmpResp.mmio || Pbmt.isUncache(s3_tlbRespBits.pbmt.head))
+  val s3_pmpFault = s3_updateValid && s3_pmpResp.ld
+  val s3_drop2 = s3_notPmem || s3_pageFault || s3_uncache || s3_pmpFault
   val s3_quit = entries(s3_updateIndex).getPrefetchVA =/= s3_vaddr // overwrite by new req
   // update
   when(s3_drop1 || s3_drop2 || s3_quit){
@@ -865,6 +900,7 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
   XSPerfAccumulate("tlb_req_fire", io.tlbReq.req.fire)
   XSPerfAccumulate("tlb_resp_fire", io.tlbReq.resp.fire)
   XSPerfAccumulate("tlb_drop_miss", s3_drop1)
+  XSPerfAccumulate("tlb_retry_miss", false.B)
   XSPerfAccumulate("tlb_drop_fault", s3_drop2)
   XSPerfAccumulate("tlb_quit_overwrite", s3_quit)
   XSPerfAccumulate("tlb_succ_update", !(s3_drop1 || s3_drop2 || s3_quit) && s3_updateValid)
@@ -907,10 +943,15 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
   // update
   when(pfIdxArb.io.out.fire){
     valids(pfIdx) := false.B
+    recentLines(recentPtr) := entries(pfIdx).vline
+    recentValids(recentPtr) := true.B
+    recentPtr := recentPtr + 1.U
   }
   XSPerfAccumulate("pf_l1_req", io.l1_req.fire)
   XSPerfAccumulate("pf_l2_req", io.l2_req.fire)
   XSPerfAccumulate("pf_l3_req", io.l3_req.fire)
+  XSPerfAccumulate("berti_pf_send_l1", io.l1_req.fire)
+  XSPerfAccumulate("berti_pf_send_l2", io.l2_req.fire)
   
   /*** performance counter and debug */
   val srcTable = ChiselDB.createTable(
@@ -936,12 +977,365 @@ class DeltaPrefetchBuffer(size: Int, name: String)(implicit p: Parameters) exten
   )
 }
 
+class Gem5LikeUnifiedTable()(implicit p: Parameters) extends BertiModule {
+  def AggressiveQueueSize: Int = 16
+
+  class DeltaInfo(implicit p: Parameters) extends BertiBundle {
+    val delta = SInt(DeltaWidth.W)
+    val coverageCnt = UInt(8.W)
+    val status = DeltaStatus()
+
+    def init(): Unit = {
+      delta := 0.S
+      coverageCnt := 0.U
+      status := DeltaStatus.NO_PREF
+    }
+  }
+
+  class Entry(implicit p: Parameters) extends BertiBundle {
+    val pcTag = UInt(HtPcTagWidth.W)
+    val pc = UInt(VAddrBits.W)
+    val hysteresis = Bool()
+    val counter = UInt(8.W)
+    val bestDeltaIdx = UInt(DtDeltaIndexWidth.W)
+    val histAddr = Vec(MaxHistoryDepth, UInt(HtLineVAddrWidth.W))
+    val histTs = Vec(MaxHistoryDepth, UInt(LATENCY_WIDTH.W))
+    val histValid = Vec(MaxHistoryDepth, Bool())
+    val deltaList = Vec(DtDeltaSize, new DeltaInfo())
+
+    def init(): Unit = {
+      pcTag := 0.U
+      pc := 0.U
+      hysteresis := false.B
+      counter := 0.U
+      bestDeltaIdx := 0.U
+      histAddr.foreach(_ := 0.U)
+      histTs.foreach(_ := 0.U)
+      histValid.foreach(_ := false.B)
+      deltaList.foreach(_.init())
+    }
+  }
+
+  class HtWayPointer(implicit p: Parameters) extends CircularQueuePtr[HtWayPointer](HtWaySize) {}
+
+  class PfQueuePtr(implicit p: Parameters) extends CircularQueuePtr[PfQueuePtr](AggressiveQueueSize) {}
+
+  class AggressivePfItem(implicit p: Parameters) extends BertiBundle {
+    val triggerPC = UInt(VAddrBits.W)
+    val triggerVA = UInt(VAddrBits.W)
+    val triggerPA = UInt(PAddrBits.W)
+    val delta = SInt(DeltaWidth.W)
+    val target = UInt(PrefetchTarget.PfTgtBits.W)
+  }
+
+  val io = IO(new Bundle{
+    val access = Flipped(ValidIO(new Bundle{
+      val pc = UInt(VAddrBits.W)
+      val vaddr = UInt(VAddrBits.W)
+    }))
+    val accessResp = Output(Bool())
+    val search = Flipped(ValidIO(new HTSearchReq()))
+    val train = Flipped(ValidIO(new TrainReqBundle()))
+    val prefetch = ValidIO(new SourcePrefetchReq())
+  })
+
+  def getIndex(pc: UInt): UInt = getPCHash(pc)(HtSetWidth-1, 0)
+  def getTag(pc: UInt): UInt = getPCHash(pc)(HtPcTagWidth + HtSetWidth - 1, HtSetWidth)
+  def getTrainBaseAddr2HT(vaddr: UInt): UInt = getTrainBaseAddr(vaddr)(HtLineVAddrWidth - 1, 0)
+
+  val entries = Reg(Vec(HtSetSize, Vec(HtWaySize, new Entry)))
+  val valids = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, Bool()))))
+  val currTime = GTimer()
+
+  val replacer = Option.when(usePLRU)(ReplacementPolicy.fromString("setplru", HtWaySize, HtSetSize))
+  val accessPtrs = Option.when(useFIFO)(RegInit(0.U.asTypeOf(Vec(HtSetSize, new HtWayPointer))))
+  val pfQueue = Reg(Vec(AggressiveQueueSize, new AggressivePfItem))
+  val pfQueueValids = RegInit(VecInit(Seq.fill(AggressiveQueueSize)(false.B)))
+  val pfEnqPtr = RegInit(0.U.asTypeOf(new PfQueuePtr))
+  val pfDeqPtr = RegInit(0.U.asTypeOf(new PfQueuePtr))
+  val accessHit = WireInit(false.B)
+  val accessDup = WireInit(false.B)
+  val accessAppend = WireInit(false.B)
+  val accessAlloc = WireInit(false.B)
+  val accessHystClear = WireInit(false.B)
+  val searchHit = WireInit(false.B)
+  val searchLatencyZero = WireInit(false.B)
+  val searchCandFound = WireInit(false.B)
+  val searchCandOverflow = WireInit(false.B)
+  val searchCandCnt = WireInit(0.U(log2Up(MaxHistoryDepth + 1).W))
+  val searchStatusUpdate = WireInit(false.B)
+  val searchBestActive = WireInit(false.B)
+  val trainHit = WireInit(false.B)
+  val trainBestActive = WireInit(false.B)
+  val trainBestShouldPrefetch = WireInit(false.B)
+  val trainActiveDeltaCnt = WireInit(0.U(log2Up(DtDeltaSize + 1).W))
+  val prefetchFromBest = WireInit(false.B)
+  val prefetchFromQueue = WireInit(false.B)
+
+  def historyCount(entry: Entry): UInt = PopCount(entry.histValid)
+  def queueCount: UInt = PopCount(pfQueueValids)
+  def queueSpace: UInt = AggressiveQueueSize.U - queueCount
+
+  io.accessResp := false.B
+  io.prefetch.valid := false.B
+  io.prefetch.bits := DontCare
+
+  when(io.access.valid) {
+    val set = getIndex(io.access.bits.pc)
+    val tag = getTag(io.access.bits.pc)
+    val baseAddr = getTrainBaseAddr2HT(io.access.bits.vaddr)
+    val hitVec = VecInit((0 until HtWaySize).map(w => valids(set)(w) && entries(set)(w).pcTag === tag))
+    val hit = hitVec.asUInt.orR
+    when(hit) {
+      accessHit := true.B
+      val way = OHToUInt(hitVec)
+      val dupVec = VecInit((0 until MaxHistoryDepth).map(i =>
+        entries(set)(way).histValid(i) && entries(set)(way).histAddr(i) === baseAddr
+      ))
+      when(!dupVec.asUInt.orR) {
+        accessAppend := true.B
+        val count = historyCount(entries(set)(way))
+        when(count === MaxHistoryDepth.U) {
+          for (i <- 0 until MaxHistoryDepth - 1) {
+            entries(set)(way).histAddr(i) := entries(set)(way).histAddr(i + 1)
+            entries(set)(way).histTs(i) := entries(set)(way).histTs(i + 1)
+            entries(set)(way).histValid(i) := entries(set)(way).histValid(i + 1)
+          }
+          entries(set)(way).histAddr(MaxHistoryDepth - 1) := baseAddr
+          entries(set)(way).histTs(MaxHistoryDepth - 1) := currTime
+          entries(set)(way).histValid(MaxHistoryDepth - 1) := true.B
+        }.otherwise {
+          for (i <- 0 until MaxHistoryDepth) {
+            when(count === i.U) {
+              entries(set)(way).histAddr(i) := baseAddr
+              entries(set)(way).histTs(i) := currTime
+              entries(set)(way).histValid(i) := true.B
+            }
+          }
+        }
+        entries(set)(way).hysteresis := true.B
+        io.accessResp := true.B
+      }.otherwise {
+        accessDup := true.B
+      }
+      replacer.foreach(_.access(set, way))
+    }.otherwise {
+      val way = if (usePLRU) replacer.get.way(set) else accessPtrs.get(set).value
+      when(valids(set)(way) && entries(set)(way).hysteresis) {
+        entries(set)(way).hysteresis := false.B
+        accessHystClear := true.B
+      }.otherwise {
+        accessAlloc := true.B
+        valids(set)(way) := true.B
+        entries(set)(way).init()
+        entries(set)(way).pcTag := tag
+        entries(set)(way).pc := io.access.bits.pc
+        entries(set)(way).histAddr(0) := baseAddr
+        entries(set)(way).histTs(0) := currTime
+        entries(set)(way).histValid(0) := true.B
+        if (useFIFO) {
+          accessPtrs.get(set) := accessPtrs.get(set) + 1.U
+        }
+      }
+    }
+  }
+
+  when(io.search.valid) {
+    val set = getIndex(io.search.bits.pc)
+    val tag = getTag(io.search.bits.pc)
+    val triggerAddr = getTrainBaseAddr2HT(io.search.bits.vaddr)
+    val latency = io.search.bits.latency
+    val hitVec = VecInit((0 until HtWaySize).map(w => valids(set)(w) && entries(set)(w).pcTag === tag))
+    when(hitVec.asUInt.orR) {
+      searchHit := true.B
+      searchLatencyZero := latency === 0.U
+      val way = OHToUInt(hitVec)
+      val demandCycle = currTime - latency
+      // search 基于当前拍寄存器快照学习 delta，不依赖 access/train 在本拍写回的新状态。
+      // 这让时序更接近“先观察，再在下一拍使用学习结果”的硬件流水语义。
+      val deltaThreshold = if (useByteAddr) blockBytes.S(DeltaWidth.W) else 8.S(DeltaWidth.W)
+      val candValid = Wire(Vec(MaxHistoryDepth, Bool()))
+      val candDelta = Wire(Vec(MaxHistoryDepth, SInt(DeltaWidth.W)))
+      val candOverflow = Wire(Vec(MaxHistoryDepth, Bool()))
+      for (outIdx <- 0 until MaxHistoryDepth) {
+        val histIdx = MaxHistoryDepth - 1 - outIdx
+        val delta = (triggerAddr.zext - entries(set)(way).histAddr(histIdx).zext).asSInt
+        val absDelta = Mux(delta < 0.S, -delta, delta)
+        val timely = demandCycle > entries(set)(way).histTs(histIdx)
+        val deltaOverflow = isDeltaOverflow(delta)
+        candOverflow(outIdx) := entries(set)(way).histValid(histIdx) && timely && deltaOverflow
+        candValid(outIdx) := entries(set)(way).histValid(histIdx) &&
+          timely &&
+          !deltaOverflow &&
+          (absDelta > deltaThreshold)
+        candDelta(outIdx) := delta
+      }
+      searchCandCnt := PopCount(candValid)
+      searchCandFound := candValid.asUInt.orR
+      searchCandOverflow := candOverflow.asUInt.orR
+
+      // 这里的 var 只是 Scala 侧的“下一状态”累积变量，最后统一写回 entry。
+      var nextCounter: UInt = entries(set)(way).counter + 1.U
+      var deltaVals: Seq[SInt] = entries(set)(way).deltaList.map(_.delta)
+      var covVals: Seq[UInt] = entries(set)(way).deltaList.map(_.coverageCnt)
+      var statusVals: Seq[DeltaStatus.Type] = entries(set)(way).deltaList.map(_.status)
+      var used = Seq.fill(MaxHistoryDepth)(false.B)
+
+      for (k <- 0 until MaxDeltaFound) {
+        val pickOH = PriorityEncoderOH(VecInit(candValid.zip(used).map { case (v, u) => v && !u }).asUInt)
+        val inValid = pickOH.orR
+        val newDelta = Mux1H(pickOH, candDelta)
+        val pickBools = pickOH.asBools.take(MaxHistoryDepth)
+        used = used.zip(pickBools).map { case (u, p) => u || p }
+
+        val matchVec = VecInit((0 until DtDeltaSize).map(i => covVals(i) =/= 0.U && deltaVals(i) === newDelta))
+        val hitDelta = matchVec.asUInt.orR
+        val hitIdx = OHToUInt(matchVec)
+        var replIdx: UInt = 0.U(DtDeltaIndexWidth.W)
+        var replCov: UInt = covVals.head
+        for (i <- 1 until DtDeltaSize) {
+          val choose = covVals(i) <= replCov
+          replIdx = Mux(choose, i.U, replIdx)
+          replCov = Mux(choose, covVals(i), replCov)
+        }
+        deltaVals = deltaVals.zipWithIndex.map { case (d, i) =>
+          Mux(inValid && !hitDelta && replIdx === i.U, newDelta, d)
+        }
+        covVals = covVals.zipWithIndex.map { case (c, i) =>
+          Mux(inValid && hitDelta && hitIdx === i.U, c + 1.U,
+            Mux(inValid && !hitDelta && replIdx === i.U, 1.U(8.W), c))
+        }
+        statusVals = statusVals.zipWithIndex.map { case (s, i) =>
+          Mux(inValid && !hitDelta && replIdx === i.U, DeltaStatus.NO_PREF, s)
+        }
+      }
+
+      val needStatusUpdate = nextCounter >= 6.U
+      searchStatusUpdate := needStatusUpdate
+      val updatedStatusVals = statusVals.zip(covVals).map { case (_, cov) =>
+        Mux(cov >= 4.U, DeltaStatus.L1_PREF,
+          Mux(cov >= 2.U, DeltaStatus.L2_PREF, DeltaStatus.NO_PREF))
+      }
+      var bestIdx: UInt = entries(set)(way).bestDeltaIdx
+      var bestCov: UInt = 0.U(8.W)
+      for (i <- 0 until DtDeltaSize) {
+        val active = updatedStatusVals(i) =/= DeltaStatus.NO_PREF
+        val choose = active && (covVals(i) >= bestCov)
+        bestIdx = Mux(needStatusUpdate && choose, i.U, bestIdx)
+        bestCov = Mux(needStatusUpdate && choose, covVals(i), bestCov)
+      }
+      searchBestActive := needStatusUpdate && bestCov =/= 0.U
+
+      entries(set)(way).counter := Mux(nextCounter >= 16.U, 0.U, nextCounter)
+      entries(set)(way).bestDeltaIdx := Mux(needStatusUpdate && bestCov =/= 0.U, bestIdx, entries(set)(way).bestDeltaIdx)
+      for (i <- 0 until DtDeltaSize) {
+        entries(set)(way).deltaList(i).delta := deltaVals(i)
+        entries(set)(way).deltaList(i).coverageCnt := Mux(nextCounter >= 16.U, 0.U, covVals(i))
+        entries(set)(way).deltaList(i).status := Mux(needStatusUpdate, updatedStatusVals(i), statusVals(i))
+      }
+    }
+  }
+
+  when(io.train.valid) {
+    val set = getIndex(io.train.bits.pc)
+    val tag = getTag(io.train.bits.pc)
+    val hitVec = VecInit((0 until HtWaySize).map(w => valids(set)(w) && entries(set)(w).pcTag === tag))
+    when(hitVec.asUInt.orR) {
+      trainHit := true.B
+      val way = OHToUInt(hitVec)
+      val bestIdx = entries(set)(way).bestDeltaIdx
+      val bestStatus = entries(set)(way).deltaList(bestIdx).status
+      val bestDelta = entries(set)(way).deltaList(bestIdx).delta
+      val activeVec = VecInit((0 until DtDeltaSize).map(i =>
+        entries(set)(way).deltaList(i).status =/= DeltaStatus.NO_PREF
+      ))
+      trainActiveDeltaCnt := PopCount(activeVec)
+      trainBestActive := bestStatus =/= DeltaStatus.NO_PREF
+      if (AggressivePF) {
+        // train 读到的是本拍 entry 的旧值；如果 search 同拍更新 delta/status，
+        // 新结果会在下一拍被 train 看到。这是刻意保留的流水化语义。
+        var freeSlots: UInt = queueSpace
+        var enqCnt: UInt = 0.U
+        for (i <- 0 until DtDeltaSize) {
+          val canTake = activeVec(i) && (freeSlots > 0.U)
+          val idx = (pfEnqPtr + enqCnt).value
+          when(canTake) {
+            pfQueue(idx).triggerPC := io.train.bits.pc
+            pfQueue(idx).triggerVA := io.train.bits.vaddr
+            pfQueue(idx).triggerPA := io.train.bits.paddr
+            pfQueue(idx).delta := entries(set)(way).deltaList(i).delta
+            pfQueue(idx).target := Mux(entries(set)(way).deltaList(i).status === DeltaStatus.L1_PREF,
+              PrefetchTarget.L1.id.U, PrefetchTarget.L2.id.U)
+            pfQueueValids(idx) := true.B
+            enqCnt = enqCnt + 1.U
+            freeSlots = freeSlots - 1.U
+          }
+        }
+        when(enqCnt.orR) {
+          pfEnqPtr := pfEnqPtr + enqCnt
+        }
+      } else {
+        trainBestShouldPrefetch := bestStatus =/= DeltaStatus.NO_PREF
+        when(bestStatus =/= DeltaStatus.NO_PREF) {
+          prefetchFromBest := true.B
+          io.prefetch.valid := true.B
+          io.prefetch.bits.triggerPC := io.train.bits.pc
+          io.prefetch.bits.triggerVA := io.train.bits.vaddr
+          io.prefetch.bits.triggerPA := io.train.bits.paddr
+          io.prefetch.bits.prefetchVA := getPrefetchVAddr(io.train.bits.vaddr, bestDelta)
+          io.prefetch.bits.prefetchTarget := Mux(bestStatus === DeltaStatus.L1_PREF,
+            PrefetchTarget.L1.id.U, PrefetchTarget.L2.id.U)
+        }
+      }
+    }
+  }
+
+  if (AggressivePF) {
+    // queueSpace 基于当前拍 valid 位统计，不预支本拍 dequeue 即将释放的空位。
+    // 这样实现会偏保守，但可以避免 enqueue/dequeue 同拍时覆盖旧项。
+    when(pfQueueValids(pfDeqPtr.value)) {
+      prefetchFromQueue := true.B
+      io.prefetch.valid := true.B
+      io.prefetch.bits.triggerPC := pfQueue(pfDeqPtr.value).triggerPC
+      io.prefetch.bits.triggerVA := pfQueue(pfDeqPtr.value).triggerVA
+      io.prefetch.bits.triggerPA := pfQueue(pfDeqPtr.value).triggerPA
+      io.prefetch.bits.prefetchVA := getPrefetchVAddr(pfQueue(pfDeqPtr.value).triggerVA, pfQueue(pfDeqPtr.value).delta)
+      io.prefetch.bits.prefetchTarget := pfQueue(pfDeqPtr.value).target
+      pfQueueValids(pfDeqPtr.value) := false.B
+      pfDeqPtr := pfDeqPtr + 1.U
+    }
+  }
+
+  XSPerfAccumulate("access_req", io.access.valid)
+  XSPerfAccumulate("access_hit", io.access.valid && accessHit)
+  XSPerfAccumulate("access_dup", io.access.valid && accessDup)
+  XSPerfAccumulate("access_append", io.access.valid && accessAppend)
+  XSPerfAccumulate("access_alloc", io.access.valid && accessAlloc)
+  XSPerfAccumulate("access_hyst_clear", io.access.valid && accessHystClear)
+  XSPerfAccumulate("search_req", io.search.valid)
+  XSPerfAccumulate("search_hit", io.search.valid && searchHit)
+  XSPerfAccumulate("search_latency_zero", io.search.valid && searchHit && searchLatencyZero)
+  XSPerfAccumulate("search_cand_found", io.search.valid && searchHit && searchCandFound)
+  XSPerfAccumulate("search_cand_overflow", io.search.valid && searchHit && searchCandOverflow)
+  XSPerfAccumulate("search_cand_cnt", Mux(io.search.valid && searchHit, searchCandCnt, 0.U))
+  XSPerfAccumulate("search_status_update", io.search.valid && searchHit && searchStatusUpdate)
+  XSPerfAccumulate("search_best_active", io.search.valid && searchHit && searchBestActive)
+  XSPerfAccumulate("train_req", io.train.valid)
+  XSPerfAccumulate("train_hit", io.train.valid && trainHit)
+  XSPerfAccumulate("train_active_delta_cnt", Mux(io.train.valid && trainHit, trainActiveDeltaCnt, 0.U))
+  XSPerfAccumulate("train_best_active", io.train.valid && trainHit && trainBestActive)
+  XSPerfAccumulate("train_best_should_prefetch", io.train.valid && trainHit && trainBestShouldPrefetch)
+  XSPerfAccumulate("train_best_blocked", io.train.valid && trainHit && trainBestShouldPrefetch && !io.prefetch.valid)
+  XSPerfAccumulate("prefetch_req", io.prefetch.valid)
+  XSPerfAccumulate("prefetch_from_best", prefetchFromBest)
+  XSPerfAccumulate("prefetch_from_queue", prefetchFromQueue)
+}
+
 class BertiPrefetcher()(implicit p: Parameters) extends BasePrefecher with HasBertiHelper {
   override lazy val io = IO(new BertiPrefetcherIO)
 
   val trainFilter = Module(new NewTrainFilter(TRAIN_FILTER_SIZE, name, true, true))
-  val historyTable = Module(new HistoryTable())
-  val detlaTable = Module(new DeltaTable())
+  val bertiTable = Module(new Gem5LikeUnifiedTable())
   val prefetchBuffer = Module(new DeltaPrefetchBuffer(PREFETCH_FILTER_SIZE, name))
 
   // 1. train filter
@@ -952,28 +1346,29 @@ class BertiPrefetcher()(implicit p: Parameters) extends BasePrefecher with HasBe
   trainFilter.io.stTrainOpt.map(_ := io.st_in)
   trainFilter.io.trainReq.ready := !demandRefill
 
-  // 2. history table && delta
+  // 2. unified table
   val trainValid = trainFilter.io.trainReq.valid
   val trainBits = trainFilter.io.trainReq.bits
   val demandMiss = trainValid && trainBits.miss
   val demandPfHit = trainValid && isFromBerti(trainBits.metaSource)
 
-  historyTable.io.access.valid := demandMiss || demandPfHit
-  historyTable.io.access.bits.pc := trainBits.pc
-  historyTable.io.access.bits.vaddr := trainBits.vaddr
+  bertiTable.io.access.valid := demandMiss || demandPfHit
+  bertiTable.io.access.bits.pc := trainBits.pc
+  bertiTable.io.access.bits.vaddr := trainBits.vaddr
 
-  historyTable.io.search.req.valid := demandRefill || demandPfHit
-  historyTable.io.search.req.bits.pc := Mux(demandRefill, io.refillTrain.bits.pc, trainBits.pc)
-  historyTable.io.search.req.bits.vaddr := Mux(demandRefill, io.refillTrain.bits.vaddr, trainBits.vaddr)
-  historyTable.io.search.req.bits.latency := Mux(demandRefill, io.refillTrain.bits.refillLatency, trainBits.refillLatency)
-
-  detlaTable.io.learn := historyTable.io.search.resp
+  bertiTable.io.search.valid := demandRefill || demandPfHit
+  bertiTable.io.search.bits.pc := Mux(demandRefill, io.refillTrain.bits.pc, trainBits.pc)
+  bertiTable.io.search.bits.vaddr := Mux(demandRefill, io.refillTrain.bits.vaddr, trainBits.vaddr)
+  bertiTable.io.search.bits.latency := Mux(demandRefill, io.refillTrain.bits.refillLatency, trainBits.refillLatency)
 
   // 3. Prefetch
+  // 原版 XiangShan 的 delta train 不依赖 history accessResp。
+  // 这里如果把 train 绑到 accessResp，会把“当前 miss 可否更新 history”
+  // 错当成“当前 miss 可否使用已经学到的 delta”，从而把预取门槛收得过严。
   val canPrefetch = io.enable && (demandMiss || demandPfHit)
-  detlaTable.io.train.valid := canPrefetch
-  detlaTable.io.train.bits := trainBits
-  prefetchBuffer.io.srcReq := detlaTable.io.prefetch
+  bertiTable.io.train.valid := canPrefetch
+  bertiTable.io.train.bits := trainBits
+  prefetchBuffer.io.srcReq := bertiTable.io.prefetch
 
   // 4. io
   io.tlb_req <> prefetchBuffer.io.tlbReq
@@ -984,10 +1379,11 @@ class BertiPrefetcher()(implicit p: Parameters) extends BasePrefecher with HasBe
 
   XSPerfAccumulate("demandMiss", demandMiss)
   XSPerfAccumulate("demandPfHit", demandPfHit)
+  XSPerfAccumulate("berti_pf_used", demandPfHit)
   XSPerfAccumulate("demandRefill", demandRefill)
-  XSPerfAccumulate("demandRefill_searchValid", demandRefill && historyTable.io.search.resp.valid && historyTable.io.search.resp.delta =/= 0.S)
-  XSPerfAccumulate("demandPfHit_searchValid", demandPfHit && historyTable.io.search.resp.valid && historyTable.io.search.resp.delta =/= 0.S)
-  XSPerfAccumulate("demandMiss_prefetchValid", demandMiss && detlaTable.io.prefetch.valid)
-  XSPerfAccumulate("demandPfHit_prefetchValid", demandPfHit && detlaTable.io.prefetch.valid)
+  XSPerfAccumulate("accessResp_on_demand", bertiTable.io.accessResp && (demandMiss || demandPfHit))
+  XSPerfAccumulate("canPrefetch", canPrefetch)
+  XSPerfAccumulate("demandMiss_prefetchValid", demandMiss && bertiTable.io.prefetch.valid)
+  XSPerfAccumulate("demandPfHit_prefetchValid", demandPfHit && bertiTable.io.prefetch.valid)
 
 }
