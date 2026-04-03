@@ -58,7 +58,6 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val s0_fire = io.stageCtrl.s0_fire && io.enable
   private val s1_fire = io.stageCtrl.s1_fire && io.enable
   private val s2_fire = io.stageCtrl.s2_fire && io.enable
-  private val s3_fire = io.stageCtrl.s3_fire && io.enable
 
   /*
    *  instantiate tables
@@ -715,7 +714,6 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val scBiasCorrectVec   = WireInit(VecInit.fill(NumWays)(false.B))
   private val scBiasWrongVec     = WireInit(VecInit.fill(NumWays)(false.B))
 
-  private val newBranchVec = WireInit(VecInit.fill(NumWays)(false.B))
   private val scUsedVec    = WireInit(VecInit.fill(NumWays)(false.B))
   private val scNotUsedVec = WireInit(VecInit.fill(NumWays)(false.B))
   private val changeVec    = VecInit.fill(NumWays)(false.B)
