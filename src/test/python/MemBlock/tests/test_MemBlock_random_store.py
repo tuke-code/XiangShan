@@ -161,7 +161,8 @@ def test_api_MemBlock_small_mixed_load_store_random(env):
 
     策略：
       - 地址池限定在 cacheable 空间
-      - store 使用固定 `robIdx=0`，保证可及时进入 committed
+      - store / load 都使用递增 `robIdx`
+      - 通过 env 的 ROB 提交建模推进 pendingPtr，再由 `scommit` 驱动 store committed
       - load 使用递增 `robIdx`，逐条完成在线 compare
       - 结尾统一 `flushSb`，检查最终 drain 与 goldenmem 一致
     """
@@ -189,7 +190,7 @@ def test_api_MemBlock_small_mixed_load_store_random(env):
         operations,
         initial_state=initial_state,
         store_req_id=0,
-        first_load_req_id=1,
+        first_load_req_id=RANDOM_MIXED_OPS + 1,
         expected_store_mmio=False,
         require_store_committed=True,
         store_materialize_cycles=300,

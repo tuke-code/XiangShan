@@ -348,16 +348,31 @@ class ScalarStoreCommitSequence:
         self.quiesce_cycles = quiesce_cycles
 
     def run(self, env) -> ScalarStoreCommitSequenceResult:
+        # 真实 DUT 中 store 的 committed 由 ROB 提交边界和 scommit 共同驱动，
+        # 不能在发完 STA/STD 后直接假定 store 已 committed。
         settle_cycles = env.config.sequence.store_settle_cycles if self.settle_cycles is None else self.settle_cycles
         store_result = ScalarStoreSequence(
             self.txn,
             expected_mmio=self.expected_mmio,
-            require_committed=self.require_committed,
+            require_committed=False,
             materialize_cycles=self.materialize_cycles,
         ).run(env)
         env.pulse_store_commit(1)
         if settle_cycles > 0:
             env.Step(settle_cycles)
+        if self.require_committed:
+            env.wait_store_materialized(
+                store_result.allocated_sq_ptr.value,
+                expected_addr=self.txn.addr,
+                expected_data=self.txn.data,
+                expected_mmio=self.expected_mmio,
+                require_committed=True,
+                max_cycles=(
+                    env.config.sequence.store_materialize_cycles
+                    if self.materialize_cycles is None
+                    else self.materialize_cycles
+                ),
+            )
         if self.wait_quiesce:
             env.wait_memory_quiesce(max_cycles=self.quiesce_cycles)
         return ScalarStoreCommitSequenceResult(
@@ -396,12 +411,22 @@ class ScalarStoreThenLoadSequence:
 
     def run(self, env) -> ScalarStoreThenLoadSequenceResult:
         completed_before = env.get_completed_load_count()
-        store_result = ScalarStoreSequence(
+        committed_store = ScalarStoreCommitSequence(
             self.store_txn,
             expected_mmio=self.expected_mmio,
             require_committed=self.require_committed,
             materialize_cycles=self.materialize_cycles,
         ).run(env)
+        store_result = ScalarStoreSequenceResult(
+            txn=committed_store.store_result.txn,
+            allocated_sq_ptr=committed_store.store_result.allocated_sq_ptr,
+            next_sq_ptr=committed_store.store_result.next_sq_ptr,
+            store_view=(
+                committed_store.committed_store_view
+                if committed_store.committed_store_view is not None
+                else committed_store.store_result.store_view
+            ),
+        )
         load_result = ScalarLoadSequence(
             LoadTxn(
                 req_id=self.load_req_id,
@@ -468,12 +493,23 @@ class ScalarStoreFlushSequence:
     def run(self, env) -> ScalarStoreFlushSequenceResult:
         outer_writes_before = env.get_counter("outer_write_request_count")
         sbuffer_drains_before = env.get_counter("sbuffer_drain_count")
-        store_result = ScalarStoreSequence(
+        committed_store = ScalarStoreCommitSequence(
             self.txn,
             expected_mmio=self.expected_mmio,
             require_committed=self.require_committed,
             materialize_cycles=self.materialize_cycles,
+            settle_cycles=self.settle_cycles,
         ).run(env)
+        store_result = ScalarStoreSequenceResult(
+            txn=committed_store.store_result.txn,
+            allocated_sq_ptr=committed_store.store_result.allocated_sq_ptr,
+            next_sq_ptr=committed_store.store_result.next_sq_ptr,
+            store_view=(
+                committed_store.committed_store_view
+                if committed_store.committed_store_view is not None
+                else committed_store.store_result.store_view
+            ),
+        )
         if self.wait_for_sbuffer_drain:
             env.wait_counter_growth(
                 "sbuffer_drain_count",
@@ -530,13 +566,14 @@ class ScalarMixedTrafficSequence:
         total_stores = 0
         total_loads = 0
         next_load_req_id = self.first_load_req_id
+        next_store_req_id = self.store_req_id
         drain_summary = None
 
         for op_kind, addr, maybe_data in self.operations:
             if op_kind == "store":
-                store_result = ScalarStoreSequence(
+                store_result = ScalarStoreCommitSequence(
                     StoreTxn(
-                        req_id=self.store_req_id,
+                        req_id=next_store_req_id,
                         sq_ptr=state.sq_ptr,
                         addr=addr,
                         data=int(maybe_data),
@@ -544,12 +581,13 @@ class ScalarMixedTrafficSequence:
                     expected_mmio=self.expected_store_mmio,
                     require_committed=self.require_store_committed,
                     materialize_cycles=self.store_materialize_cycles,
-                ).run(env)
+                ).run(env).store_result
                 state = SequenceState(
                     next_lq_ptr=state.next_lq_ptr,
                     sq_ptr=store_result.next_sq_ptr,
                 )
                 total_stores += 1
+                next_store_req_id += 1
                 continue
 
             if op_kind != "load":
