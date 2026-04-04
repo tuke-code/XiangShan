@@ -128,35 +128,46 @@ class PendingPtrDriver:
         self._issued = deque()
         self._completed = defaultdict(int)
         self._queued_scommit = 0
+        self._active_scommit = 0
 
     def drive(self) -> None:
         if self._signal_flag is not None:
             self._signal_flag.value = self.pending_ptr.flag
         if self._signal_value is not None:
             self._signal_value.value = self.pending_ptr.value
+        self._active_scommit = self._queued_scommit
         if self._signal_scommit is not None:
-            self._signal_scommit.value = self._queued_scommit
+            self._signal_scommit.value = self._active_scommit
         self._queued_scommit = 0
 
     def queue_store_commit(self, count: int = 1) -> None:
         self._queued_scommit = max(0, int(count))
 
     def note_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
-        self._issued.append(RobIndex(flag=rob_idx_flag, value=rob_idx_value))
+        self._issued.append(("load", RobIndex(flag=rob_idx_flag, value=rob_idx_value)))
+
+    def note_store_allocated(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        self._issued.append(("store", RobIndex(flag=rob_idx_flag, value=rob_idx_value)))
 
     def note_completed(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         self._completed[RobIndex(flag=rob_idx_flag, value=rob_idx_value)] += 1
 
     def advance(self) -> None:
         while self._issued:
-            head = self._issued[0]
-            if self._completed[head] == 0:
-                return
-            self._completed[head] -= 1
-            if self._completed[head] == 0:
-                del self._completed[head]
+            kind, head = self._issued[0]
+            if kind == "store":
+                if self._active_scommit == 0:
+                    break
+                self._active_scommit -= 1
+            else:
+                if self._completed[head] == 0:
+                    break
+                self._completed[head] -= 1
+                if self._completed[head] == 0:
+                    del self._completed[head]
             self._issued.popleft()
             self.pending_ptr = self._inc(self.pending_ptr)
+        self._active_scommit = 0
 
     def _inc(self, ptr: RobIndex) -> RobIndex:
         value = ptr.value + 1
@@ -1187,6 +1198,7 @@ class MemBlockEnv:
     ) -> None:
         """登记一笔 store 已分配的 SQ/ROB 元信息。"""
 
+        self.commit_agent.note_store_allocated(rob_idx_flag, rob_idx_value)
         self.memory.note_store_allocated(
             sq_idx_flag=sq_idx_flag,
             sq_idx_value=sq_idx_value,

@@ -20,6 +20,9 @@ class CommitAgent:
     def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         self.driver.note_issued(rob_idx_flag, rob_idx_value)
 
+    def note_store_allocated(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        self.driver.note_store_allocated(rob_idx_flag, rob_idx_value)
+
     def note_load_completed(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         self.driver.note_completed(rob_idx_flag, rob_idx_value)
 
