@@ -63,6 +63,14 @@ class ScalarStoreThenLoadSequenceResult:
 
 
 @dataclass(frozen=True)
+class ScalarStorePairThenLoadSequenceResult:
+    first_store_result: ScalarStoreSequenceResult
+    second_store_result: ScalarStoreSequenceResult
+    load_result: ScalarLoadSequenceResult
+    final_state: SequenceState
+
+
+@dataclass(frozen=True)
 class ScalarStoreFlushSequenceResult:
     store_result: ScalarStoreSequenceResult
     drain_summary: dict
@@ -447,6 +455,128 @@ class ScalarStoreThenLoadSequence:
             env.assert_no_outstanding()
         return ScalarStoreThenLoadSequenceResult(
             store_result=store_result,
+            load_result=load_result,
+            final_state=final_state,
+        )
+
+
+class ScalarStorePairThenLoadSequence:
+    def __init__(
+        self,
+        first_store_txn,
+        second_store_txn,
+        *,
+        initial_lq_ptr: QueuePtr,
+        load_req_id: int,
+        load_addr: int | None = None,
+        expected_mmio: bool | None = False,
+        require_committed: bool = True,
+        materialize_cycles: int | None = None,
+        commit_settle_cycles: int | None = None,
+        drain_cycles: int | None = None,
+        size: int = 8,
+        mask: int = 0xFF,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.first_store_txn = first_store_txn
+        self.second_store_txn = second_store_txn
+        self.initial_lq_ptr = initial_lq_ptr
+        self.load_req_id = load_req_id
+        self.load_addr = load_addr
+        self.expected_mmio = expected_mmio
+        self.require_committed = require_committed
+        self.materialize_cycles = materialize_cycles
+        self.commit_settle_cycles = commit_settle_cycles
+        self.drain_cycles = drain_cycles
+        self.size = size
+        self.mask = mask
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarStorePairThenLoadSequenceResult:
+        completed_before = env.get_completed_load_count()
+        commit_settle_cycles = (
+            env.config.sequence.store_settle_cycles
+            if self.commit_settle_cycles is None
+            else self.commit_settle_cycles
+        )
+
+        first_store_result = ScalarStoreSequence(
+            self.first_store_txn,
+            expected_mmio=self.expected_mmio,
+            require_committed=False,
+            materialize_cycles=self.materialize_cycles,
+        ).run(env)
+        env.pulse_store_commit(1)
+        if commit_settle_cycles > 0:
+            env.Step(commit_settle_cycles)
+        if self.require_committed:
+            env.wait_store_materialized(
+                first_store_result.allocated_sq_ptr.value,
+                expected_addr=self.first_store_txn.addr,
+                expected_data=self.first_store_txn.data,
+                expected_mmio=self.expected_mmio,
+                require_committed=True,
+                max_cycles=(
+                    env.config.sequence.store_materialize_cycles
+                    if self.materialize_cycles is None
+                    else self.materialize_cycles
+                ),
+            )
+
+        second_store_result = ScalarStoreSequence(
+            self.second_store_txn,
+            expected_mmio=self.expected_mmio,
+            require_committed=False,
+            materialize_cycles=self.materialize_cycles,
+        ).run(env)
+        env.pulse_store_commit(1)
+        if commit_settle_cycles > 0:
+            env.Step(commit_settle_cycles)
+        if self.require_committed:
+            env.wait_store_materialized(
+                second_store_result.allocated_sq_ptr.value,
+                expected_addr=self.second_store_txn.addr,
+                expected_data=self.second_store_txn.data,
+                expected_mmio=self.expected_mmio,
+                require_committed=True,
+                max_cycles=(
+                    env.config.sequence.store_materialize_cycles
+                    if self.materialize_cycles is None
+                    else self.materialize_cycles
+                ),
+            )
+
+        load_result = ScalarLoadSequence(
+            LoadTxn(
+                req_id=self.load_req_id,
+                addr=self.second_store_txn.addr if self.load_addr is None else self.load_addr,
+                lq_ptr=self.initial_lq_ptr,
+                sq_ptr=second_store_result.next_sq_ptr,
+                size=self.size,
+                mask=self.mask,
+            ),
+            drain_cycles=self.drain_cycles,
+            expected_completed_loads=completed_before + 1,
+        ).run(env)
+        final_state = SequenceState(
+            next_lq_ptr=load_result.next_lq_ptr,
+            sq_ptr=second_store_result.next_sq_ptr,
+        )
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+        return ScalarStorePairThenLoadSequenceResult(
+            first_store_result=ScalarStoreSequenceResult(
+                txn=first_store_result.txn,
+                allocated_sq_ptr=first_store_result.allocated_sq_ptr,
+                next_sq_ptr=first_store_result.next_sq_ptr,
+                store_view=env.get_store_view(first_store_result.allocated_sq_ptr.value),
+            ),
+            second_store_result=ScalarStoreSequenceResult(
+                txn=second_store_result.txn,
+                allocated_sq_ptr=second_store_result.allocated_sq_ptr,
+                next_sq_ptr=second_store_result.next_sq_ptr,
+                store_view=env.get_store_view(second_store_result.allocated_sq_ptr.value),
+            ),
             load_result=load_result,
             final_state=final_state,
         )

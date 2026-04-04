@@ -10,6 +10,7 @@ from .memblock_sequences import (
     ScalarLoadSequence,
     ScalarMixedTrafficSequence,
     ScalarStoreCommitSequence,
+    ScalarStorePairThenLoadSequence,
     ScalarStoreFlushSequence,
     ScalarStoreSequence,
     ScalarStoreThenLoadSequence,
