@@ -27,6 +27,8 @@ except ImportError:
 
     pytest = _PytestStub()
 
+from toffee_test.reporter import set_func_coverage
+
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HERE, "..", "..", "..", ".."))
@@ -48,6 +50,7 @@ from agents.issue_agent import IssueAgent
 from agents.lsq_agent import LsqAgent
 from env_config import DEFAULT_ENV_CONFIG, EnvConfig
 from memory_model import MemoryModel
+from model.rob_coverage import RobCoverageCollector
 from monitors.mem_status_monitor import MemStatusMonitor
 
 
@@ -1982,7 +1985,15 @@ class MemBlockEnv:
 
 
 @pytest.fixture(scope="function")
-def env(dut):
+def env(request, dut):
     """MemBlockEnv fixture。"""
 
-    return MemBlockEnv(dut)
+    _env = MemBlockEnv(dut)
+    _env.rob_coverage = RobCoverageCollector(_env)
+    _env.add_after_step_callback(_env.rob_coverage.sample)
+    try:
+        yield _env
+    finally:
+        _env.remove_after_step_callback(_env.rob_coverage.sample)
+        _env.rob_coverage.finalize()
+        set_func_coverage(request, list(_env.rob_coverage.all_groups()))
