@@ -408,7 +408,7 @@ abstract class VSplitBuffer(isVStore: Boolean = false)(implicit p: Parameters) e
     x.uop_unit_stride_fof   := DontCare
     x.isFirstIssue          := DontCare
     x.mBIndex               := issueMbIndex
-    x.splitIndx             := splitIdx
+    x.splitIndex             := splitIdx
   }
 
   // redirect
