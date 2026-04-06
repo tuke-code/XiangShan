@@ -1,5 +1,187 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-06
+
+本条目记录 2026-04-05 到 2026-04-06 这一轮围绕 ROB coverage、toffee 覆盖率报告、环境状态总结和后续验证规划的新增变化。该条目是对 2026-04-01 分层重构之后“环境已经稳定下来并开始进入覆盖率驱动补强阶段”的补充记录。
+
+### 变更摘要
+
+这一轮工作的重点不再是拆分层次，而是把“当前环境已经能验证什么、覆盖到了哪里、下一步该补什么”真正收敛成可执行的工程资产，主要包括：
+
+- 接入 ROB 相关 function coverage，并通过 toffee 官方 `set_func_coverage` 机制汇总。
+- 跑通 toffee 测试报告与 DUT line coverage 报告链路。
+- 形成当前验证状态与覆盖率分析文档。
+- 形成基于覆盖率结果的下一批 testcase 补强清单。
+- 开始把多人协同时的任务边界和文档入口显式化。
+- 新增 MemBlock 目录级角色规范，并把 agent 启动时的角色选择流程显式化。
+
+### 1. ROB function coverage 接入 toffee 官方机制
+
+commit: `1c9e965b2`
+
+主要改动：
+
+- 在 `MemBlock_env.py` 的 `env` fixture 生命周期中挂载 ROB coverage collector。
+- 使用 toffee 官方 `set_func_coverage(request, groups)` 汇总 function coverage，而不是额外自造报告机制。
+- 新增 `model/rob_coverage.py`，把当前 ROB 半模型相关的 DUT 观测事实、当前模型已覆盖能力和已知 gap 组织成 4 组 coverage：
+  - `MemBlock.ROB.ObservedBehavior`
+  - `MemBlock.ROB.CurrentModel`
+  - `MemBlock.ROB.GapObserved`
+  - `MemBlock.ROB.KnownModelGaps`
+- 新增 `tests/test_MemBlock_rob_coverage.py`，验证 coverage collector 已挂载且能正常导出 toffee 可汇总的结构。
+- 新增 `docs/rob_coverage_plan.md`，说明 coverage 模型的来源、分组和与 `rob_model.md` 的映射关系。
+
+这一步的意义在于：ROB 建模讨论不再停留在文档层，而是已经有真实 DUT 观测驱动的 function coverage 落地，可以在每轮回归里持续看到哪些行为已命中、哪些 gap 仍只是“已知缺口”。
+
+### 2. toffee DUT 覆盖率报告链路打通
+
+本轮使用 unitychip/toffee 环境直接运行了当前 `src/test/python/MemBlock/tests/` 回归，并通过 toffee 官方 reporter 生成：
+
+- HTML 测试报告
+- JSON 测试报告
+- DUT line coverage 原始数据
+- `merged.info`
+- `genhtml` 生成的 DUT line coverage HTML
+
+执行入口已经明确为：
+
+```bash
+source /nfs/share/unitychip/activate >/dev/null 2>&1 || true
+pytest -q src/test/python/MemBlock/tests \
+  --toffee-report \
+  --report-dir src/test/python/MemBlock/data/toffee_report_run \
+  --report-name memblock_rob_cov \
+  --report-dump-json
+```
+
+在补齐 Perl 模块 `DateTime.pm` 后，又重新执行了：
+
+```bash
+genhtml --branch-coverage \
+  src/test/python/MemBlock/data/toffee_report_run/line_dat/merged.info \
+  -o src/test/python/MemBlock/data/toffee_report_run/line_dat
+```
+
+最终得到可直接查看的 DUT line coverage HTML：
+
+- `src/test/python/MemBlock/data/toffee_report_run/line_dat/index.html`
+
+这一步的重要性在于：环境现在不仅能跑 testcase，还能稳定给出 function coverage + line/branch coverage 的统一结果，为后续覆盖率驱动补强提供客观依据。
+
+### 3. 当前回归与覆盖率结果收口成文档
+
+commit: `c8ca7a7f7`
+
+主要新增：
+
+- `docs/coverage_summary.md`
+- `docs/coverage_todo.md`
+
+其中：
+
+- `coverage_summary.md` 记录当前版本、分支、时间、pytest/toffee 命令、报告路径、功能覆盖率结果、DUT line/branch coverage 结果以及模块级解读。
+- `coverage_todo.md` 按优先级整理下一批最值得补的用例，例如：
+  - partial-mask store
+  - cross-line / cross-beat scalar store
+  - misaligned scalar store/load
+  - replay 精细化
+  - nc store drain / mmio exclusion
+  - translation / permission 专题
+
+这一步完成后，当前验证状态不再分散在聊天记录或临时命令输出里，而是有了稳定的项目内文档落点。
+
+### 4. 当前验证状态结论
+
+基于当前这轮完整通过的真实 DUT 回归，可以把环境状态概括为：
+
+- 已完成：
+  - 真实 DUT 下的 cacheable scalar load/store 主路径
+  - store->load same-addr / overwrite / unrelated ordering
+  - flushSb + drain 收尾
+  - RAW / RAR / FF / DM / NC 基础 replay 场景
+  - ROB function coverage
+  - toffee DUT line coverage
+- 当前强项：
+  - `NewLoadUnit` / `LoadUnitS*` / `LoadPipe`
+  - `StoreUnit` / `MainPipe`
+  - `ForwardModule`
+  - `LsqWrapper`
+- 当前主要短板：
+  - `NewStoreQueue`
+  - `SbufferData`
+  - `StoreMisalignBuffer`
+  - `LoadQueueUncache` / `Uncache`
+  - `VirtualLoadQueue`
+  - TLB / PTW / PMP 相关外围路径
+
+也就是说，当前环境已经越过“只会做 smoke”的阶段，但距离“完整 MemBlock/LSU 白盒验证平台”还有明显差距。后续重点不应继续机械堆普通 load case，而应转向 store 深状态、replay 组合、NC/MMIO 闭环和 translation/perms 这几类高价值缺口。
+
+### 5. README 与入口文档开始承担项目总览职责
+
+虽然本轮主要增量落在 docs 与 coverage 报告，但一个很重要的变化是：项目已经需要从“实现先行、文档补记”切换到“文档与状态入口先收口，再继续扩 testcase”。因此 README 和 CHANGELOG 后续将承担更明确的职责：
+
+- `README.md`
+  - 负责给出当前环境是什么、能做什么、该读哪些文档、当前在哪个阶段。
+- `CHANGELOG.md`
+  - 负责记录环境自身最近新增了什么能力与状态结果。
+- `docs/coverage_summary.md`
+  - 负责记录当前回归结果。
+- `docs/coverage_todo.md`
+  - 负责记录下一批补强方向。
+
+这一点对多人协同尤其重要，因为如果没有统一入口，后续很容易出现“每个人都知道一点，但没有人知道当前全貌”的状态。
+
+### 6. 多人协同进入可规划阶段
+
+随着环境结构化和 coverage 报告机制落地，当前项目已经适合按职责并行推进。建议后续协同按以下几类工作流拆开：
+
+- testcase / sequence
+- env / monitor / facade
+- model / scoreboard / coverage
+- docs / report / planning
+
+并遵循以下规则：
+
+- 公共接口先在文档中冻结，再改代码。
+- testcase、model、docs 尽量分开提交。
+- 覆盖率结果统一以 toffee report + `coverage_summary.md` 为准。
+- CHANGELOG 只做追加，不覆盖旧条目。
+
+这并不是流程形式主义，而是因为当前项目已经跨过“单人快速迭代”阶段：一旦多人同时修改 testcase、scoreboard、README 和报告脚本，如果没有明确分工和统一状态源，回归结果很快就会失真。
+
+### 7. 增加角色规范与 agent 入口约束
+
+本轮进一步把多人协同从 README 中的“建议”固化成了可执行规则，新增：
+
+- `src/test/python/MemBlock/ROLES.md`
+- 仓库根目录 `AGENTS.md`
+
+其中：
+
+- `ROLES.md` 为 MemBlock 目录定义了 4 个默认角色：
+  - `Pathfinder` -> `testcase/sequence`
+  - `Bridgekeeper` -> `env/monitor/facade`
+  - `Oracle` -> `model/coverage`
+  - `Captain` -> `integrator/owner`
+- 每个角色都使用固定模板描述：
+  - 角色名与代号
+  - 职责边界
+  - 典型工作内容
+  - 默认工作风格
+  - 提交边界
+  - 提交前自查
+  - 从 remote 更新代码后的动作
+- `AGENTS.md` 明确要求：只要任务落在 `src/test/python/MemBlock/`，agent 在开始规划或修改前必须先阅读 `ROLES.md`，并在首条任务响应中主动告知当前推测的主角色；如果角色推测有歧义，必须先向用户确认。
+
+这一步的意义不只是“多一份文档”，而是把后续多人协同时最容易失控的部分显式收口：
+
+- 谁负责 testcase、env、model、项目收口
+- 什么情况下需要拆 commit
+- remote 更新后应该做多深的自检
+- agent 如何避免一上来就跨层乱改
+
+配合 README 中新增的 `ROLES.md` 入口，当前项目的“入口文档 - 状态文档 - 角色规范 - agent 启动约束”已经形成一个闭环，后续无论是人还是 agent 加入项目，都可以先对齐工作方式，再开始改代码。
+
 ## 2026-04-01
 
 本条目记录 `src/test/python/MemBlock/` Python 验证环境在 2026-04-01 这一轮分层重构中的主要变化。它和 `docs/DUT_CHANGELOG-20260331.md` 的定位不同：后者主要记录 RTL 版本变化及其对验证的影响，这份 changelog 记录的是验证环境自身的架构演进。
