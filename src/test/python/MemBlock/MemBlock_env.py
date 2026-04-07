@@ -44,6 +44,7 @@ for _path in (_PYLIB, _HERE, _TOFFEE_FALLBACK):
 
 from toffee import Bundle, BundleList, Signal, SignalList, Signals
 
+from agents.backend_facade import BackendFacade
 from agents.commit_agent import CommitAgent
 from agents.csr_agent import CsrAgent
 from agents.issue_agent import IssueAgent
@@ -1000,7 +1001,8 @@ class MemBlockEnv:
         self.dut = dut
         self.config = DEFAULT_ENV_CONFIG if config is None else config
         self._validate_structural_config()
-        self.pending_ptr = PendingPtrDriver(dut, rob_size=self.config.rob_size)
+        self.rob_agent = None
+        self.pending_ptr = None
         self.commit_agent = CommitAgent(self)
 
         self.redirect = RedirectBundle.from_prefix("io_redirect_").bind(dut)
@@ -1022,6 +1024,7 @@ class MemBlockEnv:
         for bundle in self.issue:
             bundle.bind(dut)
         self.issue_agent = IssueAgent(self)
+        self.backend = BackendFacade(self)
         self.writeback = [
             IntWritebackBundle(f"io_mem_to_ooo_intWriteback_{idx}_0_", dut)
             for idx in range(self.config.int_writeback_ports)
@@ -1189,8 +1192,7 @@ class MemBlockEnv:
     def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         """登记一笔已完成握手的 load issue，用于推进 `pendingPtr`。"""
 
-        self.commit_agent.note_load_issued(rob_idx_flag, rob_idx_value)
-        self.memory.note_load_issued(rob_idx_flag, rob_idx_value)
+        self.backend.note_load_issued(rob_idx_flag, rob_idx_value)
 
     def note_store_allocated(
         self,
@@ -1201,19 +1203,22 @@ class MemBlockEnv:
     ) -> None:
         """登记一笔 store 已分配的 SQ/ROB 元信息。"""
 
-        self.commit_agent.note_store_allocated(rob_idx_flag, rob_idx_value)
-        self.memory.note_store_allocated(
+        self.backend.note_store_allocated(
             sq_idx_flag=sq_idx_flag,
             sq_idx_value=sq_idx_value,
             rob_idx_flag=rob_idx_flag,
             rob_idx_value=rob_idx_value,
         )
 
+    def note_load_completed(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        """登记一笔 load 已完成执行，用于推动 ROB 提交边界。"""
+
+        self.backend.note_load_completed(rob_idx_flag, rob_idx_value)
+
     def pulse_store_commit(self, count: int = 1) -> None:
         """对 `io_ooo_to_mem_lsqio_scommit` 发送一个单拍脉冲。"""
 
-        self.commit_agent.queue_store_commit(count)
-        self.Step(1)
+        self.backend.pulse_store_commit(count)
 
     def inject_outer_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
         """向 outer buffer D 通道注入一笔响应。"""
@@ -1350,6 +1355,8 @@ class MemBlockEnv:
 
         if hasattr(self.memory, counter_name):
             return int(getattr(self.memory, counter_name))
+        if hasattr(self.commit_agent, "stats") and counter_name in self.commit_agent.stats:
+            return int(self.commit_agent.stats[counter_name])
         stats = self.get_transport_stats()
         if counter_name in stats:
             return int(stats[counter_name])
@@ -1924,7 +1931,7 @@ class MemBlockEnv:
             self.Step(1)
         raise TimeoutError("等待 MemoryModel 收敛超时")
 
-    def flush_store_buffers_and_wait(self, max_cycles: int = 200, settle_cycles: int = 4) -> dict:
+    def _flush_store_buffers_and_wait_impl(self, max_cycles: int = 200, settle_cycles: int = 4) -> dict:
         """触发 `sfence + flushSb`，并等待 sbuffer/uncache drain 结束。"""
 
         if not hasattr(self.dut, "io_ooo_to_mem_flushSb"):
@@ -1950,6 +1957,14 @@ class MemBlockEnv:
                 return self.memory.finalize_and_check_drain()
             self.Step(1)
         raise TimeoutError("等待 sbuffer drain 结束超时")
+
+    def flush_store_buffers_and_wait(self, max_cycles: int = 200, settle_cycles: int = 4) -> dict:
+        """公开的 backend facade 排空入口。"""
+
+        return self.backend.flush_store_buffers_and_wait(
+            max_cycles=max_cycles,
+            settle_cycles=settle_cycles,
+        )
 
     def check_no_outstanding_transactions(self) -> None:
         """检查没有残留的 MemoryModel 事务与待校验项。"""

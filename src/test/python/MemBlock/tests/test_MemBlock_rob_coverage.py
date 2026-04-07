@@ -31,5 +31,12 @@ def test_api_MemBlock_rob_coverage_smoke_sample(env):
     assert reports[0]["name"] == "MemBlock.ROB.ObservedBehavior"
     assert reports[3]["name"] == "MemBlock.ROB.KnownModelGaps"
     known_gap_names = {point["name"] for point in reports[3]["points"]}
-    assert "known_gap_pending_ptr_next_not_modelled" in known_gap_names
     assert "known_gap_non_mem_blocker_not_modelled" in known_gap_names
+    if env.commit_agent.models_pending_ptr_next:
+        assert "known_gap_pending_ptr_next_not_modelled" not in known_gap_names
+    else:
+        assert "known_gap_pending_ptr_next_not_modelled" in known_gap_names
+    if env.commit_agent.models_commit_bool:
+        assert "known_gap_commit_bool_not_modelled" not in known_gap_names
+    else:
+        assert "known_gap_commit_bool_not_modelled" in known_gap_names

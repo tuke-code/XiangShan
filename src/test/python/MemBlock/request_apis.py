@@ -77,11 +77,11 @@ def reset_env_and_wait_backend(
 
 
 def wait_lsq_load_enq_ready(env, max_cycles: int = 200) -> None:
-    env.lsq_agent.wait_load_enq_ready(max_cycles=max_cycles)
+    env.backend.wait_load_enq_ready(max_cycles=max_cycles)
 
 
 def wait_lsq_store_enq_ready(env, max_cycles: int = 200) -> None:
-    env.lsq_agent.wait_store_enq_ready(max_cycles=max_cycles)
+    env.backend.wait_store_enq_ready(max_cycles=max_cycles)
 
 
 def enqueue_scalar_load(
@@ -91,7 +91,7 @@ def enqueue_scalar_load(
     sq_ptr: QueuePtr,
     enq_port: int = DEFAULT_STORE_ENQ_PORT,
 ) -> None:
-    env.lsq_agent.enqueue_scalar_load(req_id, lq_ptr, sq_ptr, enq_port=enq_port)
+    env.backend.enqueue_scalar_load(req_id, lq_ptr, sq_ptr, enq_port=enq_port)
 
 
 def enqueue_scalar_store(
@@ -100,32 +100,13 @@ def enqueue_scalar_store(
     sq_ptr: QueuePtr,
     enq_port: int = DEFAULT_STORE_ENQ_PORT,
 ) -> QueuePtr:
-    return env.lsq_agent.enqueue_scalar_store(req_id, sq_ptr, enq_port=enq_port)
+    return env.backend.enqueue_scalar_store(req_id, sq_ptr, enq_port=enq_port)
 
 
 def send_load(env, txn: LoadTxn) -> None:
     """按标准时序发送一笔标量 load。"""
 
-    enqueue_scalar_load(
-        env,
-        req_id=txn.req_id,
-        lq_ptr=txn.lq_ptr,
-        sq_ptr=txn.sq_ptr,
-        enq_port=txn.enq_port,
-    )
-    issue_scalar_load(
-        env,
-        req_id=txn.req_id,
-        addr=txn.addr,
-        lq_ptr=txn.lq_ptr,
-        sq_ptr=txn.sq_ptr,
-        lane=txn.issue_lane,
-        store_set_hit=txn.store_set_hit,
-        load_wait_bit=txn.load_wait_bit,
-        load_wait_strict=txn.load_wait_strict,
-        wait_for_rob_idx_flag=txn.wait_for_rob_idx_flag,
-        wait_for_rob_idx_value=txn.wait_for_rob_idx_value,
-    )
+    env.backend.send_load(txn)
 
 
 def expect_load(env, txn: LoadTxn):
@@ -143,27 +124,7 @@ def expect_load(env, txn: LoadTxn):
 def send_store(env, txn: StoreTxn) -> QueuePtr:
     """按标准时序发送一笔标量 store。"""
 
-    allocated_sq_ptr = enqueue_scalar_store(
-        env,
-        req_id=txn.req_id,
-        sq_ptr=txn.sq_ptr,
-        enq_port=txn.enq_port,
-    )
-    issue_scalar_std(
-        env,
-        req_id=txn.req_id,
-        sq_ptr=allocated_sq_ptr,
-        data=txn.data,
-        lane=txn.std_lane,
-    )
-    issue_scalar_sta(
-        env,
-        req_id=txn.req_id,
-        sq_ptr=allocated_sq_ptr,
-        addr=txn.addr,
-        lane=txn.sta_lane,
-    )
-    return allocated_sq_ptr
+    return env.backend.send_store(txn)
 
 
 def _issue_until_fire(env, lane: int, drive_inputs, max_cycles: int = 50) -> None:
@@ -184,7 +145,7 @@ def issue_scalar_load(
     wait_for_rob_idx_flag: int | None = None,
     wait_for_rob_idx_value: int | None = None,
 ) -> None:
-    env.issue_agent.issue_scalar_load(
+    env.backend.issue_scalar_load(
         req_id,
         addr,
         lq_ptr,
@@ -205,7 +166,7 @@ def issue_scalar_std(
     data: int,
     lane: int = DEFAULT_STD_LANE,
 ) -> None:
-    env.issue_agent.issue_scalar_std(req_id, sq_ptr, data, lane=lane)
+    env.backend.issue_scalar_std(req_id, sq_ptr, data, lane=lane)
 
 
 def issue_scalar_sta(
@@ -215,4 +176,4 @@ def issue_scalar_sta(
     addr: int,
     lane: int = DEFAULT_STA_LANE,
 ) -> None:
-    env.issue_agent.issue_scalar_sta(req_id, sq_ptr, addr, lane=lane)
+    env.backend.issue_scalar_sta(req_id, sq_ptr, addr, lane=lane)

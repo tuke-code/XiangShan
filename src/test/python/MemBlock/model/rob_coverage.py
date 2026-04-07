@@ -76,17 +76,9 @@ def _access_bytes(addr: int, size_bytes: int) -> frozenset[int]:
 class RobCoverageCollector:
     """收集 ROB 半模型与真实 DUT 交互相关的功能覆盖。"""
 
-    KNOWN_MODEL_GAPS = (
-        "pending_ptr_next_not_modelled",
-        "commit_bool_not_modelled",
-        "non_mem_blocker_not_modelled",
-        "mixed_lcommit_scommit_not_modelled",
-        "redirect_cancel_not_modelled",
-        "backend_feedback_credit_not_modelled",
-    )
-
     def __init__(self, env) -> None:
         self.env = env
+        self._known_model_gaps = self._detect_known_model_gaps()
         self._boxes: dict[str, _ValueBox] = {}
         self._processed_drain_count = 0
         self._seen_load_writeback_keys = set()
@@ -99,6 +91,23 @@ class RobCoverageCollector:
         self._prev_sq_deq_ptr = None
         self._groups = self._build_groups()
         self._initialize_static_gaps()
+
+    def _detect_known_model_gaps(self) -> tuple[str, ...]:
+        gaps = []
+        if not getattr(self.env.commit_agent, "models_pending_ptr_next", False):
+            gaps.append("pending_ptr_next_not_modelled")
+        if not getattr(self.env.commit_agent, "models_commit_bool", False):
+            gaps.append("commit_bool_not_modelled")
+        if not getattr(self.env.commit_agent, "models_mixed_commit_packet", False):
+            gaps.append("mixed_lcommit_scommit_not_modelled")
+        gaps.extend(
+            (
+                "non_mem_blocker_not_modelled",
+                "redirect_cancel_not_modelled",
+                "backend_feedback_credit_not_modelled",
+            )
+        )
+        return tuple(gaps)
 
     def _build_groups(self) -> list:
         observed = fc.CovGroup("MemBlock.ROB.ObservedBehavior")
@@ -238,7 +247,7 @@ class RobCoverageCollector:
         )
 
         known_gaps = fc.CovGroup("MemBlock.ROB.KnownModelGaps")
-        for gap_name in self.KNOWN_MODEL_GAPS:
+        for gap_name in self._known_model_gaps:
             known_gaps.add_watch_point(
                 self._box(f"known_gap_{gap_name}"),
                 {gap_name: fc.Eq(1)},
@@ -248,7 +257,7 @@ class RobCoverageCollector:
         return [observed, current, gap_observed, known_gaps]
 
     def _initialize_static_gaps(self) -> None:
-        for gap_name in self.KNOWN_MODEL_GAPS:
+        for gap_name in self._known_model_gaps:
             self._latch(f"known_gap_{gap_name}")
 
     def _box(self, name: str) -> _ValueBox:
@@ -382,7 +391,8 @@ class RobCoverageCollector:
 
         if _read_signal(self.env.lsq_status.mmioBusy, 0):
             self._latch("mmio_busy_observed")
-            self._latch("gap_mmio_busy_without_commit_bool")
+            if not getattr(self.env.commit_agent, "models_commit_bool", False):
+                self._latch("gap_mmio_busy_without_commit_bool")
 
         if _read_signal(self.env.mem_status.sbIsEmpty, 0) and self._box("flushsb_command_observed").value:
             if self._box("sbuffer_drain_observed").value:
@@ -396,7 +406,8 @@ class RobCoverageCollector:
             self._latch("gap_replay_without_redirect_cancel_model")
 
         if (
-            _read_signal(getattr(self.env.dut, "io_ooo_to_mem_lsqio_scommit", None), 0) > 0
+            not getattr(self.env.commit_agent, "models_mixed_commit_packet", False)
+            and _read_signal(getattr(self.env.dut, "io_ooo_to_mem_lsqio_scommit", None), 0) > 0
             and _read_signal(self.env.mem_status.lqDeq, 0) > 0
         ):
             self._latch("gap_mixed_commit_window_without_packet_model")

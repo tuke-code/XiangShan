@@ -24,8 +24,19 @@ def test_api_MemBlock_env_create(env):
     assert env.commit_agent is not None
     assert env.lsq_agent is not None
     assert env.issue_agent is not None
+    assert env.rob_agent is not None
+    assert env.backend is not None
     assert env.config.rob_size == 512
     assert env.memory.strict_writeback_check is True
+
+
+def test_api_MemBlock_env_backend_facade_wires_existing_agents(env):
+    """验证统一 backend facade 复用了现有 agent。"""
+
+    assert env.backend.lsq is env.lsq_agent
+    assert env.backend.issue is env.issue_agent
+    assert env.backend.rob is env.rob_agent
+    assert env.backend.commit is env.commit_agent
 
 
 def test_api_MemBlock_env_has_core_bundles(env):
@@ -124,6 +135,56 @@ def test_api_MemBlock_env_mem_status_access(env):
     _ = env.lsq_status.lqCanAccept.value
     _ = env.lsq_status.sqCanAccept.value
     _ = env.lsq_status.mmioBusy.value
+
+
+def test_api_MemBlock_env_commit_agent_exports_rob_state(env):
+    """验证 commit agent 暴露了 ROB packet 与五元组能力状态。"""
+
+    env.Step(1)
+    packet = env.commit_agent.latest_commit_packet
+    assert packet is not None
+    assert hasattr(env.commit_agent.pending_ptr, "flag")
+    assert hasattr(env.commit_agent.pending_ptr_next, "value")
+    support = env.commit_agent.signal_support
+    assert support["pending_ptr"] is True
+    assert isinstance(env.commit_agent.models_pending_ptr_next, bool)
+    assert isinstance(env.commit_agent.models_commit_bool, bool)
+    assert isinstance(env.commit_agent.models_mixed_commit_packet, bool)
+
+
+def test_api_MemBlock_env_backend_note_load_completed_advances_pending_ptr(env):
+    """验证 backend facade 能通过 load issued/completed 推进 ROB head。"""
+
+    env.backend.note_load_issued(0, 1)
+    assert env.rob_agent.stats["rob_pending_entry_count"] == 1
+    env.backend.note_load_completed(0, 1)
+    env.rob_agent.advance()
+    env.rob_agent.drive()
+    packet = env.commit_agent.latest_commit_packet
+    assert packet.commit is True
+    assert packet.lcommit == 1
+    assert packet.pending_ptr_before.value == 0
+    assert packet.pending_ptr_next.value == 1
+    env.rob_agent.advance()
+    assert env.commit_agent.pending_ptr.flag == 0
+    assert env.commit_agent.pending_ptr.value == 1
+
+
+def test_api_MemBlock_env_note_store_allocated_compat_updates_backend_state(env):
+    """验证旧的 env.note_store_allocated 兼容入口仍转发到 backend facade。"""
+
+    env.note_store_allocated(
+        sq_idx_flag=0,
+        sq_idx_value=7,
+        rob_idx_flag=1,
+        rob_idx_value=0x12,
+    )
+    store = env.get_store_view(7)
+    assert store is not None
+    assert store.allocated is True
+    assert store.rob_idx_flag == 1
+    assert store.rob_idx_value == 0x12
+    assert env.rob_agent.stats["rob_pending_entry_count"] == 1
 
 
 def test_api_MemBlock_env_outer_buffer_mock_ready(env):
