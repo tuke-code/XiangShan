@@ -389,7 +389,7 @@ class TageBaseTableAlignBank(
     val hit = rawHit && e.cfiPosition >= s1_alignedInstOffset && !s1_crossPage
     pred.valid            := hit
     pred.bits.static      := ~hit
-    pred.bits.loadWait    := c.isPositive
+    pred.bits.loadWait    := e.distance.orR
     pred.bits.distance    := e.distance
     pred.bits.cfiPosition := e.cfiPosition
 
@@ -640,7 +640,6 @@ class MdpTageBaseTable(implicit p: Parameters) extends XSModule with HasMdpBaseT
   val mdpBaseTrainCnt = PopCount(t1_train.loads.map(v => v.valid && t1_fire))
   XSPerfAccumulate("mdpBaseTrainCnt", mdpBaseTrainCnt)
 }
-
 
 
 
