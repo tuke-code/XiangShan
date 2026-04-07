@@ -26,7 +26,7 @@ case class FtqParameters(
     BpTrainStallLimit:  Int = 8,
     CommitQueueSize:    Int = 64,
     // drop resolve requests if there have been no mispreds for a long period
-    DropResolveCounterWidth: Int = 8
+    DropResolveCounterWidth: Int = 10
 ) {
   // sanity check
   require(isPow2(FtqSize))
