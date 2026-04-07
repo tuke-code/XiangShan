@@ -46,18 +46,19 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   /* *** submodules *** */
   private val tables = TableInfos.zipWithIndex.map { case (info, i) => Module(new TageTable(i, info)) }
 
-  // reset usefulCtr of all entries when usefulResetCtr saturated
-  private val usefulResetCtr = RegInit(UsefulResetCounter.Zero)
+  // reset all usefulCtr when usefulResetCtr saturated
+  private val usefulResetCtr      = RegInit(UsefulResetCounter.Zero)
+  private val usefulResetInFlight = RegInit(false.B)
 
   // use the alternate prediction when counter is positive
   private val useAltOnNaVec = RegInit(VecInit.fill(NumUseAltOnNa)(UseAltOnNaCounter.Zero))
 
-  /* *** reset *** */
-  private val resetDone = RegInit(false.B)
-  when(tables.map(_.io.resetDone).reduce(_ && _)) {
-    resetDone := true.B
+  /* *** init SRAM *** */
+  private val initDone = RegInit(false.B)
+  when(tables.map(_.io.initDone).reduce(_ && _)) {
+    initDone := true.B
   }
-  io.resetDone := resetDone
+  io.resetDone := initDone
 
   /* --------------------------------------------------------------------------------------------------------------
      predict pipeline stage 0
@@ -504,6 +505,8 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
     entry
   }
 
+  private val t2_usefulResetStart = t2_fire && usefulResetCtr.isSaturatePositive && !usefulResetInFlight
+
   tables.zipWithIndex.foreach { case (table, tableIdx) =>
     implicit val info: TageTableInfo = TableInfos(tableIdx) // used by NumWays
 
@@ -553,13 +556,19 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
     table.io.writeReq.bits.usefulCtrs      := writeUsefulCtrs
     table.io.writeReq.bits.actualTakenMask := actualTakenMask
 
-    table.io.resetUseful := t2_fire && usefulResetCtr.isSaturatePositive
+    table.io.usefulResetStart := t2_usefulResetStart
+  }
+
+  when(t2_usefulResetStart) {
+    usefulResetInFlight := true.B
+  }.elsewhen(usefulResetInFlight && !tables.map(_.io.usefulResetInFlight).reduce(_ || _)) {
+    usefulResetInFlight := false.B
   }
 
   when(t2_fire) {
-    when(usefulResetCtr.isSaturatePositive) {
+    when(t2_usefulResetStart) {
       usefulResetCtr.resetZero()
-    }.elsewhen(t2_needAllocate && !t2_canAllocate) {
+    }.elsewhen(!usefulResetInFlight && t2_needAllocate && !t2_canAllocate) {
       usefulResetCtr.selfIncrease()
     }
   }
