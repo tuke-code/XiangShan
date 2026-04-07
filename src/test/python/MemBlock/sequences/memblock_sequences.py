@@ -365,7 +365,7 @@ class ScalarStoreCommitSequence:
             require_committed=False,
             materialize_cycles=self.materialize_cycles,
         ).run(env)
-        env.pulse_store_commit(1)
+        env.backend.pulse_store_commit(1)
         if settle_cycles > 0:
             env.Step(settle_cycles)
         if self.require_committed:
@@ -506,7 +506,7 @@ class ScalarStorePairThenLoadSequence:
             require_committed=False,
             materialize_cycles=self.materialize_cycles,
         ).run(env)
-        env.pulse_store_commit(1)
+        env.backend.pulse_store_commit(1)
         if commit_settle_cycles > 0:
             env.Step(commit_settle_cycles)
         if self.require_committed:
@@ -529,7 +529,7 @@ class ScalarStorePairThenLoadSequence:
             require_committed=False,
             materialize_cycles=self.materialize_cycles,
         ).run(env)
-        env.pulse_store_commit(1)
+        env.backend.pulse_store_commit(1)
         if commit_settle_cycles > 0:
             env.Step(commit_settle_cycles)
         if self.require_committed:
@@ -824,7 +824,7 @@ class ScalarForwardFailReplaySequence:
             data=self.store_txn.data,
             lane=self.store_txn.std_lane,
         )
-        env.pulse_store_commit(1)
+        env.backend.pulse_store_commit(1)
         committed_store_view = env.wait_store_materialized(
             store_sq_ptr.value,
             expected_addr=self.store_txn.addr,
@@ -1040,7 +1040,7 @@ class ScalarRawReplaySequence:
             addr=self.store_txn.addr,
             lane=self.store_txn.sta_lane,
         )
-        env.pulse_store_commit(1)
+        env.backend.pulse_store_commit(1)
         committed_store_view = env.wait_store_materialized(
             store_sq_ptr.value,
             expected_addr=self.store_txn.addr,
@@ -1151,7 +1151,7 @@ class ScalarRarViolationSequence:
                 addr=self.fake_store_txn.addr,
                 lane=self.fake_store_txn.sta_lane,
             )
-            env.pulse_store_commit(1)
+            env.backend.pulse_store_commit(1)
             fake_store_view = env.wait_store_materialized(
                 fake_store_sq_ptr.value,
                 expected_addr=self.fake_store_txn.addr,

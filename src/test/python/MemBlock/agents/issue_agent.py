@@ -85,7 +85,7 @@ class IssueAgent:
             _set_optional_signal(self.env.dut, f"{prefix}lqIdx_value", lq_ptr.value)
 
         self._issue_until_fire(lane, _drive)
-        self.env.note_load_issued((req_id >> 9) & 0x1, req_id & 0x1FF)
+        self.env.backend.note_load_issued((req_id >> 9) & 0x1, req_id & 0x1FF)
 
     def issue_scalar_std(self, req_id: int, sq_ptr, data: int, lane: int = 5) -> None:
         def _drive() -> None:

@@ -180,8 +180,7 @@ class ScenarioEnvProxy:
 
     def pulse_store_commit(self, count: int = 1) -> None:
         count = int(count)
-        self._env_call(self._env.commit_agent.queue_store_commit, count)
-        self.Step(1)
+        self._env_call(self._env.backend.pulse_store_commit, count)
 
     def drain_writebacks(self, max_cycles: int = 200) -> None:
         max_cycles = int(max_cycles)

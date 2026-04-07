@@ -85,7 +85,7 @@ class LsqAgent:
             flag=int(self.env.lsq_enq_resp[enq_port].sqIdx_flag.value),
             value=int(self.env.lsq_enq_resp[enq_port].sqIdx_value.value),
         )
-        self.env.note_store_allocated(
+        self.env.backend.note_store_allocated(
             sq_idx_flag=allocated_sq_ptr.flag,
             sq_idx_value=allocated_sq_ptr.value,
             rob_idx_flag=(req_id >> 9) & 0x1,

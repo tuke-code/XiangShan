@@ -1,5 +1,79 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-07
+
+本条目记录围绕 `env.backend` 公共控制面完成收口的这一轮 API 清理。重点不再是“引入 facade”，而是把旧的兼容入口真正撤出业务路径，并同步更新环境文档，避免后续新 testcase 再沿着过时接口扩散。
+
+### 变更摘要
+
+- `env.backend` 明确成为 MemBlock Python 验证环境的默认主动控制入口。
+- 业务路径中的 `env.note_*` / `env.pulse_*` 风格 helper 已清理，不再作为 public API 继续扩散。
+- `request_apis.py`、sequence、webui、低层 agent 的业务流量已经统一走 `env.backend`。
+- README 与设计文档已同步更新，明确区分 public facade 与内部 agent。
+
+### 1. 清理旧的 env 兼容控制入口
+
+主要改动：
+
+- 从 `MemBlockEnv` 中移除了以下旧 public control helper：
+  - `note_load_issued()`
+  - `note_store_allocated()`
+  - `note_load_completed()`
+  - `pulse_store_commit()`
+- 对外保留的主动控制面统一收敛到 `env.backend`。
+- `flush_store_buffers_and_wait()` 继续保留为 env facade 的稳定能力，但内部仍通过 backend facade 收口。
+
+这一步的意义在于：新 testcase 不再容易误以为 `MemBlockEnv` 既是被动装配层、又是主动 driver helper 的堆放点。env 与 backend control plane 的职责边界现在更清晰。
+
+### 2. 清理业务路径中的 legacy 调用
+
+主要改动：
+
+- `IssueAgent` 在 load issue 成功后，直接调用 `env.backend.note_load_issued()`。
+- `LsqAgent` 在 store enqueue 成功后，直接调用 `env.backend.note_store_allocated()`。
+- `sequences/memblock_sequences.py` 中的 store commit 推进统一改为 `env.backend.pulse_store_commit()`。
+- `lsq_webui.py` 中的手动 store commit 操作也统一改走 `env.backend`。
+
+清理之后，业务路径里保留的 direct-agent/compatibility 引用，主要只剩 env 自测、ROB 自测和 coverage 自测这类“刻意验证内部结构”的测试代码，而不再是普通场景用例的默认写法。
+
+### 3. 文档与测试同步
+
+主要改动：
+
+- 更新 `README.md`，明确：
+  - `MemBlock_env.py` 的公共控制入口是 `env.backend`
+  - `request_apis.py` 是 `env.backend` 之上的薄封装
+  - 新 testcase 不再新增 `env.note_*` / `env.pulse_*` 风格 helper
+- 更新：
+  - `docs/verification_env_design.md`
+  - `docs/memory_model_design.md`
+  - `docs/test_sequence_and_extension_guide.md`
+- 更新 env fixture 测试，增加“legacy public control helper 已移除”的断言。
+
+### 4. 验证情况
+
+本轮针对 API 清理执行了以下验证：
+
+- `python3 -m py_compile`
+  - `agents/issue_agent.py`
+  - `agents/lsq_agent.py`
+  - `lsq_webui.py`
+  - `MemBlock_env.py`
+  - 更新后的测试与文档相关 Python 文件
+- `pytest`
+  - `tests/test_request_apis_backend_facade.py`
+  - `tests/test_MemBlock_scalar_ordering.py`
+  - `tests/test_MemBlock_replay.py`
+  - `tests/test_MemBlock_env_fixture.py` 相关 backend/env 子集
+
+### 总结
+
+到这一轮为止，MemBlock Python 验证环境在主动控制面上的默认工程约定已经非常明确：
+
+- `env.backend` 是唯一默认 public control plane。
+- `request_apis.py` 和 `sequences/` 负责把它包装成更适合 testcase 的调用方式。
+- `lsq_agent` / `issue_agent` / `commit_agent` / `rob_agent` 仍然存在，但它们属于 env 内部 backend-facing agents，而不是后续 testcase 应优先直接依赖的 API。
+
 ## 2026-04-06
 
 本条目记录 2026-04-05 到 2026-04-06 这一轮围绕 ROB coverage、toffee 覆盖率报告、环境状态总结和后续验证规划的新增变化。该条目是对 2026-04-01 分层重构之后“环境已经稳定下来并开始进入覆盖率驱动补强阶段”的补充记录。

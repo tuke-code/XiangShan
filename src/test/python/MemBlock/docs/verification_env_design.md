@@ -52,7 +52,7 @@ MemBlock/
 - `monitors/` 持有从 DUT 输出采样并发布事件的逻辑。
 - `model/` 持有参考模型、传输响应器、scoreboard。
 - `sequences/` 持有 testcase 可复用的场景模板。
-- `request_apis.py` 仍保留兼容型 helper，作为 sequence 之下的薄封装。
+- `request_apis.py` 是 `env.backend` 之上的薄封装，不再自成一套控制面。
 
 这个目录结构的价值不是“更像某种教科书图”，而是让一个开发者在接手问题时能快速判断该改哪一层。例如：端口驱动问题先看 agent，状态采样问题先看 monitor，load/store 一致性判断先看 scoreboard，场景复用则先看 sequence。
 
@@ -63,7 +63,8 @@ MemBlock/
 ```text
 pytest testcase
   -> sequences / request_apis
-    -> MemBlockEnv facade
+    -> env.backend
+      -> MemBlockEnv facade
       -> active agents
       -> passive monitors
       -> MemoryModel
@@ -76,7 +77,7 @@ pytest testcase
 从运行时关系看，主要有三条流：
 
 1. 驱动流
-   testcase 通过 `ScalarLoadSequence`、`ScalarStoreSequence` 等场景对象发起请求；sequence 再调用 `request_apis.py` 或 env facade，把 enqueue/issue/flush 等动作下沉到 `LsqAgent`、`IssueAgent`、`CommitAgent`、`CsrAgent`。
+   testcase 通过 `ScalarLoadSequence`、`ScalarStoreSequence` 等场景对象发起请求；sequence 再调用 `request_apis.py` 或 `env.backend`，把 enqueue/issue/flush 等动作下沉到 `LsqAgent`、`IssueAgent`、`CommitAgent`、`CsrAgent`。
 
 2. 观测流
    DUT 每拍推进后，`StoreMonitor`、`WritebackMonitor`、`MemStatusMonitor` 分别观测 store shadow、writeback、mem_status 等输出，把事件发布给 scoreboard 或 commit path，而不是由 env 或 scoreboard 直接散读端口。
@@ -97,7 +98,7 @@ pytest testcase
    负责 `Step()`、`reset()`、`idle_inputs()` 等顶层时序编排；同时在每拍末尾调用 `MemStatusMonitor` 与 `CommitAgent.advance()`，维持 pending pointer 和 commit 相关闭环。
 
 3. 对外暴露稳定 facade
-   例如 `preload_u64()`、`expect_scalar_load()`、`get_counter()`、`wait_store_materialized()`、`wait_memory_quiesce()`、`flush_store_buffers_and_wait()`、`assert_no_outstanding()`。
+   例如 `preload_u64()`、`expect_scalar_load()`、`get_counter()`、`wait_store_materialized()`、`wait_memory_quiesce()`、`flush_store_buffers_and_wait()`、`assert_no_outstanding()`；主动控制入口则统一收口到 `env.backend`。
 
 这相当于 UVM 中 env 的角色，但实现上更轻量。env 不再直接做 pin-level issue，也不再直接承担 compare 逻辑，而是尽量只负责装配、调度和对外接口稳定性。
 
@@ -109,8 +110,9 @@ pytest testcase
 - `CommitAgent`
 - `LsqAgent`
 - `IssueAgent`
+- `BackendFacade`
 
-它们共同特点是“主动写 DUT 输入”。这和 monitor 的只读性质形成了明确对照。
+其中 `BackendFacade` 负责统一编排其余 backend-facing agents，并作为 testcase/sequence 的默认主动控制入口。它们共同特点是“主动写 DUT 输入”。这和 monitor 的只读性质形成了明确对照。
 
 这种划分与 UVM driver 的思想一致，但比传统 driver/seq_item 体系更简单：Python 场景对象不直接碰 pin，agent 统一持有时序细节；testcase 只描述“我要发一个 load/store/flush”，不描述“第几拍拉哪个 valid”。这既降低了 testcase 冗余，也避免多个用例各自复制握手时序。
 
@@ -284,7 +286,7 @@ pytest testcase
 2. 为 monitor 增加统一事件类型，减少 monitor 到 scoreboard 的细粒度方法耦合。
 3. 在 sequence 层引入更高层的组合场景，例如 mixed traffic、flush/replay、异常路径模板。
 4. 把 memory violation、异常位、MMIO 特殊路径的检查进一步对象化。
-5. 将当前部分 facade 兼容接口逐步标注为 legacy，让新的 testcase 只依赖 sequence + env public API。
+5. 保持 `env.backend` 作为唯一默认主动控制入口，不再新增 `env.note_*` / `env.pulse_*` 风格 public helper。
 
 ## 14. 总结
 

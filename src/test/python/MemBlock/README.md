@@ -36,11 +36,11 @@
 - `MemBlock_api.py`
   - DUT 创建、波形/覆盖率路径配置、`dut` fixture。
 - `MemBlock_env.py`
-  - 顶层 `MemBlockEnv`、bundle 定义、env facade、toffee function coverage 接入点。
+  - 顶层 `MemBlockEnv`、bundle 定义、`env.backend` 公共控制入口、toffee function coverage 接入点。
 - `env_config.py`
   - 环境统一配置入口，收敛 queue 深度、transport 延迟、默认 sequence 时序和 strict check 策略。
 - `request_apis.py`
-  - 公共驱动 helper 和兼容型事务接口。
+  - 基于 `env.backend` 的公共驱动 helper 和事务薄封装。
 - `transactions.py`
   - `QueuePtr`、`LoadTxn`、`StoreTxn` 等事务对象。
 - `memory_model.py`
@@ -55,7 +55,7 @@
 ### 子目录
 
 - `agents/`
-  - active driver agents，包括 CSR、commit、LSQ enqueue、issue。
+  - backend-facing active agents，包括 CSR、commit、LSQ enqueue、issue，以及统一编排的 backend facade。
 - `monitors/`
   - passive monitors，包括 writeback、store、mem_status 三类被动观测器。
 - `model/`
@@ -115,6 +115,28 @@
 
 - `src/test/python/MemBlock/tests/`
 
+最小主动控制示例：
+
+```python
+from transactions import LoadTxn, QueuePtr
+
+state = ResetEnvSequence(require_issue_lanes=(0,), require_lq_ready=True).run(env)
+env.preload_u64(0x9000_0000, 0x1122334455667788)
+
+txn = LoadTxn(
+    req_id=0x21,
+    addr=0x9000_0000,
+    lq_ptr=state.next_lq_ptr,
+    sq_ptr=state.sq_ptr,
+)
+
+env.backend.send_load(txn)
+env.expect_scalar_load(req_id=txn.req_id, addr=txn.addr)
+env.drain_writebacks()
+```
+
+如果场景已经能被高层 sequence 表达，仍然优先复用 sequence；只有在编写新的 primitive 场景或 debug 时，才直接调用 `env.backend`。
+
 当前已稳定存在的测试类型：
 
 - env / fixture 冒烟
@@ -134,6 +156,7 @@
 为了降低 testcase 与环境内部实现的耦合，后续开发建议遵循以下规则：
 
 - 新 testcase 优先通过 sequence + `MemBlockEnv` public facade 组织，不直接依赖 `env.memory` 内部容器。
+- 主动控制入口默认使用 `env.backend` 或 `request_apis.py`，不要再新增 `env.note_*` / `env.pulse_*` 风格 helper。
 - 需要新增 DUT 白盒观测时，优先扩 `monitors/` 或 env facade，不把私有 DUT 命名直接散落到测试文件。
 - 需要增强检查逻辑时，优先修改 `model/` 与相应设计文档，不在 testcase 中堆临时判断。
 - 覆盖率状态与下一步补强工作以 `coverage_summary.md` 和 `coverage_todo.md` 为准。

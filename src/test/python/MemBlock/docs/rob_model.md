@@ -873,7 +873,7 @@ load compare 则仍然主要靠 MemBlock 对外导出的 `lqDeq` 做提交预算
 - MMIO busy 与 commit-stuck；
 - lq/sq near-full 与 deqPtr/dispatch feedback；
 
-这些都需要一个统一的 ROB-LSQ 交互建模层，而不是继续把语义散落在 `PendingPtrDriver`、`pulse_store_commit()`、`lqDeq` monitor 和 testcase 的局部等待逻辑中。
+这些都需要一个统一的 ROB-LSQ 交互建模层，而不是继续把语义散落在 `PendingPtrDriver`、`env.backend.pulse_store_commit()`、`lqDeq` monitor 和 testcase 的局部等待逻辑中。
 
 因此，概要设计的核心结论是：**下一代 ROB 建模应演化为“统一 ROB entry + commit packet + 兼容桥接”三层结构**。它既不是完整 backend，也不能只是当前 `PendingPtrDriver` 的增量打补丁。只有这样，测试环境才能在不破坏现有回归的前提下，逐步逼近真实后端与 MemBlock 的交互语义。
 
@@ -956,8 +956,8 @@ ROB 模型升级应该服务于这些判定更真实，而不是替换它们。
 
 在实现上，可以允许 sequence 通过 facade 做几类动作：
 
-- `note_load_issued(rob_idx, lq_idx, ...)`
-- `note_store_allocated(rob_idx, sq_idx, ...)`
+- `env.backend.note_load_issued(rob_idx, lq_idx, ...)`
+- `env.backend.note_store_allocated(rob_idx, sq_idx, ...)`
 - `insert_non_mem_placeholder(rob_idx, can_commit=False, note=...)`
 - `mark_entry_exec_completed(rob_idx)`
 - `mark_entry_cancelled(rob_idx)`

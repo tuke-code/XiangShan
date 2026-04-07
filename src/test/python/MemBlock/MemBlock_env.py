@@ -1189,37 +1189,6 @@ class MemBlockEnv:
         self.idle_inputs()
         self.Step(settle_cycles)
 
-    def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
-        """登记一笔已完成握手的 load issue，用于推进 `pendingPtr`。"""
-
-        self.backend.note_load_issued(rob_idx_flag, rob_idx_value)
-
-    def note_store_allocated(
-        self,
-        sq_idx_flag: int,
-        sq_idx_value: int,
-        rob_idx_flag: int,
-        rob_idx_value: int,
-    ) -> None:
-        """登记一笔 store 已分配的 SQ/ROB 元信息。"""
-
-        self.backend.note_store_allocated(
-            sq_idx_flag=sq_idx_flag,
-            sq_idx_value=sq_idx_value,
-            rob_idx_flag=rob_idx_flag,
-            rob_idx_value=rob_idx_value,
-        )
-
-    def note_load_completed(self, rob_idx_flag: int, rob_idx_value: int) -> None:
-        """登记一笔 load 已完成执行，用于推动 ROB 提交边界。"""
-
-        self.backend.note_load_completed(rob_idx_flag, rob_idx_value)
-
-    def pulse_store_commit(self, count: int = 1) -> None:
-        """对 `io_ooo_to_mem_lsqio_scommit` 发送一个单拍脉冲。"""
-
-        self.backend.pulse_store_commit(count)
-
     def inject_outer_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
         """向 outer buffer D 通道注入一笔响应。"""
 

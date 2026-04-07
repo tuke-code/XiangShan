@@ -170,10 +170,10 @@ def test_api_MemBlock_env_backend_note_load_completed_advances_pending_ptr(env):
     assert env.commit_agent.pending_ptr.value == 1
 
 
-def test_api_MemBlock_env_note_store_allocated_compat_updates_backend_state(env):
-    """验证旧的 env.note_store_allocated 兼容入口仍转发到 backend facade。"""
+def test_api_MemBlock_env_backend_note_store_allocated_updates_state(env):
+    """验证 backend facade 能更新 store shadow 与 ROB pending entry。"""
 
-    env.note_store_allocated(
+    env.backend.note_store_allocated(
         sq_idx_flag=0,
         sq_idx_value=7,
         rob_idx_flag=1,
@@ -185,6 +185,15 @@ def test_api_MemBlock_env_note_store_allocated_compat_updates_backend_state(env)
     assert store.rob_idx_flag == 1
     assert store.rob_idx_value == 0x12
     assert env.rob_agent.stats["rob_pending_entry_count"] == 1
+
+
+def test_api_MemBlock_env_cleanup_removes_legacy_control_helpers(env):
+    """验证旧的 env.note_*/pulse_* 公共控制入口已清理。"""
+
+    assert not hasattr(env, "note_load_issued")
+    assert not hasattr(env, "note_store_allocated")
+    assert not hasattr(env, "note_load_completed")
+    assert not hasattr(env, "pulse_store_commit")
 
 
 def test_api_MemBlock_env_outer_buffer_mock_ready(env):

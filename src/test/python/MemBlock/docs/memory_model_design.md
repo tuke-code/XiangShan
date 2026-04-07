@@ -287,18 +287,18 @@ store 的完整信息来自多个入口拼装：
 
 ## 9. 与测试环境的协作关系
 
-`MemoryModel` 不直接知道测试意图，它依赖环境和测试提供时序信息：
+`MemoryModel` 不直接知道测试意图，它依赖环境和 backend facade 提供时序信息：
 
-- `MemBlockEnv.note_load_issued()`
+- `env.backend.note_load_issued()`
   - 把 issue 成功的 load ROB 告诉模型。
 - `MemBlockEnv.Step()`
   - 把 `lqDeq` 转换成 `note_load_commits()`。
 - `request_apis.py`
-  - 负责按正确协议顺序发起 enqueue/issue。
+  - 负责按正确协议顺序调用 `env.backend` 发起 enqueue/issue。
 - 测试用例
   - 负责在 load 发起后调用 `expect_load()`，并在合适时机调用 `drain_writebacks()` 或 `flush_store_buffers_and_wait()`。
 
-因此，`MemoryModel`、`MemBlockEnv`、`request_apis.py` 三者必须配套使用，单独抽离其中一个都会丢失完整语义。
+因此，`MemoryModel`、`MemBlockEnv`、`env.backend`、`request_apis.py` 四者必须配套使用，单独抽离其中一个都会丢失完整语义。
 
 ## 10. 当前限制与后续扩展点
 
