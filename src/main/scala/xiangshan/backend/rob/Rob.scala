@@ -89,7 +89,6 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val csr = new RobCSRIO
     val snpt = Input(new SnapshotPort)
     val robFull = Output(Bool())
-    val headNotReady = Output(Bool())
     val cpu_halt = Output(Bool())
     val wfi = new Bundle {
       val wfiReq = Output(Bool())
@@ -1266,7 +1265,6 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   }
   io.csr.perfinfo.retiredInstr := retireCounter
   io.robFull := !allowEnqueue
-  io.headNotReady := commit_vDeqGroup(deqPtr.value(bankNumWidth-1, 0)) && !commit_wDeqGroup(deqPtr.value(bankNumWidth-1, 0))
 
   io.toVecExcpMod.logicPhyRegMap := rab.io.toVecExcpMod.logicPhyRegMap
   io.toVecExcpMod.excpInfo := vecExcpInfo

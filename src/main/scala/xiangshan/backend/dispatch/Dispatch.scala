@@ -153,16 +153,13 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
     // perf only
     val robHeadFuType = Input(FuType())
     val stallReason = Flipped(new StallReasonIO(RenameWidth))
-    val robHeadNotReady = Input(Bool())
     val debugBlockBackward = Option.when(backendParams.debugEn)(Input(Bool()))
     val debugWaitForward   = Option.when(backendParams.debugEn)(Input(Bool()))
     val debugIQValidNumVec = Option.when(backendParams.debugEn)(Vec(issueQueueNum, Input(UInt(maxIQSize.U.getWidth.W))))
     val debugIQEnqHasIssuedVec = Option.when(backendParams.debugEn)(Vec(issueQueueNum, Input(Bool())))
     val debugRobHeadStall = Option.when(backendParams.debugEn)(Input(Bool()))
-    val debugTopDown = new Bundle {
-      val fromRob = Flipped(new RobDispatchTopDownIO)
-      val fromCore = new CoreDispatchTopDownIO
-    }
+    val debugLoadReason = Option.when(backendParams.debugEn)(Input(UInt(log2Ceil(TopDownCounters.NumStallReasons.id).W)))
+    val debugRobTrueCommit = Option.when(backendParams.debugEn)(Input(UInt(64.W)))
   })
   // Deq for std's IQ is not assigned in Dispatch2Iq, so add one more src for it.
   val issueBlockParams = backendParams.allIssueParams
@@ -908,24 +905,8 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   XSPerfAccumulate("stall_cycle_allowDispatch", dispatchBlock && allowDispatch.asUInt.orR)
   XSPerfAccumulate("stall_cycle_lsqFull", dispatchBlock && lsqCanAccept)
 
-  val notIssue = !io.debugTopDown.fromRob.robHeadLsIssue
-  val tlbReplay = io.debugTopDown.fromCore.fromMem.robHeadTlbReplay
-  val tlbMiss = io.debugTopDown.fromCore.fromMem.robHeadTlbMiss
-  val vioReplay = io.debugTopDown.fromCore.fromMem.robHeadLoadVio
-  val mshrReplay = io.debugTopDown.fromCore.fromMem.robHeadLoadMSHR
-  val l1Miss = io.debugTopDown.fromCore.fromMem.robHeadMissInDCache
-  val l2Miss = io.debugTopDown.fromCore.l2MissMatch
-  val l3Miss = io.debugTopDown.fromCore.l3MissMatch
 
-  val ldReason = Mux(l3Miss, LoadMemStall.id.U,
-  Mux(l2Miss, LoadL3Stall.id.U,
-  Mux(l1Miss, LoadL2Stall.id.U,
-  Mux(notIssue, MemNotReadyStall.id.U,
-  Mux(tlbMiss, LoadTLBStall.id.U,
-  Mux(tlbReplay, LoadTLBStall.id.U,
-  Mux(mshrReplay, LoadMSHRReplayStall.id.U,
-  Mux(vioReplay, LoadVioReplayStall.id.U,
-  LoadL1Stall.id.U))))))))
+  val ldReason = io.debugLoadReason.getOrElse(0.U)
 
   val fusedVec = (0 until RenameWidth).map{ case i =>
     if (i == 0 || !backendParams.debugEn) false.B
@@ -1280,7 +1261,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
 
   TopDownCounters.values.foreach(ctr => XSPerfAccumulate(ctr.toString(), PopCount(stallReason.map(_ === ctr.id.U)), XSPerfLevel.CRITICAL))
 
-  val robTrueCommit = io.debugTopDown.fromRob.robTrueCommit
+  val robTrueCommit = io.debugRobTrueCommit.getOrElse(0.U)
   TopDownCounters.values.foreach(ctr => XSPerfRolling("td_"+ctr.toString(), PopCount(stallReason.map(_ === ctr.id.U)),
                                                       robTrueCommit, 1000, clock, reset))
 
