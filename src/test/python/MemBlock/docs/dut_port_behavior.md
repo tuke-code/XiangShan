@@ -111,6 +111,14 @@ flowchart LR
 - 测试环境不主动引入虚拟化、复杂权限变化、触发器等干扰因素。
 - 若 load/store 行为异常，优先看 LSU 主路径，而不是先怀疑 CSR 背景。
 
+从 2026-04-08 开始，`MemBlockEnv` 额外提供 `env.mmu` facade，用来在“默认 M-mode 空闲态”之外，显式建立可复用的 MMU 背景。它主要承担三类职责：
+
+1. 重放 `satp/priv_*` 这类每拍输入，避免 `idle_inputs()` 把活跃 testcase 意外切回 M-mode。
+2. 通过 `csrCtrl.distribute_csr_w_*` 对 DUT 内部 PMP CSR 进行编程，补齐 S-mode translation smoke 所需的权限背景。
+3. 通过 PTW TileLink responder 为 page-table walk 返回完整 multi-beat D 响应。
+
+也就是说，translation 专题 testcase 应优先依赖 `env.mmu`，而不是在 testcase 本地零散改 `tlb_csr` 或私自拼 PTW D 通道。
+
 ### 4.3 flushSb 与 sfence
 
 `MemBlockEnv.idle_inputs()` 对以下控制口有显式管理：

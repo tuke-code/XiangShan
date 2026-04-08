@@ -1,5 +1,69 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-08
+
+本条目记录一轮面向 MMU/PTW/DTLB 外围稳定性的 env/facade 补全。目标不是直接扩 testcase，而是先把 Sv39/PTW/PMP 这条控制面补成一个可复用、可 smoke、能穿过 `idle_inputs()` 与 DUT reset 的稳定入口，为后续 translation/replay 场景复用打底。
+
+### 变更摘要
+
+- `MemBlockEnv` 新增 `env.mmu` facade，集中管理 Sv39、sfence、PTW responder 与 PMP helper。
+- PTW mock 从“单拍返回一个 256-bit beat”修正为“按 TileLink size 返回完整 multi-beat D 响应”。
+- `idle_inputs()` 在清空默认输入后，会重新施加活跃的 Sv39 状态，避免 `csr_agent.reset()` 把测试中途切回 M-mode。
+- `reset()` 在 DUT reset 后会重放持久化的 PMP CSR 写入与当前 Sv39 配置。
+- 新增真实 DUT smoke，证明 Sv39 + PTW + DTLB + cacheable load 的基础 MMU 闭环可正常工作。
+
+### 1. `env.mmu` facade 收口 MMU 控制面
+
+新增的 `env.mmu` 对外提供：
+
+- `enable_sv39()` / `disable_translation()`
+- `install_sv39_gigapage_mapping()`
+- `pulse_sfence()`
+- `write_distributed_csr()`
+- `program_pmp_entry()` / `allow_all_smode_access()`
+- `ptw_responder()` context manager
+
+这样后续 testcase 不再需要自己 monkey-patch `idle_inputs()` 或手写分散的 PTW/PMP 临时 helper，而是统一通过 env facade 进入。
+
+### 2. PTW responder 修正为 multi-beat TileLink 响应
+
+此前 PTW mock 仅返回一个 D beat，无法覆盖 `size=6` 的 64B 请求，导致 TLB miss replay 长期滞留。现在 responder 会按请求大小切分完整 beat 序列，并逐 beat 在 D 通道握手返回。
+
+这一步是 MMU smoke 能跑通的关键修复之一。
+
+### 3. 稳定 Sv39 / PMP 配置跨越 `idle_inputs()` 与 reset
+
+本轮明确了两类状态的责任归属：
+
+- `tlbCsr` 输入属于“每拍输入面”，需要在 `idle_inputs()` 后重放。
+- PMP CSR 写入属于“DUT 内部状态”，需要在 DUT reset 后重放。
+
+因此：
+
+- `idle_inputs()` 现在会在默认清零后调用 `env.mmu.reapply_inputs()`
+- `reset()` 会在 deassert reset 后调用 `env.mmu.reapply_after_reset()`
+
+这使得 MMU testcase 可以在标准 env 生命周期中稳定复用，而不用靠测试局部补丁保活。
+
+### 4. 新增真实 DUT MMU smoke
+
+新增 smoke 覆盖两件事：
+
+- `env.mmu` 激活 Sv39 后，`idle_inputs()` 仍能保持 S-mode + satp 输入稳定。
+- 一条 cacheable load 在 Sv39/PTW/PMP 背景下可以真实完成写回，且走 dcache 路径而不是 outer/uncache 路径。
+
+### 5. 验证情况
+
+本轮建议至少执行：
+
+- `python3 -m py_compile`
+  - `src/test/python/MemBlock/MemBlock_env.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py`
+- `pytest`
+  - `src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py`
+
 ## 2026-04-07
 
 本条目记录围绕 `env.backend` 公共控制面完成收口的这一轮 API 清理。重点不再是“引入 facade”，而是把旧的兼容入口真正撤出业务路径，并同步更新环境文档，避免后续新 testcase 再沿着过时接口扩散。

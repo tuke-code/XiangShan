@@ -12,6 +12,7 @@ MemBlock 基础测试环境。
 import os
 import sys
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 try:
@@ -79,6 +80,20 @@ LOAD_REPLAY_CAUSE_LABELS = [
     "MF",
 ]
 TL_B_PROBE = 6
+TL_A_GET = 4
+TL_D_ACCESS_ACK_DATA = 1
+SV39_MODE = 8
+PRIV_MODE_S = 1
+SV39_PTE_V = 1 << 0
+SV39_PTE_R = 1 << 1
+SV39_PTE_W = 1 << 2
+SV39_PTE_A = 1 << 6
+SV39_PTE_D = 1 << 7
+PTW_BEAT_BYTES = 32
+PMP_CFG_RWX_NAPOT = 0x1F
+PMP_CFG_CSR_BASE = 0x3A0
+PMP_ADDR_CSR_BASE = 0x3B0
+MEMBLOCK_PADDR_BITS = 48
 
 
 def _read_signal_int(signal, default: int = 0) -> int:
@@ -699,6 +714,318 @@ class CsrCtrlBundle(Bundle):
     fsIsOff = Signal()
 
 
+class _PtwTileLinkResponder:
+    """为 MMU smoke 提供最小可用的 PTW TileLink D 通道响应。"""
+
+    def __init__(self, env, *, response_delay_cycles: int = 1) -> None:
+        self.env = env
+        self.response_delay_cycles = max(0, int(response_delay_cycles))
+        self._pending = deque()
+        self._active = None
+        self.trace = deque(maxlen=32)
+
+    def attach(self) -> None:
+        self._drive_idle()
+        self.env.add_after_step_callback(self.after_step)
+
+    def detach(self) -> None:
+        self.env.remove_after_step_callback(self.after_step)
+        self._pending.clear()
+        self._active = None
+        self._drive_idle()
+
+    def after_step(self) -> None:
+        if int(self.env.dut.reset.value) or int(self.env.dut.io_reset_backend.value):
+            self._pending.clear()
+            self._active = None
+            self._drive_idle()
+            return
+
+        self._drive_a_ready()
+        if self._a_fire():
+            self._capture_request()
+
+        if self._active is None and self._pending:
+            if self._pending[0]["release_cycle"] <= self.env._current_cycle():
+                self._active = self._pending.popleft()
+
+        if self._active is None:
+            self._drive_d_idle()
+            return
+
+        beat = self._active["beats"][0]
+        self._drive_d_response(beat)
+        if self._d_fire():
+            self.trace.append(
+                {
+                    "cycle": self.env._current_cycle(),
+                    "event": "d_fire",
+                    "opcode": int(beat["opcode"]),
+                    "size": int(beat["size"]),
+                    "source": int(beat["source"]),
+                    "beat_idx": int(beat["beat_idx"]),
+                }
+            )
+            self._active["beats"].popleft()
+            if not self._active["beats"]:
+                self._active = None
+
+    def _drive_a_ready(self) -> None:
+        signal = getattr(self.env.dut, "auto_inner_ptw_to_l2_buffer_out_a_ready", None)
+        if signal is not None:
+            signal.value = 1
+
+    def _a_fire(self) -> bool:
+        valid = getattr(self.env.dut, "auto_inner_ptw_to_l2_buffer_out_a_valid", None)
+        ready = getattr(self.env.dut, "auto_inner_ptw_to_l2_buffer_out_a_ready", None)
+        return valid is not None and ready is not None and int(valid.value) and int(ready.value)
+
+    def _d_fire(self) -> bool:
+        valid = getattr(self.env.dut, "auto_inner_ptw_to_l2_buffer_out_d_valid", None)
+        ready = getattr(self.env.dut, "auto_inner_ptw_to_l2_buffer_out_d_ready", None)
+        return valid is not None and ready is not None and int(valid.value) and int(ready.value)
+
+    def _capture_request(self) -> None:
+        opcode = _read_signal_int(getattr(self.env.dut, "auto_inner_ptw_to_l2_buffer_out_a_bits_opcode", None), 0)
+        size = _read_signal_int(getattr(self.env.dut, "auto_inner_ptw_to_l2_buffer_out_a_bits_size", None), 0)
+        source = _read_signal_int(getattr(self.env.dut, "auto_inner_ptw_to_l2_buffer_out_a_bits_source", None), 0)
+        address = _read_signal_int(getattr(self.env.dut, "auto_inner_ptw_to_l2_buffer_out_a_bits_address", None), 0)
+        if opcode != TL_A_GET:
+            raise NotImplementedError(f"暂不支持 PTW TL-A opcode={opcode}")
+
+        transfer_bytes = max(PTW_BEAT_BYTES, 1 << int(size))
+        beat_count = max(1, (transfer_bytes + PTW_BEAT_BYTES - 1) // PTW_BEAT_BYTES)
+        beat_base = int(address) & ~(PTW_BEAT_BYTES - 1)
+        beats = []
+        for beat_idx in range(beat_count):
+            line_addr = beat_base + beat_idx * PTW_BEAT_BYTES
+            beat_data = int.from_bytes(self.env.memory.read_cacheline(line_addr, line_bytes=PTW_BEAT_BYTES), "little")
+            beats.append(
+                {
+                    "opcode": TL_D_ACCESS_ACK_DATA,
+                    "size": int(size),
+                    "source": int(source),
+                    "data": int(beat_data),
+                    "beat_idx": beat_idx,
+                }
+            )
+
+        self._pending.append(
+            {
+                "release_cycle": self.env._current_cycle() + self.response_delay_cycles,
+                "beats": deque(beats),
+            }
+        )
+        self.trace.append(
+            {
+                "cycle": self.env._current_cycle(),
+                "event": "a_fire",
+                "opcode": int(opcode),
+                "size": int(size),
+                "source": int(source),
+                "address": int(address),
+                "beat_base": int(beat_base),
+                "beat_count": int(beat_count),
+            }
+        )
+
+    def _drive_idle(self) -> None:
+        self._drive_a_ready()
+        self._drive_d_idle()
+
+    def _drive_d_idle(self) -> None:
+        d_valid = getattr(self.env.dut, "auto_inner_ptw_to_l2_buffer_out_d_valid", None)
+        if d_valid is not None:
+            d_valid.value = 0
+        for signal_name in (
+            "auto_inner_ptw_to_l2_buffer_out_d_bits_opcode",
+            "auto_inner_ptw_to_l2_buffer_out_d_bits_param",
+            "auto_inner_ptw_to_l2_buffer_out_d_bits_size",
+            "auto_inner_ptw_to_l2_buffer_out_d_bits_source",
+            "auto_inner_ptw_to_l2_buffer_out_d_bits_sink",
+            "auto_inner_ptw_to_l2_buffer_out_d_bits_denied",
+            "auto_inner_ptw_to_l2_buffer_out_d_bits_data",
+            "auto_inner_ptw_to_l2_buffer_out_d_bits_corrupt",
+        ):
+            signal = getattr(self.env.dut, signal_name, None)
+            if signal is not None:
+                signal.value = 0
+
+    def _drive_d_response(self, beat: dict) -> None:
+        self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_valid.value = 1
+        self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_opcode.value = int(beat["opcode"])
+        self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_param.value = 0
+        self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_size.value = int(beat["size"])
+        self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_source.value = int(beat["source"])
+        self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_sink.value = 0
+        self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_denied.value = 0
+        self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_data.value = int(beat["data"])
+        self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_corrupt.value = 0
+
+
+@dataclass(frozen=True)
+class _ActiveSv39State:
+    root_pt_addr: int
+    asid: int
+
+
+class MmuFacade:
+    """集中管理 MemBlock MMU/PTW/DTLB smoke 所需的稳定控制面。"""
+
+    def __init__(self, env) -> None:
+        self.env = env
+        self._active_sv39 = None
+        self._persistent_csr_writes = {}
+        self._pmp_cfg_words = {}
+        self._ptw_responder = None
+
+    def reapply_inputs(self) -> None:
+        if self._active_sv39 is None:
+            return
+        self._drive_sv39_root(
+            root_pt_addr=self._active_sv39.root_pt_addr,
+            asid=self._active_sv39.asid,
+            satp_changed=0,
+        )
+
+    def reapply_after_reset(self) -> None:
+        for addr, data in self._persistent_csr_writes.items():
+            self._pulse_distributed_csr_write(addr, data)
+        if self._active_sv39 is not None:
+            self.reapply_inputs()
+            self.pulse_sfence()
+
+    def _remember_csr_write(self, addr: int, data: int) -> None:
+        self._persistent_csr_writes[int(addr)] = int(data)
+
+    def _pulse_distributed_csr_write(self, addr: int, data: int) -> None:
+        self.env.csr_ctrl.distribute_csr_w_bits_addr.value = int(addr)
+        self.env.csr_ctrl.distribute_csr_w_bits_data.value = int(data)
+        self.env.csr_ctrl.distribute_csr_w_valid.value = 1
+        self.env.Step(1)
+        self.env.csr_ctrl.distribute_csr_w_valid.value = 0
+        self.env.Step(1)
+
+    def write_distributed_csr(self, addr: int, data: int, *, persistent: bool = False) -> None:
+        if persistent:
+            self._remember_csr_write(addr, data)
+        self._pulse_distributed_csr_write(addr, data)
+
+    def _drive_sv39_root(self, *, root_pt_addr: int, asid: int, satp_changed: int) -> None:
+        self.env.tlb_csr.priv_virt.value = 0
+        self.env.tlb_csr.priv_virt_changed.value = 0
+        self.env.tlb_csr.priv_imode.value = PRIV_MODE_S
+        self.env.tlb_csr.priv_dmode.value = PRIV_MODE_S
+        self.env.tlb_csr.satp_mode.value = SV39_MODE
+        self.env.tlb_csr.satp_asid.value = int(asid)
+        self.env.tlb_csr.satp_ppn.value = int(root_pt_addr) >> 12
+        self.env.tlb_csr.satp_changed.value = int(satp_changed)
+
+    def enable_sv39(self, *, root_pt_addr: int, asid: int = 0, settle_cycles: int = 4) -> None:
+        self._active_sv39 = _ActiveSv39State(root_pt_addr=int(root_pt_addr), asid=int(asid))
+        self._drive_sv39_root(root_pt_addr=root_pt_addr, asid=asid, satp_changed=1)
+        self.env.Step(1)
+        self.reapply_inputs()
+        self.pulse_sfence()
+        if settle_cycles > 0:
+            self.env.Step(settle_cycles)
+
+    def disable_translation(self) -> None:
+        self._active_sv39 = None
+        self._drive_translation_disabled()
+
+    def _drive_translation_disabled(self) -> None:
+        self.env.tlb_csr.satp_mode.value = 0
+        self.env.tlb_csr.satp_asid.value = 0
+        self.env.tlb_csr.satp_ppn.value = 0
+        self.env.tlb_csr.satp_changed.value = 0
+        self.env.tlb_csr.vsatp_mode.value = 0
+        self.env.tlb_csr.vsatp_asid.value = 0
+        self.env.tlb_csr.vsatp_ppn.value = 0
+        self.env.tlb_csr.vsatp_changed.value = 0
+        self.env.tlb_csr.hgatp_mode.value = 0
+        self.env.tlb_csr.hgatp_vmid.value = 0
+        self.env.tlb_csr.hgatp_ppn.value = 0
+        self.env.tlb_csr.hgatp_changed.value = 0
+        self.env.tlb_csr.priv_virt.value = 0
+        self.env.tlb_csr.priv_virt_changed.value = 0
+        self.env.tlb_csr.priv_imode.value = self.env.csr_agent.MODE_M
+        self.env.tlb_csr.priv_dmode.value = self.env.csr_agent.MODE_M
+
+    def pulse_sfence(self) -> None:
+        if not hasattr(self.env.dut, "io_ooo_to_mem_sfence_valid"):
+            return
+        self.env.dut.io_ooo_to_mem_sfence_valid.value = 1
+        self.env.dut.io_ooo_to_mem_sfence_bits_rs1.value = 0
+        self.env.dut.io_ooo_to_mem_sfence_bits_rs2.value = 0
+        self.env.dut.io_ooo_to_mem_sfence_bits_addr.value = 0
+        self.env.dut.io_ooo_to_mem_sfence_bits_id.value = 0
+        self.env.dut.io_ooo_to_mem_sfence_bits_hv.value = 0
+        self.env.dut.io_ooo_to_mem_sfence_bits_hg.value = 0
+        self.env.Step(1)
+        self.env.dut.io_ooo_to_mem_sfence_valid.value = 0
+
+    def sv39_gigapage_leaf_pte(self, pa_base: int) -> int:
+        if int(pa_base) & ((1 << 30) - 1):
+            raise ValueError(f"SV39 1GiB leaf PTE 需要 1GiB 对齐物理地址: 0x{int(pa_base):x}")
+        return (
+            ((int(pa_base) >> 12) << 10)
+            | SV39_PTE_V
+            | SV39_PTE_R
+            | SV39_PTE_W
+            | SV39_PTE_A
+            | SV39_PTE_D
+        )
+
+    def install_sv39_gigapage_mapping(self, *, root_pt_addr: int, va: int, pa_base: int) -> int:
+        vpn2 = (int(va) >> 30) & 0x1FF
+        pte_addr = int(root_pt_addr) + vpn2 * 8
+        self.env.preload_u64(pte_addr, self.sv39_gigapage_leaf_pte(pa_base))
+        return pte_addr
+
+    def program_pmp_entry(self, *, index: int, cfg: int, addr: int, persistent: bool = True) -> None:
+        if int(index) < 0:
+            raise ValueError(f"非法 PMP entry 索引: {index}")
+        cfg_addr = PMP_CFG_CSR_BASE + (int(index) // 8) * 2
+        cfg_shift = (int(index) % 8) * 8
+        cfg_word = int(self._pmp_cfg_words.get(cfg_addr, 0))
+        cfg_word &= ~(0xFF << cfg_shift)
+        cfg_word |= (int(cfg) & 0xFF) << cfg_shift
+        self._pmp_cfg_words[cfg_addr] = cfg_word
+        self.write_distributed_csr(PMP_ADDR_CSR_BASE + int(index), int(addr), persistent=persistent)
+        self.write_distributed_csr(cfg_addr, cfg_word, persistent=persistent)
+
+    def allow_all_smode_access(self, *, index: int = 0, persistent: bool = True) -> None:
+        max_napot_addr = (1 << (MEMBLOCK_PADDR_BITS - 2)) - 1
+        self.program_pmp_entry(
+            index=index,
+            cfg=PMP_CFG_RWX_NAPOT,
+            addr=max_napot_addr,
+            persistent=persistent,
+        )
+
+    def attach_ptw_responder(self, *, response_delay_cycles: int = 1):
+        if self._ptw_responder is not None:
+            raise RuntimeError("PTW responder 已挂载，请先 detach")
+        self._ptw_responder = _PtwTileLinkResponder(self.env, response_delay_cycles=response_delay_cycles)
+        self._ptw_responder.attach()
+        return self._ptw_responder
+
+    def detach_ptw_responder(self) -> None:
+        if self._ptw_responder is None:
+            return
+        self._ptw_responder.detach()
+        self._ptw_responder = None
+
+    @contextmanager
+    def ptw_responder(self, *, response_delay_cycles: int = 1):
+        responder = self.attach_ptw_responder(response_delay_cycles=response_delay_cycles)
+        try:
+            yield responder
+        finally:
+            self.detach_ptw_responder()
+
+
 class MockCSRInterface:
     """MemBlock CSR 相关输入口 mock，默认工作在 M-mode。"""
 
@@ -1110,6 +1437,7 @@ class MemBlockEnv:
         self.mock_outer_buffer = self.memory
         self.mock_dcache_client = self.memory
         self.mem_status_monitor = MemStatusMonitor(self.mem_status, self.memory, self.commit_agent)
+        self.mmu = MmuFacade(self)
         self._after_step_callbacks = []
         self._last_rar_query_req_by_lane = {}
 
@@ -1156,6 +1484,7 @@ class MemBlockEnv:
             self.dut.io_ooo_to_mem_sfence_bits_id.value = 0
             self.dut.io_ooo_to_mem_sfence_bits_hv.value = 0
             self.dut.io_ooo_to_mem_sfence_bits_hg.value = 0
+        self.mmu.reapply_inputs()
         self.memory.drive_idle()
         self.commit_agent.drive()
 
@@ -1187,6 +1516,7 @@ class MemBlockEnv:
         self.Step(cycles)
         self.dut.reset.value = 0
         self.idle_inputs()
+        self.mmu.reapply_after_reset()
         self.Step(settle_cycles)
 
     def inject_outer_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
