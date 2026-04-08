@@ -526,9 +526,9 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       info.valid && info.needAllWayWeak && info.trainNxOH(tableIdx) 
     }
     (0 until NumWays).foreach { wayIdx =>
-      val hitMask = t2_trainInfoVec.map { info =>
+      val hitMask = PriorityEncoderOH(t2_trainInfoVec.map { info =>
         info.valid && info.needUpdate && info.trainNxOH(tableIdx) && info.hitWayMaskOH(wayIdx)
-      }
+      })
       val allocateMask = t2_trainInfoVec.zipWithIndex.map { case(info,infoIdx) =>
         info.valid && info.needAllocate && t2_allocate(infoIdx) && t2_allocateTableOHVec(infoIdx)(tableIdx) && t2_allocateWayOHVec(infoIdx)(wayIdx)
       }
