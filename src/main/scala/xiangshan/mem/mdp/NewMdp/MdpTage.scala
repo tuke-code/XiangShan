@@ -243,7 +243,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   //resolveQ保证传给Mdp的信号在misPredict之后都是无效的，需要结合valid使用(已完成)
   //TODO:淘汰机制不完善，valid只是这个表项被使用了，不是这个表的数据真正有效（例如饱和技术为0的时候，这个表项应该不再有效了）
   //TODO:load.valid信号是不是没有覆盖全面呢
-  private val t2_trainInfoVec = t2_loads.zipWithIndex.map { case (load, i) =>
+  private val t2_trainInfoWithUpdateTargetVec = t2_loads.zipWithIndex.map { case (load, i) =>
     val tageTableTagMatchResults = t2_readResp.zipWithIndex.map { case (tableReadResp, tableIdx) =>
       val position     = load.bits.cfiPosition
       val tag          = t2_rawTag(tableIdx) ^ position
@@ -283,6 +283,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
 
     val usefulCtrUpdate = trainNxType.isStrong || trainNxType.isWeak
     val newUsefulCtr = rawUsefulCtr.getUpdate(increase = trainNxType.isStrong,en = usefulCtrUpdate)
+    val needUpdate = tageHitTableMask.reduce(_ || _)  && !needAllWayWeak && !notNeedUpdate
 
     val trainInfo = Wire(new TrainInfo).suggestName(s"t2_Load_${i}_trainInfo")
     trainInfo.valid           := tageHitTableMask.reduce(_ || _) || needAllocateWeak || needAllocateStrong
@@ -293,7 +294,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     trainInfo.canAllocate     := WireDefault(false.B)
     //感觉notNeedWrite挺关键的，因为有冲突存在
     trainInfo.needAllWayWeak  := needAllWayWeak && !notNeedAllWayWeak
-    trainInfo.needUpdate      := tageHitTableMask.reduce(_ || _)  && !needAllWayWeak && !notNeedUpdate
+    trainInfo.needUpdate      := needUpdate
     trainInfo.allocateUsefulCtr := Mux(needAllocateStrong, UsefulCounter.InitStrong,
                                     Mux(needAllocateWeak, UsefulCounter.InitWeak, UsefulCounter.Init))
     trainInfo.updateUsefulCtr   := newUsefulCtr
@@ -370,8 +371,15 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     }.otherwise{
       trainNxType.loadType := LoadType.None
     }
-   trainInfo
+    (
+      trainInfo,
+      Mux(needUpdate, longestHistTableOH.asUInt, 0.U(NumTables.W)),
+      Mux(needUpdate, provider.hitWayMaskOH, 0.U(MaxNumWays.W))
+    )
   }
+  private val t2_trainInfoVec = t2_trainInfoWithUpdateTargetVec.map(_._1)
+  private val t2_updateTableOHVec = t2_trainInfoWithUpdateTargetVec.map(_._2)
+  private val t2_updateWayOHVec = t2_trainInfoWithUpdateTargetVec.map(_._3)
 
 
   when(t2_fire) {
@@ -455,10 +463,16 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   private val t2_needAllocateMask = t2_trainInfoVec.map(info => info.valid && info.needAllocate)
   private val t2_needAllocate     = t2_needAllocateMask.reduce(_ || _)
 
-  private val t2_tageTableCanAllocateWayMask = t2_readResp.map { tableReadResp =>
-    tableReadResp.entries.zip(tableReadResp.usefulCtrs).map { case (entry, usefulCtr) =>
+  private val t2_tableUpdateWayMask = TableInfos.indices.map { tableIdx =>
+    t2_updateTableOHVec.zip(t2_updateWayOHVec).map { case (tableOH, wayOH) =>
+      Mux(tableOH(tableIdx), wayOH, 0.U(MaxNumWays.W))
+    }.reduce(_ | _)
+  }
+  private val t2_tageTableCanAllocateWayMask = t2_readResp.zipWithIndex.map { case (tableReadResp, tableIdx) =>
+    val rawAllocateWayMask = tableReadResp.entries.zip(tableReadResp.usefulCtrs).map { case (entry, usefulCtr) =>
       !entry.valid || entry.valid && usefulCtr.isSaturateNegative
     }.asUInt
+    rawAllocateWayMask & ~t2_tableUpdateWayMask(tableIdx)
   }
   private val t2_canAllocate =
     t2_trainInfoVec.map(info => Mux(info.valid && info.needAllocate, info.canAllocate, true.B)).reduce(_ && _)
@@ -540,7 +554,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
                                   Mux(weakWayEn, weakWayUsefulCtr, updateUsefulCtr))
       when(t2_fire) {
         val opCount = PopCount(Cat(weakWayEn, allocateEn, updateEn))
-        assert(opCount <= 1.U, cf"Multiple write operations on table ${tableIdx} way ${wayIdx}: update=${updateEn}, allocate=${allocateEn}, weak=${weakWayEn}")
+        assert(opCount <= 1.U, cf"Multiple write operations on table ${tableIdx} way ${wayIdx}: update=${updateEn}, allocate=${allocateEn}, weak=${weakWayEn}, opCount=${opCount}")
       }
     }
     table.io.writeReq.valid                := t2_fire && writeWayMask.reduce(_ || _)
