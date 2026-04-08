@@ -311,33 +311,37 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
         is(MdpUpdateType.M_AW){
           when(tageHitTableMask.asUInt.orR){ //命中NX
             // trainBaseType        := LoadType.None
-            trainNxType.loadType    := LoadType.AllWayWeak 
+            val allocInfo = getFirstNonFullTableOH(longestHistTableOH, tageWayFullMask)
+            trainNxType.loadType    := Mux(allocInfo._3, LoadType.Weak, LoadType.AllWayWeak)
             allocateNxType.loadType := LoadType.AllocateWeak
-            trainInfo.allocateNxOH  := getFirstNonFullTableOH(longestHistTableOH, tageWayFullMask)._1
-            trainInfo.canAllocate   := getFirstNonFullTableOH(longestHistTableOH, tageWayFullMask)._2
+            trainInfo.allocateNxOH  := allocInfo._1
+            trainInfo.canAllocate   := allocInfo._2
             //Allocate and weak contain both actions, so two identities are required to indicate both actions
           }.otherwise{ //hit Base
             // trainBaseType.loadType := LoadType.Weak
             trainNxType.loadType    := LoadType.None
             allocateNxType.loadType := LoadType.AllocateWeak
-            trainInfo.allocateNxOH  := getFirstNonFullTableOH(Seq.fill(NumTables)(false.B), tageWayFullMask)._1 //get first not full idx to allocate
-            trainInfo.canAllocate   := getFirstNonFullTableOH(Seq.fill(NumTables)(false.B), tageWayFullMask)._2
+            val allocInfo = getFirstNonFullTableOH(Seq.fill(NumTables)(false.B), tageWayFullMask)
+            trainInfo.allocateNxOH  := allocInfo._1 //get first not full idx to allocate
+            trainInfo.canAllocate   := allocInfo._2
           }
         }
         is(MdpUpdateType.M_AS){
           when(tageHitTableMask.asUInt.orR){ //命中NX
             // trainBaseType.loadType        := LoadType.None
-            trainNxType.loadType    := LoadType.AllWayWeak
+            val allocInfo = getFirstNonFullTableOH(longestHistTableOH, tageWayFullMask)
+            trainNxType.loadType    := Mux(allocInfo._3, LoadType.Weak, LoadType.AllWayWeak)
             allocateNxType.loadType := LoadType.AllocateStrong
-            trainInfo.allocateNxOH  := getFirstNonFullTableOH(longestHistTableOH, tageWayFullMask)._1
-            trainInfo.canAllocate   := getFirstNonFullTableOH(longestHistTableOH, tageWayFullMask)._2
+            trainInfo.allocateNxOH  := allocInfo._1
+            trainInfo.canAllocate   := allocInfo._2
             //Allocate and weak contain both actions, so two identities are required to indicate both actions
           }.otherwise{ //hit Base
             // trainBaseType        := LoadType.Weak
             trainNxType.loadType    := LoadType.None
             allocateNxType.loadType := LoadType.AllocateStrong
-            trainInfo.allocateNxOH  := getFirstNonFullTableOH(Seq.fill(NumTables)(false.B), tageWayFullMask)._1 //get first not full idx to allocate
-            trainInfo.canAllocate   := getFirstNonFullTableOH(Seq.fill(NumTables)(false.B), tageWayFullMask)._2
+            val allocInfo = getFirstNonFullTableOH(Seq.fill(NumTables)(false.B), tageWayFullMask)
+            trainInfo.allocateNxOH  := allocInfo._1 //get first not full idx to allocate
+            trainInfo.canAllocate   := allocInfo._2
           }
         }
         is(MdpUpdateType.M_IS){
@@ -513,7 +517,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       }
       val updateEn = hitMask.reduce(_ || _)
       val allocateEn = allocateMask.reduce(_ || _)
-      val weakWayEn  = allWayNeedWeakMask.reduce(_ || _)
+      val weakWayEn  = allWayNeedWeakMask.reduce(_ || _) && !updateEn && !allocateEn
       val allocateLoad      = Mux1H(allocateMask, t2_loads)
       val allocateTableOH   = Mux1H(allocateMask, t2_allocateTableOHVec)
       val allocateEntry     = Wire(new TageEntry)
