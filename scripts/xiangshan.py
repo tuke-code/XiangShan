@@ -99,6 +99,7 @@ class XSArgs(object):
         self.dump_db = args.dump_db
         self.gcpt_restore_bin = args.gcpt_restore_bin
         self.instr_trace = args.instr_trace
+        self.dump_commit_trace = args.dump_commit_trace
         self.pgo = args.pgo
         self.pgo_max_cycle = args.pgo_max_cycle
         self.pgo_emu_args = args.pgo_emu_args
@@ -289,9 +290,10 @@ class XiangShan(object):
         diff_args = "--no-diff" if self.args.disable_diff else ""
         chiseldb_args = "--dump-db" if self.args.dump_db else ""
         instr_trace_args = f"--instr-trace {instr_trace}" if instr_trace_valid else ""
+        dump_commit_trace_args = "--dump-commit-trace" if self.args.dump_commit_trace else ""
         gcpt_restore_args = f"-r {self.args.gcpt_restore_bin}" if len(self.args.gcpt_restore_bin) != 0 else ""
         flash_args = f"--flash {self.args.flash}" if self.args.flash is not None else ""
-        return_code = self.__exec_cmd(f'ulimit -s {32 * 1024}; {numa_args} $NOOP_HOME/build/emu -i {workload} {emu_args} {fork_args} {diff_args} {chiseldb_args} {gcpt_restore_args} {instr_trace_args} {flash_args}')
+        return_code = self.__exec_cmd(f'ulimit -s {32 * 1024}; {numa_args} $NOOP_HOME/build/emu -i {workload} {emu_args} {fork_args} {diff_args} {chiseldb_args} {gcpt_restore_args} {instr_trace_args} {dump_commit_trace_args} {flash_args}')
         return return_code
 
     def run_simv(self, workload):
@@ -793,6 +795,7 @@ if __name__ == "__main__":
     parser.add_argument('--ram-size', nargs='?', type=str, help='manually set simulation memory size (8GB by default)')
     parser.add_argument('--gcpt-restore-bin', type=str, default="", help="specify the bin used to restore from gcpt")
     parser.add_argument('--instr-trace', type=str, default="", help="run the test with the trace of the simfrontend")
+    parser.add_argument('--dump-commit-trace', action='store_true', help='dump commit trace when log is enabled')
     parser.add_argument('--seed', type=int, help="run emu with the given random seed")
     parser.add_argument('--flash', type=str, help="Path to flash image for copy_and_run")
     # both makefile and emu arguments
