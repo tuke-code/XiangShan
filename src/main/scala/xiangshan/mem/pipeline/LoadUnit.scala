@@ -1563,7 +1563,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
     MdpPredictStatuses.INDEPEND     -> MdpUpdateType.M_AW
   ))
   val fromMdpPredictNoDependency = MuxLookup(s3_out.bits.mdpPredictStatuses, MdpUpdateType.NULL)(Seq(
-    MdpPredictStatuses.INDEPEND     -> MdpUpdateType.M_IS
+    MdpPredictStatuses.INDEPEND     -> MdpUpdateType.M_IW
   ))
   io.mdpUpdate.bits.updateType := Mux(s3_out.bits.uop.loadPred.bits.loadWait,fromMdpPredictDependency,fromMdpPredictNoDependency)
   io.mdpUpdate.bits.distance := 0.U //MdpPredictStatuses.INDEPEND分配的是非依赖项，所以不需要distance

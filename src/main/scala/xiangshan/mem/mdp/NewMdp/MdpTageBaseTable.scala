@@ -389,7 +389,7 @@ class TageBaseTableAlignBank(
     val hit = rawHit && e.cfiPosition >= s1_alignedInstOffset && !s1_crossPage
     pred.valid            := hit
     pred.bits.static      := ~hit
-    pred.bits.loadWait    := e.distance.orR
+    pred.bits.loadWait    := c.isPositive
     pred.bits.distance    := e.distance
     pred.bits.cfiPosition := e.cfiPosition
 

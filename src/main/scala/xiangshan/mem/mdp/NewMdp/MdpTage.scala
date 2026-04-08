@@ -354,7 +354,13 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
         }
         is(MdpUpdateType.M_IW){
           when(tageHitTableMask.asUInt.orR){ //命中NX
-            trainNxType.loadType   := LoadType.Weak
+            trainNxType.loadType   := LoadType.Strong
+            /* The reason for using trainNxType.loadType := LoadType.Strong 
+             is that BaseTable and TageTable use different strategies,
+             Base predictor uses saturation counters to decide whether to predict dependencies, 
+             while Tage predictors are determined by distance to predict dependencies, 
+             saturation counters affect the replacement of items
+             */
           }.otherwise{
             // trainBaseType.loadType := LoadType.Weak
             trainNxType.loadType   := LoadType.None
