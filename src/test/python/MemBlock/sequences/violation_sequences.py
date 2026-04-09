@@ -9,8 +9,12 @@ from request_apis import LoadTxn, QueuePtr, enqueue_scalar_store, expect_load, i
 
 from .memblock_sequences import (
     SequenceState,
+    _capture_writeback_trace,
     _resolve_replay_drain_cycles,
+    _snapshot_transport_stats,
     _wait_completed_load_count,
+    _wait_sq_matchinvalid_and_violation,
+    _wait_store_addr_observed,
 )
 
 
@@ -38,6 +42,23 @@ class ScalarRarViolationSequenceResult:
     final_state: SequenceState
     fake_store_view: object
     completed_load_count: int
+
+
+@dataclass(frozen=True)
+class ScalarSqDataInvalidMatchInvalidTriggerSequenceResult:
+    tlb_prime_writeback: dict | None
+    sq_forward_event: dict
+    memory_violation: dict
+    main_writeback_trace: tuple[dict, ...]
+    main_load: LoadTxn
+    store_sq_ptr: QueuePtr
+    committed_store_view: object
+    final_state: SequenceState
+    transport_stats_before_main: dict[str, int]
+    transport_stats_after_main: dict[str, int]
+    replay_events: tuple[dict, ...]
+    dcache_error_valid: int
+    dcache_miss_signal: int | None
 
 
 class ScalarRawReplaySequence:
@@ -295,3 +316,189 @@ class ScalarRarViolationSequence:
             )
         finally:
             env.memory.strict_writeback_check = previous_strict
+
+
+class ScalarSqDataInvalidMatchInvalidTriggerSequence:
+    def __init__(
+        self,
+        *,
+        main_va: int,
+        main_pa: int,
+        store_txn,
+        main_load_req_id: int,
+        initial_state: SequenceState,
+        activate_root_pt_addr: int | None = None,
+        tlb_prime_req_id: int | None = None,
+        tlb_prime_va: int | None = None,
+        tlb_prime_pa: int | None = None,
+        tlb_prime_data: int | None = None,
+        settle_cycles: int = 4,
+        observation_cycles: int = 200,
+        store_materialize_cycles: int = 200,
+        post_violation_cycles: int = 8,
+    ) -> None:
+        self.main_va = int(main_va)
+        self.main_pa = int(main_pa)
+        self.store_txn = store_txn
+        self.main_load_req_id = int(main_load_req_id)
+        self.initial_state = initial_state
+        self.activate_root_pt_addr = None if activate_root_pt_addr is None else int(activate_root_pt_addr)
+        self.tlb_prime_req_id = None if tlb_prime_req_id is None else int(tlb_prime_req_id)
+        self.tlb_prime_va = None if tlb_prime_va is None else int(tlb_prime_va)
+        self.tlb_prime_pa = None if tlb_prime_pa is None else int(tlb_prime_pa)
+        self.tlb_prime_data = None if tlb_prime_data is None else int(tlb_prime_data)
+        self.settle_cycles = int(settle_cycles)
+        self.observation_cycles = int(observation_cycles)
+        self.store_materialize_cycles = int(store_materialize_cycles)
+        self.post_violation_cycles = int(post_violation_cycles)
+
+        tlb_prime_fields = (
+            self.tlb_prime_req_id,
+            self.tlb_prime_va,
+            self.tlb_prime_pa,
+            self.tlb_prime_data,
+        )
+        if any(field is not None for field in tlb_prime_fields) and any(field is None for field in tlb_prime_fields):
+            raise ValueError("tlb_prime_* 参数需要同时提供")
+        if self.tlb_prime_req_id is not None and self.activate_root_pt_addr is None:
+            raise ValueError("配置 tlb_prime_* 时必须同时提供 activate_root_pt_addr")
+
+    def run(self, env) -> ScalarSqDataInvalidMatchInvalidTriggerSequenceResult:
+        store_queue_size = env.config.sequence.store_queue_size
+        load_queue_size = env.config.sequence.load_queue_size
+        completed_before_main = env.get_completed_load_count()
+
+        store_sq_ptr = enqueue_scalar_store(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=self.store_txn.sq_ptr,
+            enq_port=self.store_txn.enq_port,
+        )
+        issue_scalar_sta(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=store_sq_ptr,
+            addr=self.store_txn.addr,
+            lane=self.store_txn.sta_lane,
+        )
+        _wait_store_addr_observed(
+            env,
+            store_sq_ptr.value,
+            self.main_va,
+            max_cycles=self.store_materialize_cycles,
+        )
+        younger_sq_ptr = ptr_inc(store_sq_ptr, store_queue_size)
+        next_lq_ptr = self.initial_state.next_lq_ptr
+        tlb_prime_writeback = None
+
+        if self.activate_root_pt_addr is not None:
+            env.mmu.enable_sv39(root_pt_addr=self.activate_root_pt_addr, settle_cycles=self.settle_cycles)
+
+        if self.tlb_prime_req_id is not None:
+            tlb_prime_load = LoadTxn(
+                req_id=self.tlb_prime_req_id,
+                addr=self.tlb_prime_va,
+                lq_ptr=next_lq_ptr,
+                sq_ptr=younger_sq_ptr,
+            )
+            env.expect_scalar_load(
+                req_id=tlb_prime_load.req_id,
+                pdest=tlb_prime_load.resolved_pdest,
+                addr=self.tlb_prime_pa,
+                size=tlb_prime_load.size,
+                mask=tlb_prime_load.mask,
+            )
+            send_load(env, tlb_prime_load)
+            tlb_prime_writeback = env.wait_load_writeback_observed(
+                rob_idx_flag=tlb_prime_load.rob_idx_flag,
+                rob_idx_value=tlb_prime_load.rob_idx_value,
+                data=self.tlb_prime_data,
+                max_cycles=_resolve_replay_drain_cycles(env, None),
+            )
+            completed_before_main = _wait_completed_load_count(
+                env,
+                completed_before_main + 1,
+                max_cycles=_resolve_replay_drain_cycles(env, None),
+            )
+            next_lq_ptr = ptr_inc(next_lq_ptr, load_queue_size)
+
+        main_load = LoadTxn(
+            req_id=self.main_load_req_id,
+            addr=self.main_va,
+            lq_ptr=next_lq_ptr,
+            sq_ptr=younger_sq_ptr,
+        )
+        transport_stats_before_main = _snapshot_transport_stats(env)
+        with _capture_writeback_trace(env, max_events=32) as main_writeback_trace:
+            send_load(env, main_load)
+            sq_forward_event, memory_violation, replay_events, dcache_miss_signal = _wait_sq_matchinvalid_and_violation(
+                env,
+                lane=main_load.issue_lane,
+                expected_sq_idx=store_sq_ptr.value,
+                rob_idx_flag=main_load.rob_idx_flag,
+                rob_idx_value=main_load.rob_idx_value,
+                max_cycles=self.observation_cycles,
+            )
+            if self.post_violation_cycles > 0:
+                env.Step(self.post_violation_cycles)
+            transport_stats_after_main = _snapshot_transport_stats(env)
+
+            issue_scalar_std(
+                env,
+                req_id=self.store_txn.req_id,
+                sq_ptr=store_sq_ptr,
+                data=self.store_txn.data,
+                lane=self.store_txn.std_lane,
+            )
+            env.backend.pulse_store_commit(1)
+            replay_expected = env.expect_scalar_load(
+                req_id=main_load.req_id,
+                pdest=main_load.resolved_pdest,
+                addr=self.main_pa,
+                size=main_load.size,
+                mask=main_load.mask,
+            )
+            replay_expected.expected_data = self.store_txn.data
+            env.wait_load_writeback_observed(
+                rob_idx_flag=main_load.rob_idx_flag,
+                rob_idx_value=main_load.rob_idx_value,
+                data=self.store_txn.data,
+                max_cycles=_resolve_replay_drain_cycles(env, None),
+            )
+            _wait_completed_load_count(
+                env,
+                completed_before_main + 1,
+                max_cycles=_resolve_replay_drain_cycles(env, None),
+            )
+
+        committed_store_view = env.wait_store_materialized(
+            store_sq_ptr.value,
+            expected_addr=self.main_va,
+            expected_data=self.store_txn.data,
+            expected_mmio=None,
+            require_committed=True,
+            max_cycles=self.store_materialize_cycles,
+        )
+
+        return ScalarSqDataInvalidMatchInvalidTriggerSequenceResult(
+            tlb_prime_writeback=tlb_prime_writeback,
+            sq_forward_event=sq_forward_event,
+            memory_violation=memory_violation,
+            main_writeback_trace=tuple(
+                event
+                for event in main_writeback_trace
+                if event["rob_idx_flag"] == main_load.rob_idx_flag and event["rob_idx_value"] == main_load.rob_idx_value
+            ),
+            main_load=main_load,
+            store_sq_ptr=store_sq_ptr,
+            committed_store_view=committed_store_view,
+            final_state=SequenceState(
+                next_lq_ptr=ptr_inc(next_lq_ptr, load_queue_size),
+                sq_ptr=younger_sq_ptr,
+            ),
+            transport_stats_before_main=transport_stats_before_main,
+            transport_stats_after_main=transport_stats_after_main,
+            replay_events=replay_events,
+            dcache_error_valid=env._read_optional_dut_signal("io_dcacheError_ecc_error_valid"),
+            dcache_miss_signal=dcache_miss_signal,
+        )

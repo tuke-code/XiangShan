@@ -3,6 +3,8 @@
 MemBlock 可复用测试 sequence。
 """
 
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from request_apis import (
@@ -140,6 +142,193 @@ def _wait_completed_load_count(env, target_count: int, max_cycles: int = 200) ->
             return completed
         env.Step(1)
     raise TimeoutError(f"等待 completed_load_count 达到 {target_count} 超时")
+
+
+def _read_optional_any_signal(env, signal_names, default=None):
+    for signal_name in signal_names:
+        signal = getattr(env.dut, signal_name, None)
+        if signal is not None:
+            return int(signal.value)
+    return default
+
+
+def _sample_tlb_debug(env) -> dict[str, int | None]:
+    return {
+        "rob_head_tlb_replay": _read_optional_any_signal(
+            env,
+            ("MemBlock_inner_lsq_io_debugTopDown_robHeadTlbReplay",),
+            default=None,
+        ),
+        "rob_head_tlb_miss": _read_optional_any_signal(
+            env,
+            ("MemBlock_inner_lsq_io_debugTopDown_robHeadTlbMiss",),
+            default=None,
+        ),
+        "tlb_replay_all": _read_optional_any_signal(
+            env,
+            ("MemBlock_inner_lsq_io_tlb_hint_resp_bits_replay_all",),
+            default=None,
+        ),
+    }
+
+
+def _sample_l2_tlb_port(env) -> dict[str, int | None]:
+    return {
+        "req_valid": _read_optional_any_signal(env, ("io_l2_tlb_req_req_valid",), default=None),
+        "req_vaddr": _read_optional_any_signal(env, ("io_l2_tlb_req_req_bits_vaddr",), default=None),
+        "req_fullva": _read_optional_any_signal(env, ("io_l2_tlb_req_req_bits_fullva",), default=None),
+        "req_cmd": _read_optional_any_signal(env, ("io_l2_tlb_req_req_bits_cmd",), default=None),
+        "req_memidx_is_ld": _read_optional_any_signal(env, ("io_l2_tlb_req_req_bits_memidx_is_ld",), default=None),
+        "req_memidx_is_st": _read_optional_any_signal(env, ("io_l2_tlb_req_req_bits_memidx_is_st",), default=None),
+        "req_memidx_idx": _read_optional_any_signal(env, ("io_l2_tlb_req_req_bits_memidx_idx",), default=None),
+        "resp_ready": _read_optional_any_signal(env, ("io_l2_tlb_req_resp_ready",), default=None),
+        "resp_valid": _read_optional_any_signal(env, ("io_l2_tlb_req_resp_valid",), default=None),
+        "resp_miss": _read_optional_any_signal(env, ("io_l2_tlb_req_resp_bits_miss",), default=None),
+        "resp_paddr0": _read_optional_any_signal(env, ("io_l2_tlb_req_resp_bits_paddr_0",), default=None),
+    }
+
+
+def _sample_writeback_lanes(env) -> tuple[dict, ...]:
+    lanes = []
+    for lane, bundle in enumerate(env.writeback):
+        if not bundle.connected("valid") or bundle.read("valid", 0) == 0:
+            continue
+        lanes.append(
+            {
+                "lane": lane,
+                "valid": bundle.read("valid", 0),
+                "ready": bundle.read("ready", 0) if bundle.connected("ready") else None,
+                "to_rob_valid": bundle.read("toRob_valid", 0) if bundle.connected("toRob_valid") else None,
+                "is_from_load": bundle.read("isFromLoadUnit", 0) if bundle.connected("isFromLoadUnit") else None,
+                "rob_idx_flag": bundle.read("robIdx_flag", 0) if bundle.connected("robIdx_flag") else None,
+                "rob_idx_value": bundle.read("robIdx_value", 0) if bundle.connected("robIdx_value") else None,
+                "lq_idx_flag": bundle.read("lqIdx_flag", 0) if bundle.connected("lqIdx_flag") else None,
+                "lq_idx_value": bundle.read("lqIdx_value", 0) if bundle.connected("lqIdx_value") else None,
+                "sq_idx_flag": bundle.read("sqIdx_flag", 0) if bundle.connected("sqIdx_flag") else None,
+                "sq_idx_value": bundle.read("sqIdx_value", 0) if bundle.connected("sqIdx_value") else None,
+                "pdest": bundle.read("pdest", 0) if bundle.connected("pdest") else None,
+                "data": bundle.read("data_0", 0) if bundle.connected("data_0") else None,
+                "int_wen": bundle.read("intWen", 0) if bundle.connected("intWen") else None,
+                "debug_vaddr": bundle.read("debug_vaddr", 0) if bundle.connected("debug_vaddr") else None,
+                "debug_paddr": bundle.read("debug_paddr", 0) if bundle.connected("debug_paddr") else None,
+                "debug_is_mmio": bundle.read("debug_isMMIO", 0) if bundle.connected("debug_isMMIO") else None,
+                "debug_is_ncio": bundle.read("debug_isNCIO", 0) if bundle.connected("debug_isNCIO") else None,
+                "exception_bits": bundle.read_exception_bits() if hasattr(bundle, "read_exception_bits") else None,
+            }
+        )
+    return tuple(lanes)
+
+
+@contextmanager
+def _capture_writeback_trace(env, *, max_events: int = 16):
+    trace = deque(maxlen=max(1, int(max_events)))
+
+    def _sample() -> None:
+        cycle = env._current_cycle()
+        for lane, bundle in enumerate(env.writeback):
+            if not bundle.connected("valid") or bundle.read("valid", 0) == 0:
+                continue
+            trace.append(
+                {
+                    "cycle": cycle,
+                    "lane": lane,
+                    "ready": bundle.read("ready", 0) if bundle.connected("ready") else None,
+                    "to_rob_valid": bundle.read("toRob_valid", 0) if bundle.connected("toRob_valid") else None,
+                    "is_from_load": bundle.read("isFromLoadUnit", 0) if bundle.connected("isFromLoadUnit") else None,
+                    "rob_idx_flag": bundle.read("robIdx_flag", 0) if bundle.connected("robIdx_flag") else None,
+                    "rob_idx_value": bundle.read("robIdx_value", 0) if bundle.connected("robIdx_value") else None,
+                    "sq_idx_value": bundle.read("sqIdx_value", 0) if bundle.connected("sqIdx_value") else None,
+                    "pdest": bundle.read("pdest", 0) if bundle.connected("pdest") else None,
+                    "data": bundle.read("data_0", 0) if bundle.connected("data_0") else None,
+                    "int_wen": bundle.read("intWen", 0) if bundle.connected("intWen") else None,
+                    "exception_bits": bundle.read_exception_bits() if hasattr(bundle, "read_exception_bits") else None,
+                }
+            )
+
+    env.add_after_step_callback(_sample)
+    try:
+        yield trace
+    finally:
+        env.remove_after_step_callback(_sample)
+
+
+def _sample_sq_forward_events(env) -> tuple[dict, ...]:
+    events = []
+    for lane in range(env.config.load_pipeline_width):
+        prefix = f"MemBlock_inner_lsq_io_forward_{lane}_s2Resp"
+        if not env._read_optional_dut_signal(f"{prefix}_valid"):
+            continue
+        events.append(
+            {
+                "cycle": env._current_cycle(),
+                "lane": lane,
+                "valid": env._read_optional_dut_signal(f"{prefix}_valid"),
+                "forward_invalid": env._read_optional_dut_signal(f"{prefix}_bits_forwardInvalid"),
+                "match_invalid": env._read_optional_dut_signal(f"{prefix}_bits_matchInvalid"),
+                "addr_invalid_valid": env._read_optional_dut_signal(f"{prefix}_bits_addrInvalid_valid"),
+                "addr_invalid_flag": env._read_optional_dut_signal(f"{prefix}_bits_addrInvalid_bits_flag"),
+                "addr_invalid_value": env._read_optional_dut_signal(f"{prefix}_bits_addrInvalid_bits_value"),
+                "data_invalid_valid": env._read_optional_dut_signal(f"{prefix}_bits_dataInvalid_valid"),
+                "data_invalid_flag": env._read_optional_dut_signal(f"{prefix}_bits_dataInvalid_bits_flag"),
+                "data_invalid_value": env._read_optional_dut_signal(f"{prefix}_bits_dataInvalid_bits_value"),
+            }
+        )
+    return tuple(events)
+
+
+def _wait_sq_matchinvalid_and_violation(
+    env,
+    *,
+    lane: int,
+    expected_sq_idx: int,
+    rob_idx_flag: int,
+    rob_idx_value: int,
+    max_cycles: int = 200,
+):
+    sq_event = None
+    violation_event = None
+    replay_events = []
+
+    for _ in range(max_cycles):
+        for event in _sample_sq_forward_events(env):
+            if event["lane"] != int(lane):
+                continue
+            if event["data_invalid_valid"] != 1 or event["match_invalid"] != 1:
+                continue
+            if event["data_invalid_value"] != int(expected_sq_idx):
+                continue
+            sq_event = event
+
+        replay_state = env.sample_replay_state()
+        for event in replay_state["events"]:
+            if event.get("rob_idx_flag") == int(rob_idx_flag) and event.get("rob_idx_value") == int(rob_idx_value):
+                replay_events.append(dict(event))
+
+        memory_violation = replay_state["memory_violation"]
+        if (
+            memory_violation["valid"]
+            and memory_violation["rob_idx_flag"] == int(rob_idx_flag)
+            and memory_violation["rob_idx_value"] == int(rob_idx_value)
+        ):
+            violation_event = dict(memory_violation)
+
+        if sq_event is not None and violation_event is not None:
+            dcache_miss_signal = _read_optional_any_signal(
+                env,
+                (
+                    f"_inner_dcache_io_lsu_load_{lane}_resp_bits_miss",
+                    f"MemBlock_inner_dcache_io_lsu_load_{lane}_resp_bits_miss",
+                ),
+                default=None,
+            )
+            return sq_event, violation_event, tuple(replay_events), dcache_miss_signal
+
+        env.Step(1)
+
+    raise TimeoutError(
+        "等待 SQ dataInvalid+matchInvalid 与 memoryViolation 超时: "
+        f"lane={lane}, sqIdx={expected_sq_idx}, rob=({rob_idx_flag},{rob_idx_value})"
+    )
 
 
 class ResetEnvSequence:
@@ -929,9 +1118,22 @@ class ScalarNcReplaySequence:
         )
 
 
+from .mmu_sequences import (
+    MmuPrimeLoadSpec,
+    MmuSv39ActivateSequence,
+    MmuSv39ActivateSequenceResult,
+    MmuSv39AddressSpaceConfig,
+    MmuSv39AddressSpaceInstallSequence,
+    MmuSv39AddressSpaceInstallSequenceResult,
+    Sv39GigapageMapping,
+    TranslatedU64MemoryPreload,
+    U64MemoryPreload,
+)
 from .violation_sequences import (
     ScalarRarViolationSequence,
     ScalarRarViolationSequenceResult,
     ScalarRawReplaySequence,
     ScalarRawReplaySequenceResult,
+    ScalarSqDataInvalidMatchInvalidTriggerSequence,
+    ScalarSqDataInvalidMatchInvalidTriggerSequenceResult,
 )

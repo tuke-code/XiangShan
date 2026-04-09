@@ -10,16 +10,20 @@ MemBlock 真实 DUT replay 场景测试。
   5. `RAR`: 更老 load 因精确 load-wait 暂停，更年轻同地址 load 完成后在 probe release 下触发 ld-ld violation
 """
 
-from request_apis import LoadTxn, StoreTxn, ptr_inc
+from request_apis import LoadTxn, StoreTxn, ptr_inc, send_load
 from sequences import (
     FlushStoreBuffersSequence,
+    MmuSv39AddressSpaceConfig,
+    MmuSv39AddressSpaceInstallSequence,
     ResetEnvSequence,
     ScalarCacheMissReplaySequence,
     ScalarForwardFailReplaySequence,
     ScalarNcReplaySequence,
     ScalarRarViolationSequence,
     ScalarRawReplaySequence,
+    ScalarSqDataInvalidMatchInvalidTriggerSequence,
     SequenceState,
+    Sv39GigapageMapping,
 )
 
 
@@ -37,6 +41,15 @@ RAR_OLDER_STORE_DATA = 0x2233445566778899
 RAR_ADDR = 0x80000880
 RAR_OLD_DATA = 0x1020304050607080
 RAR_NEW_DATA = 0x8877665544332211
+MATCH_INVALID_ROOT_A = 0x88000000
+MATCH_INVALID_ROOT_B = 0x88001000
+MATCH_INVALID_MAIN_VA = 0x40001000
+MATCH_INVALID_TLB_PRIME_VA = 0x40002000
+MATCH_INVALID_PA_BASE_A = 0x80000000
+MATCH_INVALID_PA_BASE_B = 0xC0000000
+MATCH_INVALID_WARMUP_DATA = 0x13579BDF2468ACE0
+MATCH_INVALID_TLB_PRIME_DATA = 0x0F0E0D0C0B0A0908
+MATCH_INVALID_STORE_DATA = 0x1122334455667788
 
 
 def _reset_env_and_state(env) -> SequenceState:
@@ -218,6 +231,129 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
 
     drain_summary = FlushStoreBuffersSequence().run(env)
     assert drain_summary["drain_event_count"] > 0, "RAR 场景收尾未成功 drain 辅助 store"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke(env):
+    """
+    同一虚拟地址在 satp 切换前后映射到不同物理页。
+
+    目标组合：
+      - dcache hit 且无 cache error
+      - SQ forward resp 同时给出 `dataInvalid=1` 与 `matchInvalid=1`
+      - younger load 在 mem_to_ooo 侧触发 redirect/nuke（`memoryViolation`）
+    """
+
+    initial_state = _reset_env_and_state(env)
+    root_a = MmuSv39AddressSpaceInstallSequence(
+        MmuSv39AddressSpaceConfig(
+            root_pt_addr=MATCH_INVALID_ROOT_A,
+            mappings=(Sv39GigapageMapping(va=MATCH_INVALID_MAIN_VA, pa_base=MATCH_INVALID_PA_BASE_A),),
+        )
+    ).run(env)
+    root_b = MmuSv39AddressSpaceInstallSequence(
+        MmuSv39AddressSpaceConfig(
+            root_pt_addr=MATCH_INVALID_ROOT_B,
+            mappings=(
+                Sv39GigapageMapping(va=MATCH_INVALID_MAIN_VA, pa_base=MATCH_INVALID_PA_BASE_B),
+                Sv39GigapageMapping(va=MATCH_INVALID_TLB_PRIME_VA, pa_base=MATCH_INVALID_PA_BASE_B),
+            ),
+        )
+    ).run(env)
+    del root_a
+
+    main_pa_b = root_b.translated_pa_for(MATCH_INVALID_MAIN_VA)
+    tlb_prime_pa_b = root_b.translated_pa_for(MATCH_INVALID_TLB_PRIME_VA)
+    env.preload_u64(main_pa_b, MATCH_INVALID_WARMUP_DATA)
+    env.preload_u64(tlb_prime_pa_b, MATCH_INVALID_TLB_PRIME_DATA)
+    env.preload_u64(MATCH_INVALID_MAIN_VA, MATCH_INVALID_STORE_DATA)
+    env.mmu.allow_all_smode_access()
+
+    warmup_load = LoadTxn(
+        req_id=0,
+        addr=main_pa_b,
+        lq_ptr=initial_state.next_lq_ptr,
+        sq_ptr=initial_state.sq_ptr,
+    )
+    env.expect_scalar_load(
+        req_id=warmup_load.req_id,
+        pdest=warmup_load.resolved_pdest,
+        addr=main_pa_b,
+        size=warmup_load.size,
+        mask=warmup_load.mask,
+    )
+    send_load(env, warmup_load)
+    warmup_writeback = env.wait_load_writeback_observed(
+        rob_idx_flag=warmup_load.rob_idx_flag,
+        rob_idx_value=warmup_load.rob_idx_value,
+        data=MATCH_INVALID_WARMUP_DATA,
+        max_cycles=512,
+    )
+    for _ in range(64):
+        if env.get_completed_load_count() >= 1:
+            break
+        env.Step(1)
+    assert env.get_completed_load_count() == 1, "物理预热 load 未完成 compare"
+
+    with env.mmu.ptw_responder():
+        trigger = ScalarSqDataInvalidMatchInvalidTriggerSequence(
+            main_va=MATCH_INVALID_MAIN_VA,
+            main_pa=main_pa_b,
+            store_txn=StoreTxn(
+                req_id=1,
+                sq_ptr=initial_state.sq_ptr,
+                addr=MATCH_INVALID_MAIN_VA,
+                data=MATCH_INVALID_STORE_DATA,
+            ),
+            main_load_req_id=3,
+            initial_state=SequenceState(
+                next_lq_ptr=ptr_inc(initial_state.next_lq_ptr, env.config.sequence.load_queue_size),
+                sq_ptr=initial_state.sq_ptr,
+            ),
+            activate_root_pt_addr=MATCH_INVALID_ROOT_B,
+            tlb_prime_req_id=2,
+            tlb_prime_va=MATCH_INVALID_TLB_PRIME_VA,
+            tlb_prime_pa=tlb_prime_pa_b,
+            tlb_prime_data=MATCH_INVALID_TLB_PRIME_DATA,
+        ).run(env)
+
+    env.mmu.disable_translation()
+
+    assert warmup_writeback["data"] == MATCH_INVALID_WARMUP_DATA, "物理预热 load 未读到目标 cacheline 数据"
+    assert trigger.tlb_prime_writeback["data"] == MATCH_INVALID_TLB_PRIME_DATA, "satp 切回 root-B 后的 TLB 预热 load 未完成"
+    assert trigger.sq_forward_event["data_invalid_valid"] == 1, "SQ forward 未返回 dataInvalid=1"
+    assert trigger.sq_forward_event["match_invalid"] == 1, "SQ forward 未返回 matchInvalid=1"
+    assert trigger.sq_forward_event["forward_invalid"] == 0, "本场景不应退化为 forwardInvalid"
+    assert trigger.sq_forward_event["data_invalid_value"] == trigger.store_sq_ptr.value, "dataInvalid 未指向 older store"
+    assert trigger.memory_violation["valid"] == 1, "未观测到 younger load 的 memoryViolation/nuke"
+    assert trigger.memory_violation["rob_idx_value"] == trigger.main_load.rob_idx_value, "memoryViolation 未对应 younger load"
+    assert trigger.memory_violation["level"] == 1, "matchInvalid 应触发 flush 级 redirect"
+    assert trigger.dcache_error_valid == 0, "场景不应出现 dcache error"
+    if trigger.dcache_miss_signal is not None:
+        assert trigger.dcache_miss_signal == 0, "主 load 应在 dcache hit 条件下命中"
+
+    forbidden_replays = {
+        event["cause"]
+        for event in trigger.replay_events
+        if event.get("source") in {"replay_queue", "replay_lane", "ldu", "nc_out"}
+    }
+    assert forbidden_replays.isdisjoint({"DM", "DR", "TM", "NC"}), f"主 load 不应走 miss/error 路径: {forbidden_replays}"
+    assert (
+        trigger.transport_stats_after_main["outer_request_count"]
+        == trigger.transport_stats_before_main["outer_request_count"]
+    ), "主 load 不应走 outer/uncache 路径"
+    assert (
+        trigger.transport_stats_after_main["dcache_a_request_count"]
+        == trigger.transport_stats_before_main["dcache_a_request_count"]
+    ), "命中场景不应额外触发 dcache refill 请求"
+    assert (
+        trigger.transport_stats_after_main["dcache_d_response_count"]
+        == trigger.transport_stats_before_main["dcache_d_response_count"]
+    ), "命中场景不应额外等待 dcache D 响应"
+    assert trigger.committed_store_view.committed, "older store 未在收尾阶段进入 committed"
+
+    drain_summary = FlushStoreBuffersSequence().run(env)
+    assert drain_summary["drain_event_count"] > 0, "matchInvalid/nuke 场景收尾未成功 drain older store"
     env.assert_no_outstanding()
 
 
