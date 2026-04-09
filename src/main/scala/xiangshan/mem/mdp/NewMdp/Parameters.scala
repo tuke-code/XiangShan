@@ -156,10 +156,10 @@ trait TableHelper extends TopHelper { // extends TopHelper for getBankIndex
 
 case class MdpTageTableParameters(
   TableInfos: Seq[MdpTageTableInfo] = Seq(
-    new MdpTageTableInfo(512, 4, 2  ),
-    new MdpTageTableInfo(512, 4, 4  ),
-    new MdpTageTableInfo(512, 4, 8  ),
-    new MdpTageTableInfo(512, 4, 16 ),
+    new MdpTageTableInfo(1024, 4, 2  ),
+    new MdpTageTableInfo(1024, 4, 4  ),
+    new MdpTageTableInfo(1024, 4, 8  ),
+    new MdpTageTableInfo(1024, 4, 16 ),
     new MdpTageTableInfo(256, 4, 32 ),
     new MdpTageTableInfo(128, 4, 64 ),
     new MdpTageTableInfo(128, 4, 128)
@@ -167,7 +167,7 @@ case class MdpTageTableParameters(
   NumBanks:            Int = 4, // to alleviate read-write conflicts in single-port SRAM
   NumWays:             Int = 4,
   TagWidth:            Int = 13,
-  WriteBufferSize:     Int = 4,
+  WriteBufferSize:     Int = 8,
 
   TakenCtrWidth:       Int = 3,
   UsefulCtrWidth:      Int = 3,
@@ -175,7 +175,7 @@ case class MdpTageTableParameters(
 ){}
 
 case class MdpBaseTableParameters( //fromMainBtb
-  NumEntries: Int = 8192,
+  NumEntries: Int = 1024,
   NumWay:     Int = 4,
   // Lowest level banks, each bank is a physical SRAM
   // This banking is used to resolve read-write conflicts and reduce SRAM power
@@ -186,7 +186,7 @@ case class MdpBaseTableParameters( //fromMainBtb
   NumAlignBanks:   Int = 2,
   TagWidth:        Int = 16,
   TargetWidth:     Int = 20,       // 2B aligned
-  WriteBufferSize: Int = 4,
+  WriteBufferSize: Int = 8,
   Replacer:        String = "Lru", // "Lru" or "Plru"
   // Mbtb write trace
 ){}

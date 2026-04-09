@@ -380,6 +380,9 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   private val t2_trainInfoVec = t2_trainInfoWithUpdateTargetVec.map(_._1)
   private val t2_updateTableOHVec = t2_trainInfoWithUpdateTargetVec.map(_._2)
   private val t2_updateWayOHVec = t2_trainInfoWithUpdateTargetVec.map(_._3)
+  private val t2_tableTrainHitMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_trainInfoVec.map(info => info.valid && info.trainNxOH(tableIdx)).reduce(_ || _)
+  })
 
 
   when(t2_fire) {
@@ -469,9 +472,11 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     }.reduce(_ | _)
   }
   private val t2_tageTableCanAllocateWayMask = t2_readResp.zipWithIndex.map { case (tableReadResp, tableIdx) =>
-    val rawAllocateWayMask = tableReadResp.entries.zip(tableReadResp.usefulCtrs).map { case (entry, usefulCtr) =>
-      !entry.valid || entry.valid && usefulCtr.isSaturateNegative
+    val notValidMask = tableReadResp.entries.map(!_.valid).asUInt
+    val zeroUsefulMask = tableReadResp.entries.zip(tableReadResp.usefulCtrs).map { case (entry, usefulCtr) =>
+      entry.valid && usefulCtr.isSaturateNegative
     }.asUInt
+    val rawAllocateWayMask = Mux(notValidMask.orR, notValidMask, zeroUsefulMask)
     rawAllocateWayMask & ~t2_tableUpdateWayMask(tableIdx)
   }
   private val t2_canAllocate =
@@ -497,6 +502,48 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       0.U(MaxNumWays.W)
     )
   })
+
+  // private val s2_tablePredictHitMask = VecInit(TableInfos.indices.map { tableIdx =>
+  //   s2_loads.map { load =>
+  //     val position = load.bits.cfiPosition
+  //     val tag = s2_rawTag(tableIdx) ^ position
+  //     s2_readResp(tableIdx).entries.map(entry => entry.valid && entry.tag === tag).reduce(_ || _)
+  //   }.reduce(_ || _)
+  // })
+  // private val s2_tableProviderMask = VecInit(TableInfos.indices.map { tableIdx =>
+  //   s2_loads.map { load =>
+  //     val position = load.bits.cfiPosition
+  //     val tag = s2_rawTag(tableIdx) ^ position
+  //     val hitTableMask = s2_readResp.zipWithIndex.map { case (tableReadResp, idx) =>
+  //       val tableTag = s2_rawTag(idx) ^ position
+  //       tableReadResp.entries.map(entry => entry.valid && entry.tag === tableTag).reduce(_ || _)
+  //     }
+  //     getLongestHistTableOH(hitTableMask)(tableIdx) && hitTableMask(tableIdx)
+  //   }.reduce(_ || _)
+  // })
+  // private val t2_tableHasInvalidMask = VecInit(t2_readResp.map { tableReadResp =>
+  //   tableReadResp.entries.map(!_.valid).reduce(_ || _)
+  // })
+  // private val t2_tableHasZeroUsefulMask = VecInit(t2_readResp.map { tableReadResp =>
+  //   tableReadResp.entries.zip(tableReadResp.usefulCtrs).map { case (entry, usefulCtr) =>
+  //     entry.valid && usefulCtr.isSaturateNegative
+  //   }.reduce(_ || _)
+  // })
+  // private val t2_tableWayAllocateEnVec = TableInfos.zipWithIndex.map { case (info, _) =>
+  //   Wire(Vec(info.NumWays, Bool()))
+  // }
+  // private val t2_tableWayUpdateEnVec = TableInfos.zipWithIndex.map { case (info, _) =>
+  //   Wire(Vec(info.NumWays, Bool()))
+  // }
+  // private val t2_allocateReqTableOHVec = VecInit(t2_trainInfoVec.map { info =>
+  //   Mux(info.valid && info.needAllocate && info.canAllocate, info.allocateNxOH, 0.U(NumTables.W))
+  // })
+  // private val t2_tableUpdateMask = VecInit(TableInfos.indices.map { tableIdx =>
+  //   t2_trainInfoVec.map(info => info.valid && info.needUpdate && info.trainNxOH(tableIdx)).reduce(_ || _)
+  // })
+  // private val t2_tableAllWayWeakMask = VecInit(TableInfos.indices.map { tableIdx =>
+  //   t2_trainInfoVec.map(info => info.valid && info.needAllWayWeak && info.trainNxOH(tableIdx)).reduce(_ || _)
+  // })
 
 
   // when(t2_fire && t2_allocate) {
@@ -526,9 +573,9 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       info.valid && info.needAllWayWeak && info.trainNxOH(tableIdx) 
     }
     (0 until NumWays).foreach { wayIdx =>
-      val hitMask = t2_trainInfoVec.map { info =>
+      val hitMask = PriorityEncoderOH(t2_trainInfoVec.map { info =>
         info.valid && info.needUpdate && info.trainNxOH(tableIdx) && info.hitWayMaskOH(wayIdx)
-      }
+      })
       val allocateMask = t2_trainInfoVec.zipWithIndex.map { case(info,infoIdx) =>
         info.valid && info.needAllocate && t2_allocate(infoIdx) && t2_allocateTableOHVec(infoIdx)(tableIdx) && t2_allocateWayOHVec(infoIdx)(wayIdx)
       }
@@ -556,6 +603,8 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
         val opCount = PopCount(Cat(weakWayEn, allocateEn, updateEn))
         assert(opCount <= 1.U, cf"Multiple write operations on table ${tableIdx} way ${wayIdx}: update=${updateEn}, allocate=${allocateEn}, weak=${weakWayEn}, opCount=${opCount}")
       }
+      // t2_tableWayAllocateEnVec(tableIdx)(wayIdx) := allocateEn
+      // t2_tableWayUpdateEnVec(tableIdx)(wayIdx) := updateEn
     }
     table.io.writeReq.valid                := t2_fire && writeWayMask.reduce(_ || _)
     table.io.writeReq.bits.setIdx          := t2_setIdx(tableIdx)
@@ -570,6 +619,40 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     table.io.allWayWeakReq.bits.usefulCtrs := writeUsefulCtrs
     table.io.resetUseful := t2_fire && usefulResetCtr.isSaturatePositive
   }
+
+  // TableInfos.indices.foreach { tableIdx =>
+  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_predict_hit", s2_fire && s2_tablePredictHitMask(tableIdx))
+  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_provider_cnt", s2_fire && s2_tableProviderMask(tableIdx))
+  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_train_hit", t2_fire && t2_tableTrainHitMask(tableIdx))
+  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_has_invalid", t2_fire && t2_tableHasInvalidMask(tableIdx))
+  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_has_zero_useful", t2_fire && t2_tableHasZeroUsefulMask(tableIdx))
+  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_update_cnt", t2_fire && t2_tableUpdateMask(tableIdx))
+  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_allwayweak_cnt", t2_fire && t2_tableAllWayWeakMask(tableIdx))
+  //   XSPerfAccumulate(
+  //     s"mdp_tage_table_${tableIdx}_allocate_req",
+  //     t2_fire && t2_allocateReqTableOHVec.map(_(tableIdx)).reduce(_ || _)
+  //   )
+  //   XSPerfAccumulate(
+  //     s"mdp_tage_table_${tableIdx}_allocate_commit",
+  //     t2_fire && t2_allocateTableOHVec.map(_(tableIdx)).reduce(_ || _)
+  //   )
+  //   XSPerfAccumulate(
+  //     s"mdp_tage_table_${tableIdx}_allocate_drop_no_way",
+  //     t2_fire && t2_allocateReqTableOHVec.zip(t2_allocateTableOHVec).map { case (reqOH, allocOH) =>
+  //       reqOH(tableIdx) && !allocOH(tableIdx)
+  //     }.reduce(_ || _)
+  //   )
+  //   XSPerfAccumulate(
+  //     s"mdp_tage_table_${tableIdx}_allocate_drop_higher_prio",
+  //     t2_fire && t2_allocateReqTableOHVec.zip(t2_allocateBlockedByHigherPrio).map { case (reqOH, blocked) =>
+  //       reqOH(tableIdx) && blocked
+  //     }.reduce(_ || _)
+  //   )
+  //   (0 until TableInfos(tableIdx).NumWays).foreach { wayIdx =>
+  //     XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_allocate", t2_fire && t2_tableWayAllocateEnVec(tableIdx)(wayIdx))
+  //     XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_update", t2_fire && t2_tableWayUpdateEnVec(tableIdx)(wayIdx))
+  //   }
+  // }
   
   when(t2_fire) {
     when(usefulResetCtr.isSaturatePositive) {
