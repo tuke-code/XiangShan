@@ -168,9 +168,43 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     iq.io.replaceRCIdx.foreach(x => x := 0.U.asTypeOf(x))
     iq.io.wakeupFromWB.foreach(x => x := 0.U.asTypeOf(x))
     iq.io.wakeupFromWBDelayed.foreach(x => x := 0.U.asTypeOf(x))
+    iq.io.loadIQBypassAcceptIn.foreach(_.foreach(_ := false.B))
+    iq.io.loadIQBypassIn.foreach(_.foreach(x => x := 0.U.asTypeOf(x)))
+    iq.io.loadIQBypassRespIn.foreach(_.foreach(x => x := 0.U.asTypeOf(x)))
   }
   // 1 iq has 1 ldu, 1sta, 1vstu
   val ldAddrIQs = issueQueues.filter(iq => iq.param.LduCnt > 0)
+  val ldAddrIQMap = ldAddrIQs.map { iq =>
+    require(iq.param.exuBlockParams.size == 1, s"Load IQ ${iq.param.getIQName} should have exactly one exu")
+    iq.param.exuBlockParams.head.name -> iq
+  }.toMap
+  require(ldAddrIQMap.size == ldAddrIQs.size, "Load IQ names should be unique for bypass routing")
+  ldAddrIQs.foreach { iq =>
+    iq.param.loadIQBypassTargets.foreach { sinkName =>
+      require(ldAddrIQMap.contains(sinkName), s"Unknown load IQ bypass target $sinkName for ${iq.param.exuBlockParams.head.name}")
+    }
+    iq.param.loadIQBypassSources.foreach { sourceName =>
+      require(ldAddrIQMap.contains(sourceName), s"Unknown load IQ bypass source $sourceName for ${iq.param.exuBlockParams.head.name}")
+    }
+  }
+  // Route load-IQ bypass topology according to the static configuration in Parameters.scala.
+  ldAddrIQs.foreach { sourceIQ =>
+    val sourceName = sourceIQ.param.exuBlockParams.head.name
+    sourceIQ.io.loadIQBypassOut.foreach { bypassOutVec =>
+      sourceIQ.param.loadIQBypassTargets.zip(bypassOutVec).zipWithIndex.foreach { case ((sinkName, bypassOut), sourceTargetPortIdx) =>
+        val sinkIQ = ldAddrIQMap(sinkName)
+        val sinkPortIdx = sinkIQ.param.loadIQBypassSources.indexOf(sourceName)
+        require(sinkPortIdx >= 0, s"Load IQ bypass route $sourceName -> $sinkName is missing from sink source list")
+        sinkIQ.io.loadIQBypassIn.get(sinkPortIdx) := bypassOut
+        sourceIQ.io.loadIQBypassAcceptIn.get(sourceTargetPortIdx) := sinkIQ.io.loadIQBypassSelected.get &&
+          sinkIQ.io.loadIQBypassSelectedSource.get === sourceIQ.param.issueBlockIdx.U
+        sourceIQ.io.loadIQBypassRespIn.get(sourceTargetPortIdx).sourceIssueBlockIdx := sinkIQ.param.issueBlockIdx.U
+        sourceIQ.io.loadIQBypassRespIn.get(sourceTargetPortIdx).og0resp := sinkIQ.io.og0Resp.head
+        sourceIQ.io.loadIQBypassRespIn.get(sourceTargetPortIdx).og1resp := sinkIQ.io.og1Resp.head
+        sourceIQ.io.loadIQBypassRespIn.get(sourceTargetPortIdx).snresp.foreach(_ := sinkIQ.io.snResp.get.head)
+      }
+    }
+  }
   ldAddrIQs.zipWithIndex.foreach { case(imp, i) =>
     imp.io.memIO.get.loadWakeUp.head := io.wakeupFromLDU.get(i)
   }

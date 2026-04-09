@@ -44,6 +44,13 @@ class IssueQueueIO()(implicit p: Parameters, params: IssueBlockParams) extends X
   val replaceRCIdx = Option.when(params.needWriteRegCache)(Vec(params.numDeq, Input(UInt(RegCacheIdxWidth.W))))
   // memAddrIQ
   val memIO = Option.when(params.isMemAddrIQ)(new IssueQueueMemBundle)
+  val loadIQBypassAcceptIn = Option.when(params.numLoadIQBypassTargets > 0)(Vec(params.numLoadIQBypassTargets, Input(Bool())))
+  val loadIQBypassIn = Option.when(params.numLoadIQBypassSources > 0)(
+    Vec(params.numLoadIQBypassSources, Flipped(ValidIO(new LoadIQBypassIssueBundle(params.exuBlockParams.head))))
+  )
+  val loadIQBypassRespIn = Option.when(params.numLoadIQBypassTargets > 0)(
+    Vec(params.numLoadIQBypassTargets, Flipped(new LoadIQBypassRespBundle))
+  )
 
   // Outputs
   val wakeupToIQ: MixedVec[ValidIO[IssueQueueIQWakeUpBundle]] = params.genIQWakeUpSourceValidBundle
@@ -57,6 +64,11 @@ class IssueQueueIO()(implicit p: Parameters, params: IssueBlockParams) extends X
 
   val deqDelay: MixedVec[DecoupledIO[Og0InUop]] = params.genIssueDecoupledBundle// = deq.cloneType
   val deqOg1Payload: MixedVec[IssueQueueDeqOg1Payload] = params.genIssueDeqOg1PayloadBundle
+  val loadIQBypassOut = Option.when(params.numLoadIQBypassTargets > 0)(
+    Vec(params.numLoadIQBypassTargets, ValidIO(new LoadIQBypassIssueBundle(params.exuBlockParams.head)))
+  )
+  val loadIQBypassSelected = Option.when(params.numLoadIQBypassSources > 0)(Output(Bool()))
+  val loadIQBypassSelectedSource = Option.when(params.numLoadIQBypassSources > 0)(Output(UInt(log2Ceil(backendParams.IqCnt + 1).W)))
   def allWakeUp = wakeupFromWB ++ wakeupFromIQ
 }
 
@@ -75,6 +87,12 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   require(params.numEnq <= 2, "IssueQueue has not supported more than 2 enq ports")
   require(params.numSimp == 0 || params.numSimp >= params.numEnq, "numSimp should be 0 or at least not less than numEnq")
   require(params.numComp == 0 || params.numComp >= params.numEnq, "numComp should be 0 or at least not less than numEnq")
+  if (params.hasLoadIQBypassPath) {
+    require(params.isLdAddrIQ, s"${params.getIQName} load IQ bypass only supports load-address IQs")
+    require(params.numDeq == 1, s"${params.getIQName} load IQ bypass only supports single-deq IQs")
+    require(params.numLoadIQBypassTargets <= 1, s"${params.getIQName} load IQ bypass currently supports at most one target")
+    require(params.numLoadIQBypassSources <= 1, s"${params.getIQName} load IQ bypass currently supports at most one source")
+  }
   val param: IssueBlockParams = params
   val deqFuCfgs     : Seq[Seq[FuConfig]] = params.exuBlockParams.map(_.fuConfigs)
   val wakeupFuLatencySeqs : Seq[Seq[(FuType.OHType, Int)]] = params.exuBlockParams.map(x => x.wakeUpFuLatencyMap.toSeq.sortBy(_._2))
@@ -87,6 +105,17 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   }
 
   lazy val io = IO(new IssueQueueIO())
+
+  io.loadIQBypassOut.foreach { bypassOutVec =>
+    bypassOutVec.foreach { bypassOut =>
+      bypassOut.valid := false.B
+      bypassOut.bits := 0.U.asTypeOf(bypassOut.bits)
+      bypassOut.bits.sourceIssueBlockIdx := params.issueBlockIdx.U
+      bypassOut.bits.sourceDeqPortIdx := 0.U
+    }
+  }
+  io.loadIQBypassSelected.foreach(_ := false.B)
+  io.loadIQBypassSelectedSource.foreach(_ := 0.U)
 
   io.enq.foreach { case enq =>
     enq.bits.debug.foreach(x => PerfCCT.updateInstPos(x.debug_seqNum, PerfCCT.InstPos.AtIssueQue.id.U, enq.valid, clock, reset))
@@ -243,6 +272,12 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   val deqSelValidVec = Wire(Vec(params.numDeq, Bool()))
   val deqSelOHVec    = Wire(Vec(params.numDeq, UInt(params.numEntries.W)))
   val cancelDeqVec = Wire(Vec(params.numDeq, Bool()))
+  val loadIQBypassEntrySelOH = Option.when(params.numLoadIQBypassTargets > 0)(Wire(Valid(UInt(params.numEntries.W))))
+  val loadIQBypassIssueSelOH = Option.when(params.numLoadIQBypassTargets > 0)(Wire(Valid(UInt(params.numEntries.W))))
+  val loadIQBypassIssueSelOHDelay = Option.when(params.numLoadIQBypassTargets > 0)(RegInit(0.U.asTypeOf(Valid(UInt(params.numEntries.W)))))
+  val loadIQBypassEntry = Option.when(params.numLoadIQBypassTargets > 0)(Wire(ValidIO(new EntryBundle(isDeq = true))))
+  val loadIQBypassCancelDeq = Option.when(params.numLoadIQBypassTargets > 0)(Wire(Bool()))
+  val loadIQBorrowOg1ValidReg = Option.when(params.numLoadIQBypassSources > 0)(RegInit(false.B))
 
   val subDeqSelValidVec = Option.when(params.deqFuSame)(Wire(Vec(params.numDeq, Bool())))
   val subDeqSelOHVec = Option.when(params.deqFuSame)(Wire(Vec(params.numDeq, UInt(params.numEntries.W))))
@@ -277,6 +312,17 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       w := w_src
     }
   }
+
+  loadIQBypassEntrySelOH.foreach { sel =>
+    sel.valid := false.B
+    sel.bits := 0.U
+  }
+  loadIQBypassIssueSelOH.foreach { sel =>
+    sel.valid := false.B
+    sel.bits := 0.U
+  }
+  loadIQBypassIssueSelOHDelay.foreach(_ := loadIQBypassIssueSelOH.get)
+  loadIQBorrowOg1ValidReg.foreach(_ := false.B)
 
   /**
     * Connection of [[entries]]
@@ -339,6 +385,9 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     entriesIO.s0Resp.foreach(_                                  := io.s0Resp.get)
     entriesIO.s2Resp.foreach(_                                  := io.s2Resp.get)
     entriesIO.snResp.foreach(_                                  := io.snResp.get)
+    entriesIO.bypassOg0Resp.foreach(_                           := io.loadIQBypassRespIn.get.head.og0resp)
+    entriesIO.bypassOg1Resp.foreach(_                           := io.loadIQBypassRespIn.get.head.og1resp)
+    entriesIO.bypassSnResp.foreach(_                            := io.loadIQBypassRespIn.get.head.snresp.get)
     for(deqIdx <- 0 until params.numDeq) {
       entriesIO.deqReady(deqIdx)                                := deqBeforeDly(deqIdx).ready
       entriesIO.deqSelOH(deqIdx).valid                          := deqSelValidVec(deqIdx)
@@ -358,6 +407,9 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       entriesIO.subDeqRequest.foreach(_(deqIdx)                 := subDeqRequest.get)
       entriesIO.subDeqSelOH.foreach(_(deqIdx)                   := subDeqSelOHVec.get(deqIdx))
     }
+    entriesIO.bypassIssueSelOH.foreach(_                        := loadIQBypassIssueSelOH.get)
+    entriesIO.bypassEntrySelOH.foreach(_                        := loadIQBypassEntrySelOH.get)
+    entriesIO.bypassEntrySelOHDelay.foreach(_                   := loadIQBypassIssueSelOHDelay.get)
     entriesIO.wakeUpFromWB                                      := 0.U.asTypeOf(io.wakeupFromWB)
     entriesIO.wakeUpFromIQ                                      := wakeupFromIQ
     entriesIO.wakeUpFromWBDelayed                               := 0.U.asTypeOf(io.wakeupFromWBDelayed)
@@ -402,6 +454,9 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     fuTypeVec                                                   := entriesIO.fuType
     deqEntryVec                                                 := entriesIO.deqEntry
     cancelDeqVec                                                := entriesIO.cancelDeqVec
+    loadIQBypassEntry.foreach(_                                 := entriesIO.bypassDeqEntry.get)
+    io.loadIQBypassOut.foreach(_.head.bits.og1                  := entriesIO.bypassDeqOg1Payload.get)
+    loadIQBypassCancelDeq.foreach(_                             := entriesIO.bypassCancelDeq.get)
     simpEntryEnqSelVec.foreach(_                                := entriesIO.simpEntryEnqSelVec.get)
     compEntryEnqSelVec.foreach(_                                := entriesIO.compEntryEnqSelVec.get)
     othersEntryEnqSelVec.foreach(_                              := entriesIO.othersEntryEnqSelVec.get)
@@ -596,6 +651,135 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       selValid := deqValid
       selOH := deqOH
     }
+  }
+
+  private def selectLoadIQBypassOldest(request: UInt): Valid[UInt] = {
+    val enqOldestSel = NewAgeDetector(
+      numEntries = params.numEnq,
+      enq = VecInit(s0_doEnqSelValidVec),
+      canIssue = VecInit(Seq(request(params.numEnq - 1, 0)))
+    ).head
+    val out = Wire(Valid(UInt(params.numEntries.W)))
+    if (params.isAllComp || params.isAllSimp) {
+      val othersOldestSel = AgeDetector(
+        numEntries = params.numEntries - params.numEnq,
+        enq = othersEntryEnqSelVec.get,
+        canIssue = request(params.numEntries - 1, params.numEnq)
+      )
+      out.valid := othersOldestSel.valid || enqOldestSel.valid
+      out.bits := Cat(
+        othersOldestSel.bits,
+        Fill(params.numEnq, !othersOldestSel.valid) & enqOldestSel.bits
+      )
+    } else {
+      val simpBypassAgeDetectRequest = Wire(Vec(params.numEnq + 1, UInt(params.numSimp.W)))
+      simpBypassAgeDetectRequest(0) := request(params.numEnq + params.numSimp - 1, params.numEnq)
+      simpBypassAgeDetectRequest(1) := VecInit(requestForTrans.drop(params.numEnq).take(params.numSimp)).asUInt
+      if (params.numEnq == 2) {
+        val simpBypassSel = AgeDetector(
+          numEntries = params.numSimp,
+          enq = simpEntryEnqSelVec.get,
+          canIssue = simpBypassAgeDetectRequest
+        )
+        simpBypassAgeDetectRequest(2) := VecInit(requestForTrans.drop(params.numEnq).take(params.numSimp)).asUInt & (~simpBypassSel(1).bits).asUInt
+        val compBypassSel = AgeDetector(
+          numEntries = params.numComp,
+          enq = compEntryEnqSelVec.get,
+          canIssue = request(params.numEntries - 1, params.numEnq + params.numSimp)
+        )
+        out.valid := compBypassSel.valid || simpBypassSel.head.valid || enqOldestSel.valid
+        out.bits := Cat(
+          compBypassSel.bits,
+          Fill(params.numSimp, !compBypassSel.valid) & simpBypassSel.head.bits,
+          Fill(params.numEnq, !compBypassSel.valid && !simpBypassSel.head.valid) & enqOldestSel.bits
+        )
+      } else {
+        val simpBypassSel = AgeDetector(
+          numEntries = params.numSimp,
+          enq = simpEntryEnqSelVec.get,
+          canIssue = simpBypassAgeDetectRequest
+        ).head
+        val compBypassSel = AgeDetector(
+          numEntries = params.numComp,
+          enq = compEntryEnqSelVec.get,
+          canIssue = request(params.numEntries - 1, params.numEnq + params.numSimp)
+        )
+        out.valid := compBypassSel.valid || simpBypassSel.valid || enqOldestSel.valid
+        out.bits := Cat(
+          compBypassSel.bits,
+          Fill(params.numSimp, !compBypassSel.valid) & simpBypassSel.bits,
+          Fill(params.numEnq, !compBypassSel.valid && !simpBypassSel.valid) & enqOldestSel.bits
+        )
+      }
+    }
+    when (out.valid) {
+      assert(PopCount(out.bits) === 1.U, s"${params.getIQName} load IQ bypass select is not one-hot")
+    }
+    out
+  }
+
+  private def connectLoadIQBypassOg0(sink: Og0InUop, entry: EntryBundle, selOH: UInt, valid: Bool): Unit = {
+    sink.isFirstIssue := entry.status.firstIssue
+    sink.iqIdx := OHToUInt(selOH)
+    sink.fuType := IQFuType.readFuType(entry.status.fuType, params.getFuCfgs.map(_.fuType)).asUInt
+    sink.rfBankRen.foreach(x => x.zipWithIndex.foreach { case (xx, idx) =>
+      xx.zipWithIndex.foreach { case (xxx, bank) =>
+        xxx := valid && entry.rfBankRen.get(idx)(bank)
+      }
+    })
+    sink.fpRen.foreach(x => x.zipWithIndex.foreach { case (xx, idx) => xx := valid && entry.fpRen.get(idx) })
+    sink.vecRen.foreach(x => x.zipWithIndex.foreach { case (xx, idx) => xx := valid && entry.vecRen.get(idx) })
+    sink.v0Ren.foreach(x => x.zipWithIndex.foreach { case (xx, idx) => xx := valid && entry.v0Ren.get(idx) })
+    sink.vlRen.foreach(_ := valid && entry.vlRen.get)
+    sink.rfWen.foreach(_ := entry.payload.rfWen.get)
+    sink.fpWen.foreach(_ := entry.payload.fpWen.get)
+    sink.vecWen.foreach(_ := entry.payload.vecWen.get)
+    sink.v0Wen.foreach(_ := entry.payload.v0Wen.get)
+    sink.vlWen.foreach(_ := entry.payload.vlWen.get)
+    sink.flushPipe.foreach(_ := false.B)
+    sink.pdest := entry.payload.pdest
+    sink.pdestVl.foreach(_ := entry.payload.pdestVl.get)
+    sink.robIdx := entry.status.robIdx
+    sink.dataSources.zip(entry.status.srcStatus.map(_.dataSources)).foreach { case (dst, src) => dst := src }
+    sink.exuSources.foreach(_.zip(entry.status.srcStatus.map(_.exuSources.get)).foreach { case (dst, src) => dst := src })
+    sink.loadDependency.foreach(_.zip(entry.status.mergedLoadDependency).foreach { case (dst, src) => dst := src })
+    sink.rcIdx.foreach(_ := entry.status.srcStatus.map(_.regCacheIdx.get))
+    sink.ftqIdx.foreach(_ := entry.payload.ftqPtr.get)
+    sink.ftqOffset.foreach(_ := entry.payload.ftqOffset.get)
+    sink.perfDebugInfo.foreach(_ := entry.payload.debug.get.perfDebugInfo)
+    sink.debug_seqNum.foreach(_ := entry.payload.debug.get.debug_seqNum)
+    sink.perfDebugInfo.foreach(_.selectTime := GTimer())
+    sink.perfDebugInfo.foreach(_.issueTime := GTimer() + 1.U)
+  }
+
+  val loadIQLocalIssueValid = finalDeqSelValidVec.head && !cancelDeqVec.head
+  val loadIQLocalIssueOH = Mux(loadIQLocalIssueValid, finalDeqSelOHVec.head, 0.U(params.numEntries.W))
+
+  loadIQBypassEntrySelOH.foreach { bypassSel =>
+    val oldestSrcReadySel = selectLoadIQBypassOldest(srcReadyVec.asUInt)
+    val duplicateLocalIssue = oldestSrcReadySel.valid && (oldestSrcReadySel.bits & loadIQLocalIssueOH).orR
+    val duplicateLocalRobIdx = loadIQLocalIssueValid && loadIQBypassEntry.get.valid &&
+      (loadIQBypassEntry.get.bits.status.robIdx === deqEntryVec.head.bits.status.robIdx)
+    val bypassEntry = loadIQBypassEntry.get
+    val bypassValid = oldestSrcReadySel.valid && bypassEntry.valid && !loadIQBypassCancelDeq.get &&
+      !duplicateLocalIssue && !duplicateLocalRobIdx
+
+    bypassSel := oldestSrcReadySel
+    loadIQBypassIssueSelOH.get.valid := bypassValid && io.loadIQBypassAcceptIn.get.head
+    loadIQBypassIssueSelOH.get.bits := oldestSrcReadySel.bits
+
+    io.loadIQBypassOut.get.head.valid := bypassValid
+    io.loadIQBypassOut.get.head.bits.sourceIssueBlockIdx := params.issueBlockIdx.U
+    io.loadIQBypassOut.get.head.bits.sourceDeqPortIdx := 1.U
+    connectLoadIQBypassOg0(io.loadIQBypassOut.get.head.bits.og0, bypassEntry.bits, oldestSrcReadySel.bits, bypassValid)
+  }
+
+  val loadIQBorrowSelected = Option.when(params.numLoadIQBypassSources > 0)(Wire(Bool()))
+  loadIQBorrowSelected.foreach { borrow =>
+    borrow := !loadIQLocalIssueValid && io.loadIQBypassIn.get.head.valid
+    io.loadIQBypassSelected.get := borrow
+    io.loadIQBypassSelectedSource.get := Mux(borrow, io.loadIQBypassIn.get.head.bits.sourceIssueBlockIdx, 0.U)
+    loadIQBorrowOg1ValidReg.get := borrow
   }
 
   val toBusyTableDeqResp = Wire(Vec(params.numDeq, ValidIO(new IssueQueueRespBundle)))
@@ -909,10 +1093,17 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     deq.bits.perfDebugInfo.foreach(_.issueTime := GTimer() + 1.U)
   }
 
+  loadIQBorrowSelected.foreach { borrow =>
+    when (borrow) {
+      deqBeforeDly.head.valid := true.B
+      deqBeforeDly.head.bits := io.loadIQBypassIn.get.head.bits.og0
+    }
+  }
+
   val deqDelay = Reg(params.genIssueValidBundle)
   deqDelay.zip(deqBeforeDly).zipWithIndex.foreach { case ((deqDly, deq), i) =>
     deqDly.valid := deq.valid
-    when(validVec.asUInt.orR) {
+    when(deq.valid) {
       deqDly.bits := deq.bits
     }
     // for oldestArbiter readReq valid
@@ -942,7 +1133,14 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     sink.valid := source.valid
     sink.bits := source.bits
   }
-  io.deqOg1Payload := entries.io.deqOg1Payload
+  val deqOg1PayloadOut = Wire(params.genIssueDeqOg1PayloadBundle)
+  deqOg1PayloadOut := entries.io.deqOg1Payload
+  loadIQBorrowOg1ValidReg.foreach { borrowOg1Valid =>
+    when (borrowOg1Valid) {
+      deqOg1PayloadOut.head := io.loadIQBypassIn.get.head.bits.og1
+    }
+  }
+  io.deqOg1Payload := deqOg1PayloadOut
   if(backendParams.debugEn) {
     dontTouch(deqDelay)
     dontTouch(io.deqDelay)

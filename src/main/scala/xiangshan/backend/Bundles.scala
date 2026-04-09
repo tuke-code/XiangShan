@@ -1007,6 +1007,22 @@ object Bundles {
     val debug_seqNum  = OptionWrapper(backendParams.debugEn, InstSeqNum())
   }
 
+  class LoadIQBypassIssueBundle(
+    val exuParams: ExeUnitParams,
+  )(implicit p: Parameters, val iqParams: IssueBlockParams) extends XSBundle {
+    val sourceIssueBlockIdx = UInt(log2Ceil(backendParams.IqCnt + 1).W)
+    val sourceDeqPortIdx = UInt(log2Ceil(iqParams.numDeq + 1).W)
+    val og0 = new Og0InUop(iqParams, exuParams)
+    val og1 = new IssueQueueDeqOg1Payload(exuParams)
+  }
+
+  class LoadIQBypassRespBundle(implicit p: Parameters, val params: IssueBlockParams) extends XSBundle {
+    val sourceIssueBlockIdx = UInt(log2Ceil(backendParams.IqCnt + 1).W)
+    val og0resp = new IssueQueueRespBundle
+    val og1resp = new IssueQueueRespBundle
+    val snresp = Option.when(params.needSnResp)(new IssueQueueRespBundle)
+  }
+
   class OGRespBundle(implicit p:Parameters, params: IssueBlockParams) extends XSBundle {
     val issueQueueParams = this.params
     val og0resp = new IssueQueueRespBundle
