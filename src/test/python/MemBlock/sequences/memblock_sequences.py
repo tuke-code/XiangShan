@@ -121,12 +121,11 @@ def _snapshot_transport_stats(env) -> dict[str, int]:
 
 
 def _wait_store_addr_observed(env, sq_idx: int, expected_addr: int, max_cycles: int = 200):
-    for _ in range(max_cycles):
-        store = env.get_store_view(sq_idx)
-        if store is not None and store.allocated and store.addr == expected_addr:
-            return store
-        env.Step(1)
-    raise TimeoutError(f"等待 store 地址收敛超时: sqIdx={sq_idx}, addr=0x{expected_addr:x}")
+    return env.wait_store_addr_observed(
+        sq_idx=sq_idx,
+        expected_addr=expected_addr,
+        max_cycles=max_cycles,
+    )
 
 
 def _resolve_replay_drain_cycles(env, drain_cycles: int | None) -> int:
@@ -136,12 +135,7 @@ def _resolve_replay_drain_cycles(env, drain_cycles: int | None) -> int:
 
 
 def _wait_completed_load_count(env, target_count: int, max_cycles: int = 200) -> int:
-    for _ in range(max_cycles):
-        completed = env.get_completed_load_count()
-        if completed >= int(target_count):
-            return completed
-        env.Step(1)
-    raise TimeoutError(f"等待 completed_load_count 达到 {target_count} 超时")
+    return env.wait_completed_load_count(target_count=target_count, max_cycles=max_cycles)
 
 
 def _read_optional_any_signal(env, signal_names, default=None):
@@ -323,7 +317,7 @@ def _wait_sq_matchinvalid_and_violation(
             )
             return sq_event, violation_event, tuple(replay_events), dcache_miss_signal
 
-        env.Step(1)
+        env.advance_cycles(1)
 
     raise TimeoutError(
         "等待 SQ dataInvalid+matchInvalid 与 memoryViolation 超时: "
@@ -530,7 +524,7 @@ class ScalarStoreCommitSequence:
         ).run(env)
         env.backend.pulse_store_commit(1)
         if settle_cycles > 0:
-            env.Step(settle_cycles)
+            env.advance_cycles(settle_cycles)
         if self.require_committed:
             env.wait_store_materialized(
                 store_result.allocated_sq_ptr.value,
@@ -671,7 +665,7 @@ class ScalarStorePairThenLoadSequence:
         ).run(env)
         env.backend.pulse_store_commit(1)
         if commit_settle_cycles > 0:
-            env.Step(commit_settle_cycles)
+            env.advance_cycles(commit_settle_cycles)
         if self.require_committed:
             env.wait_store_materialized(
                 first_store_result.allocated_sq_ptr.value,
@@ -694,7 +688,7 @@ class ScalarStorePairThenLoadSequence:
         ).run(env)
         env.backend.pulse_store_commit(1)
         if commit_settle_cycles > 0:
-            env.Step(commit_settle_cycles)
+            env.advance_cycles(commit_settle_cycles)
         if self.require_committed:
             env.wait_store_materialized(
                 second_store_result.allocated_sq_ptr.value,

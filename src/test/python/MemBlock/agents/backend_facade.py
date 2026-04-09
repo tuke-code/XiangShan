@@ -165,7 +165,7 @@ class BackendFacade:
 
     def step_commit(self, count: int = 1, cycles: int = 1) -> None:
         self.queue_store_commit(count)
-        self.env.Step(cycles)
+        self.env._run_async(self.env._await_cycles(cycles))
 
     def pulse_store_commit(self, count: int = 1) -> None:
         self.step_commit(count=count, cycles=1)

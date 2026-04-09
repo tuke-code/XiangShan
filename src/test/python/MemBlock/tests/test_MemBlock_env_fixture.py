@@ -290,21 +290,38 @@ def test_api_MemBlock_env_flush_store_buffers_noop(env):
 
     api_MemBlock_reset(env, cycles=2, max_cycles=20)
     observed_barriers = []
-    original_step = env.Step
 
-    def _recording_step(cycles=1):
+    def _record_barrier():
         observed_barriers.append(
             (
                 int(env.dut.io_ooo_to_mem_sfence_valid.value),
                 int(env.dut.io_ooo_to_mem_flushSb.value),
             )
         )
-        return original_step(cycles)
 
-    env.Step = _recording_step
-    result = env.flush_store_buffers_and_wait(max_cycles=20, settle_cycles=1)
-    env.Step = original_step
+    env.add_after_step_callback(_record_barrier)
+    try:
+        result = env.flush_store_buffers_and_wait(max_cycles=20, settle_cycles=1)
+    finally:
+        env.remove_after_step_callback(_record_barrier)
     assert (1, 1) in observed_barriers
     assert env.dut.io_ooo_to_mem_sfence_valid.value == 0
     assert env.dut.io_ooo_to_mem_flushSb.value == 0
     assert result["drain_event_count"] == 0
+
+
+def test_api_MemBlock_env_async_after_step_callback_runs(env):
+    """验证 async after-step callback 会在 env 内核拍后被执行。"""
+
+    observed_cycles = []
+
+    async def _async_sample():
+        observed_cycles.append(env._current_cycle())
+
+    env.add_after_step_callback(_async_sample)
+    try:
+        env.Step(2)
+    finally:
+        env.remove_after_step_callback(_async_sample)
+
+    assert observed_cycles == [1, 2]

@@ -639,3 +639,58 @@ testcase
 - 默认策略开始由统一 config 管理。
 
 这为后续继续扩异常场景、随机回归和更复杂的检查器提供了可持续的基础。
+
+## 2026-04-09
+
+### 变更摘要
+
+本条目记录一轮面向 env 时钟治理的收敛重构。目标不是继续在 `agents/`、MMU helper 和各类 wait/pulse 逻辑里散落 `Step()`，而是把 DUT 时钟推进统一收口到 `MemBlockEnv` 内核，同时保留对现有同步 facade/testcase 的兼容。
+
+### 1. env 内新增统一时钟内核
+
+- `MemBlockEnv` 现在持有私有 `EnvClockKernel`，由它独占 `dut.Step(1)` 的执行权。
+- 内核统一负责同步 facade 到 async 协程的桥接，并把每拍的 DUT 推进、拍后 monitor/model 更新与 callback 分发固定在 env 内部。
+- 对外 `env.Step()` 仍保留同步接口，但内部只作为对 env 时钟内核的兼容包装。
+
+### 2. env 内部 wait/pulse 路径迁入 async 原语
+
+- 新增私有 async 原语：
+  - `_step_async()`
+  - `_await_cycles()`
+  - `_step_and_idle_async()`
+- replay/release/nuke/store-materialize/quiesce/drain/flushSb 这类轮询逻辑不再直接散落调用 `Step()`，而是统一改走 env 内核原语。
+- MMU 相关的 distributed CSR pulse、`enable_sv39()`、`pulse_sfence()` 也改为 async 实现 + 同步兼容 wrapper。
+
+### 3. active agents 不再自己推进时钟
+
+- `IssueAgent` 与 `LsqAgent` 的内部握手主路径改为 async 协程，由 env 内核统一推进拍数。
+- `BackendFacade.step_commit()` 也不再直接调用 `env.Step()`，而是显式委托给 env 的时钟原语。
+- 这样 `agents/` 中不再保留零散的 `Step()` 调用，时钟推进语义集中回 env。
+
+### 4. request_apis / sequences 继续去拍级化
+
+- `request_apis.py` 中的 backend reset 等待已改走 `env.wait_backend_reset_deassert()`。
+- `sequences/memblock_sequences.py` 与 `sequences/violation_sequences.py` 中原有的显式 `env.Step(...)` 调用已清理，改为：
+  - `env.advance_cycles(...)`
+  - `env.wait_store_addr_observed(...)`
+  - `env.wait_completed_load_count(...)`
+- 这样 sequence 层继续保留场景语义，不再携带本地拍级轮询细节。
+
+### 5. callback 与文档同步更新
+
+- `after_step_callback` 现在支持同步函数和 async coroutine callback。
+- `test_MemBlock_env_fixture.py` 中：
+  - `flush_store_buffers_and_wait()` 的观测方式改为 after-step callback，而不是 monkey-patch `env.Step()`。
+  - 新增 async after-step callback smoke，验证 env 内核会在拍后正确 await callback。
+- 新增 `docs/clock_control_and_migration_guide.md`，面向开发者说明如何在 env / agent / request_apis / sequence / testcase 各层复用统一时钟原语。
+
+### 6. 验证情况
+
+- 已验证：
+  - `python3 -m py_compile`
+  - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -p xdist.plugin -n 16 -q src/test/python/MemBlock/tests`
+- 回归结果：
+  - `64 passed in 249.64s`
+  - 在 `request_apis.py` / `sequences/` 进一步收口后再次执行：
+    - `64 passed in 232.32s`
+- 这轮修改保持对外同步 facade 不变，因此现有 tests / sequences / `request_apis.py` 不需要批量迁移即可继续运行。

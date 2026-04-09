@@ -440,7 +440,7 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
                 max_cycles=self.observation_cycles,
             )
             if self.post_violation_cycles > 0:
-                env.Step(self.post_violation_cycles)
+                env.advance_cycles(self.post_violation_cycles)
             transport_stats_after_main = _snapshot_transport_stats(env)
 
             issue_scalar_std(

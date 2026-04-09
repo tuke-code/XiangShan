@@ -41,17 +41,10 @@ def wait_backend_reset_deassert(
     must_observe_assert: bool,
     max_cycles: int = DEFAULT_BACKEND_RESET_SYNC_CYCLES,
 ) -> None:
-    observed_assert = not must_observe_assert
-
-    for _ in range(max_cycles):
-        backend_reset = int(env.dut.io_reset_backend.value)
-        if backend_reset:
-            observed_assert = True
-        elif observed_assert:
-            return
-        env.Step(1)
-
-    raise TimeoutError("等待 `io_reset_backend` 解复位超时")
+    env.wait_backend_reset_deassert(
+        must_observe_assert=must_observe_assert,
+        max_cycles=max_cycles,
+    )
 
 
 def reset_env_and_wait_backend(

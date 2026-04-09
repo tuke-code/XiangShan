@@ -20,7 +20,7 @@ class IssueAgent:
     def __init__(self, env) -> None:
         self.env = env
 
-    def _issue_until_fire(self, lane: int, drive_inputs, max_cycles: int = 50) -> None:
+    async def _issue_until_fire_async(self, lane: int, drive_inputs, max_cycles: int = 50) -> None:
         issue = self.env.issue[lane]
 
         for _ in range(max_cycles):
@@ -28,10 +28,10 @@ class IssueAgent:
                 raise RuntimeError(f"等待 `issue[{lane}]` 握手时 backend 进入 reset")
             drive_inputs()
             if int(issue.ready.value):
-                self.env.Step(1)
+                await self.env._step_async(1)
                 self.env.idle_inputs()
                 return
-            self.env.Step(1)
+            await self.env._step_async(1)
 
         self.env.idle_inputs()
         raise TimeoutError(f"等待 `issue[{lane}]` 完成握手超时")
@@ -84,7 +84,7 @@ class IssueAgent:
             _set_optional_signal(self.env.dut, f"{prefix}lqIdx_flag", lq_ptr.flag)
             _set_optional_signal(self.env.dut, f"{prefix}lqIdx_value", lq_ptr.value)
 
-        self._issue_until_fire(lane, _drive)
+        self.env._run_async(self._issue_until_fire_async(lane, _drive))
         self.env.backend.note_load_issued((req_id >> 9) & 0x1, req_id & 0x1FF)
 
     def issue_scalar_std(self, req_id: int, sq_ptr, data: int, lane: int = 5) -> None:
@@ -98,7 +98,7 @@ class IssueAgent:
             issue.bits_sqIdx_flag.value = sq_ptr.flag
             issue.bits_sqIdx_value.value = sq_ptr.value
 
-        self._issue_until_fire(lane, _drive)
+        self.env._run_async(self._issue_until_fire_async(lane, _drive))
 
     def issue_scalar_sta(self, req_id: int, sq_ptr, addr: int, lane: int = 3) -> None:
         def _drive() -> None:
@@ -123,4 +123,4 @@ class IssueAgent:
             _set_optional_signal(self.env.dut, f"{prefix}storeSetHit", 0)
             _set_optional_signal(self.env.dut, f"{prefix}ssid", 0)
 
-        self._issue_until_fire(lane, _drive)
+        self.env._run_async(self._issue_until_fire_async(lane, _drive))

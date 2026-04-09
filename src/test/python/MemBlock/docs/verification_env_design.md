@@ -102,6 +102,55 @@ pytest testcase
 
 这相当于 UVM 中 env 的角色，但实现上更轻量。env 不再直接做 pin-level issue，也不再直接承担 compare 逻辑，而是尽量只负责装配、调度和对外接口稳定性。
 
+### 5.1 统一时钟内核
+
+当前版本里，`MemBlockEnv` 额外承担了一个更明确的职责：**独占 DUT 时钟推进权**。
+
+环境内部现在有一个私有 `EnvClockKernel`，它的目标很简单：
+
+1. `dut.Step(1)` 只允许从 env 内核发起。
+2. `agents/`、MMU helper 和各类 wait/pulse 逻辑不再各自推进时钟。
+3. testcase 仍然可以继续使用同步 `env.Step()` / `env.reset()` / `env.backend.*`，但这些同步入口本质上只是 env 内部 async 时序原语的兼容包装。
+
+因此，当前 `MemBlockEnv` 的时钟分层可以理解为：
+
+```text
+testcase / sequence / request_apis / env.backend
+    -> MemBlockEnv 同步 facade
+        -> MemBlockEnv async 原语
+            -> EnvClockKernel.step()
+                -> dut.Step(1)
+```
+
+这个结构的直接收益是：
+
+- DUT 拍推进的所有权唯一，便于维护和调试；
+- env 可以在统一位置固定“每拍前 drive、每拍后 monitor/model/update callback”的顺序；
+- agent 只表达业务语义与握手条件，而不是再携带散落的本地 `Step()` 时序。
+
+### 5.2 `Step()`、async 原语与 callback 关系
+
+对外公开的 `env.Step()` 仍保留，因为现有 tests、sequences 和 `request_apis.py` 大量依赖它；但环境内部主要依赖以下私有原语：
+
+- `_step_async()`
+  - 推进一个或多个周期，并在每拍后固定执行：
+    - `memory.after_cycle()`
+    - reset/backend reset 判断
+    - `MemStatusMonitor.after_cycle()`
+    - `CommitAgent.advance()`
+    - after-step callback 分发
+- `_await_cycles()`
+  - 只表达“等待若干拍”的语义，用于替代 agent/facade 层的直接 `Step()`。
+- `_step_and_idle_async()`
+  - 适合一拍握手后立刻恢复默认输入的驱动路径，例如 LSQ enqueue。
+
+同时，`after_step_callback` 现在支持两种 callback：
+
+- 普通同步函数
+- async coroutine callback
+
+这意味着 coverage collector、WebUI 采样器或后续新的 env 内辅助观察器，都可以继续挂在统一的拍后阶段，而不需要再私自 monkey-patch `env.Step()`。
+
 ## 6. Active Agents
 
 当前 active agents 包括：

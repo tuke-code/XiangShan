@@ -9,6 +9,8 @@ MemBlock 基础测试环境。
   4. `env` fixture
 """
 
+import asyncio
+import inspect
 import os
 import sys
 from collections import defaultdict, deque
@@ -28,7 +30,11 @@ except ImportError:
 
     pytest = _PytestStub()
 
-from toffee_test.reporter import set_func_coverage
+try:
+    from toffee_test.reporter import set_func_coverage
+except ImportError:
+    def set_func_coverage(*_args, **_kwargs):
+        return None
 
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -195,6 +201,25 @@ class PendingPtrDriver:
             value = 0
             flag ^= 0x1
         return RobIndex(flag=flag, value=value)
+
+
+class EnvClockKernel:
+    """在 env 内集中持有 DUT 时钟推进所有权。"""
+
+    def __init__(self, dut) -> None:
+        self.dut = dut
+
+    async def step(self, cycles: int = 1) -> None:
+        if cycles < 0:
+            raise ValueError(f"cycles 必须非负，当前值为 {cycles}")
+        for _ in range(cycles):
+            self.dut.Step(1)
+
+    def run(self, coro):
+        return asyncio.run(coro)
+
+    def close(self) -> None:
+        return None
 
 
 class RedirectBundle(Bundle):
@@ -888,23 +913,29 @@ class MmuFacade:
             satp_changed=0,
         )
 
-    def reapply_after_reset(self) -> None:
+    async def reapply_after_reset_async(self) -> None:
         for addr, data in self._persistent_csr_writes.items():
-            self._pulse_distributed_csr_write(addr, data)
+            await self._pulse_distributed_csr_write_async(addr, data)
         if self._active_sv39 is not None:
             self.reapply_inputs()
-            self.pulse_sfence()
+            await self.pulse_sfence_async()
+
+    def reapply_after_reset(self) -> None:
+        self.env._run_async(self.reapply_after_reset_async())
 
     def _remember_csr_write(self, addr: int, data: int) -> None:
         self._persistent_csr_writes[int(addr)] = int(data)
 
-    def _pulse_distributed_csr_write(self, addr: int, data: int) -> None:
+    async def _pulse_distributed_csr_write_async(self, addr: int, data: int) -> None:
         self.env.csr_ctrl.distribute_csr_w_bits_addr.value = int(addr)
         self.env.csr_ctrl.distribute_csr_w_bits_data.value = int(data)
         self.env.csr_ctrl.distribute_csr_w_valid.value = 1
-        self.env.Step(1)
+        await self.env._step_async(1)
         self.env.csr_ctrl.distribute_csr_w_valid.value = 0
-        self.env.Step(1)
+        await self.env._step_async(1)
+
+    def _pulse_distributed_csr_write(self, addr: int, data: int) -> None:
+        self.env._run_async(self._pulse_distributed_csr_write_async(addr, data))
 
     def write_distributed_csr(self, addr: int, data: int, *, persistent: bool = False) -> None:
         if persistent:
@@ -921,14 +952,23 @@ class MmuFacade:
         self.env.tlb_csr.satp_ppn.value = int(root_pt_addr) >> 12
         self.env.tlb_csr.satp_changed.value = int(satp_changed)
 
-    def enable_sv39(self, *, root_pt_addr: int, asid: int = 0, settle_cycles: int = 4) -> None:
+    async def enable_sv39_async(self, *, root_pt_addr: int, asid: int = 0, settle_cycles: int = 4) -> None:
         self._active_sv39 = _ActiveSv39State(root_pt_addr=int(root_pt_addr), asid=int(asid))
         self._drive_sv39_root(root_pt_addr=root_pt_addr, asid=asid, satp_changed=1)
-        self.env.Step(1)
+        await self.env._step_async(1)
         self.reapply_inputs()
-        self.pulse_sfence()
+        await self.pulse_sfence_async()
         if settle_cycles > 0:
-            self.env.Step(settle_cycles)
+            await self.env._step_async(settle_cycles)
+
+    def enable_sv39(self, *, root_pt_addr: int, asid: int = 0, settle_cycles: int = 4) -> None:
+        self.env._run_async(
+            self.enable_sv39_async(
+                root_pt_addr=root_pt_addr,
+                asid=asid,
+                settle_cycles=settle_cycles,
+            )
+        )
 
     def disable_translation(self) -> None:
         self._active_sv39 = None
@@ -952,7 +992,7 @@ class MmuFacade:
         self.env.tlb_csr.priv_imode.value = self.env.csr_agent.MODE_M
         self.env.tlb_csr.priv_dmode.value = self.env.csr_agent.MODE_M
 
-    def pulse_sfence(self) -> None:
+    async def pulse_sfence_async(self) -> None:
         if not hasattr(self.env.dut, "io_ooo_to_mem_sfence_valid"):
             return
         self.env.dut.io_ooo_to_mem_sfence_valid.value = 1
@@ -962,8 +1002,11 @@ class MmuFacade:
         self.env.dut.io_ooo_to_mem_sfence_bits_id.value = 0
         self.env.dut.io_ooo_to_mem_sfence_bits_hv.value = 0
         self.env.dut.io_ooo_to_mem_sfence_bits_hg.value = 0
-        self.env.Step(1)
+        await self.env._step_async(1)
         self.env.dut.io_ooo_to_mem_sfence_valid.value = 0
+
+    def pulse_sfence(self) -> None:
+        self.env._run_async(self.pulse_sfence_async())
 
     def sv39_gigapage_leaf_pte(self, pa_base: int) -> int:
         if int(pa_base) & ((1 << 30) - 1):
@@ -1328,6 +1371,7 @@ class MemBlockEnv:
         self.dut = dut
         self.config = DEFAULT_ENV_CONFIG if config is None else config
         self._validate_structural_config()
+        self._clock = EnvClockKernel(dut)
         self.rob_agent = None
         self.pending_ptr = None
         self.commit_agent = CommitAgent(self)
@@ -1488,14 +1532,15 @@ class MemBlockEnv:
         self.memory.drive_idle()
         self.commit_agent.drive()
 
-    def Step(self, cycles: int = 1) -> None:
-        """推进 DUT 时钟。"""
+    def _run_async(self, coro):
+        return self._clock.run(coro)
 
+    async def _step_async(self, cycles: int = 1) -> None:
         if cycles < 0:
             raise ValueError(f"cycles 必须非负，当前值为 {cycles}")
         for _ in range(cycles):
             self.commit_agent.drive()
-            self.dut.Step(1)
+            await self._clock.step(1)
             self.memory.after_cycle()
             if int(self.dut.reset.value) or int(self.dut.io_reset_backend.value):
                 self.commit_agent.reset()
@@ -1503,21 +1548,62 @@ class MemBlockEnv:
                 self.mem_status_monitor.after_cycle()
                 self.commit_agent.advance()
             for callback in tuple(self._after_step_callbacks):
-                callback()
+                result = callback()
+                if inspect.isawaitable(result):
+                    await result
 
-    def reset(self, cycles: int = 10, settle_cycles: int = 5) -> None:
-        """执行同步复位，并清空 mock 内部状态。"""
+    async def _await_cycles(self, cycles: int = 1) -> None:
+        await self._step_async(cycles)
 
+    async def _await_until(self, predicate, *, max_cycles: int, timeout_message: str):
+        for _ in range(max_cycles):
+            result = predicate()
+            if result:
+                return result
+            await self._step_async(1)
+        raise TimeoutError(timeout_message)
+
+    async def _step_and_idle_async(self, cycles: int = 1) -> None:
+        await self._step_async(cycles)
+        self.idle_inputs()
+
+    def Step(self, cycles: int = 1) -> None:
+        """推进 DUT 时钟。"""
+
+        self._run_async(self._step_async(cycles))
+
+    def advance_cycles(self, cycles: int = 1) -> None:
+        """按 env 统一时钟语义推进若干周期。"""
+
+        self._run_async(self._await_cycles(cycles))
+
+    def wait_until(self, predicate, *, max_cycles: int = 200, timeout_message: str = "等待条件满足超时"):
+        """使用 env 统一时钟语义轮询某个条件。"""
+
+        return self._run_async(
+            self._await_until(
+                predicate,
+                max_cycles=max_cycles,
+                timeout_message=timeout_message,
+            )
+        )
+
+    async def _reset_async(self, cycles: int = 10, settle_cycles: int = 5) -> None:
         self.idle_inputs()
         self.memory.reset_runtime_state()
         self.commit_agent.reset()
         self._last_rar_query_req_by_lane = {}
         self.dut.reset.value = 1
-        self.Step(cycles)
+        await self._step_async(cycles)
         self.dut.reset.value = 0
         self.idle_inputs()
-        self.mmu.reapply_after_reset()
-        self.Step(settle_cycles)
+        await self.mmu.reapply_after_reset_async()
+        await self._step_async(settle_cycles)
+
+    def reset(self, cycles: int = 10, settle_cycles: int = 5) -> None:
+        """执行同步复位，并清空 mock 内部状态。"""
+
+        self._run_async(self._reset_async(cycles=cycles, settle_cycles=settle_cycles))
 
     def inject_outer_d_response(self, delay_cycles: int = 0, **kwargs) -> None:
         """向 outer buffer D 通道注入一笔响应。"""
@@ -1562,6 +1648,27 @@ class MemBlockEnv:
 
         self.memory.preload_u64(addr, value)
 
+    def wait_backend_reset_deassert(self, *, must_observe_assert: bool, max_cycles: int = 200) -> None:
+        """等待 `io_reset_backend` 先被拉高再解复位。"""
+
+        observed_assert = not must_observe_assert
+
+        def _backend_reset_observed():
+            nonlocal observed_assert
+            backend_reset = int(self.dut.io_reset_backend.value)
+            if backend_reset:
+                observed_assert = True
+                return False
+            if observed_assert:
+                return True
+            return False
+
+        self.wait_until(
+            _backend_reset_observed,
+            max_cycles=max_cycles,
+            timeout_message="等待 `io_reset_backend` 解复位超时",
+        )
+
     def expect_scalar_load(
         self,
         *,
@@ -1591,7 +1698,7 @@ class MemBlockEnv:
             mask=mask,
         )
 
-    def wait_load_writeback_observed(
+    async def _wait_load_writeback_observed_async(
         self,
         *,
         rob_idx_flag: int | None = None,
@@ -1632,11 +1739,30 @@ class MemBlockEnv:
                 if data is not None and event["data"] != int(data):
                     continue
                 return event
-            self.Step(1)
+            await self._step_async(1)
 
         raise TimeoutError(
             "等待 load writeback 观测超时: "
             f"rob=({rob_idx_flag},{rob_idx_value}), data={data}"
+        )
+
+    def wait_load_writeback_observed(
+        self,
+        *,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        data: int | None = None,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待某条 load writeback 在 intWriteback 口被观测到。"""
+
+        return self._run_async(
+            self._wait_load_writeback_observed_async(
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+                data=data,
+                max_cycles=max_cycles,
+            )
         )
 
     def get_transport_stats(self) -> dict[str, int]:
@@ -1648,6 +1774,21 @@ class MemBlockEnv:
         """返回已完成 compare 的 load 数量。"""
 
         return int(self.memory.completed_loads)
+
+    def wait_completed_load_count(self, target_count: int, max_cycles: int = 200) -> int:
+        """等待已完成 compare 的 load 数达到目标值。"""
+
+        def _completed_load_count_matches():
+            completed = self.get_completed_load_count()
+            if completed >= int(target_count):
+                return completed
+            return None
+
+        return self.wait_until(
+            _completed_load_count_matches,
+            max_cycles=max_cycles,
+            timeout_message=f"等待 completed_load_count 达到 {target_count} 超时",
+        )
 
     def get_counter(self, counter_name: str) -> int:
         """读取 env 导出的统计计数器。"""
@@ -1946,7 +2087,7 @@ class MemBlockEnv:
             "paddr": self._read_optional_dut_signal("MemBlock_inner_lsq_io_release_bits_paddr"),
         }
 
-    def wait_replay_event(
+    async def _wait_replay_event_async(
         self,
         *,
         cause: str | None = None,
@@ -1970,10 +2111,33 @@ class MemBlockEnv:
                     sq_idx=sq_idx,
                 ):
                     return event
-            self.Step(1)
+            await self._step_async(1)
         raise TimeoutError(
             "等待 replay 事件超时: "
             f"cause={cause}, source={source}, rob=({rob_idx_flag},{rob_idx_value}), sq_idx={sq_idx}"
+        )
+
+    def wait_replay_event(
+        self,
+        *,
+        cause: str | None = None,
+        source: str | tuple[str, ...] | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        sq_idx: int | None = None,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待一条匹配过滤条件的 replay 观测事件。"""
+
+        return self._run_async(
+            self._wait_replay_event_async(
+                cause=cause,
+                source=source,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+                sq_idx=sq_idx,
+                max_cycles=max_cycles,
+            )
         )
 
     def wait_nc_replay_or_nc_out(
@@ -1992,7 +2156,7 @@ class MemBlockEnv:
             max_cycles=max_cycles,
         )
 
-    def wait_release_event(
+    async def _wait_release_event_async(
         self,
         *,
         paddr: int | None = None,
@@ -2008,14 +2172,14 @@ class MemBlockEnv:
         for _ in range(max_cycles):
             event = self.sample_release_state()
             if not event["valid"]:
-                self.Step(1)
+                await self._step_async(1)
                 continue
             event_paddr = int(event["paddr"])
             if normalized_paddr is not None and event_paddr != normalized_paddr:
-                self.Step(1)
+                await self._step_async(1)
                 continue
             if normalized_line is not None and (event_paddr & ~(int(line_bytes) - 1)) != normalized_line:
-                self.Step(1)
+                await self._step_async(1)
                 continue
             return event
         detail = (
@@ -2028,7 +2192,26 @@ class MemBlockEnv:
             f"{detail}"
         )
 
-    def wait_nuke_query_backpressure(
+    def wait_release_event(
+        self,
+        *,
+        paddr: int | None = None,
+        cacheline_addr: int | None = None,
+        line_bytes: int = 64,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待 LSQ release 事件，可按 paddr 或 cacheline 过滤。"""
+
+        return self._run_async(
+            self._wait_release_event_async(
+                paddr=paddr,
+                cacheline_addr=cacheline_addr,
+                line_bytes=line_bytes,
+                max_cycles=max_cycles,
+            )
+        )
+
+    async def _wait_nuke_query_backpressure_async(
         self,
         *,
         kind: str,
@@ -2056,14 +2239,35 @@ class MemBlockEnv:
                 if sq_idx is not None and event["sq_idx_value"] != int(sq_idx):
                     continue
                 return event
-            self.Step(1)
+            await self._step_async(1)
 
         raise TimeoutError(
             "等待 nuke query backpressure 超时: "
             f"kind={normalized_kind}, rob=({rob_idx_flag},{rob_idx_value}), sq_idx={sq_idx}"
         )
 
-    def wait_rar_nuke_response(
+    def wait_nuke_query_backpressure(
+        self,
+        *,
+        kind: str,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        sq_idx: int | None = None,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待 RAW/RAR nuke query 出现 `valid && !ready`。"""
+
+        return self._run_async(
+            self._wait_nuke_query_backpressure_async(
+                kind=kind,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+                sq_idx=sq_idx,
+                max_cycles=max_cycles,
+            )
+        )
+
+    async def _wait_rar_nuke_response_async(
         self,
         *,
         rob_idx_flag: int | None = None,
@@ -2093,14 +2297,35 @@ class MemBlockEnv:
                 if lq_idx_value is not None and event.get("lq_idx_value") != int(lq_idx_value):
                     continue
                 return event
-            self.Step(1)
+            await self._step_async(1)
 
         raise TimeoutError(
             "等待 RAR nuke response 超时: "
             f"rob=({rob_idx_flag},{rob_idx_value}), lq=({lq_idx_flag},{lq_idx_value})"
         )
 
-    def collect_replay_window(
+    def wait_rar_nuke_response(
+        self,
+        *,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        lq_idx_flag: int | None = None,
+        lq_idx_value: int | None = None,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待一条 RAR nuke response，并回填最近一次同 lane req 元信息。"""
+
+        return self._run_async(
+            self._wait_rar_nuke_response_async(
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+                lq_idx_flag=lq_idx_flag,
+                lq_idx_value=lq_idx_value,
+                max_cycles=max_cycles,
+            )
+        )
+
+    async def _collect_replay_window_async(
         self,
         cycles: int,
         *,
@@ -2141,8 +2366,31 @@ class MemBlockEnv:
                 seen.add(event_key)
                 events.append(event)
             if step_idx != cycles - 1:
-                self.Step(1)
+                await self._step_async(1)
         return events
+
+    def collect_replay_window(
+        self,
+        cycles: int,
+        *,
+        cause: str | None = None,
+        source: str | tuple[str, ...] | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        sq_idx: int | None = None,
+    ) -> list[dict]:
+        """在一个时间窗口内收集 replay 观测事件。"""
+
+        return self._run_async(
+            self._collect_replay_window_async(
+                cycles=cycles,
+                cause=cause,
+                source=source,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+                sq_idx=sq_idx,
+            )
+        )
 
     def get_store_view(self, sq_idx: int) -> StoreView | None:
         """返回某个 SQ slot 的只读 store 视图。"""
@@ -2169,7 +2417,22 @@ class MemBlockEnv:
             rob_idx_value=rob_idx_value,
         )
 
-    def wait_store_materialized(
+    def wait_store_addr_observed(self, sq_idx: int, expected_addr: int, max_cycles: int = 200):
+        """等待某个 store shadow 的地址字段收敛。"""
+
+        def _store_addr_matches():
+            store = self.get_store_view(sq_idx)
+            if store is not None and store.allocated and store.addr == int(expected_addr):
+                return store
+            return None
+
+        return self.wait_until(
+            _store_addr_matches,
+            max_cycles=max_cycles,
+            timeout_message=f"等待 store 地址收敛超时: sqIdx={sq_idx}, addr=0x{int(expected_addr):x}",
+        )
+
+    async def _wait_store_materialized_async(
         self,
         sq_idx: int,
         *,
@@ -2194,7 +2457,7 @@ class MemBlockEnv:
                 and (not require_committed or store.committed)
             ):
                 return store
-            self.Step(1)
+            await self._step_async(1)
 
         store = self.get_store_view(sq_idx)
         raise AssertionError(
@@ -2202,35 +2465,83 @@ class MemBlockEnv:
             f"sqIdx={sq_idx}, store={store}"
         )
 
-    def wait_counter_growth(self, counter_name: str, baseline: int, max_cycles: int = 200) -> int:
+    def wait_store_materialized(
+        self,
+        sq_idx: int,
+        *,
+        expected_addr: int,
+        expected_data: int,
+        expected_mmio: bool | None = None,
+        require_committed: bool = False,
+        max_cycles: int = 200,
+    ) -> StoreView:
+        """等待某个 SQ slot 的 store shadow 收敛。"""
+
+        return self._run_async(
+            self._wait_store_materialized_async(
+                sq_idx=sq_idx,
+                expected_addr=expected_addr,
+                expected_data=expected_data,
+                expected_mmio=expected_mmio,
+                require_committed=require_committed,
+                max_cycles=max_cycles,
+            )
+        )
+
+    async def _wait_counter_growth_async(self, counter_name: str, baseline: int, max_cycles: int = 200) -> int:
         """等待某个计数器增长。"""
 
         for _ in range(max_cycles):
             current = self.get_counter(counter_name)
             if current > baseline:
                 return current
-            self.Step(1)
+            await self._step_async(1)
         raise TimeoutError(f"等待 `{counter_name}` 增长超时")
 
-    def wait_memory_quiesce(self, max_cycles: int = 200) -> None:
+    def wait_counter_growth(self, counter_name: str, baseline: int, max_cycles: int = 200) -> int:
+        """等待某个计数器增长。"""
+
+        return self._run_async(
+            self._wait_counter_growth_async(
+                counter_name=counter_name,
+                baseline=baseline,
+                max_cycles=max_cycles,
+            )
+        )
+
+    async def _wait_memory_quiesce_async(self, max_cycles: int = 200) -> None:
         """等待 MemoryModel 事务收敛。"""
 
         for _ in range(max_cycles):
             if self.memory.outstanding_transaction_count == 0:
                 return
-            self.Step(1)
+            await self._step_async(1)
         raise TimeoutError("等待 MemoryModel 事务收敛超时")
 
-    def drain_writebacks(self, max_cycles: int = 200) -> None:
+    def wait_memory_quiesce(self, max_cycles: int = 200) -> None:
+        """等待 MemoryModel 事务收敛。"""
+
+        self._run_async(self._wait_memory_quiesce_async(max_cycles=max_cycles))
+
+    async def _drain_writebacks_async(self, max_cycles: int = 200) -> None:
         """推进若干周期直到待校验 writeback 全部收敛。"""
 
         for _ in range(max_cycles):
             if self.memory.outstanding_expected_count == 0 and self.memory.outstanding_transaction_count == 0:
                 return
-            self.Step(1)
+            await self._step_async(1)
         raise TimeoutError("等待 MemoryModel 收敛超时")
 
-    def _flush_store_buffers_and_wait_impl(self, max_cycles: int = 200, settle_cycles: int = 4) -> dict:
+    def drain_writebacks(self, max_cycles: int = 200) -> None:
+        """推进若干周期直到待校验 writeback 全部收敛。"""
+
+        self._run_async(self._drain_writebacks_async(max_cycles=max_cycles))
+
+    async def _flush_store_buffers_and_wait_impl_async(
+        self,
+        max_cycles: int = 200,
+        settle_cycles: int = 4,
+    ) -> dict:
         """触发 `sfence + flushSb`，并等待 sbuffer/uncache drain 结束。"""
 
         if not hasattr(self.dut, "io_ooo_to_mem_flushSb"):
@@ -2245,17 +2556,25 @@ class MemBlockEnv:
             self.dut.io_ooo_to_mem_sfence_bits_hv.value = 0
             self.dut.io_ooo_to_mem_sfence_bits_hg.value = 0
         self.dut.io_ooo_to_mem_flushSb.value = 1
-        self.Step(1)
+        await self._step_async(1)
         if hasattr(self.dut, "io_ooo_to_mem_sfence_valid"):
             self.dut.io_ooo_to_mem_sfence_valid.value = 0
         self.dut.io_ooo_to_mem_flushSb.value = 0
 
         for _ in range(max_cycles):
             if int(self.mem_status.sbIsEmpty.value):
-                self.Step(settle_cycles)
+                await self._step_async(settle_cycles)
                 return self.memory.finalize_and_check_drain()
-            self.Step(1)
+            await self._step_async(1)
         raise TimeoutError("等待 sbuffer drain 结束超时")
+
+    def _flush_store_buffers_and_wait_impl(self, max_cycles: int = 200, settle_cycles: int = 4) -> dict:
+        return self._run_async(
+            self._flush_store_buffers_and_wait_impl_async(
+                max_cycles=max_cycles,
+                settle_cycles=settle_cycles,
+            )
+        )
 
     def flush_store_buffers_and_wait(self, max_cycles: int = 200, settle_cycles: int = 4) -> dict:
         """公开的 backend facade 排空入口。"""
@@ -2295,7 +2614,13 @@ class MemBlockEnv:
     def Finish(self) -> None:
         """释放 DUT 资源。"""
 
+        self.close()
         self.dut.Finish()
+
+    def close(self) -> None:
+        """释放 env 内部时钟内核资源。"""
+
+        self._clock.close()
 
 
 @pytest.fixture(scope="function")
@@ -2310,4 +2635,5 @@ def env(request, dut):
     finally:
         _env.remove_after_step_callback(_env.rob_coverage.sample)
         _env.rob_coverage.finalize()
+        _env.close()
         set_func_coverage(request, list(_env.rob_coverage.all_groups()))

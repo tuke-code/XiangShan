@@ -36,7 +36,7 @@
 - `MemBlock_api.py`
   - DUT 创建、波形/覆盖率路径配置、`dut` fixture。
 - `MemBlock_env.py`
-  - 顶层 `MemBlockEnv`、bundle 定义、`env.backend` 公共控制入口、toffee function coverage 接入点。
+  - 顶层 `MemBlockEnv`、bundle 定义、统一时钟推进内核、`env.backend` 公共控制入口、toffee function coverage 接入点。
 - `env_config.py`
   - 环境统一配置入口，收敛 queue 深度、transport 延迟、默认 sequence 时序和 strict check 策略。
 - `request_apis.py`
@@ -72,7 +72,9 @@
 ## `docs/` 文档列表
 
 - `verification_env_design.md`
-  - 验证环境总设计，涵盖 `MemBlockEnv`、`agents`、`monitors`、`Scoreboard`、`sequences`、`EnvConfig` 的分层关系、实现思路和演进方向。
+  - 验证环境总设计，涵盖 `MemBlockEnv`、统一时钟内核、`agents`、`monitors`、`Scoreboard`、`sequences`、`EnvConfig` 的分层关系、实现思路和演进方向。
+- `clock_control_and_migration_guide.md`
+  - 面向开发者的时钟控制与迁移指南，说明各层应该如何复用 env 时钟原语，避免重新引入零散 `Step()`。
 - `memory_model_design.md`
   - `MemoryModel` 当前职责、load commit-boundary compare、store drain 校验和与 scoreboard 的边界。
 - `dut_port_behavior.md`
@@ -99,15 +101,16 @@
 1. `README.md`
 2. `CHANGELOG.md`
 3. `docs/verification_env_design.md`
-4. `docs/memory_model_design.md`
-5. `docs/rob_model.md`
-6. `docs/coverage_summary.md`
-7. `docs/coverage_todo.md`
-8. `docs/vp_pipeline_plan.md`
-9. `tests/test_MemBlock_scalar_load_pipeline.py`
-10. `tests/test_MemBlock_scalar_store_pipeline.py`
-11. `tests/test_MemBlock_scalar_ordering.py`
-12. `tests/test_MemBlock_replay.py`
+4. `docs/clock_control_and_migration_guide.md`
+5. `docs/memory_model_design.md`
+6. `docs/rob_model.md`
+7. `docs/coverage_summary.md`
+8. `docs/coverage_todo.md`
+9. `docs/vp_pipeline_plan.md`
+10. `tests/test_MemBlock_scalar_load_pipeline.py`
+11. `tests/test_MemBlock_scalar_store_pipeline.py`
+12. `tests/test_MemBlock_scalar_ordering.py`
+13. `tests/test_MemBlock_replay.py`
 
 ## 当前测试与报告入口
 

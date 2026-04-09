@@ -16,32 +16,38 @@ class LsqAgent:
     def __init__(self, env) -> None:
         self.env = env
 
-    def wait_load_enq_ready(self, max_cycles: int = 200) -> None:
+    async def _wait_load_enq_ready_async(self, max_cycles: int = 200) -> None:
         for _ in range(max_cycles):
             if int(self.env.dut.io_reset_backend.value):
                 raise RuntimeError("等待 load `enqLsq` ready 时 backend 进入 reset")
             if self.env.lsq_enq_meta.canAccept.value and self.env.lsq_status.lqCanAccept.value:
                 return
-            self.env.Step(1)
+            await self.env._step_async(1)
         raise TimeoutError("等待 load `enqLsq` ready 超时")
 
-    def wait_store_enq_ready(self, max_cycles: int = 200) -> None:
+    def wait_load_enq_ready(self, max_cycles: int = 200) -> None:
+        self.env._run_async(self._wait_load_enq_ready_async(max_cycles=max_cycles))
+
+    async def _wait_store_enq_ready_async(self, max_cycles: int = 200) -> None:
         for _ in range(max_cycles):
             if int(self.env.dut.io_reset_backend.value):
                 raise RuntimeError("等待 store `enqLsq` ready 时 backend 进入 reset")
             if self.env.lsq_enq_meta.canAccept.value and self.env.lsq_status.sqCanAccept.value:
                 return
-            self.env.Step(1)
+            await self.env._step_async(1)
         raise TimeoutError("等待 store `enqLsq` ready 超时")
 
-    def enqueue_scalar_load(
+    def wait_store_enq_ready(self, max_cycles: int = 200) -> None:
+        self.env._run_async(self._wait_store_enq_ready_async(max_cycles=max_cycles))
+
+    async def _enqueue_scalar_load_async(
         self,
         req_id: int,
         lq_ptr: QueuePtr,
         sq_ptr: QueuePtr,
         enq_port: int = 0,
     ) -> None:
-        self.wait_load_enq_ready()
+        await self._wait_load_enq_ready_async()
 
         req = self.env.lsq_enq_req[enq_port]
         self.env.lsq_enq_meta.need_alloc[enq_port].value = 1
@@ -56,16 +62,31 @@ class LsqAgent:
         req.bits_sqIdx_value.value = sq_ptr.value
         req.bits_numLsElem.value = 1
 
-        self.env.Step(1)
-        self.env.idle_inputs()
+        await self.env._step_and_idle_async(1)
 
-    def enqueue_scalar_store(
+    def enqueue_scalar_load(
+        self,
+        req_id: int,
+        lq_ptr: QueuePtr,
+        sq_ptr: QueuePtr,
+        enq_port: int = 0,
+    ) -> None:
+        self.env._run_async(
+            self._enqueue_scalar_load_async(
+                req_id=req_id,
+                lq_ptr=lq_ptr,
+                sq_ptr=sq_ptr,
+                enq_port=enq_port,
+            )
+        )
+
+    async def _enqueue_scalar_store_async(
         self,
         req_id: int,
         sq_ptr: QueuePtr,
         enq_port: int = 0,
     ) -> QueuePtr:
-        self.wait_store_enq_ready()
+        await self._wait_store_enq_ready_async()
 
         req = self.env.lsq_enq_req[enq_port]
         self.env.lsq_enq_meta.need_alloc[enq_port].value = 2
@@ -80,7 +101,7 @@ class LsqAgent:
         req.bits_sqIdx_value.value = sq_ptr.value
         req.bits_numLsElem.value = 1
 
-        self.env.Step(1)
+        await self.env._step_async(1)
         allocated_sq_ptr = QueuePtr(
             flag=int(self.env.lsq_enq_resp[enq_port].sqIdx_flag.value),
             value=int(self.env.lsq_enq_resp[enq_port].sqIdx_value.value),
@@ -93,3 +114,17 @@ class LsqAgent:
         )
         self.env.idle_inputs()
         return allocated_sq_ptr
+
+    def enqueue_scalar_store(
+        self,
+        req_id: int,
+        sq_ptr: QueuePtr,
+        enq_port: int = 0,
+    ) -> QueuePtr:
+        return self.env._run_async(
+            self._enqueue_scalar_store_async(
+                req_id=req_id,
+                sq_ptr=sq_ptr,
+                enq_port=enq_port,
+            )
+        )
