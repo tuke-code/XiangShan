@@ -1412,8 +1412,8 @@ abstract class NewStoreQueueBase(implicit p: Parameters) extends LSQModule {
   // rdataPtr may be equal to deqPtr when [MMIO/CBO].
   val rdataPtrExt        = RegInit(VecInit((0 until EnsbufferWidth).map(_.U.asTypeOf(new SqPtr))))
   val cmtPtrExt          = RegInit(VecInit((0 until CommitWidth).map(_.U.asTypeOf(new SqPtr))))
-  val addrReadyPtrExt    = RegInit(0.U.asTypeOf(new SqPtr))
-  val dataReadyPtrExt    = RegInit(0.U.asTypeOf(new SqPtr))
+  val addrReadyPtr       = RegInit(0.U.asTypeOf(new SqPtr))
+  val dataReadyPtr       = RegInit(0.U.asTypeOf(new SqPtr))
 
   val validCount         = distanceBetween(enqPtrExt(0), deqPtrExt(0))
   val allowEnqueue       = validCount <= (StoreQueueSize - LSQStEnqWidth).U
@@ -1486,7 +1486,7 @@ abstract class NewStoreQueueBase(implicit p: Parameters) extends LSQModule {
 
   // unalignQueue connection
   unalignQueue.io.redirect            := io.redirect
-  unalignQueue.io.fromSQ.addrReadyPtr := addrReadyPtrExt
+  unalignQueue.io.fromSQ.addrReadyPtr := addrReadyPtr
   unalignQueue.io.fromStaS2.zip(io.fromStoreUnit.unalignQueueReq).map{case (sink, source) =>
     sink <> source
   }
@@ -1829,53 +1829,37 @@ class NewStoreQueue(implicit p: Parameters) extends NewStoreQueueBase with HasPe
   val IssuePtrMoveStride = 4
   require(IssuePtrMoveStride >= 2)
 
-  val addrReadyLookupVec = (0 until IssuePtrMoveStride).map(addrReadyPtrExt + _.U)
+  val addrReadyLookupVec = (0 until IssuePtrMoveStride).map(addrReadyPtr + _.U)
   val addrReadyLookup = addrReadyLookupVec.map(ptr =>
-//    (MemoryType.isPMPIO(ctrlEntries(ptr.value).memoryType) || ctrlEntries(ptr.value).addrValid || ctrlEntries(ptr.value).vecInactive)
-      (ctrlEntries(ptr.value).addrValid || ctrlEntries(ptr.value).vecInactive || ctrlEntries(ptr.value).vecMbCommit) &&
-        ctrlEntries(ptr.value).allocated && ptr =/= enqPtrExt(0))
-  val nextAddrReadyPtr = addrReadyPtrExt + PriorityEncoder(VecInit(addrReadyLookup.map(!_) :+ true.B))
-  addrReadyPtrExt := nextAddrReadyPtr
+      (ctrlEntries(ptr.value).addrValid || ctrlEntries(ptr.value).vecInactive) && ptr =/= enqPtrExt.head)
+  val nextAddrReadyPtr = MuxCase(addrReadyPtr + PriorityEncoder(VecInit(addrReadyLookup.map(!_) :+ true.B)),
+    Seq(
+    (RegNext(lastlastCycleRedirect) && isAfter(addrReadyPtr, enqPtrExt.head)) -> enqPtrExt.head
+  ))
+  addrReadyPtr := nextAddrReadyPtr
 
+  XSError((addrReadyPtr > enqPtrExt.head) && !RegNext(lastlastCycleRedirect), s"addrReadyPtr shouldn't exceed enqPtr!\n")
   val stAddrReadyVecWire = Wire(Vec(StoreQueueSize, Bool()))
   (0 until StoreQueueSize).map(i => {
-//    stAddrReadyVecReg(i) := ctrlEntries(i).allocated && (mmio(i) || addrvalid(i) || (isVec(i) && vecMbCommit(i)))
-    stAddrReadyVecWire(i) := (ctrlEntries(i).addrValid || ctrlEntries(i).vecInactive || ctrlEntries(i).vecMbCommit) &&
-      ctrlEntries(i).allocated
+    stAddrReadyVecWire(i) := (ctrlEntries(i).addrValid || ctrlEntries(i).vecInactive)
   })
 
-  when (io.redirect.valid) {
-    addrReadyPtrExt := Mux(
-      isAfter(cmtPtrExt(0), deqPtrExt(0)),
-      cmtPtrExt(0),
-      deqPtrExtNext(0) // for mmio insts, deqPtr may be ahead of cmtPtr
-    )
-
-    dataReadyPtrExt := Mux(
-      isAfter(cmtPtrExt(0), deqPtrExt(0)),
-      cmtPtrExt(0),
-      deqPtrExtNext(0) // for mmio insts, deqPtr may be ahead of cmtPtr
-    )
-  }
-
     // enqPtr update
-  val dataReadyLookupVec = (0 until IssuePtrMoveStride).map(dataReadyPtrExt + _.U)
-  val dataReadyLookup = dataReadyLookupVec.map(ptr =>
-      (ctrlEntries(ptr.value).addrValid && !ctrlEntries(ptr.value).waitStoreS2 && //TODO: remove waitStoreS2 in the future
-        (isMmio(dataEntries(ptr.value).memoryType) || ctrlEntries(ptr.value).dataValid) ||
-        ctrlEntries(ptr.value).vecMbCommit) && //TODO: vecMbCommit will be remove in the future, entry maybe inactive, so we nned to or vecMbCommit.
-      ctrlEntries(ptr.value).allocated &&
-      ptr =/= enqPtrExt(0)
+  val dataReadyLookupVec = (0 until IssuePtrMoveStride).map(dataReadyPtr + _.U)
+  val dataReadyLookup = dataReadyLookupVec.map(ptr => //TODO: remove waitStoreS2 in the future
+      (ctrlEntries(ptr.value).dataValid || ctrlEntries(ptr.value).vecInactive) && ptr =/= enqPtrExt.head
   )
-  val nextDataReadyPtr = dataReadyPtrExt + PriorityEncoder(VecInit(dataReadyLookup.map(!_) :+ true.B))
-  dataReadyPtrExt := nextDataReadyPtr
+  val nextDataReadyPtr = MuxCase(dataReadyPtr + PriorityEncoder(VecInit(dataReadyLookup.map(!_) :+ true.B)),
+    Seq(
+      (RegNext(lastlastCycleRedirect) && isAfter(dataReadyPtr, enqPtrExt.head)) -> enqPtrExt.head
+  ))
+  dataReadyPtr := nextDataReadyPtr
 
-  val stDataReadyVecReg = Wire(Vec(StoreQueueSize, Bool()))
+  XSError((dataReadyPtr > enqPtrExt.head) && !RegNext(lastlastCycleRedirect), s"dataReadyPtr shouldn't exceed enqPtr!\n")
+
+  val stDataReadyVecWire = Wire(Vec(StoreQueueSize, Bool()))
   (0 until StoreQueueSize).map(i => {
-    stDataReadyVecReg(i) := (ctrlEntries(i).addrValid && !ctrlEntries(i).waitStoreS2 && // ctrl memoryType is ready.
-        (isMmio(dataEntries(i).memoryType) || ctrlEntries(i).dataValid) ||
-      ctrlEntries(i).vecMbCommit) &&
-      ctrlEntries(i).allocated
+    stDataReadyVecWire(i) := ctrlEntries(i).dataValid || ctrlEntries(i).vecInactive
   })
 
   // deqPtr logic
@@ -1985,10 +1969,10 @@ class NewStoreQueue(implicit p: Parameters) extends NewStoreQueueBase with HasPe
   XSError(cmtPtrExt.head < deqPtrExt.head || cmtPtrExt.head < rdataPtrExt.head, "pointer update error!\n")
   /************************************************* IO Assign ********************************************************/
 
-  io.toLoadQueue.stAddrReadySqPtr := addrReadyPtrExt
-  io.toLoadQueue.stDataReadySqPtr := dataReadyPtrExt
+  io.toLoadQueue.stAddrReadySqPtr := addrReadyPtr
+  io.toLoadQueue.stDataReadySqPtr := dataReadyPtr
 
-  io.toLoadQueue.stDataReadyVec := GatedValidRegNext(stDataReadyVecReg)
+  io.toLoadQueue.stDataReadyVec := GatedValidRegNext(stDataReadyVecWire)
   io.toLoadQueue.stAddrReadyVec := GatedValidRegNext(stAddrReadyVecWire)
 
   io.toLoadQueue.stIssuePtr := enqPtrExt(0)
