@@ -203,13 +203,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   /* *** predictor specific inputs *** */
   abtb.io.redirectValid := redirect.valid
-  // abtb.io.redirectSimpleHist := redirect.bits.meta.simpleHist
-  abtb.io.redirectHash  := redirect.bits.meta.phr.phrLowBits(AheadBtbPerturbWidth - 1, 0)
+  abtb.io.redirectHash  := redirect.bits.meta.phr.phrLowBits(AheadBtbHashBitWidth - 1, 0)
   abtb.io.overrideValid := s3_override
-  abtb.io.overrideHash  := s3_phrMeta.phrLowBits(AheadBtbPerturbWidth - 1, 0)
-  abtb.io.normalHash    := phr.io.phrMeta.phrLowBits(AheadBtbPerturbWidth - 1, 0)
-  // abtb.io.overridePrevPartPc := s3_abtbMeta.prevPartPc
-  // abtb.io.overrideSimpleHist := s3_abtbMeta.simpleHist
+  abtb.io.overrideHash  := s3_phrMeta.phrLowBits(AheadBtbHashBitWidth - 1, 0)
+  abtb.io.normalHash    := phr.io.phrMeta.phrLowBits(AheadBtbHashBitWidth - 1, 0)
 
   utage.io.foldedPathHist         := phr.io.s0_foldedPhr
   utage.io.foldedPathHistForTrain := phr.io.trainFoldedPhr
@@ -397,8 +394,6 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_redirectMeta.phr          := s3_phrMeta
   s3_redirectMeta.commonHRMeta := s3_commonHRMeta
   s3_redirectMeta.ras          := ras.io.redirectMeta
-  // s3_redirectMeta.prevPartPc   := s3_abtbMeta.prevPartPc
-  // s3_redirectMeta.simpleHist   := s3_abtbMeta.simpleHist
 
   private val s3_resolveMeta = Wire(new BpuResolveMeta)
   s3_resolveMeta.mbtb     := RegEnable(mbtb.io.meta, s2_fire)

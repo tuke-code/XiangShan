@@ -31,10 +31,10 @@ import xiangshan.frontend.bpu.Prediction
 class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   class AheadBtbIO(implicit p: Parameters) extends BasePredictorIO with HasFastTrainIO {
     val redirectValid: Bool                       = Input(Bool())
-    val redirectHash:  UInt                       = Input(UInt(AheadBtbPerturbWidth.W))
+    val redirectHash:  UInt                       = Input(UInt(AheadBtbHashBitWidth.W))
     val overrideValid: Bool                       = Input(Bool())
-    val overrideHash:  UInt                       = Input(UInt(AheadBtbPerturbWidth.W))
-    val normalHash:    UInt                       = Input(UInt(AheadBtbPerturbWidth.W))
+    val overrideHash:  UInt                       = Input(UInt(AheadBtbHashBitWidth.W))
+    val normalHash:    UInt                       = Input(UInt(AheadBtbHashBitWidth.W))
     val prediction:    Vec[Valid[Prediction]]     = Output(Vec(NumAheadBtbPredictionEntries, Valid(new Prediction)))
     val abtbResult:    Vec[Valid[AheadBtbResult]] = Output(Vec(NumAheadBtbPredictionEntries, Valid(new AheadBtbResult)))
     val abtbResultPos: Vec[UInt]                  = Output(Vec(NumAheadBtbPredictionEntries, UInt(CfiPositionWidth.W)))
