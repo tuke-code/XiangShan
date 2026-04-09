@@ -138,6 +138,75 @@
 - `request_apis.py` 和 `sequences/` 负责把它包装成更适合 testcase 的调用方式。
 - `lsq_agent` / `issue_agent` / `commit_agent` / `rob_agent` 仍然存在，但它们属于 env 内部 backend-facing agents，而不是后续 testcase 应优先直接依赖的 API。
 
+## 2026-04-08（续）
+
+本条目记录在稳定 MMU env/facade 之后，进一步把 `sq dataInvalid + matchInvalid + nuke` 场景切换到新 MMU 环境，并同步把设计摘要沉淀为项目内文档。
+
+### 变更摘要
+
+- 新增 `ScalarSqDataInvalidMatchInvalidSequence`，把目标 replay 场景切到 `env.mmu`。
+- 新增真实 DUT smoke：`sq_datainvalid_matchinvalid_nuke`。
+- 新增两份文档，收口 MMU 设计/用法和该 replay 用例的设计原理。
+
+### 1. 用例迁移到新 MMU 环境
+
+当前稳定方案没有继续采用“root-A 下 translated store + root-B 下 translated load”的对称结构，而是采用：
+
+1. bare 模式下对 root-B 目标物理页做 cache warmup
+2. bare 模式下发 older store 的 `STA(main_va)`
+3. 切到 Sv39 root-B
+4. 发 TLB prime load
+5. 发 younger main load，观测 `dataInvalid + matchInvalid + memoryViolation`
+
+这样做的原因是：在真实 DUT 上，store `STA` 侧的 MMU 组合并不如 load 侧稳定；而“bare older store + translated younger load”能够稳定保留所需的相关性与失配行为。
+
+### 2. 主 load 的后续收敛语义
+
+当前真实 DUT 并不会在出现 `memoryViolation` 后永久没有后续动作。相反，主 load 在后续 replay/recovery 过程中仍可能完成写回，且最终数据来自 older store 补齐后的 store data。
+
+因此 sequence 在观测到目标 invalid/nuke 组合后，还会：
+
+- 补 `STD`
+- 推进 store commit
+- 为主 load 登记 replay completion expectation
+- 等待场景完整收敛
+
+这一步是为了让 testcase 不只“打到一个瞬时波形点”，而是能稳定进入日常回归。
+
+### 3. 新增文档
+
+新增：
+
+- `docs/mmu_env_design_and_usage.md`
+- `docs/sq_matchinvalid_nuke_case_analysis.md`
+
+其中：
+
+- 前者说明 `env.mmu` 的职责边界、Sv39/PTW/PMP 设计和推荐使用流程。
+- 后者说明 `matchInvalid + dataInvalid + nuke` 场景的设计原理、最终稳定方案和当前 DUT 的实际表现。
+
+### 4. 验证情况
+
+本轮建议至少执行：
+
+- `unset _SITE_PACKAGE_ACTIVATED && source /nfs/share/unitychip/activate && python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -k sq_datainvalid_matchinvalid_nuke -q`
+- `unset _SITE_PACKAGE_ACTIVATED && source /nfs/share/unitychip/activate && python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -q`
+
+### 5. MMU / sequence 分层重构
+
+在不改变行为的前提下，本轮进一步把 `matchInvalid_nuke` 的实现从“大而全专题 sequence”重构为：
+
+- `MmuSv39AddressSpaceInstallSequence`
+- `MmuSv39ActivateSequence`
+- `ScalarSqDataInvalidMatchInvalidTriggerSequence`
+
+其中当前 testcase 实际采用：
+
+1. testcase 先多次调用 install sequence，分别配置 root-A / root-B
+2. testcase 再调用 trigger sequence，完成 `bare older store -> activate root-B -> TLB prime -> main load -> recovery`
+
+这样做的目的不是新增能力，而是把“MMU 配置”和“专题行为触发”拆开，使后续其他 MMU testcase 可以直接复用配置部分，同时保住当前用例依赖的关键顺序：older bare store 必须发生在 activation 之前。
+
 ## 2026-04-06
 
 本条目记录 2026-04-05 到 2026-04-06 这一轮围绕 ROB coverage、toffee 覆盖率报告、环境状态总结和后续验证规划的新增变化。该条目是对 2026-04-01 分层重构之后“环境已经稳定下来并开始进入覆盖率驱动补强阶段”的补充记录。

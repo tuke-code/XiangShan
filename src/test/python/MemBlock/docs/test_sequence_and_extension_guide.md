@@ -162,6 +162,19 @@ env.drain_writebacks()
    - 封装 `older load 因精确 load-wait 暂停 -> younger same-addr load 先完成 -> probe/release -> RAR nuke -> older load 重新写回`。
    - 用于真实 DUT 下的 `RAR` ld-ld violation 冒烟。
 
+11. `MmuSv39AddressSpaceInstallSequence`
+   - 单次只安装一套地址空间的 gigapage mappings / preload，不隐式切换 active root。
+   - 适合在 testcase 中多次调用，分别配置 root-A / root-B。
+
+12. `MmuSv39ActivateSequence`
+   - 封装 `enable_sv39()` 加可选的 prime loads。
+   - 适合只需要“切 root + 打热 translation”的普通 MMU testcase。
+
+13. `ScalarSqDataInvalidMatchInvalidTriggerSequence`
+   - 封装 `bare older store(仅 STA) -> 可选切到 Sv39 root-B -> 可选 TLB prime -> younger translated load -> 观测 dataInvalid + matchInvalid + memoryViolation -> 补 STD/commit 收尾`。
+   - 用于真实 DUT 下的 `sq dataInvalid + matchInvalid + nuke` 冒烟。
+   - 当前推荐由 testcase 先组织 `MmuSv39AddressSpaceInstallSequence`，再调用该 trigger sequence。
+
 ### 4.4 replay 观测辅助 API
 
 当前 env 已经把真实 DUT replay 观测收口成公共 helper，testcase 不需要自己逐拍扫内部信号：
@@ -196,6 +209,21 @@ env.drain_writebacks()
 8. `env.wait_load_writeback_observed(...)`
    - 直接在 `intWriteback` 口等待某条 load 的写回，而不要求它已经进入 commit compare。
    - 适合像 `RAR` 这样需要区分“younger 已先写回，但 commit compare 仍被 older 阻塞”的场景。
+
+对于 translation 相关 testcase，还应优先复用：
+
+9. `env.mmu`
+   - 统一提供 `enable_sv39()`、`disable_translation()`、`install_sv39_gigapage_mapping()`、`allow_all_smode_access()` 和 `ptw_responder()`。
+   - 这样 testcase 不需要自己 monkey-patch `idle_inputs()`、也不需要再本地复制 PTW/PMP helper。
+
+10. `MmuSv39AddressSpaceInstallSequence`
+   - 用 sequence 形式复用“单地址空间配置”。
+   - 如果一个 testcase 同时需要 root-A/root-B，两次调用 install sequence 即可，不必再把 A/B 配置耦合进一个大 config。
+
+更完整的 MMU 使用说明见：
+
+- `src/test/python/MemBlock/docs/mmu_env_design_and_usage.md`
+- `src/test/python/MemBlock/docs/sq_matchinvalid_nuke_case_analysis.md`
 
 这些 helper 的判定真值固定来自真实 DUT 导出的 replay 相关端口，而不是 Python 侧 mock tracker。
 
