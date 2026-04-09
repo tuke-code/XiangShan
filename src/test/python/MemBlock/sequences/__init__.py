@@ -16,3 +16,9 @@ from .memblock_sequences import (
     ScalarStoreThenLoadSequence,
     SequenceState,
 )
+from .violation_sequences import (
+    ScalarRarViolationSequence,
+    ScalarRarViolationSequenceResult,
+    ScalarRawReplaySequence,
+    ScalarRawReplaySequenceResult,
+)

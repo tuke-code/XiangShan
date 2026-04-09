@@ -4,7 +4,7 @@ MemBlockEnv MMU/PTW/DTLB smoke。
 """
 
 from request_apis import LoadTxn, send_load
-from sequences.memblock_sequences import ResetEnvSequence
+from sequences import ResetEnvSequence
 
 
 MMU_ROOT_PT = 0x88000000

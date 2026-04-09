@@ -17,7 +17,7 @@ import random
 from request_apis import (
     LoadTxn,
 )
-from sequences.memblock_sequences import (
+from sequences import (
     ResetEnvSequence,
     ScalarLoadBurstSequence,
     ScalarLoadSequence,

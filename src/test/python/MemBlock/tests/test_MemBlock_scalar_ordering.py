@@ -4,7 +4,7 @@ MemBlock 标量 load/store 排序场景的定向真实 DUT 用例。
 """
 
 from request_apis import LoadTxn, QueuePtr, StoreTxn, ptr_inc
-from sequences.memblock_sequences import (
+from sequences import (
     FlushStoreBuffersSequence,
     ResetEnvSequence,
     ScalarLoadSequence,

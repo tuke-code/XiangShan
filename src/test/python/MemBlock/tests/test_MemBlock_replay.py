@@ -11,7 +11,7 @@ MemBlock 真实 DUT replay 场景测试。
 """
 
 from request_apis import LoadTxn, StoreTxn, ptr_inc
-from sequences.memblock_sequences import (
+from sequences import (
     FlushStoreBuffersSequence,
     ResetEnvSequence,
     ScalarCacheMissReplaySequence,

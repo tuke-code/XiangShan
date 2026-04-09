@@ -4,7 +4,7 @@ MemBlock 标量 store pipeline 的定向真实 DUT 用例。
 """
 
 from request_apis import QueuePtr, StoreTxn, ptr_inc
-from sequences.memblock_sequences import (
+from sequences import (
     FlushStoreBuffersSequence,
     ResetEnvSequence,
     ScalarStoreCommitSequence,

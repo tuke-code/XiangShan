@@ -16,7 +16,7 @@ from request_apis import (
     QueuePtr,
     StoreTxn,
 )
-from sequences.memblock_sequences import (
+from sequences import (
     ResetEnvSequence,
     ScalarMixedTrafficSequence,
     ScalarStoreCommitSequence,

@@ -4,7 +4,7 @@ MemBlock 标量 load pipeline 的定向真实 DUT 用例。
 """
 
 from request_apis import QueuePtr
-from sequences.memblock_sequences import (
+from sequences import (
     ResetEnvSequence,
     ScalarLoadBurstSequence,
     SequenceState,
@@ -60,4 +60,3 @@ def test_api_MemBlock_small_cacheable_load_burst_directed(env):
     assert result.transport_stats_after["outer_request_count"] == stats_before["outer_request_count"], (
         "定向 cacheable load 不应走 outer/uncache 路径"
     )
-
