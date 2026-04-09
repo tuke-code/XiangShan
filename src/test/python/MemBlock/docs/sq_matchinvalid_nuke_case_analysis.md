@@ -188,11 +188,12 @@ sequence 随后等待：
 
 ### 6.2 路径断言
 
-1. `outer_request_count` 在主 load 观测窗口内不增长
-2. `dcache_a_request_count` 不增长
-3. `dcache_d_response_count` 不增长
+1. `outer_request_count` 从主 load 发射到最终收敛都不增长
+2. `dcache_a_request_count` 从主 load 发射到最终收敛都不增长
+3. `dcache_d_response_count` 从主 load 发射到最终收敛都不增长
 4. `dcache_miss_signal == 0`（若端口存在）
 5. `dcache_error_valid == 0`
+6. 不允许同一 ROB 的 replay cause 再从 `replay_queue` / `replay_lane` / `ldu` / `nc_out` 暴露出来
 
 这组断言用来证明主 load 的目标路径确实是：
 
@@ -200,6 +201,7 @@ sequence 随后等待：
 - 非 outer
 - 非 miss/refill
 - 非 error
+- 非“redirect 之后仍继续向 LSQ 建立 replay 去路”
 
 也就是说，当前 testcase 不是在用 cache miss 或 cache error 冒充 nuke 条件。
 
@@ -211,11 +213,11 @@ sequence 随后等待：
 
 这组断言确保 testcase 不只是“打到一个波形点”，而是整个场景可完整收敛、可进入回归。
 
-## 7. 当前真实 DUT 的已知行为
+## 7. 当前 testcase 的收口口径
 
-根据当前稳定回归，主 load 的后续行为还表现出两个重要事实：
+在这轮语义收紧后，主 load 的后续恢复路径需要满足两个事实：
 
-### 7.1 replay 窗口可能看到 `FF`
+### 7.1 flush 级 `memoryViolation` 与 LSQ replay 路径应保持排他
 
 虽然我们关注的核心是：
 
@@ -223,16 +225,14 @@ sequence 随后等待：
 - `dataInvalid`
 - `memoryViolation`
 
-但主 load 在后续 replay 窗口中仍可能出现 `FF`。这说明 DUT 的后续恢复路径并不等价于“纯粹 silent nuke 后直接消失”，而是还伴随了后续 replay/重取数行为。
+当前 testcase 不再接受“同一条 younger load 一边触发 flush 级 redirect，一边又继续把 replay cause 送往 LSQ”这种双去路语义。
 
-因此 testcase 当前只禁止明显错误的路径：
+因此对于同一 ROB：
 
-- `DM`
-- `DR`
-- `TM`
-- `NC`
+- 允许观测到 `memory_violation` 本身
+- 但不允许再从 `replay_queue` / `replay_lane` / `ldu` / `nc_out` 看到该 load 的 replay cause
 
-而不强行把 replay cause 限死为“只能没有任何 replay”。
+当前稳定回归里，这条排他断言仍会命中已知 DUT bug：`DUTBUG-matchinvalid-redirect-replay-dual-path`。该问题的 commit 记录与处理状态见 `src/test/python/MemBlock/docs/BUGS.md`；pytest 侧暂时把它标记成精确条件触发的 `xfail`，等待后续 DUT 版本修复后再恢复为硬失败。
 
 ### 7.2 主 load 最终会完成写回，且数据来自 store
 

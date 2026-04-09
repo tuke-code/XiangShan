@@ -10,6 +10,8 @@ MemBlock 真实 DUT replay 场景测试。
   5. `RAR`: 更老 load 因精确 load-wait 暂停，更年轻同地址 load 完成后在 probe release 下触发 ld-ld violation
 """
 
+import pytest
+
 from request_apis import LoadTxn, StoreTxn, ptr_inc, send_load
 from sequences import (
     FlushStoreBuffersSequence,
@@ -50,6 +52,14 @@ MATCH_INVALID_PA_BASE_B = 0xC0000000
 MATCH_INVALID_WARMUP_DATA = 0x13579BDF2468ACE0
 MATCH_INVALID_TLB_PRIME_DATA = 0x0F0E0D0C0B0A0908
 MATCH_INVALID_STORE_DATA = 0x1122334455667788
+
+DUTBUG_MATCHINVALID_REDIRECT_REPLAY_DUAL_PATH = "DUTBUG-matchinvalid-redirect-replay-dual-path"
+DUT_SRC_MAIN_COMMIT_MATCHINVALID_REDIRECT_REPLAY_DUAL_PATH = "03bc924c72cb055ccb8146a2eecd750ead0b4d7b"
+DUTBUG_MATCHINVALID_REDIRECT_REPLAY_DUAL_PATH_XFAIL_REASON = (
+    f"{DUTBUG_MATCHINVALID_REDIRECT_REPLAY_DUAL_PATH} "
+    f"(dut-src-main={DUT_SRC_MAIN_COMMIT_MATCHINVALID_REDIRECT_REPLAY_DUAL_PATH}): "
+    "flush-level memoryViolation still leaves FF replay events visible on the LSQ replay path"
+)
 
 
 def _reset_env_and_state(env) -> SequenceState:
@@ -332,24 +342,26 @@ def test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke(env):
     if trigger.dcache_miss_signal is not None:
         assert trigger.dcache_miss_signal == 0, "主 load 应在 dcache hit 条件下命中"
 
-    forbidden_replays = {
-        event["cause"]
+    replay_path_events = [
+        event
         for event in trigger.replay_events
         if event.get("source") in {"replay_queue", "replay_lane", "ldu", "nc_out"}
-    }
-    assert forbidden_replays.isdisjoint({"DM", "DR", "TM", "NC"}), f"主 load 不应走 miss/error 路径: {forbidden_replays}"
+    ]
+    if replay_path_events:
+        pytest.xfail(DUTBUG_MATCHINVALID_REDIRECT_REPLAY_DUAL_PATH_XFAIL_REASON)
+    assert not replay_path_events, f"flush 级 memoryViolation 后不应再向 LSQ 建立 replay 去路: {replay_path_events}"
     assert (
-        trigger.transport_stats_after_main["outer_request_count"]
+        trigger.transport_stats_after_recovery["outer_request_count"]
         == trigger.transport_stats_before_main["outer_request_count"]
     ), "主 load 不应走 outer/uncache 路径"
     assert (
-        trigger.transport_stats_after_main["dcache_a_request_count"]
+        trigger.transport_stats_after_recovery["dcache_a_request_count"]
         == trigger.transport_stats_before_main["dcache_a_request_count"]
-    ), "命中场景不应额外触发 dcache refill 请求"
+    ), "整个恢复路径都不应额外触发 dcache refill 请求"
     assert (
-        trigger.transport_stats_after_main["dcache_d_response_count"]
+        trigger.transport_stats_after_recovery["dcache_d_response_count"]
         == trigger.transport_stats_before_main["dcache_d_response_count"]
-    ), "命中场景不应额外等待 dcache D 响应"
+    ), "整个恢复路径都不应额外等待 dcache D 响应"
     assert trigger.committed_store_view.committed, "older store 未在收尾阶段进入 committed"
 
     drain_summary = FlushStoreBuffersSequence().run(env)

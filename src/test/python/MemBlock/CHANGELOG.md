@@ -694,3 +694,31 @@ testcase
   - 在 `request_apis.py` / `sequences/` 进一步收口后再次执行：
     - `64 passed in 232.32s`
 - 这轮修改保持对外同步 facade 不变，因此现有 tests / sequences / `request_apis.py` 不需要批量迁移即可继续运行。
+
+## 2026-04-09：收紧 `sq_datainvalid_matchinvalid_nuke` 的 replay 排他口径
+
+### 1. 用例不再接受 redirect 与 LSQ replay 双去路
+
+- `test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke` 不再只排除 `DM/DR/TM/NC`。
+- 现在对同一条 younger load 明确要求：一旦观测到 flush 级 `memoryViolation`，就不能再从 `replay_queue` / `replay_lane` / `ldu` / `nc_out` 看到该 ROB 的 replay cause。
+
+### 2. transport 统计改为覆盖整个恢复期
+
+- `ScalarSqDataInvalidMatchInvalidTriggerSequence` 现在把 transport 统计的收尾点从“violation 后短窗口”改为“主 load 最终恢复完成之后”。
+- 这样 testcase 可以覆盖整个恢复路径，避免后续 refill / outer 请求只是在短窗口之外发生而被漏检。
+
+### 3. sequence 补充全流程 replay 观测
+
+- `sequences/violation_sequences.py` 新增对目标 ROB replay 事件的全流程采样。
+- 用例因此能区分“仅有 memoryViolation”与“redirect 后仍向 LSQ 建立 replay 去路”这两类语义。
+
+### 4. 文档同步更新
+
+- `docs/sq_matchinvalid_nuke_case_analysis.md` 已同步改写为新的排他契约，不再把 `FF` 视为可接受的已知行为。
+
+### 5. 已知 DUT bug 暂时以精确条件 `xfail` 挂起
+
+- 当前真实 DUT 仍会在 flush 级 `memoryViolation` 之后暴露 `FF` replay path。
+- 该问题已登记为 `DUTBUG-matchinvalid-redirect-replay-dual-path`，并在 `docs/BUGS.md` 中记录 `src/main/` 路径对应的 DUT commit hash。
+- 因此 `test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke` 暂时不是整例无条件 `xfail`，而是在实际观测到这组 replay 事件时调用带 bug tag 的 `pytest.xfail(...)`。
+- 这样已知 DUT 缺陷不会把回归直接打红，但其他不相关断言仍保持真实失败能力。

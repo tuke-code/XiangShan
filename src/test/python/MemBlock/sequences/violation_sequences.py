@@ -3,6 +3,8 @@
 MemBlock replay / violation related sequences.
 """
 
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from request_apis import LoadTxn, QueuePtr, enqueue_scalar_store, expect_load, issue_scalar_sta, issue_scalar_std, ptr_inc, send_load
@@ -55,10 +57,48 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequenceResult:
     committed_store_view: object
     final_state: SequenceState
     transport_stats_before_main: dict[str, int]
-    transport_stats_after_main: dict[str, int]
+    transport_stats_after_recovery: dict[str, int]
     replay_events: tuple[dict, ...]
     dcache_error_valid: int
     dcache_miss_signal: int | None
+
+
+@contextmanager
+def _capture_replay_events(
+    env,
+    *,
+    rob_idx_flag: int,
+    rob_idx_value: int,
+    max_events: int = 64,
+):
+    trace = deque(maxlen=max(1, int(max_events)))
+    seen = set()
+
+    def _sample() -> None:
+        replay_state = env.sample_replay_state()
+        for event in replay_state["events"]:
+            if event.get("rob_idx_flag") != int(rob_idx_flag) or event.get("rob_idx_value") != int(rob_idx_value):
+                continue
+            event_key = (
+                event.get("cycle"),
+                event.get("source"),
+                event.get("lane"),
+                event.get("sched_index"),
+                event.get("cause"),
+                event.get("rob_idx_flag"),
+                event.get("rob_idx_value"),
+                event.get("sq_idx_value"),
+            )
+            if event_key in seen:
+                continue
+            seen.add(event_key)
+            trace.append(dict(event))
+
+    env.add_after_step_callback(_sample)
+    try:
+        yield trace
+    finally:
+        env.remove_after_step_callback(_sample)
 
 
 class ScalarRawReplaySequence:
@@ -429,9 +469,17 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
             sq_ptr=younger_sq_ptr,
         )
         transport_stats_before_main = _snapshot_transport_stats(env)
-        with _capture_writeback_trace(env, max_events=32) as main_writeback_trace:
+        with (
+            _capture_writeback_trace(env, max_events=32) as main_writeback_trace,
+            _capture_replay_events(
+                env,
+                rob_idx_flag=main_load.rob_idx_flag,
+                rob_idx_value=main_load.rob_idx_value,
+                max_events=64,
+            ) as replay_trace,
+        ):
             send_load(env, main_load)
-            sq_forward_event, memory_violation, replay_events, dcache_miss_signal = _wait_sq_matchinvalid_and_violation(
+            sq_forward_event, memory_violation, initial_replay_events, dcache_miss_signal = _wait_sq_matchinvalid_and_violation(
                 env,
                 lane=main_load.issue_lane,
                 expected_sq_idx=store_sq_ptr.value,
@@ -441,7 +489,6 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
             )
             if self.post_violation_cycles > 0:
                 env.advance_cycles(self.post_violation_cycles)
-            transport_stats_after_main = _snapshot_transport_stats(env)
 
             issue_scalar_std(
                 env,
@@ -470,6 +517,7 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
                 completed_before_main + 1,
                 max_cycles=_resolve_replay_drain_cycles(env, None),
             )
+            transport_stats_after_recovery = _snapshot_transport_stats(env)
 
         committed_store_view = env.wait_store_materialized(
             store_sq_ptr.value,
@@ -479,6 +527,23 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
             require_committed=True,
             max_cycles=self.store_materialize_cycles,
         )
+        merged_replay_events = []
+        seen_replay_keys = set()
+        for event in tuple(initial_replay_events) + tuple(replay_trace):
+            event_key = (
+                event.get("cycle"),
+                event.get("source"),
+                event.get("lane"),
+                event.get("sched_index"),
+                event.get("cause"),
+                event.get("rob_idx_flag"),
+                event.get("rob_idx_value"),
+                event.get("sq_idx_value"),
+            )
+            if event_key in seen_replay_keys:
+                continue
+            seen_replay_keys.add(event_key)
+            merged_replay_events.append(dict(event))
 
         return ScalarSqDataInvalidMatchInvalidTriggerSequenceResult(
             tlb_prime_writeback=tlb_prime_writeback,
@@ -497,8 +562,8 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
                 sq_ptr=younger_sq_ptr,
             ),
             transport_stats_before_main=transport_stats_before_main,
-            transport_stats_after_main=transport_stats_after_main,
-            replay_events=replay_events,
+            transport_stats_after_recovery=transport_stats_after_recovery,
+            replay_events=tuple(merged_replay_events),
             dcache_error_valid=env._read_optional_dut_signal("io_dcacheError_ecc_error_valid"),
             dcache_miss_signal=dcache_miss_signal,
         )
