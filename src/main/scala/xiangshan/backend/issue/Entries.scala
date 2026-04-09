@@ -29,16 +29,25 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
   private val CompEntryNum        = params.numComp
   val io = IO(new EntriesIO)
 
-  val fakeS1Resp = Option.when(params.needFakeS1Resp)(0.U.asTypeOf(io.og0Resp))
+  private val respPortNum = params.numDeq + (if (params.numLoadIQBypassTargets > 0) 1 else 0)
+  private val og0RespPorts = Wire(Vec(respPortNum, new IssueQueueRespBundle))
+  private val og1RespPorts = Wire(Vec(respPortNum, new IssueQueueRespBundle))
+  private val snRespPorts = Option.when(params.needSnResp)(Wire(Vec(respPortNum, new IssueQueueRespBundle)))
+
+  og0RespPorts := VecInit(io.og0Resp ++ io.bypassOg0Resp.toSeq)
+  og1RespPorts := VecInit(io.og1Resp ++ io.bypassOg1Resp.toSeq)
+  snRespPorts.foreach(_ := VecInit(io.snResp.get ++ io.bypassSnResp.toSeq))
+
+  val fakeS1Resp = Option.when(params.needFakeS1Resp)(0.U.asTypeOf(og0RespPorts))
   val allResps = Seq(
-    Some(io.og0Resp),
-    Some(io.og1Resp),
+    Some(og0RespPorts),
+    Some(og1RespPorts),
     io.og2Resp.orElse(io.s0Resp),
     if (io.og2Resp.nonEmpty) io.s0Resp else fakeS1Resp,
-    io.s2Resp.orElse(io.snResp)
+    io.s2Resp.orElse(snRespPorts)
   ).filter(_.nonEmpty).map(_.get)
   assert(allResps.length == params.issueTimerMaxValue + 1, "allResps.length == params.issueTimerMaxValue + 1")
-  val resps = Wire(Vec(allResps.length, chiselTypeOf(io.og0Resp)))
+  val resps = Wire(Vec(allResps.length, chiselTypeOf(og0RespPorts)))
   resps := allResps
 
   //Module
@@ -145,8 +154,12 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
 
   deqSelVec.zip(deqPortIdxWriteVec).zipWithIndex.foreach { case ((deqSel, deqPortIdxWrite), i) =>
     val deqVec = io.deqSelOH.zip(io.deqReady).map(x => x._1.valid && x._1.bits(i) && x._2)
-    deqPortIdxWrite := OHToUInt(deqVec)
-    deqSel := deqVec.reduce(_ | _)
+    val bypassDeq = io.bypassIssueSelOH.map(sel => sel.valid && sel.bits(i)).getOrElse(false.B)
+    deqPortIdxWrite := Mux(bypassDeq, 1.U, OHToUInt(deqVec))
+    deqSel := deqVec.reduce(_ | _) || bypassDeq
+    when (bypassDeq) {
+      assert(!deqVec.reduce(_ | _), s"${params.getIQName} entry is selected by both local deq and bypass deq")
+    }
   }
 
 
@@ -401,6 +414,24 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
     }
   }
 
+  io.bypassDeqEntry.foreach { bypassEntry =>
+    val bypassSel = io.bypassEntrySelOH.get
+    bypassEntry.valid := bypassSel.valid && Mux1H(bypassSel.bits, entries.map(_.valid))
+    bypassEntry.bits := Mux(bypassSel.valid, Mux1H(bypassSel.bits, entries.map(_.bits)), 0.U.asTypeOf(bypassEntry.bits))
+  }
+  io.bypassDeqOg1Payload.foreach { bypassOg1Payload =>
+    val bypassSelDelay = io.bypassEntrySelOHDelay.get
+    bypassOg1Payload := Mux(
+      bypassSelDelay.valid,
+      Mux1H(bypassSelDelay.bits, entries.map(_.bits)).toDeqOg1Payload(0),
+      0.U.asTypeOf(bypassOg1Payload)
+    )
+  }
+  io.bypassCancelDeq.foreach { bypassCancel =>
+    val bypassSel = io.bypassEntrySelOH.get
+    bypassCancel := Mux(bypassSel.valid, Mux1H(bypassSel.bits, cancelBypassVec), false.B)
+  }
+
   io.valid                          := validVec.asUInt
   io.issued                         := issuedVec.asUInt
   io.canIssue                       := canIssueVec.asUInt
@@ -540,9 +571,15 @@ class EntriesIO(implicit p: Parameters, params: IssueBlockParams) extends XSBund
   val s0Resp              = OptionWrapper(params.needS0Resp, Vec(params.numDeq, Flipped(new IssueQueueRespBundle)))
   val s2Resp              = OptionWrapper(params.needS2Resp, Vec(params.numDeq, Flipped(new IssueQueueRespBundle)))
   val snResp              = OptionWrapper(params.needSnResp, Vec(params.numDeq, Flipped(new IssueQueueRespBundle)))
+  val bypassOg0Resp       = OptionWrapper(params.numLoadIQBypassTargets > 0, Flipped(new IssueQueueRespBundle))
+  val bypassOg1Resp       = OptionWrapper(params.numLoadIQBypassTargets > 0, Flipped(new IssueQueueRespBundle))
+  val bypassSnResp        = OptionWrapper(params.numLoadIQBypassTargets > 0 && params.needSnResp, Flipped(new IssueQueueRespBundle))
   //deq sel
   val deqReady            = Vec(params.numDeq, Input(Bool()))
   val deqSelOH            = Vec(params.numDeq, Flipped(ValidIO(UInt(params.numEntries.W))))
+  val bypassIssueSelOH    = OptionWrapper(params.numLoadIQBypassTargets > 0, Flipped(ValidIO(UInt(params.numEntries.W))))
+  val bypassEntrySelOH    = OptionWrapper(params.numLoadIQBypassTargets > 0, Flipped(ValidIO(UInt(params.numEntries.W))))
+  val bypassEntrySelOHDelay = OptionWrapper(params.numLoadIQBypassTargets > 0, Flipped(ValidIO(UInt(params.numEntries.W))))
   val enqEntryOldestSel   = Vec(params.numDeq, Flipped(ValidIO(UInt(params.numEnq.W))))
   val simpEntryOldestSel  = OptionWrapper(params.hasCompAndSimp, Vec(params.numDeq, Flipped(ValidIO(UInt(params.numSimp.W)))))
   val compEntryOldestSel  = OptionWrapper(params.hasCompAndSimp, Vec(params.numDeq, Flipped(ValidIO(UInt(params.numComp.W)))))
@@ -582,6 +619,9 @@ class EntriesIO(implicit p: Parameters, params: IssueBlockParams) extends XSBund
   val deqEntry            = Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true)))
   val deqOg1Payload       = Output(MixedVec(params.exuBlockParams.map(x => new IssueQueueDeqOg1Payload(x))))
   val cancelDeqVec        = Vec(params.numDeq, Output(Bool()))
+  val bypassDeqEntry      = OptionWrapper(params.numLoadIQBypassTargets > 0, ValidIO(new EntryBundle(isDeq = true)))
+  val bypassDeqOg1Payload = OptionWrapper(params.numLoadIQBypassTargets > 0, Output(new IssueQueueDeqOg1Payload(params.exuBlockParams.head)))
+  val bypassCancelDeq     = OptionWrapper(params.numLoadIQBypassTargets > 0, Output(Bool()))
   val aluDeqSelectJump    = Option.when(params.aluDeqNeedPickJump)(Output(Bool()))
 
   // vec mem only

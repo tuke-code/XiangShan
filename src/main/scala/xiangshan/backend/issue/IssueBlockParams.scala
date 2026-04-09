@@ -24,6 +24,8 @@ case class IssueBlockParams(
   numComp              : Int,
   numDeqOutside        : Int = 0,
   numWakeupFromOthers  : Int = 0,
+  loadIQBypassTargets  : Seq[String] = Seq.empty,
+  loadIQBypassSources  : Seq[String] = Seq.empty,
   XLEN                 : Int = 64,
   VLEN                 : Int = 128,
   // calculate in scheduler
@@ -54,6 +56,12 @@ case class IssueBlockParams(
   def isMemBlockIQ: Boolean = LduCnt > 0 || StaCnt > 0 || StdCnt > 0 || VlduCnt > 0 || VstuCnt > 0 || HyuCnt > 0
 
   def isLdAddrIQ: Boolean = LduCnt > 0
+
+  def hasLoadIQBypassPath: Boolean = isLdAddrIQ && (loadIQBypassTargets.nonEmpty || loadIQBypassSources.nonEmpty)
+
+  def numLoadIQBypassTargets: Int = loadIQBypassTargets.size
+
+  def numLoadIQBypassSources: Int = loadIQBypassSources.size
 
   def isStAddrIQ: Boolean = StaCnt > 0
 
@@ -384,6 +392,13 @@ case class IssueBlockParams(
 
   def bindBackendParam(param: BackendParams): Unit = {
     backendParam = param
+  }
+
+  def issueBlockIdx: Int = {
+    require(backendParam != null, s"backendParam is not bound for ${getIQName}")
+    val idx = backendParam.allIssueParams.indexWhere(_ eq this)
+    require(idx >= 0, s"IssueBlockParams ${getIQName} is not registered in backendParam")
+    idx
   }
 
   def wakeUpSourceExuIdx: Seq[Int] = {

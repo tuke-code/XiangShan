@@ -113,6 +113,11 @@ case class XSCoreParameters
   VTypeBufferSize: Int = 64, // used to reorder vtype
   IssueQueueSize: Int = 20,
   IssueQueueCompEntrySize: Int = 12,
+  LoadIQBypassPairs: Seq[(String, String)] = Seq(
+    "LDU2" -> "LDU1",
+    "LDU1" -> "LDU0",
+    "LDU0" -> "LDU2",
+  ),
   EnableBackendV2Config: Boolean = false,
   intPreg: PregParams = IntPregParams(
     numEntries = 224,
@@ -323,6 +328,14 @@ case class XSCoreParameters
   val RegCacheSize = IntRegCacheSize + MemRegCacheSize
   val RegCacheIdxWidth = log2Up(RegCacheSize)
 
+  private def loadIQBypassTargetsFor(iqName: String): Seq[String] = {
+    LoadIQBypassPairs.collect { case (source, sink) if source == iqName => sink }.distinct
+  }
+
+  private def loadIQBypassSourcesFor(iqName: String): Seq[String] = {
+    LoadIQBypassPairs.collect { case (source, sink) if sink == iqName => source }.distinct
+  }
+
   val intSchdParams = {
     implicit val schdType: SchedulerType = IntScheduler()
     SchdBlockParams(Seq(
@@ -357,13 +370,19 @@ case class XSCoreParameters
       ), numEntries = IssueQueueSize, numEnq = 2, numComp = IssueQueueCompEntrySize),
       IssueBlockParams(Seq(
         ExeUnitParams("LDU0", Seq(LduCfg), Seq(IntWB(6, 0), FpWB(4, 0)), Seq(Seq(IntRD(7, 0))), true, 2),
-      ), numEntries = 20, numEnq = 2, numComp = 12),
+      ), numEntries = 20, numEnq = 2, numComp = 12,
+        loadIQBypassTargets = loadIQBypassTargetsFor("LDU0"),
+        loadIQBypassSources = loadIQBypassSourcesFor("LDU0")),
       IssueBlockParams(Seq(
         ExeUnitParams("LDU1", Seq(LduCfg), Seq(IntWB(7, 0), FpWB(5, 0)), Seq(Seq(IntRD(9, 0))), true, 2),
-      ), numEntries = 20, numEnq = 2, numComp = 12),
+      ), numEntries = 20, numEnq = 2, numComp = 12,
+        loadIQBypassTargets = loadIQBypassTargetsFor("LDU1"),
+        loadIQBypassSources = loadIQBypassSourcesFor("LDU1")),
       IssueBlockParams(Seq(
         ExeUnitParams("LDU2", Seq(LduCfg), Seq(IntWB(8, 0), FpWB(6, 0)), Seq(Seq(IntRD(11, 0))), true, 2),
-      ), numEntries = 20, numEnq = 2, numComp = 12),
+      ), numEntries = 20, numEnq = 2, numComp = 12,
+        loadIQBypassTargets = loadIQBypassTargetsFor("LDU2"),
+        loadIQBypassSources = loadIQBypassSourcesFor("LDU2")),
       IssueBlockParams(Seq(
         ExeUnitParams("STA0", Seq(StaCfg, MouCfg), Seq(FakeIntWB()), Seq(Seq(IntRD(6, 1)))),
       ), numEntries = 16, numEnq = 2, numComp = 12),
