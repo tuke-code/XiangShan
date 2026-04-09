@@ -2,6 +2,9 @@
 
 This repository uses local agent instructions. When working in `src/test/python/MemBlock/`, agents must treat the MemBlock collaboration documents as part of the task contract.
 
+When working in `src/test/python/`, agents must read:
+- `src/test/python/AGENTS.md`
+
 ## MemBlock Rule
 
 If the user request touches any file under `src/test/python/MemBlock/`, or the task is clearly about the MemBlock Python verification environment, the agent must read:
