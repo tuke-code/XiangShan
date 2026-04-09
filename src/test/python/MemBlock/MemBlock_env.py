@@ -2007,6 +2007,46 @@ class MemBlockEnv:
             "events": events,
         }
 
+    def sample_load_debug_state(self) -> dict:
+        """采样当前拍 load pipeline `debugLsInfo` 白盒调试口。"""
+
+        cycle = self._current_cycle()
+        lanes = []
+
+        for idx in range(self.config.load_pipeline_width):
+            prefix = f"io_debug_ls_debugLsInfo_{idx}"
+            replay_causes = []
+            replay_cause_mask = 0
+            for cause_idx, label in enumerate(LOAD_REPLAY_CAUSE_LABELS):
+                signal = getattr(self.dut, f"{prefix}_replayCause_{cause_idx}", None)
+                if signal is None:
+                    continue
+                if _read_signal_int(signal, 0):
+                    replay_cause_mask |= 1 << cause_idx
+                    replay_causes.append(self._normalize_replay_cause(label))
+
+            lanes.append(
+                {
+                    "cycle": cycle,
+                    "lane": idx,
+                    "s1_rob_idx_value": self._read_optional_dut_signal(f"{prefix}_s1_robIdx", -1),
+                    "s2_rob_idx_value": self._read_optional_dut_signal(f"{prefix}_s2_robIdx", -1),
+                    "s3_rob_idx_value": self._read_optional_dut_signal(f"{prefix}_s3_robIdx", -1),
+                    "s2_is_bank_conflict": self._read_optional_dut_signal(f"{prefix}_s2_isBankConflict", 0),
+                    "s2_is_forward_fail": self._read_optional_dut_signal(f"{prefix}_s2_isForwardFail", 0),
+                    "s3_is_replay_fast": self._read_optional_dut_signal(f"{prefix}_s3_isReplayFast", 0),
+                    "s3_is_replay_slow": self._read_optional_dut_signal(f"{prefix}_s3_isReplaySlow", 0),
+                    "s3_is_replay": self._read_optional_dut_signal(f"{prefix}_s3_isReplay", 0),
+                    "replay_cause_mask": replay_cause_mask,
+                    "replay_causes": tuple(replay_causes),
+                }
+            )
+
+        return {
+            "cycle": cycle,
+            "lanes": tuple(lanes),
+        }
+
     def sample_nuke_query_state(self) -> dict:
         """采样当前拍 RAW/RAR nuke query 的请求握手状态。"""
 

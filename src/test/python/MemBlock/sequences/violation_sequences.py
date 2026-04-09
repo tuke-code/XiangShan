@@ -7,14 +7,28 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from request_apis import LoadTxn, QueuePtr, enqueue_scalar_store, expect_load, issue_scalar_sta, issue_scalar_std, ptr_inc, send_load
+from request_apis import (
+    LoadTxn,
+    QueuePtr,
+    enqueue_scalar_store,
+    expect_load,
+    issue_scalar_sta,
+    issue_scalar_std,
+    ptr_inc,
+    send_load,
+    send_load_batch_same_cycle,
+)
 
 from .memblock_sequences import (
     SequenceState,
+    _capture_load_debug_trace,
     _capture_writeback_trace,
+    _load_debug_lane_matches,
     _resolve_replay_drain_cycles,
     _snapshot_transport_stats,
+    _wait_load_debug_event,
     _wait_completed_load_count,
+    _wait_sq_forward_event,
     _wait_sq_matchinvalid_and_violation,
     _wait_store_addr_observed,
 )
@@ -63,6 +77,39 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequenceResult:
     dcache_miss_signal: int | None
 
 
+@dataclass(frozen=True)
+class ScalarPipelineStldNukeSequenceResult:
+    main_load: LoadTxn
+    store_sq_ptr: QueuePtr
+    load_debug_event: dict
+    load_debug_trace: tuple[dict, ...]
+    nk_observed: bool
+    replay_events: tuple[dict, ...]
+    nuke_query_trace: tuple[dict, ...]
+    main_writeback: dict | None
+    committed_store_view: object | None
+    final_state: SequenceState
+    completed_load_count: int
+
+
+@dataclass(frozen=True)
+class ScalarBankConflictSqDataInvalidNukeSequenceResult:
+    lead_load: LoadTxn
+    victim_load: LoadTxn
+    store_sq_ptr: QueuePtr
+    sq_forward_event: dict
+    load_debug_event: dict
+    load_debug_trace: tuple[dict, ...]
+    nk_observed: bool
+    replay_events: tuple[dict, ...]
+    nuke_query_trace: tuple[dict, ...]
+    lead_writeback: dict | None
+    victim_writeback: dict | None
+    committed_store_view: object | None
+    final_state: SequenceState
+    completed_load_count: int
+
+
 @contextmanager
 def _capture_replay_events(
     env,
@@ -99,6 +146,58 @@ def _capture_replay_events(
         yield trace
     finally:
         env.remove_after_step_callback(_sample)
+
+
+@contextmanager
+def _capture_nuke_query_trace(env, *, max_events: int = 64):
+    trace = deque(maxlen=max(1, int(max_events)))
+    seen = set()
+
+    def _sample() -> None:
+        query_state = env.sample_nuke_query_state()
+        for bucket_name in ("raw_queries", "rar_queries", "rar_responses"):
+            for event in query_state[bucket_name]:
+                event_key = (
+                    event.get("cycle"),
+                    event.get("source"),
+                    event.get("lane"),
+                    event.get("rob_idx_flag"),
+                    event.get("rob_idx_value"),
+                    event.get("lq_idx_flag"),
+                    event.get("lq_idx_value"),
+                    event.get("sq_idx_flag"),
+                    event.get("sq_idx_value"),
+                    event.get("resp_valid"),
+                    event.get("nuke"),
+                )
+                if event_key in seen:
+                    continue
+                seen.add(event_key)
+                trace.append(dict(event))
+
+    env.add_after_step_callback(_sample)
+    try:
+        yield trace
+    finally:
+        env.remove_after_step_callback(_sample)
+
+
+def _wait_load_debug_stage(env, *, rob_idx_value: int, stage: str, max_cycles: int = 200) -> dict:
+    stage_key = f"{stage}_rob_idx_value"
+    if stage_key not in {"s1_rob_idx_value", "s2_rob_idx_value", "s3_rob_idx_value"}:
+        raise ValueError(f"unsupported load debug stage: {stage}")
+
+    def _probe():
+        for lane_state in env.sample_load_debug_state()["lanes"]:
+            if lane_state.get(stage_key) == int(rob_idx_value):
+                return dict(lane_state)
+        return None
+
+    return env.wait_until(
+        _probe,
+        max_cycles=max_cycles,
+        timeout_message=f"等待 load debug 命中 {stage} 超时: rob={rob_idx_value}",
+    )
 
 
 class ScalarRawReplaySequence:
@@ -356,6 +455,324 @@ class ScalarRarViolationSequence:
             )
         finally:
             env.memory.strict_writeback_check = previous_strict
+
+
+class ScalarPipelineStldNukeSequence:
+    def __init__(
+        self,
+        *,
+        store_txn,
+        initial_lq_ptr: QueuePtr,
+        load_req_id: int,
+        replay_wait_cycles: int = 200,
+        materialize_cycles: int = 200,
+        drain_cycles: int | None = None,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.store_txn = store_txn
+        self.initial_lq_ptr = initial_lq_ptr
+        self.load_req_id = int(load_req_id)
+        self.replay_wait_cycles = int(replay_wait_cycles)
+        self.materialize_cycles = int(materialize_cycles)
+        self.drain_cycles = drain_cycles
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarPipelineStldNukeSequenceResult:
+        completed_before = env.get_completed_load_count()
+        store_sq_ptr = enqueue_scalar_store(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=self.store_txn.sq_ptr,
+            enq_port=self.store_txn.enq_port,
+        )
+        issue_scalar_std(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=store_sq_ptr,
+            data=self.store_txn.data,
+            lane=self.store_txn.std_lane,
+        )
+
+        main_load = LoadTxn(
+            req_id=self.load_req_id,
+            addr=self.store_txn.addr,
+            lq_ptr=self.initial_lq_ptr,
+            sq_ptr=ptr_inc(self.store_txn.sq_ptr, env.config.sequence.store_queue_size),
+            store_set_hit=1,
+        )
+        main_expected = expect_load(env, main_load)
+
+        with (
+            _capture_load_debug_trace(env, max_events=96) as load_debug_trace,
+            _capture_replay_events(
+                env,
+                rob_idx_flag=main_load.rob_idx_flag,
+                rob_idx_value=main_load.rob_idx_value,
+                max_events=64,
+            ) as replay_trace,
+            _capture_nuke_query_trace(env, max_events=64) as nuke_query_trace,
+        ):
+            send_load(env, main_load)
+            issue_scalar_sta(
+                env,
+                req_id=self.store_txn.req_id,
+                sq_ptr=store_sq_ptr,
+                addr=self.store_txn.addr,
+                lane=self.store_txn.sta_lane,
+            )
+            load_debug_event = _wait_load_debug_event(
+                env,
+                rob_idx_value=main_load.rob_idx_value,
+                required_replay_causes=("NK",),
+                forbidden_replay_causes=("BC", "FF"),
+                max_cycles=self.replay_wait_cycles,
+            )
+
+            env.backend.pulse_store_commit(1)
+            main_expected.expected_data = self.store_txn.data
+            main_writeback = env.wait_load_writeback_observed(
+                rob_idx_flag=main_load.rob_idx_flag,
+                rob_idx_value=main_load.rob_idx_value,
+                data=self.store_txn.data,
+                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+            )
+            completed = _wait_completed_load_count(
+                env,
+                completed_before + 1,
+                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+            )
+            main_trace = tuple(
+                event
+                for event in load_debug_trace
+                if main_load.rob_idx_value in {
+                    event["s1_rob_idx_value"],
+                    event["s2_rob_idx_value"],
+                    event["s3_rob_idx_value"],
+                }
+            )
+
+        committed_store_view = env.wait_store_materialized(
+            store_sq_ptr.value,
+            expected_addr=self.store_txn.addr,
+            expected_data=self.store_txn.data,
+            expected_mmio=False,
+            require_committed=True,
+            max_cycles=self.materialize_cycles,
+        )
+        final_state = SequenceState(
+            next_lq_ptr=ptr_inc(main_load.lq_ptr, env.config.sequence.load_queue_size),
+            sq_ptr=ptr_inc(self.store_txn.sq_ptr, env.config.sequence.store_queue_size),
+        )
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+
+        return ScalarPipelineStldNukeSequenceResult(
+            main_load=main_load,
+            store_sq_ptr=store_sq_ptr,
+            load_debug_event=load_debug_event,
+            load_debug_trace=main_trace,
+            nk_observed=True,
+            replay_events=tuple(replay_trace),
+            nuke_query_trace=tuple(nuke_query_trace),
+            main_writeback=main_writeback,
+            committed_store_view=committed_store_view,
+            final_state=final_state,
+            completed_load_count=completed,
+        )
+
+
+class ScalarBankConflictSqDataInvalidNukeSequence:
+    def __init__(
+        self,
+        *,
+        store_txn,
+        initial_lq_ptr: QueuePtr,
+        lead_load_req_id: int,
+        victim_load_req_id: int,
+        lead_addr: int | None = None,
+        replay_wait_cycles: int = 200,
+        materialize_cycles: int = 200,
+        drain_cycles: int | None = None,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.store_txn = store_txn
+        self.initial_lq_ptr = initial_lq_ptr
+        self.lead_load_req_id = int(lead_load_req_id)
+        self.victim_load_req_id = int(victim_load_req_id)
+        self.lead_addr = None if lead_addr is None else int(lead_addr)
+        self.replay_wait_cycles = int(replay_wait_cycles)
+        self.materialize_cycles = int(materialize_cycles)
+        self.drain_cycles = drain_cycles
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarBankConflictSqDataInvalidNukeSequenceResult:
+        completed_before = env.get_completed_load_count()
+        store_sq_ptr = enqueue_scalar_store(
+            env,
+            req_id=self.store_txn.req_id,
+            sq_ptr=self.store_txn.sq_ptr,
+            enq_port=self.store_txn.enq_port,
+        )
+        younger_sq_ptr = ptr_inc(self.store_txn.sq_ptr, env.config.sequence.store_queue_size)
+        lead_addr = self.store_txn.addr + 0x40 if self.lead_addr is None else self.lead_addr
+        lead_load = LoadTxn(
+            req_id=self.lead_load_req_id,
+            addr=lead_addr,
+            lq_ptr=self.initial_lq_ptr,
+            sq_ptr=younger_sq_ptr,
+            issue_lane=0,
+        )
+        victim_load = LoadTxn(
+            req_id=self.victim_load_req_id,
+            addr=self.store_txn.addr,
+            lq_ptr=ptr_inc(self.initial_lq_ptr, env.config.sequence.load_queue_size),
+            sq_ptr=younger_sq_ptr,
+            issue_lane=1,
+            store_set_hit=1,
+        )
+        lead_expected = expect_load(env, lead_load)
+        victim_expected = expect_load(env, victim_load)
+
+        with (
+            _capture_load_debug_trace(env, max_events=128) as load_debug_trace,
+            _capture_replay_events(
+                env,
+                rob_idx_flag=victim_load.rob_idx_flag,
+                rob_idx_value=victim_load.rob_idx_value,
+                max_events=64,
+            ) as replay_trace,
+            _capture_nuke_query_trace(env, max_events=64) as nuke_query_trace,
+            _capture_writeback_trace(env, max_events=64) as writeback_trace,
+        ):
+            def _match_writeback(event, *, rob_idx_flag, rob_idx_value, data):
+                if event.get("int_wen") != 1:
+                    return False
+                if event.get("rob_idx_flag") != rob_idx_flag or event.get("rob_idx_value") != rob_idx_value:
+                    return False
+                if data is not None and event.get("data") != data:
+                    return False
+                return True
+
+            send_load_batch_same_cycle(env, (lead_load, victim_load))
+            issue_scalar_sta(
+                env,
+                req_id=self.store_txn.req_id,
+                sq_ptr=store_sq_ptr,
+                addr=self.store_txn.addr,
+                lane=self.store_txn.sta_lane,
+            )
+            sq_forward_event = _wait_sq_forward_event(
+                env,
+                expected_sq_idx=store_sq_ptr.value,
+                expected_data_invalid_valid=1,
+                expected_match_invalid=0,
+                expected_forward_invalid=0,
+                max_cycles=self.replay_wait_cycles,
+            )
+            # For this combo, issuing STD only after the transient pipeline NK is visible
+            # makes the recovery path deterministic instead of collapsing into FF-only spin.
+            _wait_load_debug_event(
+                env,
+                rob_idx_value=victim_load.rob_idx_value,
+                required_replay_causes=("NK",),
+                max_cycles=self.replay_wait_cycles,
+            )
+            load_debug_event = _wait_load_debug_event(
+                env,
+                rob_idx_value=victim_load.rob_idx_value,
+                required_replay_causes=("BC", "FF"),
+                forbidden_replay_causes=("RAW", "RAR"),
+                max_cycles=self.replay_wait_cycles,
+            )
+
+            issue_scalar_std(
+                env,
+                req_id=self.store_txn.req_id,
+                sq_ptr=store_sq_ptr,
+                data=self.store_txn.data,
+                lane=self.store_txn.std_lane,
+            )
+            env.backend.pulse_store_commit(1)
+            victim_expected.expected_data = self.store_txn.data
+            completed = _wait_completed_load_count(
+                env,
+                completed_before + 2,
+                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+            )
+            lead_writeback = next(
+                (
+                    event
+                    for event in writeback_trace
+                    if _match_writeback(
+                        event,
+                        rob_idx_flag=lead_load.rob_idx_flag,
+                        rob_idx_value=lead_load.rob_idx_value,
+                        data=lead_expected.expected_data,
+                    )
+                ),
+                None,
+            )
+            victim_writeback = next(
+                (
+                    event
+                    for event in writeback_trace
+                    if _match_writeback(
+                        event,
+                        rob_idx_flag=victim_load.rob_idx_flag,
+                        rob_idx_value=victim_load.rob_idx_value,
+                        data=self.store_txn.data,
+                    )
+                ),
+                None,
+            )
+            if lead_writeback is None or victim_writeback is None:
+                raise TimeoutError(
+                    "组合场景 writeback 观测不完整: "
+                    f"lead={lead_writeback is not None}, victim={victim_writeback is not None}, "
+                    f"trace={tuple(writeback_trace)}"
+                )
+            victim_trace = tuple(
+                event
+                for event in load_debug_trace
+                if victim_load.rob_idx_value in {
+                    event["s1_rob_idx_value"],
+                    event["s2_rob_idx_value"],
+                    event["s3_rob_idx_value"],
+                }
+            )
+            nk_observed = any("NK" in event["replay_causes"] for event in victim_trace)
+
+        committed_store_view = env.wait_store_materialized(
+            store_sq_ptr.value,
+            expected_addr=self.store_txn.addr,
+            expected_data=self.store_txn.data,
+            expected_mmio=False,
+            require_committed=True,
+            max_cycles=self.materialize_cycles,
+        )
+        final_state = SequenceState(
+            next_lq_ptr=ptr_inc(victim_load.lq_ptr, env.config.sequence.load_queue_size),
+            sq_ptr=younger_sq_ptr,
+        )
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+
+        return ScalarBankConflictSqDataInvalidNukeSequenceResult(
+            lead_load=lead_load,
+            victim_load=victim_load,
+            store_sq_ptr=store_sq_ptr,
+            sq_forward_event=sq_forward_event,
+            load_debug_event=load_debug_event,
+            load_debug_trace=victim_trace,
+            nk_observed=nk_observed,
+            replay_events=tuple(replay_trace),
+            nuke_query_trace=tuple(nuke_query_trace),
+            lead_writeback=lead_writeback,
+            victim_writeback=victim_writeback,
+            committed_store_view=committed_store_view,
+            final_state=final_state,
+            completed_load_count=completed,
+        )
 
 
 class ScalarSqDataInvalidMatchInvalidTriggerSequence:

@@ -102,6 +102,34 @@ def send_load(env, txn: LoadTxn) -> None:
     env.backend.send_load(txn)
 
 
+def send_load_batch_same_cycle(env, txns, max_cycles: int = 50) -> None:
+    """按标准时序 enqueue 多笔标量 load，并在同一拍完成 issue。"""
+
+    env.backend.send_load_batch_same_cycle(txns, max_cycles=max_cycles)
+
+
+def send_load_batch_with_sta_same_cycle(
+    env,
+    txns,
+    *,
+    sta_req_id: int,
+    sta_sq_ptr,
+    sta_addr: int,
+    sta_lane: int = DEFAULT_STA_LANE,
+    max_cycles: int = 50,
+) -> None:
+    """按标准时序 enqueue 多笔标量 load，并与一条 `STA` 在同一拍完成 issue。"""
+
+    env.backend.send_load_batch_with_sta_same_cycle(
+        txns,
+        sta_req_id=sta_req_id,
+        sta_sq_ptr=sta_sq_ptr,
+        sta_addr=sta_addr,
+        sta_lane=sta_lane,
+        max_cycles=max_cycles,
+    )
+
+
 def expect_load(env, txn: LoadTxn):
     """登记一笔 load 事务的期望结果。"""
 

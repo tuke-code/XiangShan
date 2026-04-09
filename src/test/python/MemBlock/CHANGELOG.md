@@ -722,3 +722,134 @@ testcase
 - 该问题已登记为 `DUTBUG-matchinvalid-redirect-replay-dual-path`，并在 `docs/BUGS.md` 中记录 `src/main/` 路径对应的 DUT commit hash。
 - 因此 `test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke` 暂时不是整例无条件 `xfail`，而是在实际观测到这组 replay 事件时调用带 bug tag 的 `pytest.xfail(...)`。
 - 这样已知 DUT 缺陷不会把回归直接打红，但其他不相关断言仍保持真实失败能力。
+
+## 2026-04-09：补齐 `BC` / pipeline `NK` 白盒观测与组合场景探索
+
+### 1. 新增同拍 load issue 能力与 `debugLsInfo` 观测
+
+- `IssueAgent` / `BackendFacade` / `request_apis.py` 新增同拍多 load issue helper，供 replay 场景稳定复用。
+- `MemBlockEnv` 新增 `sample_load_debug_state()`，把顶层 `io_debug_ls_debugLsInfo_*` 白盒口整理成结构化采样结果。
+- `sequences/memblock_sequences.py` 新增 load debug trace / SQ forward 采样 helper，测试侧不再直接散读分散信号。
+
+### 2. 单独场景先行落地
+
+- `ScalarForwardFailReplaySequence` 现在会回填：
+  - `sq_forward_event`
+  - 目标 load 的 `load_debug_trace`
+- 新增 `ScalarBankConflictReplaySequence`，用于证明“同拍双 load + 同 bank + 不同 set”可稳定打到 `BC`。
+- 新增 `ScalarPipelineStldNukeSequence`，用于探索“older store 晚到 STA”这一条直接 pipeline `NK` 路径。
+
+### 3. 回归层新增 directed smoke
+
+- `test_MemBlock_replay.py` 新增：
+  - `test_api_MemBlock_scalar_bank_conflict_replay_smoke`
+  - `test_api_MemBlock_scalar_pipeline_stld_nuke_smoke`
+  - `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke`
+- 其中 FF smoke 也同步收紧为必须命中：
+  - `dataInvalid=1`
+  - `matchInvalid=0`
+  - `forwardInvalid=0`
+
+### 4. 组合场景当前状态
+
+- 当前 directed timing 已能稳定构造：
+  - `BC`
+  - `SQ dataInvalid=1`
+  - `matchInvalid=0`
+  - 且不向 `RAW/RAR` queue 发起 nuke query
+- 但在当前 DUT / issue 时序下，目标 victim load 还没有稳定观测到同一条 load debug `NK` cause。
+- 因此：
+  - standalone pipeline `NK`
+  - `BC + FF + NK` 组合场景
+  暂时都以精确条件 `xfail` 形式挂起，避免把其余已构造成功的回归能力一起打红。
+
+### 5. 验证情况
+
+- `python3 -m py_compile`
+  - `agents/issue_agent.py`
+  - `agents/backend_facade.py`
+  - `request_apis.py`
+  - `MemBlock_env.py`
+  - `sequences/memblock_sequences.py`
+  - `sequences/violation_sequences.py`
+  - `tests/test_MemBlock_replay.py`
+- `pytest`
+  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -n 16 -q`
+  - 结果：`7 passed, 3 xfailed`
+
+## 2026-04-09：收口 standalone pipeline `NK`
+
+本条目记录 `pipeline NK` 单场景从探索态 `xfail` 收口成稳定回归用例的这轮修正。核心结论不是 DUT 完全打不出 `NK`，而是旧 directed timing 把 `STA` 发得过晚，导致 testcase 自己把目标 load 推到了只看见 `DR/DM` 的路径。
+
+### 变更摘要
+
+- `ScalarPipelineStldNukeSequence` 不再先等 `load_debug.s1` 后再发 `STA`，而是在 load issue 后立即补发 `STA`。
+- `test_api_MemBlock_scalar_pipeline_stld_nuke_smoke` 去掉了场景缺口 `xfail`，改为对 `NK` 路径做硬断言。
+- `sq_pipeline_stld_nuke.md` 同步更新，明确这次修正的根因和当前验证口径。
+
+### 1. 修正 standalone pipeline NK 的 directed timing
+
+本轮白盒排查表明：
+
+- `STA` 若等到 younger load 已经明显进入 `s1` 再发，`load_debug_trace` 会稳定退化成 `DR/DM`
+- `STA` 若在 load issue 后立即发起，目标 load 可以稳定命中 `NK`
+- 同时 load 最终仍能写回 older store data，store 也能进入 committed
+
+因此问题根因在 testcase/sequence 的时序，而不是“当前 DUT 完全不支持 pipeline NK”。
+
+### 2. 当前 standalone NK 的验证口径
+
+当前 testcase 硬断言以下事实：
+
+- `load_debug_trace` 命中 `NK`
+- 同一 trace 不混入 `BC`
+- 同一 trace 不混入 `FF`
+- younger load 最终写回 older store data
+- older store 最终进入 committed
+
+需要注意的是，当前 `NK` trace 仍可能同时带着 `DR/DM`。这说明当前用例证明的是“pipeline-side nuke 已稳定出现并能恢复完成”，而不是“只剩一个孤立的 `NK` bit”。
+
+## 2026-04-09：收口 `bankconflict + dataInvalid + pipeline NK` 组合场景
+
+本条目记录 `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke` 从 `xfail` 候选收口为稳定回归用例的这轮修正。核心结论是：旧问题主要是 testcase 时序和 writeback 观测口径不对，而不是 DUT 缺少这条组合路径。
+
+### 变更摘要
+
+- `ScalarBankConflictSqDataInvalidNukeSequence` 改为先等 victim load 的早期 `NK`，再等后续 `BC + FF`，最后才补 `STD` 并提交 store。
+- 同一 sequence 的 writeback 观测改为基于 trace 收口，避免顺序等待 lead/victim writeback 时漏采已发生的写回。
+- `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke` 保持对 `NK` 做硬断言，不再依赖 `xfail`。
+- `sq_bankconflict_datainvalid_nuke_combo.md` 同步更新，明确“pipeline NK 可稳定构造，但恢复后段仍可能出现 RAW/RAR query 流量”。
+
+### 1. 本轮修正解决了什么
+
+本轮白盒排查确认了两个独立问题：
+
+- 如果 `STD` 补得过早，victim load 会退化成 `FF` 主导的重发表现，看不到稳定 `NK`
+- 即便场景构造成功，按固定顺序去等 lead / victim writeback，也可能错过已经先发生的写回事件
+
+因此旧版失败并不能直接证明 DUT 没有这条组合路径。
+
+### 2. 当前验证口径
+
+当前 testcase 硬断言以下事实：
+
+- SQ forward 命中 `dataInvalid=1 && matchInvalid=0`
+- victim load 的主 replay 断言点命中 `BC + FF`
+- victim load 的完整 debug trace 中稳定出现 `NK`
+- victim load 最终写回 older store data
+- lead load 不被 older store 污染
+- older store 最终进入 committed
+
+同时，本轮去掉了“全程不允许 target RAW/RAR query”这条过强假设，因为成功恢复的波形上可以看到后段 query 流量。
+
+### 3. 验证情况
+
+- `python3 -m py_compile`
+  - `src/test/python/MemBlock/sequences/violation_sequences.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_replay.py`
+- 定向稳定性回归
+  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -k bankconflict_sq_datainvalid_nuke -q -rxX`
+  - 连续 5 轮：`5/5` 通过
+- replay 回归
+  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -n 16 -q`
+  - 结果：`9 passed, 1 xfailed`

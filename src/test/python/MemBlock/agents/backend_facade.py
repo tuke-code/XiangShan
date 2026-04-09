@@ -86,6 +86,50 @@ class BackendFacade:
             wait_for_rob_idx_value=wait_for_rob_idx_value,
         )
 
+    def issue_load_batch_same_cycle(self, txns, max_cycles: int = 50) -> None:
+        self.issue.issue_scalar_load_batch_same_cycle(txns, max_cycles=max_cycles)
+
+    def issue_scalar_load_batch_same_cycle(self, txns, max_cycles: int = 50) -> None:
+        self.issue_load_batch_same_cycle(txns, max_cycles=max_cycles)
+
+    def issue_load_batch_with_sta_same_cycle(
+        self,
+        txns,
+        *,
+        sta_req_id: int,
+        sta_sq_ptr,
+        sta_addr: int,
+        sta_lane: int = 3,
+        max_cycles: int = 50,
+    ) -> None:
+        self.issue.issue_scalar_load_batch_with_sta_same_cycle(
+            txns,
+            sta_req_id=sta_req_id,
+            sta_sq_ptr=sta_sq_ptr,
+            sta_addr=sta_addr,
+            sta_lane=sta_lane,
+            max_cycles=max_cycles,
+        )
+
+    def issue_scalar_load_batch_with_sta_same_cycle(
+        self,
+        txns,
+        *,
+        sta_req_id: int,
+        sta_sq_ptr,
+        sta_addr: int,
+        sta_lane: int = 3,
+        max_cycles: int = 50,
+    ) -> None:
+        self.issue_load_batch_with_sta_same_cycle(
+            txns,
+            sta_req_id=sta_req_id,
+            sta_sq_ptr=sta_sq_ptr,
+            sta_addr=sta_addr,
+            sta_lane=sta_lane,
+            max_cycles=max_cycles,
+        )
+
     def issue_std(self, req_id: int, sq_ptr, data: int, lane: int = 5) -> None:
         self.issue.issue_scalar_std(req_id, sq_ptr, data, lane=lane)
 
@@ -116,6 +160,42 @@ class BackendFacade:
             load_wait_strict=txn.load_wait_strict,
             wait_for_rob_idx_flag=txn.wait_for_rob_idx_flag,
             wait_for_rob_idx_value=txn.wait_for_rob_idx_value,
+        )
+
+    def send_load_batch_same_cycle(self, txns, max_cycles: int = 50) -> None:
+        for txn in txns:
+            self.enqueue_load(
+                req_id=txn.req_id,
+                lq_ptr=txn.lq_ptr,
+                sq_ptr=txn.sq_ptr,
+                enq_port=txn.enq_port,
+            )
+        self.issue_load_batch_same_cycle(txns, max_cycles=max_cycles)
+
+    def send_load_batch_with_sta_same_cycle(
+        self,
+        txns,
+        *,
+        sta_req_id: int,
+        sta_sq_ptr,
+        sta_addr: int,
+        sta_lane: int = 3,
+        max_cycles: int = 50,
+    ) -> None:
+        for txn in txns:
+            self.enqueue_load(
+                req_id=txn.req_id,
+                lq_ptr=txn.lq_ptr,
+                sq_ptr=txn.sq_ptr,
+                enq_port=txn.enq_port,
+            )
+        self.issue_load_batch_with_sta_same_cycle(
+            txns,
+            sta_req_id=sta_req_id,
+            sta_sq_ptr=sta_sq_ptr,
+            sta_addr=sta_addr,
+            sta_lane=sta_lane,
+            max_cycles=max_cycles,
         )
 
     def send_store(self, txn: StoreTxn):

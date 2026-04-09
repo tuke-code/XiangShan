@@ -18,6 +18,7 @@ from request_apis import (
     ptr_inc,
     reset_env_and_wait_backend,
     send_load,
+    send_load_batch_same_cycle,
     send_store,
 )
 
@@ -93,9 +94,21 @@ class ScalarMixedTrafficSequenceResult:
 class ScalarForwardFailReplaySequenceResult:
     store_sq_ptr: QueuePtr
     replay_event: dict
+    sq_forward_event: dict
+    load_debug_trace: tuple[dict, ...]
     load_result: ScalarLoadSequenceResult
     final_state: SequenceState
     committed_store_view: object
+
+
+@dataclass(frozen=True)
+class ScalarBankConflictReplaySequenceResult:
+    issued_loads: tuple[LoadTxn, ...]
+    replay_event: dict
+    load_debug_event: dict
+    load_debug_trace: tuple[dict, ...]
+    final_state: SequenceState
+    completed_load_count: int
 
 
 @dataclass(frozen=True)
@@ -268,6 +281,131 @@ def _sample_sq_forward_events(env) -> tuple[dict, ...]:
             }
         )
     return tuple(events)
+
+
+def _wait_sq_forward_event(
+    env,
+    *,
+    lane: int | None = None,
+    expected_sq_idx: int | None = None,
+    expected_data_invalid_valid: int | None = None,
+    expected_match_invalid: int | None = None,
+    expected_forward_invalid: int | None = None,
+    max_cycles: int = 200,
+):
+    for _ in range(max_cycles):
+        for event in _sample_sq_forward_events(env):
+            if lane is not None and event["lane"] != int(lane):
+                continue
+            if expected_sq_idx is not None and event["data_invalid_value"] != int(expected_sq_idx):
+                continue
+            if expected_data_invalid_valid is not None and event["data_invalid_valid"] != int(expected_data_invalid_valid):
+                continue
+            if expected_match_invalid is not None and event["match_invalid"] != int(expected_match_invalid):
+                continue
+            if expected_forward_invalid is not None and event["forward_invalid"] != int(expected_forward_invalid):
+                continue
+            return event
+        env.advance_cycles(1)
+
+    raise TimeoutError(
+        "等待 SQ forward 事件超时: "
+        f"lane={lane}, sqIdx={expected_sq_idx}, dataInvalid={expected_data_invalid_valid}, "
+        f"matchInvalid={expected_match_invalid}, forwardInvalid={expected_forward_invalid}"
+    )
+
+
+@contextmanager
+def _capture_load_debug_trace(env, *, max_events: int = 64):
+    trace = deque(maxlen=max(1, int(max_events)))
+
+    def _sample() -> None:
+        debug_state = env.sample_load_debug_state()
+        for lane_state in debug_state["lanes"]:
+            stage_rob_ids = (
+                lane_state["s1_rob_idx_value"],
+                lane_state["s2_rob_idx_value"],
+                lane_state["s3_rob_idx_value"],
+            )
+            if all(value < 0 for value in stage_rob_ids) and not lane_state["replay_cause_mask"]:
+                continue
+            trace.append(dict(lane_state))
+
+    env.add_after_step_callback(_sample)
+    try:
+        yield trace
+    finally:
+        env.remove_after_step_callback(_sample)
+
+
+def _load_debug_lane_matches(
+    lane_state: dict,
+    *,
+    lane: int | None = None,
+    rob_idx_value: int | None = None,
+    required_replay_causes=(),
+    forbidden_replay_causes=(),
+    s2_is_bank_conflict: int | None = None,
+    s2_is_forward_fail: int | None = None,
+    s3_is_replay: int | None = None,
+) -> bool:
+    if lane is not None and lane_state["lane"] != int(lane):
+        return False
+    if rob_idx_value is not None and int(rob_idx_value) not in {
+        lane_state["s1_rob_idx_value"],
+        lane_state["s2_rob_idx_value"],
+        lane_state["s3_rob_idx_value"],
+    }:
+        return False
+
+    replay_causes = set(lane_state["replay_causes"])
+    if any(cause not in replay_causes for cause in required_replay_causes):
+        return False
+    if any(cause in replay_causes for cause in forbidden_replay_causes):
+        return False
+    if s2_is_bank_conflict is not None and lane_state["s2_is_bank_conflict"] != int(s2_is_bank_conflict):
+        return False
+    if s2_is_forward_fail is not None and lane_state["s2_is_forward_fail"] != int(s2_is_forward_fail):
+        return False
+    if s3_is_replay is not None and lane_state["s3_is_replay"] != int(s3_is_replay):
+        return False
+    return True
+
+
+def _wait_load_debug_event(
+    env,
+    *,
+    lane: int | None = None,
+    rob_idx_value: int | None = None,
+    required_replay_causes=(),
+    forbidden_replay_causes=(),
+    s2_is_bank_conflict: int | None = None,
+    s2_is_forward_fail: int | None = None,
+    s3_is_replay: int | None = None,
+    max_cycles: int = 200,
+):
+    recent = deque(maxlen=16)
+    for _ in range(max_cycles):
+        debug_state = env.sample_load_debug_state()
+        for lane_state in debug_state["lanes"]:
+            recent.append(dict(lane_state))
+            if _load_debug_lane_matches(
+                lane_state,
+                lane=lane,
+                rob_idx_value=rob_idx_value,
+                required_replay_causes=required_replay_causes,
+                forbidden_replay_causes=forbidden_replay_causes,
+                s2_is_bank_conflict=s2_is_bank_conflict,
+                s2_is_forward_fail=s2_is_forward_fail,
+                s3_is_replay=s3_is_replay,
+            ):
+                return dict(lane_state)
+        env.advance_cycles(1)
+
+    raise TimeoutError(
+        "等待 load debug 事件超时: "
+        f"lane={lane}, rob={rob_idx_value}, causes={tuple(required_replay_causes)}, recent={tuple(recent)}"
+    )
 
 
 def _wait_sq_matchinvalid_and_violation(
@@ -965,14 +1103,24 @@ class ScalarForwardFailReplaySequence:
             mask=self.mask,
             store_set_hit=1,
         )
-        send_load(env, load_txn)
-        expect_load(env, load_txn)
-        replay_event = env.wait_replay_event(
-            cause="FF",
-            rob_idx_flag=load_txn.rob_idx_flag,
-            rob_idx_value=load_txn.rob_idx_value,
-            max_cycles=self.replay_wait_cycles,
-        )
+        with _capture_load_debug_trace(env, max_events=64) as load_debug_trace:
+            send_load(env, load_txn)
+            expect_load(env, load_txn)
+            sq_forward_event = _wait_sq_forward_event(
+                env,
+                lane=load_txn.issue_lane,
+                expected_sq_idx=store_sq_ptr.value,
+                expected_data_invalid_valid=1,
+                expected_match_invalid=0,
+                expected_forward_invalid=0,
+                max_cycles=self.replay_wait_cycles,
+            )
+            replay_event = env.wait_replay_event(
+                cause="FF",
+                rob_idx_flag=load_txn.rob_idx_flag,
+                rob_idx_value=load_txn.rob_idx_value,
+                max_cycles=self.replay_wait_cycles,
+            )
 
         issue_scalar_std(
             env,
@@ -1007,9 +1155,101 @@ class ScalarForwardFailReplaySequence:
         return ScalarForwardFailReplaySequenceResult(
             store_sq_ptr=store_sq_ptr,
             replay_event=replay_event,
+            sq_forward_event=sq_forward_event,
+            load_debug_trace=tuple(
+                event
+                for event in load_debug_trace
+                if load_txn.rob_idx_value in {
+                    event["s1_rob_idx_value"],
+                    event["s2_rob_idx_value"],
+                    event["s3_rob_idx_value"],
+                }
+            ),
             load_result=load_result,
             final_state=final_state,
             committed_store_view=committed_store_view,
+        )
+
+
+class ScalarBankConflictReplaySequence:
+    def __init__(
+        self,
+        *,
+        lead_load_txn: LoadTxn,
+        victim_load_txn: LoadTxn,
+        replay_wait_cycles: int = 200,
+        drain_cycles: int | None = None,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.lead_load_txn = lead_load_txn
+        self.victim_load_txn = victim_load_txn
+        self.replay_wait_cycles = int(replay_wait_cycles)
+        self.drain_cycles = drain_cycles
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarBankConflictReplaySequenceResult:
+        if self.lead_load_txn.issue_lane == self.victim_load_txn.issue_lane:
+            raise ValueError("bank conflict sequence 需要两个不同的 issue lane")
+
+        completed_before = env.get_completed_load_count()
+        lead_expected = expect_load(env, self.lead_load_txn)
+        victim_expected = expect_load(env, self.victim_load_txn)
+
+        with _capture_load_debug_trace(env, max_events=96) as load_debug_trace:
+            send_load_batch_same_cycle(env, (self.lead_load_txn, self.victim_load_txn))
+            load_debug_event = _wait_load_debug_event(
+                env,
+                rob_idx_value=self.victim_load_txn.rob_idx_value,
+                required_replay_causes=("BC",),
+                forbidden_replay_causes=("FF", "NK", "RAW", "RAR"),
+                max_cycles=self.replay_wait_cycles,
+            )
+            replay_event = env.wait_replay_event(
+                rob_idx_flag=self.victim_load_txn.rob_idx_flag,
+                rob_idx_value=self.victim_load_txn.rob_idx_value,
+                max_cycles=self.replay_wait_cycles,
+            )
+
+            env.wait_load_writeback_observed(
+                rob_idx_flag=self.lead_load_txn.rob_idx_flag,
+                rob_idx_value=self.lead_load_txn.rob_idx_value,
+                data=lead_expected.expected_data,
+                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+            )
+            env.wait_load_writeback_observed(
+                rob_idx_flag=self.victim_load_txn.rob_idx_flag,
+                rob_idx_value=self.victim_load_txn.rob_idx_value,
+                data=victim_expected.expected_data,
+                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+            )
+            completed = _wait_completed_load_count(
+                env,
+                completed_before + 2,
+                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+            )
+
+        final_state = SequenceState(
+            next_lq_ptr=ptr_inc(self.victim_load_txn.lq_ptr, env.config.sequence.load_queue_size),
+            sq_ptr=self.lead_load_txn.sq_ptr,
+        )
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+
+        return ScalarBankConflictReplaySequenceResult(
+            issued_loads=(self.lead_load_txn, self.victim_load_txn),
+            replay_event=replay_event,
+            load_debug_event=load_debug_event,
+            load_debug_trace=tuple(
+                event
+                for event in load_debug_trace
+                if self.victim_load_txn.rob_idx_value in {
+                    event["s1_rob_idx_value"],
+                    event["s2_rob_idx_value"],
+                    event["s3_rob_idx_value"],
+                }
+            ),
+            final_state=final_state,
+            completed_load_count=completed,
         )
 
 

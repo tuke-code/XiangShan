@@ -18,9 +18,12 @@ from sequences import (
     MmuSv39AddressSpaceConfig,
     MmuSv39AddressSpaceInstallSequence,
     ResetEnvSequence,
+    ScalarBankConflictReplaySequence,
+    ScalarBankConflictSqDataInvalidNukeSequence,
     ScalarCacheMissReplaySequence,
     ScalarForwardFailReplaySequence,
     ScalarNcReplaySequence,
+    ScalarPipelineStldNukeSequence,
     ScalarRarViolationSequence,
     ScalarRawReplaySequence,
     ScalarSqDataInvalidMatchInvalidTriggerSequence,
@@ -43,6 +46,14 @@ RAR_OLDER_STORE_DATA = 0x2233445566778899
 RAR_ADDR = 0x80000880
 RAR_OLD_DATA = 0x1020304050607080
 RAR_NEW_DATA = 0x8877665544332211
+BC_REPLAY_ADDR = 0x80000980
+BC_REPLAY_DATA = 0x3141592653589793
+STLD_NUKE_ADDR = 0x80000A80
+STLD_NUKE_WARMUP_DATA = 0x1111222233334444
+STLD_NUKE_STORE_DATA = 0xAAAABBBBCCCCDDDD
+BC_FF_NK_ADDR = 0x80000B80
+BC_FF_NK_WARMUP_DATA = 0x0123456789ABCDEF
+BC_FF_NK_STORE_DATA = 0xDEADBEEFCAFEBABE
 MATCH_INVALID_ROOT_A = 0x88000000
 MATCH_INVALID_ROOT_B = 0x88001000
 MATCH_INVALID_MAIN_VA = 0x40001000
@@ -64,10 +75,41 @@ DUTBUG_MATCHINVALID_REDIRECT_REPLAY_DUAL_PATH_XFAIL_REASON = (
 
 def _reset_env_and_state(env) -> SequenceState:
     return ResetEnvSequence(
-        require_issue_lanes=(0, 3, 5),
+        require_issue_lanes=(0, 1, 2, 3, 5),
         require_lq_ready=True,
         require_sq_ready=True,
     ).run(env)
+
+
+def _warm_cacheable_load(env, *, state: SequenceState, req_id: int, addr: int, data: int) -> SequenceState:
+    completed_before = env.get_completed_load_count()
+    env.preload_u64(addr, data)
+    warmup_load = LoadTxn(
+        req_id=req_id,
+        addr=addr,
+        lq_ptr=state.next_lq_ptr,
+        sq_ptr=state.sq_ptr,
+    )
+    env.expect_scalar_load(
+        req_id=warmup_load.req_id,
+        pdest=warmup_load.resolved_pdest,
+        addr=addr,
+        size=warmup_load.size,
+        mask=warmup_load.mask,
+    )
+    send_load(env, warmup_load)
+    warmup_writeback = env.wait_load_writeback_observed(
+        rob_idx_flag=warmup_load.rob_idx_flag,
+        rob_idx_value=warmup_load.rob_idx_value,
+        data=data,
+        max_cycles=512,
+    )
+    assert warmup_writeback["data"] == data, "cache warmup load 未读到预热数据"
+    env.wait_completed_load_count(completed_before + 1, max_cycles=128)
+    return SequenceState(
+        next_lq_ptr=ptr_inc(state.next_lq_ptr, env.config.sequence.load_queue_size),
+        sq_ptr=state.sq_ptr,
+    )
 
 
 def test_api_MemBlock_scalar_forward_fail_replay_smoke(env):
@@ -91,6 +133,11 @@ def test_api_MemBlock_scalar_forward_fail_replay_smoke(env):
     assert result.replay_event["cause"] == "FF", "FF replay 原因不匹配"
     assert result.replay_event["source"] in {"replay_queue", "replay_lane", "ldu"}, "FF replay 观测来源异常"
     assert result.replay_event["rob_idx_value"] == 1, "FF replay 的 load robIdx 不匹配"
+    assert result.sq_forward_event["data_invalid_valid"] == 1, "FF 场景未命中 SQ dataInvalid"
+    assert result.sq_forward_event["match_invalid"] == 0, "FF 场景不应退化为 matchInvalid"
+    assert result.sq_forward_event["forward_invalid"] == 0, "FF 场景不应退化为 forwardInvalid"
+    assert result.sq_forward_event["data_invalid_value"] == result.store_sq_ptr.value, "FF dataInvalid 未指向 older store"
+    assert any("FF" in event["replay_causes"] for event in result.load_debug_trace), "FF 场景未命中 load debug replayCause.FF"
     assert result.committed_store_view.committed, "FF replay 场景中的 store 未进入 committed"
     assert result.committed_store_view.addr == FORWARD_FAIL_STORE_ADDR, "FF replay store 地址不匹配"
     assert (int(result.committed_store_view.data) & ((1 << 64) - 1)) == FORWARD_FAIL_STORE_DATA
@@ -244,6 +291,137 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
     env.assert_no_outstanding()
 
 
+def test_api_MemBlock_scalar_bank_conflict_replay_smoke(env):
+    """
+    两条同地址 load 同拍 issue 时，低优先级 lane 应命中一次纯 `BC` replay。
+    """
+
+    initial_state = _reset_env_and_state(env)
+    lead_addr = BC_REPLAY_ADDR + 0x40
+    warmed_state = _warm_cacheable_load(
+        env,
+        state=initial_state,
+        req_id=0,
+        addr=BC_REPLAY_ADDR,
+        data=BC_REPLAY_DATA,
+    )
+    warmed_state = _warm_cacheable_load(
+        env,
+        state=warmed_state,
+        req_id=1,
+        addr=lead_addr,
+        data=BC_REPLAY_DATA ^ 0x1111111111111111,
+    )
+    victim_lq_ptr = ptr_inc(warmed_state.next_lq_ptr, env.config.sequence.load_queue_size)
+
+    result = ScalarBankConflictReplaySequence(
+        lead_load_txn=LoadTxn(
+            req_id=2,
+            addr=lead_addr,
+            lq_ptr=warmed_state.next_lq_ptr,
+            sq_ptr=warmed_state.sq_ptr,
+            issue_lane=0,
+        ),
+        victim_load_txn=LoadTxn(
+            req_id=3,
+            addr=BC_REPLAY_ADDR,
+            lq_ptr=victim_lq_ptr,
+            sq_ptr=warmed_state.sq_ptr,
+            issue_lane=1,
+        ),
+        assert_no_outstanding=True,
+    ).run(env)
+
+    assert result.replay_event["rob_idx_value"] == 3, "bank conflict replay 未对应 victim load"
+    assert "BC" in result.load_debug_event["replay_causes"], "load debug 未命中 BC cause"
+    assert "FF" not in result.load_debug_event["replay_causes"], "bank conflict 场景不应混入 FF cause"
+    assert "NK" not in result.load_debug_event["replay_causes"], "bank conflict 场景不应混入 NK cause"
+
+
+def test_api_MemBlock_scalar_pipeline_stld_nuke_smoke(env):
+    """
+    older store 仅提前准备好数据，随后在 younger load issue 后立即补 STA，应稳定命中 pipeline `NK`。
+    """
+
+    initial_state = _reset_env_and_state(env)
+    warmed_state = _warm_cacheable_load(
+        env,
+        state=initial_state,
+        req_id=0,
+        addr=STLD_NUKE_ADDR,
+        data=STLD_NUKE_WARMUP_DATA,
+    )
+
+    result = ScalarPipelineStldNukeSequence(
+        store_txn=StoreTxn(
+            req_id=1,
+            sq_ptr=warmed_state.sq_ptr,
+            addr=STLD_NUKE_ADDR,
+            data=STLD_NUKE_STORE_DATA,
+        ),
+        initial_lq_ptr=warmed_state.next_lq_ptr,
+        load_req_id=2,
+        assert_no_outstanding=True,
+    ).run(env)
+
+    assert result.main_writeback["data"] == STLD_NUKE_STORE_DATA, "pipeline nuke 恢复后未读到 older store 数据"
+    assert result.committed_store_view.committed, "pipeline nuke 场景中的 store 未进入 committed"
+    assert any("NK" in event["replay_causes"] for event in result.load_debug_trace), "pipeline nuke 场景未命中 NK cause"
+    assert not any("BC" in event["replay_causes"] for event in result.load_debug_trace), "pipeline nuke 场景不应混入 BC cause"
+    assert not any("FF" in event["replay_causes"] for event in result.load_debug_trace), "pipeline nuke 场景不应混入 FF cause"
+
+
+def test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke(env):
+    """
+    组合验证：dcache hit + bank conflict + SQ dataInvalid=1/matchInvalid=0 + pipeline st-ld nuke。
+    """
+
+    initial_state = _reset_env_and_state(env)
+    lead_addr = BC_FF_NK_ADDR + 0x40
+    warmed_state = _warm_cacheable_load(
+        env,
+        state=initial_state,
+        req_id=0,
+        addr=BC_FF_NK_ADDR,
+        data=BC_FF_NK_WARMUP_DATA,
+    )
+    warmed_state = _warm_cacheable_load(
+        env,
+        state=warmed_state,
+        req_id=1,
+        addr=lead_addr,
+        data=BC_FF_NK_WARMUP_DATA ^ 0x2222222222222222,
+    )
+
+    result = ScalarBankConflictSqDataInvalidNukeSequence(
+        store_txn=StoreTxn(
+            req_id=2,
+            sq_ptr=warmed_state.sq_ptr,
+            addr=BC_FF_NK_ADDR,
+            data=BC_FF_NK_STORE_DATA,
+        ),
+        initial_lq_ptr=warmed_state.next_lq_ptr,
+        lead_load_req_id=3,
+        victim_load_req_id=4,
+        lead_addr=lead_addr,
+        assert_no_outstanding=True,
+    ).run(env)
+
+    assert result.sq_forward_event["data_invalid_valid"] == 1, "组合场景未命中 SQ dataInvalid"
+    assert result.sq_forward_event["match_invalid"] == 0, "组合场景不应混入 matchInvalid"
+    assert result.sq_forward_event["forward_invalid"] == 0, "组合场景不应退化为 forwardInvalid"
+    assert result.sq_forward_event["data_invalid_value"] == result.store_sq_ptr.value, "dataInvalid 未指向 older store"
+    assert {"BC", "FF"} <= set(result.load_debug_event["replay_causes"]), (
+        f"组合场景缺少目标 replay causes: {result.load_debug_event['replay_causes']}"
+    )
+    assert "RAW" not in result.load_debug_event["replay_causes"], "组合场景不应退化为 RAW"
+    assert "RAR" not in result.load_debug_event["replay_causes"], "组合场景不应退化为 RAR"
+    assert result.nk_observed, "组合场景未命中目标 victim load 的 NK cause"
+    assert result.lead_writeback["data"] == (BC_FF_NK_WARMUP_DATA ^ 0x2222222222222222), "lead load 不应被 older store 污染"
+    assert result.victim_writeback["data"] == BC_FF_NK_STORE_DATA, "victim load 恢复后未读到 older store 数据"
+    assert result.committed_store_view.committed, "组合场景中的 older store 未进入 committed"
+
+
 def test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke(env):
     """
     同一虚拟地址在 satp 切换前后映射到不同物理页。
@@ -279,31 +457,13 @@ def test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke(env):
     env.preload_u64(MATCH_INVALID_MAIN_VA, MATCH_INVALID_STORE_DATA)
     env.mmu.allow_all_smode_access()
 
-    warmup_load = LoadTxn(
+    warmed_state = _warm_cacheable_load(
+        env,
+        state=initial_state,
         req_id=0,
         addr=main_pa_b,
-        lq_ptr=initial_state.next_lq_ptr,
-        sq_ptr=initial_state.sq_ptr,
-    )
-    env.expect_scalar_load(
-        req_id=warmup_load.req_id,
-        pdest=warmup_load.resolved_pdest,
-        addr=main_pa_b,
-        size=warmup_load.size,
-        mask=warmup_load.mask,
-    )
-    send_load(env, warmup_load)
-    warmup_writeback = env.wait_load_writeback_observed(
-        rob_idx_flag=warmup_load.rob_idx_flag,
-        rob_idx_value=warmup_load.rob_idx_value,
         data=MATCH_INVALID_WARMUP_DATA,
-        max_cycles=512,
     )
-    for _ in range(64):
-        if env.get_completed_load_count() >= 1:
-            break
-        env.Step(1)
-    assert env.get_completed_load_count() == 1, "物理预热 load 未完成 compare"
 
     with env.mmu.ptw_responder():
         trigger = ScalarSqDataInvalidMatchInvalidTriggerSequence(
@@ -317,8 +477,8 @@ def test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke(env):
             ),
             main_load_req_id=3,
             initial_state=SequenceState(
-                next_lq_ptr=ptr_inc(initial_state.next_lq_ptr, env.config.sequence.load_queue_size),
-                sq_ptr=initial_state.sq_ptr,
+                next_lq_ptr=warmed_state.next_lq_ptr,
+                sq_ptr=warmed_state.sq_ptr,
             ),
             activate_root_pt_addr=MATCH_INVALID_ROOT_B,
             tlb_prime_req_id=2,
@@ -329,7 +489,6 @@ def test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke(env):
 
     env.mmu.disable_translation()
 
-    assert warmup_writeback["data"] == MATCH_INVALID_WARMUP_DATA, "物理预热 load 未读到目标 cacheline 数据"
     assert trigger.tlb_prime_writeback["data"] == MATCH_INVALID_TLB_PRIME_DATA, "satp 切回 root-B 后的 TLB 预热 load 未完成"
     assert trigger.sq_forward_event["data_invalid_valid"] == 1, "SQ forward 未返回 dataInvalid=1"
     assert trigger.sq_forward_event["match_invalid"] == 1, "SQ forward 未返回 matchInvalid=1"

@@ -6,6 +6,8 @@ MemBlock reusable test sequences.
 from .memblock_sequences import (
     FlushStoreBuffersSequence,
     ResetEnvSequence,
+    ScalarBankConflictReplaySequence,
+    ScalarBankConflictReplaySequenceResult,
     ScalarCacheMissReplaySequence,
     ScalarForwardFailReplaySequence,
     ScalarLoadBurstSequence,
@@ -31,6 +33,10 @@ from .mmu_sequences import (
     U64MemoryPreload,
 )
 from .violation_sequences import (
+    ScalarBankConflictSqDataInvalidNukeSequence,
+    ScalarBankConflictSqDataInvalidNukeSequenceResult,
+    ScalarPipelineStldNukeSequence,
+    ScalarPipelineStldNukeSequenceResult,
     ScalarRarViolationSequence,
     ScalarRarViolationSequenceResult,
     ScalarRawReplaySequence,
