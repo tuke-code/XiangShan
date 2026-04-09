@@ -95,7 +95,7 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   private val s3_firstTakenIsCond = s3_update.firstTakenBranch.bits.attribute.isConditional
   private val s3_cfiPc            = getCfiPcFromPosition(s3_update.startPc, s3_firstTakenPos)
   private val s3_bwTaken =
-    s3_cfiPc.addr > s3_update.target.addr
+    s3_cfiPc.addr(PredictionTargetWidth - 1, 0) > s3_update.target.addr(PredictionTargetWidth - 1, 0)
   private val s3_lessThanFirstTaken = s3_update.position.zip(s3_hitMask).map {
     case (pos, hit) => hit && (pos < s3_firstTakenPos)
   }
@@ -129,7 +129,7 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   private val debug_taken   = io.redirect.taken
   private val debug_isCond  = io.redirect.attribute.isConditional
   private val debug_bwTaken =
-    io.redirect.cfiPc.addr > io.redirect.target.addr
+    io.redirect.cfiPc.addr(PredictionTargetWidth - 1, 0) > io.redirect.target.addr(PredictionTargetWidth - 1, 0)
   private val debug_takenPosition = getAlignedInstOffset(io.redirect.cfiPc)
   private val debug_lessThanPc = debug_oldPositions.zip(debug_oldHits).map {
     case (pos, hit) => hit && (pos < debug_takenPosition)
@@ -160,8 +160,9 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   private val r0_taken  = io.redirect.taken
   private val r0_isCond = io.redirect.attribute.isConditional
   private val r0_bwTaken =
-    io.redirect.cfiPc.addr > io.redirect.target.addr
-  private val r0_commonHR = WireInit(0.U.asTypeOf(new CommonHREntry))
+    io.redirect.cfiPc.addr(PredictionTargetWidth - 1, 0) > io.redirect.target.addr(PredictionTargetWidth - 1, 0)
+  private val r0_takenPosition = getAlignedInstOffset(io.redirect.cfiPc)
+  private val r0_commonHR      = WireInit(0.U.asTypeOf(new CommonHREntry))
   r0_commonHR.valid           := false.B
   r0_commonHR.predStartPc.get := io.redirect.target
   r0_commonHR.ghr             := io.redirect.meta.ghr
@@ -179,7 +180,7 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   private val r1_taken   = r1_redirect.taken
   private val r1_isCond  = r1_redirect.attribute.isConditional
   private val r1_bwTaken =
-    r1_redirect.cfiPc.addr > r1_redirect.target.addr
+    r1_redirect.cfiPc.addr(PredictionTargetWidth - 1, 0) > r1_redirect.target.addr(PredictionTargetWidth - 1, 0)
   private val r1_takenPosition = getAlignedInstOffset(r1_redirect.cfiPc)
   private val r1_lessThanPc = r1_oldPositions.zip(r1_oldHits).map {
     case (pos, hit) => hit && (pos < r1_takenPosition)
