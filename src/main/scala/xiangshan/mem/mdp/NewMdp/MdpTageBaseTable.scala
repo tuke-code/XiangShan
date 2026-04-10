@@ -396,6 +396,7 @@ class TageBaseTableAlignBank(
     meta.rawHit     := rawHit
     meta.cfiPosition:= e.cfiPosition
     meta.counter    := c
+    meta.distance   := e.distance
   }
 
   // add an alias for hitMask for later use & debug purpose
@@ -444,9 +445,11 @@ class TageBaseTableAlignBank(
   // NOTE: the original rawHit result can be multi-hit (i.e. multiple rawHit && position match), so PriorityEncoderOH
   private val t1_hitMask = PriorityEncoderOH(VecInit(t1_meta.map(_.hit(t1_mispredictInfo.bits))).asUInt)
   private val t1_hit     = t1_hitMask.orR
+  private val t1_hitDistance = Mux1H(t1_hitMask, t1_meta.map(_.distance))
+  private val t1_hitDistanceMismatch = t1_hit && t1_hitDistance =/= t1_mispredictInfo.bits.distance
 
   // Write entry only when there's a mispredict, and if:
-  private val t1_entryNeedWrite = t1_mispredictInfo.valid && t1_needWrite && !t1_hit
+  private val t1_entryNeedWrite = t1_mispredictInfo.valid && t1_needWrite && (!t1_hit || t1_hitDistanceMismatch)
 
   // Use hit wayMask if hit, else use replacer's victim way
   private val t1_entryWayMask = Mux(t1_hit, t1_hitMask, replacer.io.victim.wayMask)
@@ -640,6 +643,5 @@ class MdpTageBaseTable(implicit p: Parameters) extends XSModule with HasMdpBaseT
   val mdpBaseTrainCnt = PopCount(t1_train.loads.map(v => v.valid && t1_fire))
   XSPerfAccumulate("mdpBaseTrainCnt", mdpBaseTrainCnt)
 }
-
 
 

@@ -44,7 +44,7 @@ object UsefulCounter extends SaturateCounterFactory {
   def Init(implicit p: Parameters): SaturateCounter =
     SaturateCounterInit(width, 0)
   def InitWeak(implicit p: Parameters): SaturateCounter =
-    SaturateCounterInit(width, 2) //TODO:更改为宏
+    SaturateCounterInit(width, 1) //TODO:更改为宏
   def InitStrong(implicit p: Parameters): SaturateCounter =
     SaturateCounterInit(width, 6)
 }

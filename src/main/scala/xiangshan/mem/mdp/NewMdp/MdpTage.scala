@@ -38,12 +38,14 @@ class TrainInfo(implicit p: Parameters) extends XSBundle with HasMdpTageTablePar
   val trainNxOH    = UInt(NumTables.W)
   val hitWayMaskOH = UInt(MaxNumWays.W)
   val allocateNxOH = UInt(NumTables.W)
+  val allWayWeakOH = UInt(NumTables.W)
   val updateEntry  = new TageEntry
   val canAllocate = Bool()
   //
   val needUpdate         = Bool()
   val needAllocate       = Bool()
   val needAllWayWeak     = Bool()
+  val iwNdepClampBlocked = Bool()
   val allocateUsefulCtr  = UsefulCounter()
   val updateUsefulCtr    = UsefulCounter()
   val AllWayWeakUsefulCtrs = Vec(MaxNumWays,UsefulCounter())
@@ -85,6 +87,37 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
 
   /* *** submodules *** */
   private val tables = TableInfos.zipWithIndex.map { case (info, i) => Module(new MdpTageTable(i, info)) }
+
+  private def getAllocateAndWeakTargets(
+    startTableOH: Seq[Bool],
+    wayFullMask: Seq[Bool]
+  ): (UInt, Bool, UInt) = {
+    val searchMask = Wire(UInt(startTableOH.length.W))
+    when(startTableOH.asUInt.orR) {
+      searchMask := ~(startTableOH.asUInt - 1.U) << 1.U
+    }.otherwise {
+      searchMask := ~0.U(startTableOH.length.W)
+    }
+
+    val allocatableMask = searchMask & (~wayFullMask.asUInt)
+    val allocateOH = Mux(
+      allocatableMask.orR,
+      PriorityEncoderOH(allocatableMask),
+      0.U(startTableOH.length.W)
+    )
+    val firstTriedOH = Mux(
+      searchMask.orR,
+      PriorityEncoderOH(searchMask),
+      0.U(startTableOH.length.W)
+    )
+    val allWayWeakOH = Mux(
+      (firstTriedOH & wayFullMask.asUInt).orR,
+      firstTriedOH,
+      0.U(startTableOH.length.W)
+    )
+
+    (allocateOH, allocatableMask.orR, allWayWeakOH)
+  }
 
   // reset usefulCtr of all entries when usefulResetCtr saturated
   private val usefulResetCtr = RegInit(UsefulResetCounter.Zero)
@@ -268,40 +301,76 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     val longestHistTableOH  = getLongestHistTableOH(tageHitTableMask)
     val allocateNxType   = WireDefault((LoadType.None).asTypeOf(new LoadTrainType))
     val trainNxType      = WireDefault((LoadType.None).asTypeOf(new LoadTrainType))
+    val allWayWeakOH     = WireDefault(0.U(NumTables.W))
     dontTouch(tageHitTableMask.asUInt.suggestName(s"t2_Load_${i}_hitTableMask"))
     val provider = Mux1H(longestHistTableOH.asUInt, tageTableTagMatchResults)
     val rawUsefulCtr = Mux1H(provider.hitWayMaskOH, provider.usefulCtrs)
+    val allWayWeakTargetUsefulCtrsRaw = Wire(Vec(MaxNumWays, UsefulCounter()))
+    val allWayWeakTargetUsefulCtrs = Wire(Vec(MaxNumWays, UsefulCounter()))
+    allWayWeakTargetUsefulCtrsRaw := VecInit(Seq.fill(MaxNumWays)(UsefulCounter.Zero))
+    when(allWayWeakOH.orR) {
+      allWayWeakTargetUsefulCtrsRaw := Mux1H(allWayWeakOH, tageTableTagMatchResults).usefulCtrs
+    }
+    allWayWeakTargetUsefulCtrs := VecInit(allWayWeakTargetUsefulCtrsRaw.map(_.getDecrease()))
+    val providerHit = tageHitTableMask.reduce(_ || _)
+    val providerIsNdep = provider.distance === 0.U
+    val awProviderMismatch = load.valid && load.bits.updateType === MdpUpdateType.M_AW &&
+      providerHit && !providerIsNdep
+    val asProviderMismatch = load.valid && load.bits.updateType === MdpUpdateType.M_AS &&
+      providerHit && (providerIsNdep || provider.distance =/= load.bits.distance)
+    val rewriteProvider = rawUsefulCtr.isSaturateNegative && (awProviderMismatch || asProviderMismatch)
     val needAllocateWeak   = allocateNxType.isAllocateWeak
     val needAllocateStrong = allocateNxType.isAllocateStrong
-    val needAllWayWeak     = trainNxType.isAllWayWeak
-    val notNeedAllWayWeak  = tageHitTableMask.reduce(_ || _) && trainNxType.isAllWayWeak && VecInit(
-      provider.usefulCtrs.map(ctr => ctr.isSaturateNegative)
+    val needAllWayWeak     = allWayWeakOH.orR
+    val notNeedAllWayWeak  = needAllWayWeak && VecInit(
+      allWayWeakTargetUsefulCtrsRaw.map(ctr => ctr.isSaturateNegative)
     ).reduce(_ && _)
     val notNeedUpdate      = (((trainNxType.isStrong && rawUsefulCtr.isSaturatePositive) 
                            ||  (trainNxType.isWeak   && rawUsefulCtr.isSaturateNegative)) 
                            && tageHitTableMask.reduce(_ || _)) || trainNxType.isNone
 
     val usefulCtrUpdate = trainNxType.isStrong || trainNxType.isWeak
-    val newUsefulCtr = rawUsefulCtr.getUpdate(increase = trainNxType.isStrong,en = usefulCtrUpdate)
-    val needUpdate = tageHitTableMask.reduce(_ || _)  && !needAllWayWeak && !notNeedUpdate
+    val newUsefulCtr = Wire(UsefulCounter())
+    newUsefulCtr := rawUsefulCtr
+    when(usefulCtrUpdate) {
+      when(trainNxType.isWeak) {
+        newUsefulCtr := rawUsefulCtr.getDecrease()
+      }.elsewhen(load.bits.updateType === MdpUpdateType.M_IW && provider.distance === 0.U) {
+        newUsefulCtr := rawUsefulCtr.getIncrease(en = rawUsefulCtr.value <= 2.U)
+      }.otherwise {
+        newUsefulCtr := rawUsefulCtr.getIncrease()
+      }
+    }
+    val needUpdate = providerHit && (rewriteProvider || !notNeedUpdate)
 
     val trainInfo = Wire(new TrainInfo).suggestName(s"t2_Load_${i}_trainInfo")
-    trainInfo.valid           := tageHitTableMask.reduce(_ || _) || needAllocateWeak || needAllocateStrong
+    trainInfo.valid           := providerHit || needAllocateWeak || needAllocateStrong
     trainInfo.trainNxOH       := longestHistTableOH.asUInt
     trainInfo.hitWayMaskOH    := provider.hitWayMaskOH
     trainInfo.allocateNxOH    := WireDefault(0.U)
+    trainInfo.allWayWeakOH    := allWayWeakOH
     trainInfo.needAllocate    := needAllocateWeak || needAllocateStrong
     trainInfo.canAllocate     := WireDefault(false.B)
     //感觉notNeedWrite挺关键的，因为有冲突存在
     trainInfo.needAllWayWeak  := needAllWayWeak && !notNeedAllWayWeak
     trainInfo.needUpdate      := needUpdate
+    trainInfo.iwNdepClampBlocked := load.valid && load.bits.updateType === MdpUpdateType.M_IW &&
+      providerHit && provider.distance === 0.U && rawUsefulCtr.value >= 2.U
     trainInfo.allocateUsefulCtr := Mux(needAllocateStrong, UsefulCounter.InitStrong,
                                     Mux(needAllocateWeak, UsefulCounter.InitWeak, UsefulCounter.Init))
-    trainInfo.updateUsefulCtr   := newUsefulCtr
+    trainInfo.updateUsefulCtr   := Mux(
+      rewriteProvider,
+      Mux(load.bits.updateType === MdpUpdateType.M_AS, UsefulCounter.InitStrong, UsefulCounter.InitWeak),
+      newUsefulCtr
+    )
     trainInfo.updateEntry.valid := true.B
     trainInfo.updateEntry.tag   := provider.tag
-    trainInfo.updateEntry.distance := provider.distance
-    trainInfo.AllWayWeakUsefulCtrs := provider.allWayWeakUsefulCtrs
+    trainInfo.updateEntry.distance := Mux(
+      rewriteProvider,
+      Mux(load.bits.updateType === MdpUpdateType.M_AS, load.bits.distance, 0.U),
+      provider.distance
+    )
+    trainInfo.AllWayWeakUsefulCtrs := allWayWeakTargetUsefulCtrs
 
     when(load.valid){
       switch(load.bits.updateType){
@@ -310,37 +379,57 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
           trainNxType.loadType   := LoadType.None
         }
         is(MdpUpdateType.M_AW){
-          when(tageHitTableMask.asUInt.orR){ //命中NX
+          when(providerHit){ //命中NX
             // trainBaseType        := LoadType.None
-            val allocInfo = getFirstNonFullTableOH(longestHistTableOH, tageWayFullMask)
-            trainNxType.loadType    := Mux(allocInfo._3, LoadType.Weak, LoadType.AllWayWeak)
-            allocateNxType.loadType := LoadType.AllocateWeak
-            trainInfo.allocateNxOH  := allocInfo._1
-            trainInfo.canAllocate   := allocInfo._2
-            //Allocate and weak contain both actions, so two identities are required to indicate both actions
+            when(rewriteProvider) {
+              trainNxType.loadType    := LoadType.None
+              allocateNxType.loadType := LoadType.None
+              allWayWeakOH            := 0.U
+              trainInfo.allocateNxOH  := 0.U
+              trainInfo.canAllocate   := false.B
+            }.otherwise {
+              val allocInfo = getAllocateAndWeakTargets(longestHistTableOH, tageWayFullMask)
+              trainNxType.loadType    := LoadType.Weak
+              allocateNxType.loadType := LoadType.AllocateWeak
+              allWayWeakOH            := allocInfo._3
+              trainInfo.allocateNxOH  := allocInfo._1
+              trainInfo.canAllocate   := allocInfo._2
+              //Allocate and weak contain both actions, so two identities are required to indicate both actions
+            }
           }.otherwise{ //hit Base
             // trainBaseType.loadType := LoadType.Weak
             trainNxType.loadType    := LoadType.None
             allocateNxType.loadType := LoadType.AllocateWeak
-            val allocInfo = getFirstNonFullTableOH(Seq.fill(NumTables)(false.B), tageWayFullMask)
+            val allocInfo = getAllocateAndWeakTargets(Seq.fill(NumTables)(false.B), tageWayFullMask)
+            allWayWeakOH            := allocInfo._3
             trainInfo.allocateNxOH  := allocInfo._1 //get first not full idx to allocate
             trainInfo.canAllocate   := allocInfo._2
           }
         }
         is(MdpUpdateType.M_AS){
-          when(tageHitTableMask.asUInt.orR){ //命中NX
+          when(providerHit){ //命中NX
             // trainBaseType.loadType        := LoadType.None
-            val allocInfo = getFirstNonFullTableOH(longestHistTableOH, tageWayFullMask)
-            trainNxType.loadType    := Mux(allocInfo._3, LoadType.Weak, LoadType.AllWayWeak)
-            allocateNxType.loadType := LoadType.AllocateStrong
-            trainInfo.allocateNxOH  := allocInfo._1
-            trainInfo.canAllocate   := allocInfo._2
-            //Allocate and weak contain both actions, so two identities are required to indicate both actions
+            when(rewriteProvider) {
+              trainNxType.loadType    := LoadType.None
+              allocateNxType.loadType := LoadType.None
+              allWayWeakOH            := 0.U
+              trainInfo.allocateNxOH  := 0.U
+              trainInfo.canAllocate   := false.B
+            }.otherwise {
+              val allocInfo = getAllocateAndWeakTargets(longestHistTableOH, tageWayFullMask)
+              trainNxType.loadType    := LoadType.Weak
+              allocateNxType.loadType := LoadType.AllocateStrong
+              allWayWeakOH            := allocInfo._3
+              trainInfo.allocateNxOH  := allocInfo._1
+              trainInfo.canAllocate   := allocInfo._2
+              //Allocate and weak contain both actions, so two identities are required to indicate both actions
+            }
           }.otherwise{ //hit Base
             // trainBaseType        := LoadType.Weak
             trainNxType.loadType    := LoadType.None
             allocateNxType.loadType := LoadType.AllocateStrong
-            val allocInfo = getFirstNonFullTableOH(Seq.fill(NumTables)(false.B), tageWayFullMask)
+            val allocInfo = getAllocateAndWeakTargets(Seq.fill(NumTables)(false.B), tageWayFullMask)
+            allWayWeakOH            := allocInfo._3
             trainInfo.allocateNxOH  := allocInfo._1 //get first not full idx to allocate
             trainInfo.canAllocate   := allocInfo._2
           }
@@ -412,6 +501,52 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   val mdpTageTrainLoadsAS = PopCount(t2_loads.map(load => load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AS))
   val mdpTageTrainLoadsIS = PopCount(t2_loads.map(load => load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IS))
   val mdpTageTrainLoadsIW = PopCount(t2_loads.map(load => load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IW))
+  val mdpTageTrainLoadsAWOnTage = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AW && info.trainNxOH.orR
+  })
+  val mdpTageTrainLoadsAWOnBase = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AW && !info.trainNxOH.orR
+  })
+  val mdpTageTrainLoadsASOnTage = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AS && info.trainNxOH.orR
+  })
+  val mdpTageTrainLoadsASOnBase = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AS && !info.trainNxOH.orR
+  })
+  val mdpTageTrainLoadsISOnTage = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IS && info.trainNxOH.orR
+  })
+  val mdpTageTrainLoadsISOnBase = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IS && !info.trainNxOH.orR
+  })
+  val mdpTageTrainLoadsIWOnTage = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IW && info.trainNxOH.orR
+  })
+  val mdpTageTrainLoadsIWOnBase = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IW && !info.trainNxOH.orR
+  })
+  val mdpTageTrainProviderWeakReq = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && (load.bits.updateType === MdpUpdateType.M_AW || load.bits.updateType === MdpUpdateType.M_AS) &&
+      info.trainNxOH.orR
+  })
+  val mdpTageTrainProviderWeakApplied = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && (load.bits.updateType === MdpUpdateType.M_AW || load.bits.updateType === MdpUpdateType.M_AS) &&
+      info.trainNxOH.orR && info.needUpdate
+  })
+  val mdpTageTrainProviderWeakSkip = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && (load.bits.updateType === MdpUpdateType.M_AW || load.bits.updateType === MdpUpdateType.M_AS) &&
+      info.trainNxOH.orR && !info.needUpdate
+  })
+  val mdpTageTrainProviderRewrite = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && (load.bits.updateType === MdpUpdateType.M_AW || load.bits.updateType === MdpUpdateType.M_AS) &&
+      info.trainNxOH.orR && info.needUpdate && !info.needAllocate && !info.needAllWayWeak
+  })
+  val mdpTageTrainIwNdepClampBlocked = PopCount(t2_trainInfoVec.map(info =>
+    info.valid && t2_fire && info.iwNdepClampBlocked
+  ))
+  val mdpTageTrainAllWayWeakMultiReqTables = PopCount(TableInfos.indices.map { tableIdx =>
+    t2_fire && (PopCount(t2_trainInfoVec.map(info => info.valid && info.allWayWeakOH(tableIdx))) > 1.U)
+  })
   val mdpTageTrainNeedWrite = VecInit(t2_trainInfoVec.map(info => 
     info.valid && (info.needUpdate || info.needAllocate || info.needAllWayWeak) && t2_fire))
 
@@ -426,17 +561,6 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   dontTouch(mdpTageTrainAllocate)
   dontTouch(mdpTageTrainAllWayWeak)
   dontTouch(mdpTageTrainUpdate)
-  XSPerfAccumulate("mdp_tage_train_raw_cnt", mdpTageTrainLoadsValidCnt)
-  XSPerfAccumulate("mdp_tage_train_raw_aw", mdpTageTrainLoadsAW)
-  XSPerfAccumulate("mdp_tage_train_raw_as", mdpTageTrainLoadsAS)
-  XSPerfAccumulate("mdp_tage_train_raw_is", mdpTageTrainLoadsIS)
-  XSPerfAccumulate("mdp_tage_train_raw_iw", mdpTageTrainLoadsIW)
-  XSPerfAccumulate("mdp_tage_train_cnt", mdpTageTrainCnt)
-  XSPerfAccumulate("mdp_tage_train_allocate", mdpTageTrainAllocateCnt)
-  XSPerfAccumulate("mdp_tage_train_all_way_weak", mdpTageTrainAllWayWeakCnt)
-  XSPerfAccumulate("mdp_tage_train_update", mdpTageTrainUpdateCnt)
-  XSPerfAccumulate("mdp_tage_train_need_write", PopCount(mdpTageTrainNeedWrite))
-  XSPerfAccumulate("mdp_tage_train_skip_update", PopCount(mdpTageTrainSkipUpdate))
 
   // //allocate
   // private val t2_needAllocateLoadOH = t2_trainInfoVec.map(info => info.valid && info.needAllocate)
@@ -503,47 +627,111 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     )
   })
 
-  // private val s2_tablePredictHitMask = VecInit(TableInfos.indices.map { tableIdx =>
-  //   s2_loads.map { load =>
-  //     val position = load.bits.cfiPosition
-  //     val tag = s2_rawTag(tableIdx) ^ position
-  //     s2_readResp(tableIdx).entries.map(entry => entry.valid && entry.tag === tag).reduce(_ || _)
-  //   }.reduce(_ || _)
-  // })
-  // private val s2_tableProviderMask = VecInit(TableInfos.indices.map { tableIdx =>
-  //   s2_loads.map { load =>
-  //     val position = load.bits.cfiPosition
-  //     val tag = s2_rawTag(tableIdx) ^ position
-  //     val hitTableMask = s2_readResp.zipWithIndex.map { case (tableReadResp, idx) =>
-  //       val tableTag = s2_rawTag(idx) ^ position
-  //       tableReadResp.entries.map(entry => entry.valid && entry.tag === tableTag).reduce(_ || _)
-  //     }
-  //     getLongestHistTableOH(hitTableMask)(tableIdx) && hitTableMask(tableIdx)
-  //   }.reduce(_ || _)
-  // })
-  // private val t2_tableHasInvalidMask = VecInit(t2_readResp.map { tableReadResp =>
-  //   tableReadResp.entries.map(!_.valid).reduce(_ || _)
-  // })
-  // private val t2_tableHasZeroUsefulMask = VecInit(t2_readResp.map { tableReadResp =>
-  //   tableReadResp.entries.zip(tableReadResp.usefulCtrs).map { case (entry, usefulCtr) =>
-  //     entry.valid && usefulCtr.isSaturateNegative
-  //   }.reduce(_ || _)
-  // })
-  // private val t2_tableWayAllocateEnVec = TableInfos.zipWithIndex.map { case (info, _) =>
-  //   Wire(Vec(info.NumWays, Bool()))
-  // }
-  // private val t2_tableWayUpdateEnVec = TableInfos.zipWithIndex.map { case (info, _) =>
-  //   Wire(Vec(info.NumWays, Bool()))
-  // }
-  // private val t2_allocateReqTableOHVec = VecInit(t2_trainInfoVec.map { info =>
-  //   Mux(info.valid && info.needAllocate && info.canAllocate, info.allocateNxOH, 0.U(NumTables.W))
-  // })
-  // private val t2_tableUpdateMask = VecInit(TableInfos.indices.map { tableIdx =>
-  //   t2_trainInfoVec.map(info => info.valid && info.needUpdate && info.trainNxOH(tableIdx)).reduce(_ || _)
-  // })
-  // private val t2_tableAllWayWeakMask = VecInit(TableInfos.indices.map { tableIdx =>
-  //   t2_trainInfoVec.map(info => info.valid && info.needAllWayWeak && info.trainNxOH(tableIdx)).reduce(_ || _)
-  // })
+  private val s2_tablePredictHitMask = VecInit(TableInfos.indices.map { tableIdx =>
+    s2_loads.map { load =>
+      val position = load.bits.cfiPosition
+      val tag = s2_rawTag(tableIdx) ^ position
+      load.valid && s2_readResp(tableIdx).entries.map(entry => entry.valid && entry.tag === tag).reduce(_ || _)
+    }.reduce(_ || _)
+  })
+  private val s2_tableProviderMask = VecInit(TableInfos.indices.map { tableIdx =>
+    s2_loads.map { load =>
+      val position = load.bits.cfiPosition
+      val hitTableMask = s2_readResp.zipWithIndex.map { case (tableReadResp, idx) =>
+        val tableTag = s2_rawTag(idx) ^ position
+        load.valid && tableReadResp.entries.map(entry => entry.valid && entry.tag === tableTag).reduce(_ || _)
+      }
+      getLongestHistTableOH(hitTableMask)(tableIdx) && hitTableMask(tableIdx)
+    }.reduce(_ || _)
+  })
+  private val t2_expectedNextTableOHVec = VecInit(t2_trainInfoVec.map { info =>
+    val nextTableOH = Wire(UInt(NumTables.W))
+    when(info.trainNxOH.orR) {
+      nextTableOH := (info.trainNxOH << 1)(NumTables - 1, 0)
+    }.otherwise {
+      nextTableOH := UIntToOH(0.U, NumTables)
+    }
+    nextTableOH
+  })
+  private val t2_allocateCommitNextVec = VecInit(t2_allocateTableOHVec.zip(t2_expectedNextTableOHVec).map { case (allocOH, nextOH) =>
+    allocOH.orR && allocOH === nextOH
+  })
+  private val t2_allocateCommitFarVec = VecInit(t2_allocateTableOHVec.zip(t2_allocateCommitNextVec).map { case (allocOH, isNext) =>
+    allocOH.orR && !isNext
+  })
+  private val mdpTageTrainAllocateCommitNext = PopCount(t2_allocateCommitNextVec.map(_ && t2_fire))
+  private val mdpTageTrainAllocateCommitFar = PopCount(t2_allocateCommitFarVec.map(_ && t2_fire))
+  private val t2_tableHasInvalidMask = VecInit(t2_readResp.map { tableReadResp =>
+    tableReadResp.entries.map(!_.valid).reduce(_ || _)
+  })
+  private val t2_tableHasZeroUsefulMask = VecInit(t2_readResp.map { tableReadResp =>
+    tableReadResp.entries.zip(tableReadResp.usefulCtrs).map { case (entry, usefulCtr) =>
+      entry.valid && usefulCtr.isSaturateNegative
+    }.reduce(_ || _)
+  })
+  private val t2_tableWayAllocateEnVec = TableInfos.zipWithIndex.map { case (info, _) =>
+    Wire(Vec(info.NumWays, Bool()))
+  }
+  private val t2_tableWayUpdateEnVec = TableInfos.zipWithIndex.map { case (info, _) =>
+    Wire(Vec(info.NumWays, Bool()))
+  }
+  private val t2_allocateReqTableOHVec = VecInit(t2_trainInfoVec.map { info =>
+    Mux(info.valid && info.needAllocate && info.canAllocate, info.allocateNxOH, 0.U(NumTables.W))
+  })
+  private val t2_tableUpdateMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_trainInfoVec.map(info => info.valid && info.needUpdate && info.trainNxOH(tableIdx)).reduce(_ || _)
+  })
+  private val t2_tableProviderWeakReqMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+      load.valid && (load.bits.updateType === MdpUpdateType.M_AW || load.bits.updateType === MdpUpdateType.M_AS) &&
+        info.trainNxOH(tableIdx)
+    }.reduce(_ || _)
+  })
+  private val t2_tableProviderWeakAppliedMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+      load.valid && (load.bits.updateType === MdpUpdateType.M_AW || load.bits.updateType === MdpUpdateType.M_AS) &&
+        info.trainNxOH(tableIdx) && info.needUpdate
+    }.reduce(_ || _)
+  })
+  private val t2_tableProviderWeakSkipMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+      load.valid && (load.bits.updateType === MdpUpdateType.M_AW || load.bits.updateType === MdpUpdateType.M_AS) &&
+        info.trainNxOH(tableIdx) && !info.needUpdate
+    }.reduce(_ || _)
+  })
+  private val t2_tableProviderRewriteMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+      load.valid && (load.bits.updateType === MdpUpdateType.M_AW || load.bits.updateType === MdpUpdateType.M_AS) &&
+        info.trainNxOH(tableIdx) && info.needUpdate && !info.needAllocate && !info.needAllWayWeak
+    }.reduce(_ || _)
+  })
+  private val t2_tableAllWayWeakMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_trainInfoVec.map(info => info.valid && info.needAllWayWeak && info.allWayWeakOH(tableIdx)).reduce(_ || _)
+  })
+  private val t2_tableAllWayWeakTargetMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_trainInfoVec.map(info => info.valid && info.allWayWeakOH(tableIdx)).reduce(_ || _)
+  })
+  private val t2_tableAllWayWeakSkipZeroMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_trainInfoVec.map(info => info.valid && info.allWayWeakOH(tableIdx) && !info.needAllWayWeak).reduce(_ || _)
+  })
+  private val t2_tableAllWayWeakAllocFallbackMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_trainInfoVec.zip(t2_allocateTableOHVec).map { case (info, allocOH) =>
+      info.valid && info.allWayWeakOH(tableIdx) && allocOH.orR && !allocOH(tableIdx)
+    }.reduce(_ || _)
+  })
+  private val t2_tableAllWayWeakMultiReqMask = VecInit(TableInfos.indices.map { tableIdx =>
+    PopCount(t2_trainInfoVec.map(info => info.valid && info.allWayWeakOH(tableIdx))) > 1.U
+  })
+  private val t2_tableAllocateCommitNextMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_allocateTableOHVec.zip(t2_allocateCommitNextVec).map { case (allocOH, isNext) =>
+      allocOH(tableIdx) && isNext
+    }.reduce(_ || _)
+  })
+  private val t2_tableAllocateCommitFarMask = VecInit(TableInfos.indices.map { tableIdx =>
+    t2_allocateTableOHVec.zip(t2_allocateCommitFarVec).map { case (allocOH, isFar) =>
+      allocOH(tableIdx) && isFar
+    }.reduce(_ || _)
+  })
 
 
   // when(t2_fire && t2_allocate) {
@@ -570,7 +758,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     val writeEntries    = Wire(Vec(NumWays, new TageEntry))
     val writeUsefulCtrs = Wire(Vec(NumWays, UsefulCounter()))
     val allWayNeedWeakMask = t2_trainInfoVec.map { info =>
-      info.valid && info.needAllWayWeak && info.trainNxOH(tableIdx) 
+      info.valid && info.needAllWayWeak && info.allWayWeakOH(tableIdx)
     }
     (0 until NumWays).foreach { wayIdx =>
       val hitMask = PriorityEncoderOH(t2_trainInfoVec.map { info =>
@@ -603,8 +791,8 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
         val opCount = PopCount(Cat(weakWayEn, allocateEn, updateEn))
         assert(opCount <= 1.U, cf"Multiple write operations on table ${tableIdx} way ${wayIdx}: update=${updateEn}, allocate=${allocateEn}, weak=${weakWayEn}, opCount=${opCount}")
       }
-      // t2_tableWayAllocateEnVec(tableIdx)(wayIdx) := allocateEn
-      // t2_tableWayUpdateEnVec(tableIdx)(wayIdx) := updateEn
+      t2_tableWayAllocateEnVec(tableIdx)(wayIdx) := allocateEn
+      t2_tableWayUpdateEnVec(tableIdx)(wayIdx) := updateEn
     }
     table.io.writeReq.valid                := t2_fire && writeWayMask.reduce(_ || _)
     table.io.writeReq.bits.setIdx          := t2_setIdx(tableIdx)
@@ -620,39 +808,6 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     table.io.resetUseful := t2_fire && usefulResetCtr.isSaturatePositive
   }
 
-  // TableInfos.indices.foreach { tableIdx =>
-  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_predict_hit", s2_fire && s2_tablePredictHitMask(tableIdx))
-  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_provider_cnt", s2_fire && s2_tableProviderMask(tableIdx))
-  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_train_hit", t2_fire && t2_tableTrainHitMask(tableIdx))
-  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_has_invalid", t2_fire && t2_tableHasInvalidMask(tableIdx))
-  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_has_zero_useful", t2_fire && t2_tableHasZeroUsefulMask(tableIdx))
-  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_update_cnt", t2_fire && t2_tableUpdateMask(tableIdx))
-  //   XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_allwayweak_cnt", t2_fire && t2_tableAllWayWeakMask(tableIdx))
-  //   XSPerfAccumulate(
-  //     s"mdp_tage_table_${tableIdx}_allocate_req",
-  //     t2_fire && t2_allocateReqTableOHVec.map(_(tableIdx)).reduce(_ || _)
-  //   )
-  //   XSPerfAccumulate(
-  //     s"mdp_tage_table_${tableIdx}_allocate_commit",
-  //     t2_fire && t2_allocateTableOHVec.map(_(tableIdx)).reduce(_ || _)
-  //   )
-  //   XSPerfAccumulate(
-  //     s"mdp_tage_table_${tableIdx}_allocate_drop_no_way",
-  //     t2_fire && t2_allocateReqTableOHVec.zip(t2_allocateTableOHVec).map { case (reqOH, allocOH) =>
-  //       reqOH(tableIdx) && !allocOH(tableIdx)
-  //     }.reduce(_ || _)
-  //   )
-  //   XSPerfAccumulate(
-  //     s"mdp_tage_table_${tableIdx}_allocate_drop_higher_prio",
-  //     t2_fire && t2_allocateReqTableOHVec.zip(t2_allocateBlockedByHigherPrio).map { case (reqOH, blocked) =>
-  //       reqOH(tableIdx) && blocked
-  //     }.reduce(_ || _)
-  //   )
-  //   (0 until TableInfos(tableIdx).NumWays).foreach { wayIdx =>
-  //     XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_allocate", t2_fire && t2_tableWayAllocateEnVec(tableIdx)(wayIdx))
-  //     XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_update", t2_fire && t2_tableWayUpdateEnVec(tableIdx)(wayIdx))
-  //   }
-  // }
   
   when(t2_fire) {
     when(usefulResetCtr.isSaturatePositive) {
@@ -661,6 +816,76 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       usefulResetCtr.selfIncrease()
     }
   }
+  TableInfos.indices.foreach { tableIdx =>
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_predict_hit", s2_fire && s2_tablePredictHitMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_provider_cnt", s2_fire && s2_tableProviderMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_train_hit", t2_fire && t2_tableTrainHitMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_has_invalid", t2_fire && t2_tableHasInvalidMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_has_zero_useful", t2_fire && t2_tableHasZeroUsefulMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_update_cnt", t2_fire && t2_tableUpdateMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_provider_weak_req", t2_fire && t2_tableProviderWeakReqMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_provider_weak_applied", t2_fire && t2_tableProviderWeakAppliedMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_provider_weak_skip", t2_fire && t2_tableProviderWeakSkipMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_provider_rewrite", t2_fire && t2_tableProviderRewriteMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_allwayweak_cnt", t2_fire && t2_tableAllWayWeakMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_allwayweak_target", t2_fire && t2_tableAllWayWeakTargetMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_allwayweak_skip_zero", t2_fire && t2_tableAllWayWeakSkipZeroMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_allwayweak_alloc_fallback", t2_fire && t2_tableAllWayWeakAllocFallbackMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_allwayweak_multi_req", t2_fire && t2_tableAllWayWeakMultiReqMask(tableIdx))
+    XSPerfAccumulate(
+      s"mdp_tage_table_${tableIdx}_allocate_req",
+      t2_fire && t2_allocateReqTableOHVec.map(_(tableIdx)).reduce(_ || _)
+    )
+    XSPerfAccumulate(
+      s"mdp_tage_table_${tableIdx}_allocate_commit",
+      t2_fire && t2_allocateTableOHVec.map(_(tableIdx)).reduce(_ || _)
+    )
+    XSPerfAccumulate(
+      s"mdp_tage_table_${tableIdx}_allocate_drop_no_way",
+      t2_fire && t2_allocateReqTableOHVec.zip(t2_allocateTableOHVec).map { case (reqOH, allocOH) =>
+        reqOH(tableIdx) && !allocOH(tableIdx)
+      }.reduce(_ || _)
+    )
+    XSPerfAccumulate(
+      s"mdp_tage_table_${tableIdx}_allocate_drop_higher_prio",
+      t2_fire && t2_allocateReqTableOHVec.zip(t2_allocateBlockedByHigherPrio).map { case (reqOH, blocked) =>
+        reqOH(tableIdx) && blocked
+      }.reduce(_ || _)
+    )
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_allocate_commit_next", t2_fire && t2_tableAllocateCommitNextMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_allocate_commit_far", t2_fire && t2_tableAllocateCommitFarMask(tableIdx))
+    (0 until TableInfos(tableIdx).NumWays).foreach { wayIdx =>
+      XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_allocate", t2_fire && t2_tableWayAllocateEnVec(tableIdx)(wayIdx))
+      XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_update", t2_fire && t2_tableWayUpdateEnVec(tableIdx)(wayIdx))
+    }
+  }
   XSPerfAccumulate("mdp_t2_useful_reset_need_allocate", t2_fire && t2_needAllocate && !t2_canAllocate)
   XSPerfAccumulate("mdp_t2_useful_reset", t2_fire && usefulResetCtr.isSaturatePositive)
+  XSPerfAccumulate("mdp_tage_train_raw_cnt", mdpTageTrainLoadsValidCnt)
+  XSPerfAccumulate("mdp_tage_train_raw_aw", mdpTageTrainLoadsAW)
+  XSPerfAccumulate("mdp_tage_train_raw_aw_on_tage", mdpTageTrainLoadsAWOnTage)
+  XSPerfAccumulate("mdp_tage_train_raw_aw_on_base", mdpTageTrainLoadsAWOnBase)
+  XSPerfAccumulate("mdp_tage_train_raw_as", mdpTageTrainLoadsAS)
+  XSPerfAccumulate("mdp_tage_train_raw_as_on_tage", mdpTageTrainLoadsASOnTage)
+  XSPerfAccumulate("mdp_tage_train_raw_as_on_base", mdpTageTrainLoadsASOnBase)
+  XSPerfAccumulate("mdp_tage_train_raw_is", mdpTageTrainLoadsIS)
+  XSPerfAccumulate("mdp_tage_train_raw_is_on_tage", mdpTageTrainLoadsISOnTage)
+  XSPerfAccumulate("mdp_tage_train_raw_is_on_base", mdpTageTrainLoadsISOnBase)
+  XSPerfAccumulate("mdp_tage_train_raw_iw", mdpTageTrainLoadsIW)
+  XSPerfAccumulate("mdp_tage_train_raw_iw_on_tage", mdpTageTrainLoadsIWOnTage)
+  XSPerfAccumulate("mdp_tage_train_raw_iw_on_base", mdpTageTrainLoadsIWOnBase)
+  XSPerfAccumulate("mdp_tage_train_cnt", mdpTageTrainCnt)
+  XSPerfAccumulate("mdp_tage_train_allocate", mdpTageTrainAllocateCnt)
+  XSPerfAccumulate("mdp_tage_train_allocate_commit_next", mdpTageTrainAllocateCommitNext)
+  XSPerfAccumulate("mdp_tage_train_allocate_commit_far", mdpTageTrainAllocateCommitFar)
+  XSPerfAccumulate("mdp_tage_train_all_way_weak", mdpTageTrainAllWayWeakCnt)
+  XSPerfAccumulate("mdp_tage_train_all_way_weak_multi_req_tables", mdpTageTrainAllWayWeakMultiReqTables)
+  XSPerfAccumulate("mdp_tage_train_provider_weak_req", mdpTageTrainProviderWeakReq)
+  XSPerfAccumulate("mdp_tage_train_provider_weak_applied", mdpTageTrainProviderWeakApplied)
+  XSPerfAccumulate("mdp_tage_train_provider_weak_skip", mdpTageTrainProviderWeakSkip)
+  XSPerfAccumulate("mdp_tage_train_provider_rewrite", mdpTageTrainProviderRewrite)
+  XSPerfAccumulate("mdp_tage_train_iw_ndep_clamp_blocked", mdpTageTrainIwNdepClampBlocked)
+  XSPerfAccumulate("mdp_tage_train_update", mdpTageTrainUpdateCnt)
+  XSPerfAccumulate("mdp_tage_train_need_write", PopCount(mdpTageTrainNeedWrite))
+  XSPerfAccumulate("mdp_tage_train_skip_update", PopCount(mdpTageTrainSkipUpdate))
 }

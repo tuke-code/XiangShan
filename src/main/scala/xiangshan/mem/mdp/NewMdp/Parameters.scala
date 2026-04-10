@@ -156,17 +156,17 @@ trait TableHelper extends TopHelper { // extends TopHelper for getBankIndex
 
 case class MdpTageTableParameters(
   TableInfos: Seq[MdpTageTableInfo] = Seq(
-    new MdpTageTableInfo(1024, 4, 2  ),
-    new MdpTageTableInfo(1024, 4, 4  ),
-    new MdpTageTableInfo(1024, 4, 8  ),
-    new MdpTageTableInfo(1024, 4, 16 ),
+    new MdpTageTableInfo(512, 4, 2  ),
+    new MdpTageTableInfo(512, 4, 4  ),
+    new MdpTageTableInfo(512, 4, 8  ),
+    new MdpTageTableInfo(512, 4, 16 ),
     new MdpTageTableInfo(256, 4, 32 ),
     new MdpTageTableInfo(128, 4, 64 ),
     new MdpTageTableInfo(128, 4, 128)
   ),
   NumBanks:            Int = 4, // to alleviate read-write conflicts in single-port SRAM
   NumWays:             Int = 4,
-  TagWidth:            Int = 13,
+  TagWidth:            Int = 16,
   WriteBufferSize:     Int = 8,
 
   TakenCtrWidth:       Int = 3,
@@ -175,7 +175,7 @@ case class MdpTageTableParameters(
 ){}
 
 case class MdpBaseTableParameters( //fromMainBtb
-  NumEntries: Int = 1024,
+  NumEntries: Int = 2048,
   NumWay:     Int = 4,
   // Lowest level banks, each bank is a physical SRAM
   // This banking is used to resolve read-write conflicts and reduce SRAM power

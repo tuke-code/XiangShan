@@ -62,6 +62,7 @@ class MdpMetaEntry(implicit p: Parameters) extends XSBundle with HasMdpParameter
   val rawHit      = Bool()
   val counter     = UsefulCounter()
   val cfiPosition = UInt(CfiPositionWidth.W)
+  val distance    = UInt(RobDistance.W)
 
   def hit(load: LoadInfo): Bool = rawHit && cfiPosition === load.cfiPosition
 }
