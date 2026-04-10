@@ -18,8 +18,8 @@ jobs:
     outputs:
       core: ${{ steps.filter.outputs.core }}
     steps:
-    - uses: actions/checkout@v4
-    - uses: dorny/paths-filter@v3
+    - uses: actions/checkout@v6
+    - uses: dorny/paths-filter@v4
       id: filter
       with:
         predicate-quantifier: 'every'
@@ -33,10 +33,9 @@ jobs:
     timeout-minutes: 900
     name: Generate Verilog
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          submodules: true
       - name: set env
         run: |
           export HEAD_SHA=${{ github.run_number }}
@@ -45,7 +44,10 @@ jobs:
           echo "WAVE_HOME=/nfs/home/ci-runner/xs-wave/${HEAD_SHA}" >> $GITHUB_ENV
           mkdir -p /nfs/home/ci-runner/xs-wave/${HEAD_SHA}
       - name: Initialize submodules
-        run: make init-force
+        run: |
+          make init-force || {
+            cd rocket-chip && git fetch --unshallow && cd .. && make init-force
+          }
       - name: clean up
         run: |
           python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --clean
@@ -118,10 +120,9 @@ jobs:
     timeout-minutes: 900
     name: EMU - Basics
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          submodules: true
       - name: set env
         run: |
           export HEAD_SHA=${{ github.run_number }}
@@ -134,7 +135,10 @@ jobs:
           mkdir -p /nfs/home/ci-runner/xs-perf/${HEAD_SHA}
           mkdir -p /nfs/home/ci-runner/xs-wave/${HEAD_SHA}
       - name: Initialize submodules
-        run: make init-force
+        run: |
+          make init-force || {
+            cd rocket-chip && git fetch --unshallow && cd .. && make init-force
+          }
       - name: clean up
         run: |
           python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --clean
@@ -213,10 +217,9 @@ jobs:
     timeout-minutes: 900
     name: EMU - CHI
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          submodules: true
       - name: set env
         run: |
           export HEAD_SHA=${{ github.run_number }}
@@ -225,7 +228,10 @@ jobs:
           echo "WAVE_HOME=/nfs/home/ci-runner/xs-wave/${HEAD_SHA}" >> $GITHUB_ENV
           mkdir -p /nfs/home/ci-runner/xs-wave/${HEAD_SHA}
       - name: Initialize submodules
-        run: make init-force
+        run: |
+          make init-force || {
+            cd rocket-chip && git fetch --unshallow && cd .. && make init-force
+          }
       - name: clean up
         run: |
           python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --clean
@@ -250,7 +256,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Build docker image
         run: make image
@@ -266,10 +272,9 @@ jobs:
     timeout-minutes: 900
     name: EMU - Performance
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          submodules: true
       - name: set env
         run: |
           export HEAD_SHA=${{ github.run_number }}
@@ -282,7 +287,10 @@ jobs:
           mkdir -p /nfs/home/ci-runner/xs-perf/${HEAD_SHA}
           mkdir -p /nfs/home/ci-runner/xs-wave/${HEAD_SHA}
       - name: Initialize submodules
-        run: make init-force
+        run: |
+          make init-force || {
+            cd rocket-chip && git fetch --unshallow && cd .. && make init-force
+          }
       - name: clean up
         run: |
           python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --clean
@@ -377,10 +385,9 @@ jobs:
     timeout-minutes: 900
     name: EMU - MC
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          submodules: true
       - name: set env
         run: |
           export HEAD_SHA=${{ github.run_number }}
@@ -392,7 +399,10 @@ jobs:
           mkdir -p /nfs/home/ci-runner/xs-perf/${HEAD_SHA}
           mkdir -p /nfs/home/ci-runner/xs-wave/${HEAD_SHA}
       - name: Initialize submodules
-        run: make init-force
+        run: |
+          make init-force || {
+            cd rocket-chip && git fetch --unshallow && cd .. && make init-force
+          }
       - name: clean up
         run: |
           python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --clean
@@ -418,10 +428,9 @@ jobs:
     timeout-minutes: 900
     name: SIMV - Basics
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          submodules: true
       - name: set env
         run: |
           export HEAD_SHA=${{ github.run_number }}
@@ -433,7 +442,10 @@ jobs:
           mkdir -p /nfs/home/ci-runner/xs-perf/${HEAD_SHA}
           mkdir -p /nfs/home/ci-runner/xs-wave/${HEAD_SHA}
       - name: Initialize submodules
-        run: make init-force
+        run: |
+          make init-force || {
+            cd rocket-chip && git fetch --unshallow && cd .. && make init-force
+          }
       - name: clean up
         run: |
           python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --clean
@@ -470,16 +482,19 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.core == 'true' }}
     continue-on-error: false
-    timeout-minutes: 40
+    timeout-minutes: 60
     name: Upload Artifacts
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: set env
         run: echo "NOOP_HOME=$GITHUB_WORKSPACE" >> $GITHUB_ENV
       - name: psutil
         run: sudo apt install python3-psutil
       - name: Initialize submodules
-        run: make init-force
+        run: |
+          make init-force || {
+            cd rocket-chip && git fetch --unshallow && cd .. && make init-force
+          }
       - name: mill
         uses: jodersky/setup-mill@v0.3.0
         with:
@@ -508,7 +523,7 @@ jobs:
           rm `find $GITHUB_WORKSPACE/build -name "*.fir"`
           cd $GITHUB_WORKSPACE/build/rtl && find . -name "*.*v" > filelist.f
       - name: acrhive issue B verilog artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: xs-issue-b-difftest-verilog
           path: build
@@ -526,7 +541,7 @@ jobs:
           rm `find $GITHUB_WORKSPACE/build -name "*.fir"`
           cd $GITHUB_WORKSPACE/build/rtl && find . -name "*.*v" > filelist.f
       - name: acrhive issue E.b verilog artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: xs-issue-e-b-difftest-verilog
           path: build
@@ -544,7 +559,7 @@ jobs:
           rm `find $GITHUB_WORKSPACE/build -name "*.fir"`
           cd $GITHUB_WORKSPACE/build/rtl && find . -name "*.*v" > filelist.f
       - name: acrhive issue E.b lowpower verilog artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: xs-issue-e-b-lowpower-difftest-verilog
           path: build
@@ -553,7 +568,7 @@ jobs:
           python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --clean
           make test-jar
       - name: acrhive test jar artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: xsgen
           path: out/xiangshan/test/assembly.dest/out.jar
@@ -566,7 +581,7 @@ jobs:
     timeout-minutes: 5
     name: Check Submodules
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: 'true'
           fetch-depth: '0'
@@ -599,10 +614,10 @@ jobs:
     timeout-minutes: 900
     name: Check Format
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: 'recursive'
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '11'
