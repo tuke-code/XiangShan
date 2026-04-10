@@ -176,7 +176,7 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
   tage.io.startPc   := io.fromBpu.startPc
   tage.io.fromPhr.foldedPathHist := io.fromPhr.foldedPathHist
   //s1 stage
-  private val s1_prediction = {
+  private val s1_basePrediction = {
     val prediction = Wire(Vec(NumMdpResultEntries, Valid(new MdpPrediction)))
     (base.io.result zip prediction).map{ case (base, pred) =>
       pred.valid := base.valid
@@ -188,21 +188,13 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
     }
     prediction
   }
-  io.basePred := s1_prediction
-  //s2 stage
-  private val s2_baseResult = RegEnable(base.io.result, stageCtrl.s1_fire)
-  tage.io.fromBaseResult := s2_baseResult
-
-  private val s2_tageResult = tage.io.result
+  tage.io.fromBaseResult := base.io.result
+  private val s1_tageResult = tage.io.result
   io.meta := base.io.meta
 
-  private val s2_takenMask = VecInit(s2_baseResult.zip(s2_tageResult).map{ case(base, tage) =>
-    (base.valid && base.bits.loadWait) || (tage.valid && tage.bits.loadWait)
-  })
-  //TODO:静态预测器
-  private val s2_prediction = {
+  private val s1_finalPrediction = {
     val prediction = Wire(Vec(NumMdpResultEntries, Valid(new MdpPrediction)))
-    (s2_baseResult zip s2_tageResult zip prediction).map{ case ((base, tage), pred) =>
+    (base.io.result zip s1_tageResult zip prediction).map{ case ((base, tage), pred) =>
       pred.valid := Mux(tage.valid, true.B   , base.valid)
       pred.bits.cfiPosition := base.bits.cfiPosition
       pred.bits.static   := Mux(tage.valid, tage.bits.static, base.bits.static)
@@ -211,9 +203,14 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
     }
     prediction
   }
+  io.basePred := s1_finalPrediction
+  io.finalPred := s1_finalPrediction
 
-  io.finalPred := s2_prediction 
-  //s3 stage
+  private val s1_takenMask = VecInit(s1_basePrediction.zip(s1_tageResult).map{ case(base, tage) =>
+    (base.valid && base.bits.loadWait) || (tage.valid && tage.bits.loadWait)
+  })
+  //s2/s3 side-effect path
+  private val s2_takenMask  = RegEnable(s1_takenMask , stageCtrl.s1_fire)
   private val s3_takenMask  = RegEnable(s2_takenMask , stageCtrl.s2_fire)
   base.io.s3_takenMask := s3_takenMask
 

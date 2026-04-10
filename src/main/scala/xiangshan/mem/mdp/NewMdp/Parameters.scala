@@ -156,13 +156,14 @@ trait TableHelper extends TopHelper { // extends TopHelper for getBankIndex
 
 case class MdpTageTableParameters(
   TableInfos: Seq[MdpTageTableInfo] = Seq(
-    new MdpTageTableInfo(512, 4, 2  ),
-    new MdpTageTableInfo(512, 4, 4  ),
-    new MdpTageTableInfo(512, 4, 8  ),
-    new MdpTageTableInfo(512, 4, 16 ),
-    new MdpTageTableInfo(256, 4, 32 ),
-    new MdpTageTableInfo(128, 4, 64 ),
-    new MdpTageTableInfo(128, 4, 128)
+    new MdpTageTableInfo(512, 4, 4   ),
+    new MdpTageTableInfo(512, 4, 9   ),
+    new MdpTageTableInfo(512, 4, 15  ),
+    new MdpTageTableInfo(512, 4, 24  ),
+    new MdpTageTableInfo(512, 4, 36  ),
+    new MdpTageTableInfo(256, 4, 56  ),
+    new MdpTageTableInfo(128, 4, 108 ),
+    new MdpTageTableInfo(128, 4, 144 )
   ),
   NumBanks:            Int = 4, // to alleviate read-write conflicts in single-port SRAM
   NumWays:             Int = 4,
