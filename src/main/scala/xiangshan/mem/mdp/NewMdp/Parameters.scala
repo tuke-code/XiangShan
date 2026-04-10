@@ -157,18 +157,18 @@ trait TableHelper extends TopHelper { // extends TopHelper for getBankIndex
 case class MdpTageTableParameters(
   TableInfos: Seq[MdpTageTableInfo] = Seq(
     new MdpTageTableInfo(512, 4, 4   ),
-    new MdpTageTableInfo(512, 4, 9   ),
+    new MdpTageTableInfo(512, 4, 8   ),
     new MdpTageTableInfo(512, 4, 15  ),
     new MdpTageTableInfo(512, 4, 24  ),
     new MdpTageTableInfo(512, 4, 36  ),
     new MdpTageTableInfo(256, 4, 56  ),
     new MdpTageTableInfo(128, 4, 108 ),
-    new MdpTageTableInfo(128, 4, 144 )
+    new MdpTageTableInfo(128, 4, 160 )
   ),
   NumBanks:            Int = 4, // to alleviate read-write conflicts in single-port SRAM
   NumWays:             Int = 4,
   TagWidth:            Int = 16,
-  WriteBufferSize:     Int = 8,
+  WriteBufferSize:     Int = 4,
 
   TakenCtrWidth:       Int = 3,
   UsefulCtrWidth:      Int = 3,
@@ -187,7 +187,7 @@ case class MdpBaseTableParameters( //fromMainBtb
   NumAlignBanks:   Int = 2,
   TagWidth:        Int = 16,
   TargetWidth:     Int = 20,       // 2B aligned
-  WriteBufferSize: Int = 8,
+  WriteBufferSize: Int = 4,
   Replacer:        String = "Lru", // "Lru" or "Plru"
   // Mbtb write trace
 ){}
