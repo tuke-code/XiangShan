@@ -3,7 +3,15 @@
 MemBlock 真实 DUT 请求发送公共 API。
 """
 
-from transactions import LoadTxn, QueuePtr, StoreTxn
+from transactions import (
+    BackendSendPlan,
+    EnqueueLoadStep,
+    IssueCyclePlan,
+    IssueOp,
+    LoadTxn,
+    QueuePtr,
+    StoreTxn,
+)
 
 
 FU_TYPE_LDU = 1 << 16
@@ -97,15 +105,24 @@ def enqueue_scalar_store(
 
 
 def send_load(env, txn: LoadTxn) -> None:
-    """按标准时序发送一笔标量 load。"""
+    """兼容入口：按标准时序发送一笔标量 load。"""
 
-    env.backend.send_load(txn)
+    env.backend.send(txn)
 
 
 def send_load_batch_same_cycle(env, txns, max_cycles: int = 50) -> None:
-    """按标准时序 enqueue 多笔标量 load，并在同一拍完成 issue。"""
+    """兼容入口：enqueue 多笔标量 load，并在同一拍完成 issue。"""
 
-    env.backend.send_load_batch_same_cycle(txns, max_cycles=max_cycles)
+    txns = tuple(txns)
+    env.backend.execute(
+        BackendSendPlan.from_steps(
+            *(EnqueueLoadStep.from_txn(txn) for txn in txns),
+            IssueCyclePlan(
+                ops=tuple(IssueOp.load_from_txn(txn) for txn in txns),
+                max_cycles=max_cycles,
+            ),
+        )
+    )
 
 
 def send_load_batch_with_sta_same_cycle(
@@ -118,15 +135,25 @@ def send_load_batch_with_sta_same_cycle(
     sta_lane: int = DEFAULT_STA_LANE,
     max_cycles: int = 50,
 ) -> None:
-    """按标准时序 enqueue 多笔标量 load，并与一条 `STA` 在同一拍完成 issue。"""
+    """兼容入口：enqueue 多笔标量 load，并与一条 `STA` 在同一拍完成 issue。"""
 
-    env.backend.send_load_batch_with_sta_same_cycle(
-        txns,
-        sta_req_id=sta_req_id,
-        sta_sq_ptr=sta_sq_ptr,
-        sta_addr=sta_addr,
-        sta_lane=sta_lane,
-        max_cycles=max_cycles,
+    txns = tuple(txns)
+    env.backend.execute(
+        BackendSendPlan.from_steps(
+            *(EnqueueLoadStep.from_txn(txn) for txn in txns),
+            IssueCyclePlan(
+                ops=tuple(IssueOp.load_from_txn(txn) for txn in txns)
+                + (
+                    IssueOp.sta(
+                        req_id=sta_req_id,
+                        sq_ptr=sta_sq_ptr,
+                        addr=sta_addr,
+                        lane=sta_lane,
+                    ),
+                ),
+                max_cycles=max_cycles,
+            ),
+        )
     )
 
 
@@ -143,9 +170,9 @@ def expect_load(env, txn: LoadTxn):
 
 
 def send_store(env, txn: StoreTxn) -> QueuePtr:
-    """按标准时序发送一笔标量 store。"""
+    """兼容入口：按标准时序发送一笔标量 store。"""
 
-    return env.backend.send_store(txn)
+    return env.backend.send(txn)
 
 
 def _issue_until_fire(env, lane: int, drive_inputs, max_cycles: int = 50) -> None:

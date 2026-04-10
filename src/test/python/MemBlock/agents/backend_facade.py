@@ -3,7 +3,21 @@
 Unified backend-facing facade for MemBlock env.
 """
 
-from transactions import LoadTxn, StoreTxn
+from dataclasses import replace
+
+from transactions import (
+    BackendSendPlan,
+    BackendSendResult,
+    EnqueueLoadStep,
+    EnqueueStoreStep,
+    IssueCyclePlan,
+    IssueOp,
+    LoadTxn,
+    QueuePtr,
+    StoreCommitStep,
+    StoreRef,
+    StoreTxn,
+)
 
 
 class BackendFacade:
@@ -34,6 +48,80 @@ class BackendFacade:
     def enqueue_scalar_store(self, req_id: int, sq_ptr, enq_port: int = 0):
         return self.enqueue_store(req_id, sq_ptr, enq_port=enq_port)
 
+    def _resolve_issue_cycle(self, plan: IssueCyclePlan, result: BackendSendResult) -> IssueCyclePlan:
+        resolved_ops = []
+        for op in plan.ops:
+            resolved_sq_ptr = result.resolve_sq_ptr(op.sq_ptr)
+            resolved_ops.append(replace(op, sq_ptr=resolved_sq_ptr))
+        return IssueCyclePlan(ops=tuple(resolved_ops), max_cycles=plan.max_cycles)
+
+    def execute(self, plan: BackendSendPlan) -> BackendSendResult:
+        store_ptrs: dict[StoreRef, QueuePtr] = {}
+        result = BackendSendResult(store_ptrs=store_ptrs)
+        for step in plan.steps:
+            if isinstance(step, EnqueueLoadStep):
+                self.enqueue_load(
+                    req_id=step.req_id,
+                    lq_ptr=step.lq_ptr,
+                    sq_ptr=step.sq_ptr,
+                    enq_port=step.enq_port,
+                )
+            elif isinstance(step, EnqueueStoreStep):
+                allocated_sq_ptr = self.enqueue_store(
+                    req_id=step.req_id,
+                    sq_ptr=step.sq_ptr,
+                    enq_port=step.enq_port,
+                )
+                if step.ref is not None:
+                    store_ptrs[step.ref] = allocated_sq_ptr
+            elif isinstance(step, IssueCyclePlan):
+                self.issue.issue_cycle(self._resolve_issue_cycle(step, result))
+            elif isinstance(step, StoreCommitStep):
+                self.step_commit(count=step.count, cycles=step.cycles)
+            else:
+                raise TypeError(f"unsupported backend send step: {type(step)!r}")
+        return result
+
+    def send(self, request):
+        if isinstance(request, BackendSendPlan):
+            return self.execute(request)
+        if isinstance(request, LoadTxn):
+            self.execute(
+                BackendSendPlan.from_steps(
+                    EnqueueLoadStep.from_txn(request),
+                    IssueCyclePlan.from_ops(IssueOp.load_from_txn(request)),
+                )
+            )
+            return None
+        if isinstance(request, StoreTxn):
+            store_ref = StoreRef(name=f"store_{request.req_id}")
+            result = self.execute(
+                BackendSendPlan.from_steps(
+                    EnqueueStoreStep.from_txn(request, ref=store_ref),
+                    IssueCyclePlan.from_ops(
+                        IssueOp.std(
+                            req_id=request.req_id,
+                            sq_ptr=store_ref,
+                            data=request.data,
+                            lane=request.std_lane,
+                        )
+                    ),
+                    IssueCyclePlan.from_ops(
+                        IssueOp.sta(
+                            req_id=request.req_id,
+                            sq_ptr=store_ref,
+                            addr=request.addr,
+                            lane=request.sta_lane,
+                        )
+                    ),
+                )
+            )
+            return result.resolve_sq_ptr(store_ref)
+        raise TypeError(f"unsupported backend send request: {type(request)!r}")
+
+    def send_many(self, requests):
+        return [self.send(request) for request in requests]
+
     def issue_load(
         self,
         req_id: int,
@@ -47,11 +135,11 @@ class BackendFacade:
         wait_for_rob_idx_flag: int | None = None,
         wait_for_rob_idx_value: int | None = None,
     ) -> None:
-        self.issue.issue_scalar_load(
-            req_id,
-            addr,
-            lq_ptr,
-            sq_ptr,
+        self.issue_scalar_load(
+            req_id=req_id,
+            addr=addr,
+            lq_ptr=lq_ptr,
+            sq_ptr=sq_ptr,
             lane=lane,
             store_set_hit=store_set_hit,
             load_wait_bit=load_wait_bit,
@@ -73,21 +161,32 @@ class BackendFacade:
         wait_for_rob_idx_flag: int | None = None,
         wait_for_rob_idx_value: int | None = None,
     ) -> None:
-        self.issue_load(
-            req_id,
-            addr,
-            lq_ptr,
-            sq_ptr,
-            lane=lane,
-            store_set_hit=store_set_hit,
-            load_wait_bit=load_wait_bit,
-            load_wait_strict=load_wait_strict,
-            wait_for_rob_idx_flag=wait_for_rob_idx_flag,
-            wait_for_rob_idx_value=wait_for_rob_idx_value,
+        self.issue.issue_cycle(
+            IssueCyclePlan.from_ops(
+                IssueOp(
+                    kind="load",
+                    req_id=req_id,
+                    lane=lane,
+                    sq_ptr=sq_ptr,
+                    addr=addr,
+                    lq_ptr=lq_ptr,
+                    store_set_hit=store_set_hit,
+                    load_wait_bit=load_wait_bit,
+                    load_wait_strict=load_wait_strict,
+                    wait_for_rob_idx_flag=wait_for_rob_idx_flag,
+                    wait_for_rob_idx_value=wait_for_rob_idx_value,
+                )
+            )
         )
 
     def issue_load_batch_same_cycle(self, txns, max_cycles: int = 50) -> None:
-        self.issue.issue_scalar_load_batch_same_cycle(txns, max_cycles=max_cycles)
+        txns = tuple(txns)
+        self.issue.issue_cycle(
+            IssueCyclePlan(
+                ops=tuple(IssueOp.load_from_txn(txn) for txn in txns),
+                max_cycles=max_cycles,
+            )
+        )
 
     def issue_scalar_load_batch_same_cycle(self, txns, max_cycles: int = 50) -> None:
         self.issue_load_batch_same_cycle(txns, max_cycles=max_cycles)
@@ -102,13 +201,20 @@ class BackendFacade:
         sta_lane: int = 3,
         max_cycles: int = 50,
     ) -> None:
-        self.issue.issue_scalar_load_batch_with_sta_same_cycle(
-            txns,
-            sta_req_id=sta_req_id,
-            sta_sq_ptr=sta_sq_ptr,
-            sta_addr=sta_addr,
-            sta_lane=sta_lane,
-            max_cycles=max_cycles,
+        txns = tuple(txns)
+        self.issue.issue_cycle(
+            IssueCyclePlan(
+                ops=tuple(IssueOp.load_from_txn(txn) for txn in txns)
+                + (
+                    IssueOp.sta(
+                        req_id=sta_req_id,
+                        sq_ptr=sta_sq_ptr,
+                        addr=sta_addr,
+                        lane=sta_lane,
+                    ),
+                ),
+                max_cycles=max_cycles,
+            )
         )
 
     def issue_scalar_load_batch_with_sta_same_cycle(
@@ -131,46 +237,39 @@ class BackendFacade:
         )
 
     def issue_std(self, req_id: int, sq_ptr, data: int, lane: int = 5) -> None:
-        self.issue.issue_scalar_std(req_id, sq_ptr, data, lane=lane)
+        self.issue.issue_cycle(
+            IssueCyclePlan.from_ops(
+                IssueOp.std(req_id=req_id, sq_ptr=sq_ptr, data=data, lane=lane)
+            )
+        )
 
     def issue_scalar_std(self, req_id: int, sq_ptr, data: int, lane: int = 5) -> None:
         self.issue_std(req_id, sq_ptr, data, lane=lane)
 
     def issue_sta(self, req_id: int, sq_ptr, addr: int, lane: int = 3) -> None:
-        self.issue.issue_scalar_sta(req_id, sq_ptr, addr, lane=lane)
+        self.issue.issue_cycle(
+            IssueCyclePlan.from_ops(
+                IssueOp.sta(req_id=req_id, sq_ptr=sq_ptr, addr=addr, lane=lane)
+            )
+        )
 
     def issue_scalar_sta(self, req_id: int, sq_ptr, addr: int, lane: int = 3) -> None:
         self.issue_sta(req_id, sq_ptr, addr, lane=lane)
 
     def send_load(self, txn: LoadTxn) -> None:
-        self.enqueue_load(
-            req_id=txn.req_id,
-            lq_ptr=txn.lq_ptr,
-            sq_ptr=txn.sq_ptr,
-            enq_port=txn.enq_port,
-        )
-        self.issue_load(
-            req_id=txn.req_id,
-            addr=txn.addr,
-            lq_ptr=txn.lq_ptr,
-            sq_ptr=txn.sq_ptr,
-            lane=txn.issue_lane,
-            store_set_hit=txn.store_set_hit,
-            load_wait_bit=txn.load_wait_bit,
-            load_wait_strict=txn.load_wait_strict,
-            wait_for_rob_idx_flag=txn.wait_for_rob_idx_flag,
-            wait_for_rob_idx_value=txn.wait_for_rob_idx_value,
-        )
+        self.send(txn)
 
     def send_load_batch_same_cycle(self, txns, max_cycles: int = 50) -> None:
-        for txn in txns:
-            self.enqueue_load(
-                req_id=txn.req_id,
-                lq_ptr=txn.lq_ptr,
-                sq_ptr=txn.sq_ptr,
-                enq_port=txn.enq_port,
+        txns = tuple(txns)
+        self.execute(
+            BackendSendPlan.from_steps(
+                *(EnqueueLoadStep.from_txn(txn) for txn in txns),
+                IssueCyclePlan(
+                    ops=tuple(IssueOp.load_from_txn(txn) for txn in txns),
+                    max_cycles=max_cycles,
+                ),
             )
-        self.issue_load_batch_same_cycle(txns, max_cycles=max_cycles)
+        )
 
     def send_load_batch_with_sta_same_cycle(
         self,
@@ -182,41 +281,27 @@ class BackendFacade:
         sta_lane: int = 3,
         max_cycles: int = 50,
     ) -> None:
-        for txn in txns:
-            self.enqueue_load(
-                req_id=txn.req_id,
-                lq_ptr=txn.lq_ptr,
-                sq_ptr=txn.sq_ptr,
-                enq_port=txn.enq_port,
+        txns = tuple(txns)
+        self.execute(
+            BackendSendPlan.from_steps(
+                *(EnqueueLoadStep.from_txn(txn) for txn in txns),
+                IssueCyclePlan(
+                    ops=tuple(IssueOp.load_from_txn(txn) for txn in txns)
+                    + (
+                        IssueOp.sta(
+                            req_id=sta_req_id,
+                            sq_ptr=sta_sq_ptr,
+                            addr=sta_addr,
+                            lane=sta_lane,
+                        ),
+                    ),
+                    max_cycles=max_cycles,
+                ),
             )
-        self.issue_load_batch_with_sta_same_cycle(
-            txns,
-            sta_req_id=sta_req_id,
-            sta_sq_ptr=sta_sq_ptr,
-            sta_addr=sta_addr,
-            sta_lane=sta_lane,
-            max_cycles=max_cycles,
         )
 
     def send_store(self, txn: StoreTxn):
-        allocated_sq_ptr = self.enqueue_store(
-            req_id=txn.req_id,
-            sq_ptr=txn.sq_ptr,
-            enq_port=txn.enq_port,
-        )
-        self.issue_std(
-            req_id=txn.req_id,
-            sq_ptr=allocated_sq_ptr,
-            data=txn.data,
-            lane=txn.std_lane,
-        )
-        self.issue_sta(
-            req_id=txn.req_id,
-            sq_ptr=allocated_sq_ptr,
-            addr=txn.addr,
-            lane=txn.sta_lane,
-        )
-        return allocated_sq_ptr
+        return self.send(txn)
 
     def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         self.commit.note_load_issued(rob_idx_flag, rob_idx_value)
