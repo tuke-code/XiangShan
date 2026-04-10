@@ -1,0 +1,26 @@
+# Tutorial 自动化跑批命令演练脚本
+# 运行方式：
+# python3 scripts/pdb-run.py --script docs/XSPdb/examples/tutorial_script.txt
+
+# 1. 载入微基准测试程序
+xload ready-to-run/microbench.bin
+
+# 2. 检查基本环境与命令全貌
+xcmds
+xpc
+
+# 3. 开启部分高价值信号的监控 (比如 timer)
+xwatch SimTop_top.SimTop.timer
+
+# 4. 开始开启波形记录并先跑一段测试水深
+xwave_on
+xstep 200
+
+# 5. 设置遇到异常立刻暂停的强制触发器断点
+xbreak_expr SimTop_top.SimTop.cpu.l_soc.core_with_l2.core.backend.inner_ctrlBlock.rob.io_exception_valid_REG == 1
+
+# 6. 再死跑 2000 个周期，如果没有触发则停止波形记录，否则遇到触发点前就会自动交出控制台！
+xstep 2000
+xwave_off
+
+# 此后，它将自动归还操作权并在控制台留下 (XiangShan) 等待您的下一步探索

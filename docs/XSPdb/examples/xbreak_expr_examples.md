@@ -12,7 +12,7 @@
 
 这可能是最常用的断点。例如，中断在PC为 `0x80000000` 的指令提交时。
 
-```bash
+```text
 xbreak SimTop_top.SimTop.cpu.l_soc.core_with_l2.core.backend.inner_ctrlBlock.rob.difftest_commit_pc == 0x80000000
 ```
 
@@ -50,9 +50,8 @@ xbreak_expr SimTop_top.SimTop.cpu.l_soc.core_with_l2.core.backend.inner_ctrlBloc
 
 跟踪对某个特定内存地址的数据访问。例如，当访问地址 `0x80001000` 时。
 
-```bash
-
-
+```text
+xbreak_expr SimTop_top.SimTop.cpu.l_soc.core_with_l2.core.memBlock.inner_dcache.dcache.mainPipe.s3_valid == 1 && SimTop_top.SimTop.cpu.l_soc.core_with_l2.core.memBlock.inner_dcache.dcache.mainPipe.s3_req_vaddr == 0x80001000
 ```
 
 ### D-Cache 在特定地址发生 Miss 时中断

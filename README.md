@@ -122,6 +122,8 @@ make emu CONFIG=TLMinimalConfig EMU_THREADS=2 -j10
 ```
 ### Run with xspdb
 
+> **📖 Documentation:** See [XSPdb README](docs/XSPdb/README.md) for feature overview and [Tutorial (实战教程)](docs/XSPdb/tutorial.md) for a hands-on debugging walkthrough.
+
 There are two ways to use xspdb:
 
 1. Quick Start with Prebuilt Binaries

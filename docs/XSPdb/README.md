@@ -2,6 +2,8 @@
 
 XSPdb is a Python `pdb`-based debugging tool for RISC-V IPs, customized for XiangShan’s difftest interface. It provides a GDB-like interactive CLI, waveform control, flexible breakpoints/triggers, and scripts for reproducible debugging. It also integrates signal-level debugging with software execution state for hardware/software co-verification.
 
+> **Quick Links:** [Tutorial (实战教程)](tutorial.md) | [Expression Trigger Examples](examples/xbreak_expr_examples.md) | [Automation Script Sample](examples/tutorial_script.txt)
+
 ## Most used features
 
 - **Breakpoints & triggers**: `xbreak`, `xbreak_expr`, `xbreak_fsm`
@@ -14,6 +16,7 @@ XSPdb is a Python `pdb`-based debugging tool for RISC-V IPs, customized for Xian
 
 - `design/`  Design and specification notes
   - `design/cli.md`
+  - `design/cli_batch.md`
   - `design/step.md`
   - `design/breakpoints.md`
   - `design/trigger_expr_spec.md`
@@ -38,6 +41,7 @@ XSPdb is a Python `pdb`-based debugging tool for RISC-V IPs, customized for Xian
   - `examples/difftest_snapshot.md`
   - `examples/xbreak_expr_examples.md`
   - `examples/xspdb_script_example.txt`
+  - `examples/tutorial_script.txt`
   - `examples/csr_trace.fsm`
   - `examples/pc_sequence.fsm`
 
