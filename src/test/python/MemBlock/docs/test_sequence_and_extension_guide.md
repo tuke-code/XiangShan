@@ -88,7 +88,7 @@ ScalarLoadSequence(txn, expected_completed_loads=1, assert_no_outstanding=True).
 from transactions import LoadTxn
 
 txn = LoadTxn(req_id=req_id, addr=addr, lq_ptr=lq_ptr, sq_ptr=sq_ptr)
-env.backend.send_load(txn)
+env.backend.send(txn)
 env.expect_scalar_load(req_id=txn.req_id, addr=txn.addr)
 env.drain_writebacks()
 ```
@@ -99,7 +99,45 @@ env.drain_writebacks()
 2. load compare 仍通过 `env.expect_scalar_load()` 登记。
 3. primitive 场景结束后仍要显式调用 `drain_writebacks()` 或更强的收敛检查。
 
-### 4.1 为什么 `expect_load()` 放在 issue 后
+如果你需要表达“多条 load 同拍 issue”或“load 与 sta/std 混合同拍 issue”，不要继续扩 `request_apis.py` 的特化 helper；优先改为构造 `BackendSendPlan` / `IssueCyclePlan`：
+
+```python
+from transactions import BackendSendPlan, EnqueueLoadStep, IssueCyclePlan, IssueOp
+
+env.backend.execute(
+    BackendSendPlan.from_steps(
+        EnqueueLoadStep.from_txn(load0),
+        EnqueueLoadStep.from_txn(load1),
+        IssueCyclePlan.from_ops(
+            IssueOp.load_from_txn(load0),
+            IssueOp.sta(req_id=sta_req_id, sq_ptr=sta_sq_ptr, addr=sta_addr, lane=3),
+        ),
+    )
+)
+```
+
+旧的 `send_load_batch_same_cycle()` / `send_load_batch_with_sta_same_cycle()` 仍保留作兼容包装，但不再作为后续扩接口的方向。
+
+### 4.1 什么时候写 plan，什么时候写 sequence
+
+可以用一个很实用的判断标准：
+
+1. 如果你关心的是“这一拍 backend/issue 到底发了哪些 lane、这些 lane 如何组合”，优先写 `BackendSendPlan` / `IssueCyclePlan`。
+2. 如果你关心的是“这个测试场景从 reset 到收敛应该怎么组织”，优先写 sequence。
+3. 如果某个 primitive 脚本已经在多个 testcase 中重复出现，就不要继续把它散落在测试里，应该上提成 sequence。
+
+也就是说：
+
+- `plan` 更偏底层发送结构，适合探路、debug、验证某个新组合是否可达；
+- `sequence` 更偏 testcase 模板，适合沉淀稳定场景、统一 reset/expect/drain/materialize/commit 等固定流程。
+
+推荐工作流通常是：
+
+1. 先用 `env.backend.execute(...)` 写出最短可运行脚本；
+2. 确认路径可达后，把外层固定流程收敛成 sequence；
+3. 最终让 testcase 尽量消费 sequence result，而不是长期手拼 backend 细节。
+
+### 4.2 为什么 `expect_load()` 放在 issue 后
 
 当前 `ScalarLoadSequence` 已经把 “send_load + expect_load + drain_writebacks” 这一标准骨架封装起来。保留这一节，是为了说明 sequence 内部仍沿用了先 issue、再登记期望的顺序。
 
@@ -110,7 +148,7 @@ env.drain_writebacks()
 
 如果后续引入零延迟路径或更激进的 mock，则可以考虑在 issue 前登记期望，以减少竞态风险。
 
-### 4.2 为什么最后要 `check_no_outstanding_transactions()`
+### 4.3 为什么最后要 `check_no_outstanding_transactions()`
 
 因为一次数据 compare 成功，并不代表环境已经完全收敛。
 
@@ -122,7 +160,7 @@ env.drain_writebacks()
 
 这个检查是为了避免“主断言已过，但后台还有未完成事务”的假阳性。
 
-### 4.3 推荐优先复用的高层 sequence
+### 4.4 推荐优先复用的高层 sequence
 
 当 testcase 不再是“单笔 primitive”而是“一个完整场景”时，更推荐直接使用高层 sequence，而不是在测试文件里手工拼循环和指针推进。
 

@@ -853,3 +853,63 @@ testcase
 - replay 回归
   - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -n 16 -q`
   - 结果：`9 passed, 1 xfailed`
+
+## 2026-04-10：重构 backend/issue 请求发送接口
+
+本条目记录一次主动控制接口的收敛：把新增的“多 lda”“混合 lda/sta”能力从一组越堆越多的特化 helper，重构成以请求脚本为中心的统一发送接口。
+
+### 变更摘要
+
+- 在 `transactions.py` 中新增 backend send plan 数据模型：
+  - `EnqueueLoadStep`
+  - `EnqueueStoreStep`
+  - `IssueOp`
+  - `IssueCyclePlan`
+  - `BackendSendPlan`
+  - `StoreRef`
+- `BackendFacade` 新增：
+  - `execute(plan)`
+  - `send(txn_or_plan)`
+  - `send_many(...)`
+- `IssueAgent` 新增通用同拍执行入口：
+  - `issue_cycle(plan)`
+  - `issue_script(plans)`
+- 原有 `send_load_batch_same_cycle` / `send_load_batch_with_sta_same_cycle` 等旧入口继续保留，但全部降级为兼容包装
+- `request_apis.py` 仍保留旧名字，对 tests/sequences 兼容；其内部发送逻辑改为翻译成新 plan 后再交给 `env.backend`
+
+### 当前接口口径
+
+- 推荐新代码优先使用 `env.backend.send(...)` 或 `env.backend.execute(...)`
+- `request_apis.py` 继续可用，但不再作为新增混合场景接口的扩展点
+- 同拍多 lane / 混合 `load + sta/std` 统一由 `IssueCyclePlan` 表达，不再继续新增特化 helper 名字
+
+### 验证情况
+
+- `python3 -m py_compile`
+  - `transactions.py`
+  - `agents/backend_facade.py`
+  - `agents/issue_agent.py`
+  - `request_apis.py`
+  - `tests/test_request_apis_backend_facade.py`
+- 接口/兼容测试
+  - `python3 -m pytest src/test/python/MemBlock/tests/test_request_apis_backend_facade.py src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py -k "backend_facade or request_apis" -q`
+  - 结果：`7 passed`
+- 真实 replay 冒烟
+  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -k "scalar_forward_fail_replay_smoke or scalar_bank_conflict_replay_smoke" -q`
+  - 结果：`2 passed`
+
+## 2026-04-10：补充 backend 请求模型设计文档
+
+本条目记录对新请求模型的文档化收口，确保后续扩展时优先复用脚本式接口，而不是重新回到特化 helper 持续膨胀的旧路径。
+
+### 变更摘要
+
+- 新增 `docs/backend_request_model_design.md`
+  - 说明 `LoadTxn` / `StoreTxn`、`IssueOp`、`IssueCyclePlan`、`BackendSendPlan`、`StoreRef` 的职责分工
+  - 解释 `env.backend.send(...)` 与 `env.backend.execute(...)` 的边界
+  - 记录兼容层策略与后续扩展规则
+- 在同一文档中补充 sequence 风格示例，明确 `BackendSendPlan` 适合探路/primitive/debug，稳定场景仍优先上提到 `ResetEnvSequence`、`ScalarLoadSequence`、`ScalarStoreCommitSequence`
+- 在 `README.md` 中加入新文档入口，并把它纳入推荐阅读顺序
+- 在 `README.md` 的“推荐工作方式”中补一句话版选层规则，帮助开发者快速判断何时写 `BackendSendPlan`、何时抽 sequence
+- 在 `docs/verification_env_design.md` 中补充到新文档的专项链接
+- 在 `docs/test_sequence_and_extension_guide.md` 中补充“什么时候写 plan，什么时候写 sequence”的简版规则，方便 testcase 开发阶段快速选层

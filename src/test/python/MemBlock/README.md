@@ -73,6 +73,8 @@
 
 - `verification_env_design.md`
   - 验证环境总设计，涵盖 `MemBlockEnv`、统一时钟内核、`agents`、`monitors`、`Scoreboard`、`sequences`、`EnvConfig` 的分层关系、实现思路和演进方向。
+- `backend_request_model_design.md`
+  - backend 主动控制请求模型专项说明，重点覆盖 `env.backend.send(...)`、`env.backend.execute(...)`、`IssueCyclePlan`、`BackendSendPlan` 与兼容层收敛策略。
 - `clock_control_and_migration_guide.md`
   - 面向开发者的时钟控制与迁移指南，说明各层应该如何复用 env 时钟原语，避免重新引入零散 `Step()`。
 - `memory_model_design.md`
@@ -101,16 +103,17 @@
 1. `README.md`
 2. `CHANGELOG.md`
 3. `docs/verification_env_design.md`
-4. `docs/clock_control_and_migration_guide.md`
-5. `docs/memory_model_design.md`
-6. `docs/rob_model.md`
-7. `docs/coverage_summary.md`
-8. `docs/coverage_todo.md`
-9. `docs/vp_pipeline_plan.md`
-10. `tests/test_MemBlock_scalar_load_pipeline.py`
-11. `tests/test_MemBlock_scalar_store_pipeline.py`
-12. `tests/test_MemBlock_scalar_ordering.py`
-13. `tests/test_MemBlock_replay.py`
+4. `docs/backend_request_model_design.md`
+5. `docs/clock_control_and_migration_guide.md`
+6. `docs/memory_model_design.md`
+7. `docs/rob_model.md`
+8. `docs/coverage_summary.md`
+9. `docs/coverage_todo.md`
+10. `docs/vp_pipeline_plan.md`
+11. `tests/test_MemBlock_scalar_load_pipeline.py`
+12. `tests/test_MemBlock_scalar_store_pipeline.py`
+13. `tests/test_MemBlock_scalar_ordering.py`
+14. `tests/test_MemBlock_replay.py`
 
 ## 当前测试与报告入口
 
@@ -133,12 +136,31 @@ txn = LoadTxn(
     sq_ptr=state.sq_ptr,
 )
 
-env.backend.send_load(txn)
+env.backend.send(txn)
 env.expect_scalar_load(req_id=txn.req_id, addr=txn.addr)
 env.drain_writebacks()
 ```
 
 如果场景已经能被高层 sequence 表达，仍然优先复用 sequence；只有在编写新的 primitive 场景或 debug 时，才直接调用 `env.backend`。
+
+如果需要在同一拍发多条 `load`，或组合 `load + sta/std`，推荐直接构造脚本化计划：
+
+```python
+from transactions import BackendSendPlan, EnqueueLoadStep, IssueCyclePlan, IssueOp
+
+env.backend.execute(
+    BackendSendPlan.from_steps(
+        EnqueueLoadStep.from_txn(load0),
+        EnqueueLoadStep.from_txn(load1),
+        IssueCyclePlan.from_ops(
+            IssueOp.load_from_txn(load0),
+            IssueOp.load_from_txn(load1),
+        ),
+    )
+)
+```
+
+这套请求脚本模型的设计动机、对象关系与扩展规则，详见 `src/test/python/MemBlock/docs/backend_request_model_design.md`。
 
 当前已稳定存在的测试类型：
 
@@ -160,6 +182,7 @@ env.drain_writebacks()
 
 - 新 testcase 优先通过 sequence + `MemBlockEnv` public facade 组织，不直接依赖 `env.memory` 内部容器。
 - 主动控制入口默认使用 `env.backend` 或 `request_apis.py`，不要再新增 `env.note_*` / `env.pulse_*` 风格 helper。
+- 需要验证 backend/issue 的拍级发送组合时优先写 `BackendSendPlan`；需要沉淀可复用测试场景时优先上提成 sequence。
 - 需要新增 DUT 白盒观测时，优先扩 `monitors/` 或 env facade，不把私有 DUT 命名直接散落到测试文件。
 - 需要增强检查逻辑时，优先修改 `model/` 与相应设计文档，不在 testcase 中堆临时判断。
 - 覆盖率状态与下一步补强工作以 `coverage_summary.md` 和 `coverage_todo.md` 为准。

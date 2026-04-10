@@ -163,6 +163,8 @@ testcase / sequence / request_apis / env.backend
 
 其中 `BackendFacade` 负责统一编排其余 backend-facing agents，并作为 testcase/sequence 的默认主动控制入口。它们共同特点是“主动写 DUT 输入”。这和 monitor 的只读性质形成了明确对照。
 
+关于 `env.backend.send(...)` / `env.backend.execute(...)` 及 `IssueCyclePlan`、`BackendSendPlan` 的专项设计说明，见 `src/test/python/MemBlock/docs/backend_request_model_design.md`。
+
 这种划分与 UVM driver 的思想一致，但比传统 driver/seq_item 体系更简单：Python 场景对象不直接碰 pin，agent 统一持有时序细节；testcase 只描述“我要发一个 load/store/flush”，不描述“第几拍拉哪个 valid”。这既降低了 testcase 冗余，也避免多个用例各自复制握手时序。
 
 ## 7. Passive Monitors
