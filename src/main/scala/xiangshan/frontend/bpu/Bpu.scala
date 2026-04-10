@@ -24,6 +24,7 @@ import utility.DelayN
 import utility.XSError
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
+import utility.XSPerfSeqAccumulate
 import xiangshan.frontend.BpuToFtqIO
 import xiangshan.frontend.FrontendTopDownBundle
 import xiangshan.frontend.FtqToBpuIO
@@ -235,8 +236,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   sc.io.mbtbResult          := mbtb.io.result
   sc.io.providerTakenCtrs   := tage.io.toSc.providerTakenCtrVec
   sc.io.foldedPathHist      := phr.io.s0_foldedPhr
+  sc.io.imli                := commonHR.io.s0_imli
   sc.io.trainFoldedPathHist := phr.io.trainFoldedPhr
-  sc.io.s3_override         := s3_override
   sc.io.commonHR            := commonHR.io.s0_commonHR
 
   s3_flush := redirect.valid
@@ -378,11 +379,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s2_phrMeta = RegEnable(phr.io.phrMeta, s1_fire)
   private val s3_phrMeta = RegEnable(s2_phrMeta, s2_fire)
 
-  private val s2_commonHR     = RegEnable(commonHR.io.commonHR, s1_fire)
-  private val s3_commonHR     = RegEnable(s2_commonHR, s2_fire)
   private val s3_commonHRMeta = WireInit(0.U.asTypeOf(new CommonHRMeta))
-  s3_commonHRMeta.ghr       := s3_commonHR.ghr
-  s3_commonHRMeta.bw        := s3_commonHR.bw
+  s3_commonHRMeta.ghr       := commonHR.io.s3ResolveMeta.ghr
+  s3_commonHRMeta.bw        := commonHR.io.s3ResolveMeta.bw
+  s3_commonHRMeta.imli      := commonHR.io.s3ResolveMeta.imli
   s3_commonHRMeta.hitMask   := VecInit(s3_mbtbResult.map(_.valid))
   s3_commonHRMeta.attribute := VecInit(s3_mbtbResult.map(_.bits.attribute))
   s3_commonHRMeta.position  := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
@@ -393,11 +393,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_redirectMeta.ras          := ras.io.redirectMeta
 
   private val s3_resolveMeta = Wire(new BpuResolveMeta)
-  s3_resolveMeta.mbtb   := RegEnable(mbtb.io.meta, s2_fire)
-  s3_resolveMeta.tage   := RegEnable(tage.io.meta, s2_fire)
-  s3_resolveMeta.sc     := sc.io.meta
-  s3_resolveMeta.ittage := ittage.io.meta
-  s3_resolveMeta.phr    := s3_phrMeta
+  s3_resolveMeta.mbtb     := RegEnable(mbtb.io.meta, s2_fire)
+  s3_resolveMeta.tage     := RegEnable(tage.io.meta, s2_fire)
+  s3_resolveMeta.sc       := sc.io.meta
+  s3_resolveMeta.commonHR := commonHR.io.s3ResolveMeta
+  s3_resolveMeta.ittage   := ittage.io.meta
+  s3_resolveMeta.phr      := s3_phrMeta
   // s3_resolveMeta.debug_utage.foreach(_ := s3_utageMeta)
   s3_resolveMeta.utage := s3_utageMeta
 
@@ -468,8 +469,13 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   dontTouch(phrBits)
 
   // ghr update
+  private val s1_cfiPc = getCfiPcFromPosition(s1_startPc, s1_prediction.cfiPosition)
+  private val s1_imliTaken =
+    s1_prediction.taken && s1_prediction.attribute.isConditional && (s1_cfiPc.addr > s1_prediction.target.addr)
+
   commonHR.io.stageCtrl               := stageCtrl
   commonHR.io.s0_startPc.get          := s0_startPc
+  commonHR.io.s1_imliTaken            := s1_imliTaken
   commonHR.io.update.startPc          := s3_startPc
   commonHR.io.update.target           := s3_prediction.target
   commonHR.io.update.taken            := s3_taken
@@ -483,8 +489,6 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   commonHR.io.redirect.taken          := redirect.bits.taken
   commonHR.io.redirect.attribute      := redirect.bits.attribute
   commonHR.io.redirect.meta           := redirect.bits.meta.commonHRMeta
-  private val s0_commonHR = commonHR.io.s0_commonHR
-  dontTouch(s0_commonHR)
 
   // Power-on reset
   private val powerOnResetState = RegInit(true.B)
@@ -504,34 +508,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   /* *** Debug Meta *** */
   // used for performance counters
-  private val s3_scFlipTage = VecInit((s3_tagePrediction zip s3_scUsed zip s3_scTakenMask).map {
-    case ((tagePred, useSc), scTaken) =>
-      useSc && (tagePred.providerPred =/= scTaken)
-  }) // for bpSource counter
-  private val s3_condTakenMask = VecInit(s3_mbtbResult.zipWithIndex.map { case (entry, i) =>
-    val tagePred = s3_tagePrediction(i)
-    val useSc    = s3_scUsed(i)
-    val scTaken  = s3_scTakenMask(i)
-
-    entry.valid && entry.bits.attribute.isConditional &&
-    MuxCase(
-      entry.bits.taken, // default: base table
-      Seq(
-        useSc                -> scTaken,
-        tagePred.useProvider -> tagePred.providerPred,
-        tagePred.hasAlt      -> tagePred.altPred
-      )
-    )
-  })
-  private val s3_firstTakenPosition = Mux1H(s3_firstTakenBranchOH, VecInit(s3_mbtbResult.map(_.bits.cfiPosition)))
-  private val s3_firstTakenBlameSc  = Mux1H(s3_firstTakenBranchOH, s3_scFlipTage)
-  // if the branch before the first take has a flipped and !s3_taken && flipped, then blamed on sc
-  // first tage taken flip to not taken
-  private val s3_firstT2NT = VecInit((s3_mbtbResult zip s3_scFlipTage).map {
-    case (info, flip) =>
-      flip && (s3_taken && info.bits.cfiPosition < s3_firstTakenPosition)
-  }).reduce(_ || _) || (!s3_taken && s3_scFlipTage.reduce(_ || _))
-  // see class BpuPredictionSource in bpu/Bundles.scala:137
+  private val s3_firstTakenBlameSc = Mux1H(s3_firstTakenBranchOH, s3_scUsed)
+  // see class BpuPredictionSource in bpu/Bundles.scala
   private val s1_predictionSource =
     MuxCase(
       BpuPredictionSource.Stage1.Fallthrough,
@@ -543,15 +521,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       )
     )
   private val s3_predictionSource = PriorityEncoder(Seq(
-    s3_taken && s3_useRas,                                                                                    // RAS
-    s3_taken && s3_useIttage,                                                                                 // ITTage
-    s3_firstTakenBranch.bits.attribute.isConditional && ((s3_taken && s3_firstTakenBlameSc) || s3_firstT2NT), // MbtbSc
-    s3_taken && s3_firstTakenBranch.bits.attribute.isConditional, // MbtbTage
-    s3_taken,                                                     // Mbtb
-    (s3_mbtbResult zip s3_condTakenMask).map { case (info, taken) =>
-      info.valid && info.bits.attribute.isConditional && !taken
-    }.reduce(_ || _), // FallthroughTage
-    true.B            // Fallthrough
+    s3_taken && s3_useRas,                                                                // RAS
+    s3_taken && s3_useIttage,                                                             // ITTage
+    s3_taken && s3_firstTakenBranch.bits.attribute.isConditional && s3_firstTakenBlameSc, // Sc
+    s3_taken && s3_firstTakenBranch.bits.attribute.isConditional,                         // Tage
+    s3_taken,                                                                             // Mbtb
+    true.B                                                                                // Fallthrough
   ))
 
   private val s2_s1PredictionSource = RegEnable(s1_predictionSource, s1_fire)
@@ -566,6 +541,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_perfMeta.bpSource.s3Source   := s3_predictionSource
   s3_perfMeta.bpSource.s3Override := s3_override
   s3_perfMeta.mbtbMeta            := RegEnable(mbtb.io.meta, s2_fire)
+  s3_perfMeta.scUsed              := s3_scUsed.asUInt
 
   io.toFtq.perfMeta := s3_perfMeta
   // TODO: override reason and redirect reason
@@ -624,7 +600,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     0,
     FetchBlockInstNum + 1
   )
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "s1_use",
     io.toFtq.prediction.fire,
     Seq(
@@ -639,13 +615,13 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   XSPerfAccumulate("s3_use_ittage", s3_fire && s3_taken && !s3_useRas && s3_useIttage)
   XSPerfAccumulate("s3_use_mbtb_tage", s3_fire && s3_prediction.attribute.isConditional)
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "finalPred_s1",
     s3_fire && !s3_override,
     BpuPredictionSource.Stage1.getValidSeq(s3_perfMeta.bpSource.s1Source)
   )
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "finalPred_s3",
     s3_fire && s3_override,
     BpuPredictionSource.Stage3.getValidSeq(s3_perfMeta.bpSource.s3Source)
@@ -661,30 +637,24 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   )
   private val perf_s3TakenSourceVec = BpuPredictionSource.Stage3.getValidSeq(
     s3_perfMeta.bpSource.s3Source,
-    exclude = Set("Fallthrough", "FallthroughTage"),
+    exclude = Set("Fallthrough"),
     thisPrefix = "s3"
   )
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     s"s3Override_takenMismatch_s1fall",
     io.toFtq.prediction.fire && s3_override && s3_perfMeta.bpSource.s1Fallthrough,
     perf_s3TakenSourceVec
   )
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     s"s3Override_takenMismatch_s3fall",
     io.toFtq.prediction.fire && s3_override && s3_perfMeta.bpSource.s3Fallthrough,
     perf_s1TakenSourceVec
   )
 
-  XSPerfAccumulate(
-    s"s3Override_takenMismatch_s3fallTage",
-    io.toFtq.prediction.fire && s3_override && s3_perfMeta.bpSource.s3FallthroughTage,
-    perf_s1TakenSourceVec
-  )
-
   // position mismatch
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     s"s3Override_positionMismatch",
     io.toFtq.prediction.fire && s3_override &&
       s3_prediction.taken && s3_s1Prediction.taken &&
@@ -693,7 +663,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   )
 
   // attribute mismatch
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     s"s3Override_attributeMismatch",
     io.toFtq.prediction.fire && s3_override &&
       s3_prediction.taken && s3_s1Prediction.taken &&
@@ -707,11 +677,11 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val perf_fullTakenSourceVec = BpuPredictionSource.Stage3.getValidSeq(
     s3_perfMeta.bpSource.s3Source,
     thatSeq = perf_s1TakenSourceVec,
-    exclude = Set("Fallthrough", "FallthroughTage"),
+    exclude = Set("Fallthrough"),
     thisPrefix = "s3"
   )
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     s"s3Override_targetMismatch",
     io.toFtq.prediction.fire && s3_override &&
       s3_prediction.taken && s3_s1Prediction.taken &&
@@ -726,15 +696,15 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val t0_branches         = train.branches
   private val t0_mbtbHit          = t0_mbtbMeta.entries.flatten.map(_.hit(t0_mispredictBranch.bits)).reduce(_ || _)
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "train",
-    io.fromFtq.train.fire,
+    io.fromFtq.train.valid,
     Seq(
-      ("total", true.B),
+      ("total", io.fromFtq.train.ready),
       ("stall", !io.fromFtq.train.ready)
     )
   )
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "train_branch",
     io.fromFtq.train.fire,
     Seq(
@@ -746,7 +716,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       ("conditional", true.B, PopCount(t0_branches.map(b => b.valid && b.bits.attribute.isConditional)))
     )
   )
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "train_mispredict",
     io.fromFtq.train.fire && t0_mispredictBranch.valid,
     Seq(

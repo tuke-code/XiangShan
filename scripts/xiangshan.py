@@ -104,6 +104,8 @@ class XSArgs(object):
         self.pgo_emu_args = args.pgo_emu_args
         self.llvm_profdata = args.llvm_profdata
         self.emulator = args.emulator
+        self.emu_trace_all = 1 if args.trace_all else None
+        self.flash = args.flash
         # wave dump path
         if args.wave_dump is not None:
             self.set_wave_home(args.wave_dump)
@@ -151,6 +153,7 @@ class XSArgs(object):
             (self.llvm_profdata, "LLVM_PROFDATA"),
             (self.issue,         "ISSUE"),
             (self.simfrontend,   "ENABLE_SIMFRONTEND"),
+            (self.emu_trace_all, "EMU_TRACE_ALL"),
         ]
         args = filter(lambda arg: arg[0] is not None, makefile_args)
         args = [(shlex.quote(str(arg[0])), arg[1]) for arg in args] # shell escape
@@ -216,6 +219,7 @@ class XiangShan(object):
     def __init__(self, args):
         self.args = XSArgs(args)
         self.timeout = args.timeout
+        self.numa_info = None
 
     def show(self):
         self.args.show()
@@ -280,14 +284,16 @@ class XiangShan(object):
             print("workload instr trace: ", instr_trace)
         numa_args = ""
         if self.args.numa:
-            numa_info = get_free_cores(self.args.threads)
-            numa_args = f"numactl -m {numa_info[0]} -C {numa_info[1]}-{numa_info[2]}"
+            if self.numa_info is None:
+                self.numa_info = get_free_cores(self.args.threads)
+            numa_args = f"numactl -m {self.numa_info[0]} -C {self.numa_info[1]}-{self.numa_info[2]}"
         fork_args = "--enable-fork" if self.args.fork else ""
         diff_args = "--no-diff" if self.args.disable_diff else ""
         chiseldb_args = "--dump-db" if self.args.dump_db else ""
         instr_trace_args = f"--instr-trace {instr_trace}" if instr_trace_valid else ""
         gcpt_restore_args = f"-r {self.args.gcpt_restore_bin}" if len(self.args.gcpt_restore_bin) != 0 else ""
-        return_code = self.__exec_cmd(f'ulimit -s {32 * 1024}; {numa_args} $NOOP_HOME/build/emu -i {workload} {emu_args} {fork_args} {diff_args} {chiseldb_args} {gcpt_restore_args} {instr_trace_args}')
+        flash_args = f"--flash {self.args.flash}" if self.args.flash is not None else ""
+        return_code = self.__exec_cmd(f'ulimit -s {32 * 1024}; {numa_args} $NOOP_HOME/build/emu -i {workload} {emu_args} {fork_args} {diff_args} {chiseldb_args} {gcpt_restore_args} {instr_trace_args} {flash_args}')
         return return_code
 
     def run_simv(self, workload):
@@ -773,6 +779,7 @@ if __name__ == "__main__":
     parser.add_argument('--make-threads', nargs='?', type=int, help='number of make threads', default=200)
     parser.add_argument('--trace', action='store_true', help='enable vcd waveform')
     parser.add_argument('--trace-fst', action='store_true', help='enable fst waveform')
+    parser.add_argument('--trace-all', action='store_true', help='enable EMU_TRACE_ALL for makefile')
     parser.add_argument('--config', nargs='?', type=str, help='config')
     parser.add_argument('--yaml-config', nargs='?', type=str, help='yaml config')
     parser.add_argument('--emu-optimize', nargs='?', type=str, help='verilator optimization letter')
@@ -789,6 +796,7 @@ if __name__ == "__main__":
     parser.add_argument('--gcpt-restore-bin', type=str, default="", help="specify the bin used to restore from gcpt")
     parser.add_argument('--instr-trace', type=str, default="", help="run the test with the trace of the simfrontend")
     parser.add_argument('--seed', type=int, help="run emu with the given random seed")
+    parser.add_argument('--flash', type=str, help="Path to flash image for copy_and_run")
     # both makefile and emu arguments
     parser.add_argument('--dump-db', action='store_true', help='enable chiseldb dump')
     parser.add_argument('--pgo', nargs='?', type=str, help='workload for pgo (null to disable pgo)')

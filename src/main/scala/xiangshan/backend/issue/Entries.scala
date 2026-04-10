@@ -52,7 +52,7 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
 
   //Wire
   //entries status
-  val entries             = Wire(Vec(params.numEntries, ValidIO(new EntryBundle)))
+  val entries             = Wire(Vec(params.numEntries, ValidIO(new EntryBundle(isDeq = true))))
   val robIdxVec           = Wire(Vec(params.numEntries, new RobPtr))
   val validVec            = Wire(Vec(params.numEntries, Bool()))
   val issuedVec           = Wire(Vec(params.numEntries, Bool()))
@@ -66,9 +66,8 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
   val sqIdxVec            = OptionWrapper(params.needFeedBackSqIdx, Wire(Vec(params.numEntries, new SqPtr())))
   val lqIdxVec            = OptionWrapper(params.needFeedBackLqIdx, Wire(Vec(params.numEntries, new LqPtr())))
   val validVecRegNext     = Wire(Vec(params.numEntries, Bool()))
-  val issuedVecRegNext    = Wire(Vec(params.numEntries, Bool()))  
+  val issuedVecRegNext    = Wire(Vec(params.numEntries, Bool()))
   //src status
-  val dataSourceVec       = Wire(Vec(params.numEntries, Vec(params.numRegSrc, DataSource())))
   val loadDependencyVec   = Wire(Vec(params.numEntries, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W))))
   val exuSourceVec        = OptionWrapper(params.hasIQWakeUp, Wire(Vec(params.numEntries, Vec(params.numRegSrc, ExuSource()))))
   //deq sel
@@ -254,14 +253,14 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
     }
 
   //deq
-  val enqEntryOldest          = Wire(Vec(params.numDeq, ValidIO(new EntryBundle)))
-  val simpEntryOldest         = OptionWrapper(params.hasCompAndSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle))))
-  val compEntryOldest         = OptionWrapper(params.hasCompAndSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle))))
-  val othersEntryOldest       = OptionWrapper(params.isAllComp || params.isAllSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle))))
-  val enqEntryOldestDelay     = Wire(Vec(params.numDeq, ValidIO(new EntryBundle)))
-  val simpEntryOldestDelay    = OptionWrapper(params.hasCompAndSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle))))
-  val compEntryOldestDelay    = OptionWrapper(params.hasCompAndSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle))))
-  val othersEntryOldestDelay  = OptionWrapper(params.isAllComp || params.isAllSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle))))
+  val enqEntryOldest          = Wire(Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true))))
+  val simpEntryOldest         = OptionWrapper(params.hasCompAndSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true)))))
+  val compEntryOldest         = OptionWrapper(params.hasCompAndSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true)))))
+  val othersEntryOldest       = OptionWrapper(params.isAllComp || params.isAllSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true)))))
+  val enqEntryOldestDelay     = Wire(Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true))))
+  val simpEntryOldestDelay    = OptionWrapper(params.hasCompAndSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true)))))
+  val compEntryOldestDelay    = OptionWrapper(params.hasCompAndSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true)))))
+  val othersEntryOldestDelay  = OptionWrapper(params.isAllComp || params.isAllSimp, Wire(Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true)))))
   val enqEntryOldestCancel    = Wire(Vec(params.numDeq, Bool()))
   val simpEntryOldestCancel   = OptionWrapper(params.hasCompAndSimp, Wire(Vec(params.numDeq, Bool())))
   val compEntryOldestCancel   = OptionWrapper(params.hasCompAndSimp, Wire(Vec(params.numDeq, Bool())))
@@ -408,7 +407,6 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
   io.srcReady                       := srcReadyVec.asUInt
   io.rfWen                          := rfWenVec.asUInt
   io.fuType                         := fuTypeVec
-  io.dataSources                    := dataSourceVec
   io.exuSources.foreach(_           := exuSourceVec.get)
   io.loadDependency                 := loadDependencyVec
   io.isFirstIssue.zipWithIndex.foreach{ case (isFirstIssue, deqIdx) =>
@@ -444,7 +442,6 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
     srcReadyVec(entryIdx)       := out.srcReady
     fuTypeVec(entryIdx)         := out.fuType
     robIdxVec(entryIdx)         := out.robIdx
-    dataSourceVec(entryIdx)     := out.dataSources
     isFirstIssueVec(entryIdx)   := out.isFirstIssue
     entries(entryIdx)           := out.entry
     deqPortIdxReadVec(entryIdx) := out.deqPortIdxRead
@@ -575,7 +572,6 @@ class EntriesIO(implicit p: Parameters, params: IssueBlockParams) extends XSBund
   val rfWen               = Output(UInt(params.numEntries.W))
   val srcReady            = Output(UInt(params.numEntries.W))
   val fuType              = Vec(params.numEntries, Output(FuType()))
-  val dataSources         = Vec(params.numEntries, Vec(params.numRegSrc, Output(DataSource())))
   val loadDependency      = Vec(params.numEntries, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
   val exuSources          = OptionWrapper(params.hasIQWakeUp, Vec(params.numEntries, Vec(params.numRegSrc, Output(ExuSource()))))
   // for enq.ready timing
@@ -583,7 +579,7 @@ class EntriesIO(implicit p: Parameters, params: IssueBlockParams) extends XSBund
   val issuedRegNext       = Output(UInt(params.numEntries.W))
   //deq status
   val isFirstIssue        = Vec(params.numDeq, Output(Bool()))
-  val deqEntry            = Vec(params.numDeq, ValidIO(new EntryBundle))
+  val deqEntry            = Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true)))
   val deqOg1Payload       = Output(MixedVec(params.exuBlockParams.map(x => new IssueQueueDeqOg1Payload(x))))
   val cancelDeqVec        = Vec(params.numDeq, Output(Bool()))
   val aluDeqSelectJump    = Option.when(params.aluDeqNeedPickJump)(Output(Bool()))

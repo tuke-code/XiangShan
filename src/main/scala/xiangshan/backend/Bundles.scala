@@ -95,6 +95,11 @@ object Bundles {
     sink.bits.toVlRf. foreach(_.bits  := source.bits.data(0))
   }
 
+  def connectMemDecoupledNewExuOutput(sink: DecoupledIO[NewExuOutput], source: NewExuOutput) = {
+    sink.valid := source.toRob.valid
+    sink.bits := source
+  }
+
   def connectWriteBackRob(sink: WriteBackRobBundle, source: NewExuOutput) = {
     connectSamePort(sink, source.toRob.bits)
     connectSamePort(sink, source)
@@ -268,6 +273,7 @@ object Bundles {
     val numWB = UInt(log2Up(MaxUopSize).W) // rob need this
     // rename
     val psrc = Vec(numSrc, UInt(PhyRegIdxWidth.W))
+    val psrcIntForMove = UInt(PhyRegIdxWidth.W)
     val psrcVl = UInt(VlPhyRegIdxWidth.W)
     val pdest = UInt(PhyRegIdxWidth.W)
     val pdestVl = UInt(VlPhyRegIdxWidth.W)
@@ -317,7 +323,7 @@ object Bundles {
     def isHls: Bool = {
       fuType === FuType.ldu.U && LSUOpType.isHlv(fuOpType) || fuType === FuType.stu.U && LSUOpType.isHsv(fuOpType)
     }
-    
+
     def connectEnqRobUop(source: RenameOutUop): Unit = {
       connectSamePort(this, source)
       this.hasException := source.hasException || source.singleStep
@@ -487,6 +493,9 @@ object Bundles {
     // from rename
     val numLsElem = Option.when(params.issueBlockParam.isVecMemIQ)(NumLsElem())
     val rasAction = Option.when(params.needRasAction)(BranchAttribute.RasAction())
+    // psrc are used in datapath to generate regfile's bank Ren
+    val psrc      = Vec(params.numRegSrc, UInt(params.rdPregIdxWidth.W))
+    val psrcVl    = Option.when(params.readVlRf)(UInt(VlPhyRegIdxWidth.W))
     // for mdp
     val storeSetHit    = Option.when(params.issueBlockParam.isLdAddrIQ || params.issueBlockParam.isStAddrIQ)(Bool())
     val waitForRobIdx  = Option.when(params.issueBlockParam.isLdAddrIQ)(new RobPtr)
@@ -496,14 +505,6 @@ object Bundles {
     // from dispatch
     val lqIdx = Option.when(params.issueBlockParam.needLqIdx)(new LqPtr)
     val sqIdx = Option.when(params.issueBlockParam.needSqIdx)(new SqPtr) // load unit need sqIdx
-    // for read regfile, rf and rfVl are only for param config
-    private val rfReadDataCfgSet: Seq[Set[DataConfig]] = params.getRfReadDataCfgSet
-    val rf: MixedVec[MixedVec[RfReadPortWithConfig]] = MixedVec(
-      rfReadDataCfgSet.map((set: Set[DataConfig]) =>
-        MixedVec(set.map((x: DataConfig) => new RfReadPortWithConfig(x, params.rdPregIdxWidth)).toSeq)
-      )
-    )
-    val rfVl = Option.when(params.readVlRf)(new RfReadPortWithConfig(VlData(), params.backendParam.getPregParams(VlData()).addrWidth))
   }
 
   class IssueQueuePayload(val params: IssueBlockParams)(implicit p: Parameters) extends XSBundle {
@@ -524,7 +525,6 @@ object Bundles {
     val pdest     = UInt(PhyRegIdxWidth.W)
     val pdestVl   = Option.when(params.writeVlRf)(UInt(VlPhyRegIdxWidth.W))
     // from dispatch
-    val srcState          = Vec(numSrc, SrcState())
     val srcLoadDependency = Vec(numSrc, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
     val debug             = OptionWrapper(backendParams.debugEn, new IssueQueueInDebug)
   }
@@ -622,6 +622,8 @@ object Bundles {
     // load inst will not be executed until ALL former store addr calcuated
     val loadWaitStrict  = Bool()
     val ssid            = UInt(SSIDWidth.W)
+    val nc = Bool()
+    val mmio = Bool()
     // Todo
     val lqIdx = new LqPtr
     val sqIdx = new SqPtr
@@ -927,7 +929,7 @@ object Bundles {
     val robIdx         = new RobPtr
     val iqIdx          = UInt(log2Up(iqParams.numEntries).W)
     val isFirstIssue   = Bool()
-    val rfRen          = Option.when(exuParams.readIntRf)(Vec(exuParams.numRegSrc, Bool()))
+    val rfBankRen      = Option.when(exuParams.readIntRf)(Vec(exuParams.numRegSrc, Vec(coreParams.intPreg.numBank, Bool())))
     val fpRen          = Option.when(exuParams.readFpRf )(Vec(exuParams.numRegSrc, Bool()))
     val vecRen         = Option.when(exuParams.readVecRf)(Vec(exuParams.numRegSrc, Bool()))
     val v0Ren          = Option.when(exuParams.readV0Rf )(Vec(exuParams.numRegSrc, Bool()))
@@ -942,9 +944,6 @@ object Bundles {
     val flushPipe      = Option.when(exuParams.flushPipe)    (Bool())
     val ftqIdx         = Option.when(exuParams.needFtqPtr)   (new FtqPtr)
     val ftqOffset      = Option.when(exuParams.needFtqPtrOffset)(UInt(FetchBlockInstOffsetWidth.W))
-    // psrc are used in datapath to generate regfile's bank Ren
-    val psrc           = Vec(exuParams.numRegSrc, UInt(exuParams.rdPregIdxWidth.W))
-    val psrcVl         = Option.when(exuParams.readVlRf)(UInt(VlPhyRegIdxWidth.W))
     // dataSources are used in issueQueue to generate regfile Ren
     val dataSources    = Vec(exuParams.numRegSrc, DataSource())
     val exuSources     = Option.when(exuParams.isIQWakeUpSink)(Vec(exuParams.numRegSrc, ExuSource(exuParams)))
@@ -1729,5 +1728,10 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
       val ld2Cancel = loadDependency.map(_.zip(ldCancel.map(_.ld2Cancel)).map { case (dep, cancel) => cancel && dep(1)}.reduce(_ || _))
       ld1Cancel.map(_ || ld2Cancel.get).getOrElse(false.B)
     }
+  }
+
+  class DiffRCIdx(implicit p: Parameters) extends XSBundle {
+    val wen    = Bool()
+    val rcIdx = UInt(RegCacheIdxWidth.W)
   }
 }

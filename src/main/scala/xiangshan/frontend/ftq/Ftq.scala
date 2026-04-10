@@ -30,14 +30,13 @@ import utility.UIntToMask
 import utility.XSError
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
-import utility.XSPerfPriorityAccumulate
+import utility.XSPerfSeqAccumulate
 import xiangshan.RedirectLevel
 import xiangshan.TopDownCounters
 import xiangshan.backend.CtrlToFtqIO
+import xiangshan.frontend.BackendRedirectTopdown
 import xiangshan.frontend.BlameBpuSource
-import xiangshan.frontend.BpuPerfInfo
 import xiangshan.frontend.BpuToFtqIO
-import xiangshan.frontend.BpuTopDownInfo
 import xiangshan.frontend.ExceptionType
 import xiangshan.frontend.FetchRequestBundle
 import xiangshan.frontend.FrontendTopDownBundle
@@ -71,10 +70,8 @@ class Ftq(implicit p: Parameters) extends FtqModule
     val fromBackend: CtrlToFtqIO = Flipped(new CtrlToFtqIO)
     val toBackend:   FtqToCtrlIO = new FtqToCtrlIO
 
-    val bpuInfo: BpuPerfInfo = Output(new BpuPerfInfo)
-
-    // for perf
-    val bpuTopDownInfo: BpuTopDownInfo = Output(new BpuTopDownInfo)
+    // Topdown analysis
+    val backendRedirectTopdown: BackendRedirectTopdown = Output(new BackendRedirectTopdown)
   }
 
   val io: FtqIO = IO(new FtqIO)
@@ -274,19 +271,6 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   io.toIfu.req.bits.fetch(1) := 0.U.asTypeOf(new FetchRequestBundle)
 
-  // toIFU topdown counters
-  val topdown_stage = RegInit(0.U.asTypeOf(new FrontendTopDownBundle()))
-  // only driven by clock, not valid-ready
-  topdown_stage                 := io.fromBpu.topdownReasons
-  io.toIfu.req.bits.topdownInfo := topdown_stage
-  when(backendRedirect.valid) {
-    // TODO: reasoning back to each BP component
-    when(backendRedirect.bits.debugIsMemVio) {
-      topdown_stage.reasons(TopDownCounters.MemVioRedirectBubble.id)                 := true.B
-      io.toIfu.req.bits.topdownInfo.reasons(TopDownCounters.MemVioRedirectBubble.id) := true.B
-    }
-  }
-
   // --------------------------------------------------------------------------------
   // Interaction with backend
   // --------------------------------------------------------------------------------
@@ -387,16 +371,31 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // --------------------------------------------------------------------------------
   // Performance monitoring
   // --------------------------------------------------------------------------------
-  io.bpuInfo := DontCare
-  // io.toIfu.req.bits.topdownInfo is assigned above
-  io.toIfu.topdownRedirect := backendRedirect
 
-  io.bpuTopDownInfo.btbMissBubble    := false.B // TODO: add more info to distinguish
-  io.bpuTopDownInfo.tageMissBubble   := RegNext(backendRedirect.valid && backendRedirect.bits.attribute.isConditional)
-  io.bpuTopDownInfo.scMissBubble     := false.B // TODO: add SC info
-  io.bpuTopDownInfo.ittageMissBubble := RegNext(backendRedirect.valid && backendRedirect.bits.attribute.needIttage)
-  io.bpuTopDownInfo.rasMissBubble    := RegNext(backendRedirect.valid && backendRedirect.bits.attribute.isReturn)
+  // Topdown analysis
+  io.backendRedirectTopdown.backendRedirect         := backendRedirect.valid
+  io.backendRedirectTopdown.controlFlowRedirect     := backendRedirect.bits.debugIsCtrl
+  io.backendRedirectTopdown.memoryViolationRedirect := backendRedirect.bits.debugIsMemVio
 
+  io.backendRedirectTopdown.btbMissBubble    := false.B // TODO: add more info to distinguish
+  io.backendRedirectTopdown.tageMissBubble   := backendRedirect.bits.attribute.isConditional
+  io.backendRedirectTopdown.scMissBubble     := false.B // TODO: add SC info
+  io.backendRedirectTopdown.ittageMissBubble := backendRedirect.bits.attribute.needIttage
+  io.backendRedirectTopdown.rasMissBubble    := backendRedirect.bits.attribute.isReturn
+
+  private val topdownStage = RegInit(0.U.asTypeOf(new FrontendTopDownBundle))
+  // only driven by clock, not valid-ready
+  topdownStage := io.fromBpu.topdownReasons
+  topdownStage.backendRedirectOverride(io.backendRedirectTopdown)
+  io.toIfu.req.bits.topdownInfo := topdownStage
+
+  when(!(distanceBetween(bpuPtr(0), commitPtr(0)) < FtqSize.U)) {
+    topdownStage.reasons(TopDownCounters.FtqFullStall.id) := true.B
+  }.elsewhen(!(distanceBetween(bpuPtr(0), ifuPtr(0)) < BpRunAheadDistance.U && bpTrainStallCnt < BpTrainStallLimit.U)) {
+    topdownStage.reasons(TopDownCounters.FtqUpdateBubble.id) := true.B
+  }
+
+  // Hardware performance monitors
   val perfEvents: Seq[(String, UInt)] = Seq()
   generatePerfEvent()
 
@@ -408,7 +407,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   private val redirectPerfMeta = perfQueue(backendRedirectFtqIdx.bits.value).bpuPerf
   private val commitPerfMeta   = perfQueue(commitPtr(0).value)
 
-  XSPerfPriorityAccumulate(
+  XSPerfSeqAccumulate(
     "squash_cycles_bp_wrong_redirect",
     backendRedirect.valid && backendRedirect.bits.isMisPred,
     Seq(
@@ -416,10 +415,11 @@ class Ftq(implicit p: Parameters) extends FtqModule
       ("wrong_position", redirectCfiOffset =/= redirectPerfMeta.bpPred.cfiPosition),
       ("wrong_attribute", !(redirect.bits.attribute === redirectPerfMeta.bpPred.attribute)),
       ("wrong_target", redirect.bits.target =/= redirectPerfMeta.bpPred.target.toUInt)
-    )
+    ),
+    withPriority = true
   )
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "squash_cycles_bp_wrong_redirect_wrong_target",
     backendRedirect.valid && backendRedirect.bits.isMisPred &&
       redirect.bits.taken === redirectPerfMeta.bpPred.taken &&
@@ -437,13 +437,13 @@ class Ftq(implicit p: Parameters) extends FtqModule
   private val perf_mispredS1SourceVec = BpuPredictionSource.Stage1.getValidSeq(redirectPerfMeta.bpSource.s1Source)
   private val perf_mispredS3SourceVec = BpuPredictionSource.Stage3.getValidSeq(redirectPerfMeta.bpSource.s3Source)
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "resolve_branch_mispredicts_s1_source",
     backendRedirect.valid && backendRedirect.bits.isMisPred && !redirectPerfMeta.bpSource.s3Override,
     perf_mispredS1SourceVec
   )
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "resolve_branch_mispredicts_s3_source",
     backendRedirect.valid && backendRedirect.bits.isMisPred && redirectPerfMeta.bpSource.s3Override,
     perf_mispredS3SourceVec
@@ -453,7 +453,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   XSPerfAccumulate("resolve_other_redirects", backendRedirect.valid && !backendRedirect.bits.isMisPred)
 
   // Commit-time statistics, should be correct-path only
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "commit_branch",
     commit,
     Seq(
@@ -461,7 +461,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
       ("mispredicts", true.B, commitPerfMeta.mispredict)
     )
   )
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "commit_branch_type",
     commit,
     Seq(
@@ -478,34 +478,46 @@ class Ftq(implicit p: Parameters) extends FtqModule
     )
   )
 
-  XSPerfAccumulate(
+  private val perf_commitHasMispredict = commit && commitPerfMeta.mispredict
+  private val perf_commitHasMispredictConditional =
+    perf_commitHasMispredict && commitPerfMeta.mispredictBranchInfo.attribute.isConditional
+
+  XSPerfSeqAccumulate(
     "commit_branch_mispredicts_s1_mispred_s1_source",
-    commit && commitPerfMeta.mispredict && !commitPerfMeta.bpuPerf.bpSource.s3Override,
+    perf_commitHasMispredict && !commitPerfMeta.bpuPerf.bpSource.s3Override,
     BpuPredictionSource.Stage1.getValidSeq(commitPerfMeta.bpuPerf.bpSource.s1Source)
   )
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "commit_branch_mispredicts_s1_source",
-    commit && commitPerfMeta.mispredict,
+    perf_commitHasMispredict,
     BpuPredictionSource.Stage1.getValidSeq(commitPerfMeta.bpuPerf.bpSource.s1Source)
   )
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "commit_branch_mispredicts_s3_source",
-    commit && commitPerfMeta.mispredict,
+    perf_commitHasMispredict,
     BpuPredictionSource.Stage3.getValidSeq(commitPerfMeta.bpuPerf.bpSource.s3Source)
   )
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "commit_branch_mispredicts_reason",
-    commit && commitPerfMeta.mispredict,
-    BlameBpuSource.BlameType.getValidSeq(BlameBpuSource(commitPerfMeta.bpuPerf, commitPerfMeta.mispredictBranchInfo))
+    perf_commitHasMispredict,
+    BlameBpuSource.BlameType.getValidSeq(BlameBpuSource(
+      perf_commitHasMispredict,
+      commitPerfMeta.bpuPerf,
+      commitPerfMeta.mispredictBranchInfo
+    ))
   )
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "commit_conditional_branch_mispredicts_reason",
-    commit && commitPerfMeta.mispredict && commitPerfMeta.mispredictBranchInfo.attribute.isConditional,
-    BlameBpuSource.BlameType.getValidSeq(BlameBpuSource(commitPerfMeta.bpuPerf, commitPerfMeta.mispredictBranchInfo))
+    perf_commitHasMispredictConditional,
+    BlameBpuSource.BlameType.getValidSeq(BlameBpuSource(
+      perf_commitHasMispredictConditional,
+      commitPerfMeta.bpuPerf,
+      commitPerfMeta.mispredictBranchInfo
+    ))
   )
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "commit_branch_mispredicts_type",
-    commit && commitPerfMeta.mispredict,
+    perf_commitHasMispredict,
     Seq(
       ("conditional", commitPerfMeta.mispredictBranchInfo.attribute.isConditional),
       ("direct", commitPerfMeta.mispredictBranchInfo.attribute.isDirect),

@@ -20,6 +20,7 @@ import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
+import utility.XSPerfSeqAccumulate
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.BranchInfo
 import xiangshan.frontend.bpu.Prediction
@@ -52,6 +53,7 @@ class MainBtbAlignBank(
 
     class Write extends Bundle {
       class Req extends Bundle {
+        val needWrite: Bool = Bool()
         // similar to Read.Req.startPc, calculated in MainBtb top
         val startPc:  PrunedAddr             = new PrunedAddr(VAddrBits)
         val branches: Vec[Valid[BranchInfo]] = Vec(ResolveEntryBranchNumber, Valid(new BranchInfo))
@@ -64,20 +66,13 @@ class MainBtbAlignBank(
 
       val req: Valid[Req] = Flipped(Valid(new Req))
     }
-    class Trace extends Bundle {
-      val needWrite: Bool         = Bool()
-      val setIdx:    UInt         = UInt(SetIdxLen.W)
-      val bankIdx:   UInt         = UInt(log2Ceil(NumInternalBanks).W)
-      val wayIdx:    UInt         = UInt(log2Ceil(NumWay).W)
-      val entry:     MainBtbEntry = new MainBtbEntry
-    }
 
     val resetDone: Bool      = Output(Bool())
     val stageCtrl: StageCtrl = Input(new StageCtrl)
 
-    val read:  Read  = new Read
-    val write: Write = new Write
-    val trace: Trace = Output(new Trace)
+    val read:  Read                  = new Read
+    val write: Write                 = new Write
+    val trace: MainBtbAlignBankTrace = Output(new MainBtbAlignBankTrace)
 
     // final s3_takenMask (mbtb + tage + sc), used to touch replacer accurately
     val s3_takenMask: Vec[Bool] = Input(Vec(NumWay, Bool()))
@@ -200,6 +195,7 @@ class MainBtbAlignBank(
    * send write req to internal banks (srams)
    */
   private val t1_fire             = w.req.valid
+  private val t1_needWrite        = w.req.bits.needWrite
   private val t1_startPc          = w.req.bits.startPc
   private val t1_branches         = w.req.bits.branches
   private val t1_meta             = w.req.bits.meta
@@ -215,7 +211,7 @@ class MainBtbAlignBank(
   private val t1_hit     = t1_hitMask.orR
 
   // Write entry only when there's a mispredict, and if:
-  private val t1_entryNeedWrite = t1_mispredictInfo.valid && (
+  private val t1_entryNeedWrite = t1_needWrite && t1_mispredictInfo.valid && (
     // 1. not hit, always write a new entry, use mbtb replacer's victim way.
     !t1_hit ||
       // 2. hit, do write only if:
@@ -293,7 +289,7 @@ class MainBtbAlignBank(
   io.trace.entry     := t1_entry
   XSPerfHistogram("multihit_count", PopCount(s2_multiHitMask), s2_fire, 0, NumWay)
 
-  XSPerfAccumulate(
+  XSPerfSeqAccumulate(
     "", // no common prefix is needed
     t1_fire && t1_mispredictInfo.valid,
     Seq(

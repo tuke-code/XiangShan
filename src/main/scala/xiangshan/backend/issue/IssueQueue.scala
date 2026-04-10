@@ -222,8 +222,6 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   dontTouch(canIssueVec)
   val deqFirstIssueVec = entries.io.isFirstIssue
 
-  val dataSources: Vec[Vec[DataSource]] = entries.io.dataSources
-  val finalDataSources: Vec[Vec[DataSource]] = VecInit(finalDeqSelOHVec.map(oh => Mux1H(oh, dataSources)))
   val loadDependency: Vec[Vec[UInt]] = entries.io.loadDependency
   val finalLoadDependency: IndexedSeq[Vec[UInt]] = VecInit(finalDeqSelOHVec.map(oh => Mux1H(oh, loadDependency)))
   // (entryIdx)(srcIdx)
@@ -233,7 +231,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
 
   val fuTypeVec = Wire(Vec(params.numEntries, FuType()))
   io.fuTypeVec := fuTypeVec
-  val deqEntryVec = Wire(Vec(params.numDeq, ValidIO(new EntryBundle)))
+  val deqEntryVec = Wire(Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true))))
   val canIssueMergeAllBusy = Wire(Vec(params.numDeq, UInt(params.numEntries.W)))
   val deqCanIssue = Wire(Vec(params.numDeq, UInt(params.numEntries.W)))
 
@@ -865,11 +863,13 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     deq.bits.iqIdx    := OHToUInt(finalDeqSelOHVec(i))
     deq.bits.fuType   := IQFuType.readFuType(deqEntryVec(i).bits.status.fuType, params.getFuCfgs.map(_.fuType)).asUInt
     // TODO: entries use Mux1H sel oldest uop, there can remove deq.valid
-    deq.bits.rfRen .foreach(x => x.zipWithIndex.foreach{case (xx, idx) => xx := deq.valid && SrcType.isXp(deqEntryVec(i).bits.payload.srcType(idx)) && deqEntryVec(i).bits.status.srcStatus(idx).dataSources.readReg})
-    deq.bits.fpRen .foreach(x => x.zipWithIndex.foreach{case (xx, idx) => xx := deq.valid && SrcType.isFp(deqEntryVec(i).bits.payload.srcType(idx)) && deqEntryVec(i).bits.status.srcStatus(idx).dataSources.readReg})
-    deq.bits.vecRen.foreach(x => x.zipWithIndex.foreach{case (xx, idx) => xx := deq.valid && SrcType.isVp(deqEntryVec(i).bits.payload.srcType(idx)) && deqEntryVec(i).bits.status.srcStatus(idx).dataSources.readReg})
-    deq.bits.v0Ren .foreach(x => x.zipWithIndex.foreach{case (xx, idx) => xx := deq.valid && SrcType.isV0(deqEntryVec(i).bits.payload.srcType(idx)) && deqEntryVec(i).bits.status.srcStatus(idx).dataSources.readReg})
-    deq.bits.vlRen .foreach(x => x := deq.valid && deqEntryVec(i).bits.status.srcStatusVl.get.dataSource.readReg)
+    deq.bits.rfBankRen.foreach(x => x.zipWithIndex.foreach{case (xx, idx) => xx.zipWithIndex.foreach{case (xxx, bank) => xxx :=
+      deq.valid && deqEntryVec(i).bits.rfBankRen.get(idx)(bank)
+    }})
+    deq.bits.fpRen .foreach(x => x.zipWithIndex.foreach{case (xx, idx) => xx := deq.valid && deqEntryVec(i).bits.fpRen.get(idx)})
+    deq.bits.vecRen.foreach(x => x.zipWithIndex.foreach{case (xx, idx) => xx := deq.valid && deqEntryVec(i).bits.vecRen.get(idx)})
+    deq.bits.vlRen .foreach(x => x := deq.valid && deqEntryVec(i).bits.vlRen.get)
+    deq.bits.v0Ren .foreach(x => x.zipWithIndex.foreach{case (xx, idx) => xx := deq.valid && deqEntryVec(i).bits.v0Ren.get(idx)})
     deq.bits.rfWen.foreach(_ := deqEntryVec(i).bits.payload.rfWen.get)
     deq.bits.fpWen.foreach(_ := deqEntryVec(i).bits.payload.fpWen.get)
     deq.bits.vecWen.foreach(_ := deqEntryVec(i).bits.payload.vecWen.get)
@@ -880,21 +880,21 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     deq.bits.pdestVl.foreach(_ := deqEntryVec(i).bits.payload.pdestVl.get)
     deq.bits.robIdx := deqEntryVec(i).bits.status.robIdx
 
-    require(deq.bits.dataSources.size <= finalDataSources(i).size)
-    deq.bits.psrc.zip(deqEntryVec(i).bits.status.srcStatus).map(x => x._1 := x._2.psrc)
-    deq.bits.psrcVl.zip(deqEntryVec(i).bits.status.srcStatusVl).map(x => x._1 := x._2.psrc)
-    deq.bits.dataSources.zip(finalDataSources(i)).foreach { case (sink, source) => sink := source}
+    val deqDataSources = deqEntryVec.map(_.bits.status.srcStatus.map(_.dataSources))
+    deq.bits.dataSources.zip(deqDataSources(i)).foreach { case (sink, source) => sink := source}
     deq.bits.exuSources.foreach(_.zip(finalExuSources.get(i)).foreach { case (sink, source) => sink := source})
     deq.bits.loadDependency.foreach(_.zip(finalLoadDependency(i)).foreach { case (sink, source) => sink := source})
-    // when alu select jump uop, src0's dataSource change to imm
+    // when alu select jump uop, src0's refren change to false
     if (params.aluDeqNeedPickJump && (i == 0)) {
-      val src0IsReadReg = finalDataSources(i)(0).readReg
-      deq.bits.dataSources(0).value := Mux(entries.io.aluDeqSelectJump.get && src0IsReadReg, DataSource.imm, finalDataSources(i)(0).value)
+      val src0IsReadReg = deqDataSources(i)(0).readReg
+      when(entries.io.aluDeqSelectJump.get && src0IsReadReg){
+        deq.bits.rfBankRen.get(0) := 0.U.asTypeOf(deq.bits.rfBankRen.get(0))
+      }
     }
     else if (params.aluDeqNeedPickJump && (i == 1)) {
       // assign jump uop form alu deq
       when(entries.io.aluDeqSelectJump.get) {
-        deq.bits.dataSources := finalDataSources(0)
+        deq.bits.dataSources := deqDataSources(0)
         deq.bits.exuSources.foreach(_ := deqBeforeDly(0).bits.exuSources.get)
         deq.bits.loadDependency.foreach(_ := deqBeforeDly(0).bits.loadDependency.get)
       }
@@ -916,7 +916,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       deqDly.bits := deq.bits
     }
     // for oldestArbiter readReq valid
-    deqDly.bits.rfRen .foreach(_ := deq.bits.rfRen .get)
+    deqDly.bits.rfBankRen .foreach(_ := deq.bits.rfBankRen .get)
     deqDly.bits.fpRen .foreach(_ := deq.bits.fpRen .get)
     deqDly.bits.vecRen.foreach(_ := deq.bits.vecRen.get)
     deqDly.bits.v0Ren .foreach(_ := deq.bits.v0Ren .get)
@@ -1086,7 +1086,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     PopCount(deq.bits.dataSources.zipWithIndex.map{ case (ds, j) => deq.valid && ds.value === DataSource.forward })
   }.reduce(_ +& _))
   XSPerfAccumulate("issue_datasource_noreg", deqBeforeDly.map{ deq =>
-    PopCount(deq.bits.dataSources.zipWithIndex.map{ case (ds, j) => deq.valid })
+    PopCount(deq.bits.dataSources.zipWithIndex.map{ case (ds, j) => deq.valid && (ds.value =/= DataSource.imm) })
   }.reduce(_ +& _))
 
   XSPerfHistogram("issue_datasource_reg_hist", deqBeforeDly.map{ deq =>
@@ -1099,8 +1099,40 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     PopCount(deq.bits.dataSources.zipWithIndex.map{ case (ds, j) => deq.valid && ds.value === DataSource.forward })
   }.reduce(_ +& _), true.B, 0, params.numDeq * params.numRegSrc + 1, 1)
   XSPerfHistogram("issue_datasource_noreg_hist", deqBeforeDly.map{ deq =>
-    PopCount(deq.bits.dataSources.zipWithIndex.map{ case (ds, j) => deq.valid })
+    PopCount(deq.bits.dataSources.zipWithIndex.map{ case (ds, j) => deq.valid && (ds.value =/= DataSource.imm) })
   }.reduce(_ +& _), true.B, 0, params.numDeq * params.numRegSrc + 1, 1)
+
+  // deq instr data source count for each futype
+  for (t <- FuType.functionNameMap.keys) {
+    val fuName = FuType.functionNameMap(t)
+    if (params.getFuCfgs.map(_.fuType == t).reduce(_ | _)) {
+      XSPerfAccumulate(s"issue_datasource_reg_futype_${fuName}", deqBeforeDly.map { deq =>
+        PopCount(deq.bits.dataSources.zipWithIndex.map { case (ds, j) => deq.valid && ds.value === DataSource.reg && deq.bits.fuType === t.U })
+      }.reduce(_ +& _))
+      XSPerfAccumulate(s"issue_datasource_bypass_futype_${fuName}", deqBeforeDly.map { deq =>
+        PopCount(deq.bits.dataSources.zipWithIndex.map { case (ds, j) => deq.valid && ds.value === DataSource.bypass && deq.bits.fuType === t.U })
+      }.reduce(_ +& _))
+      XSPerfAccumulate(s"issue_datasource_forward_futype_${fuName}", deqBeforeDly.map { deq =>
+        PopCount(deq.bits.dataSources.zipWithIndex.map { case (ds, j) => deq.valid && ds.value === DataSource.forward && deq.bits.fuType === t.U })
+      }.reduce(_ +& _))
+      XSPerfAccumulate(s"issue_datasource_noreg_futype_${fuName}", deqBeforeDly.map { deq =>
+        PopCount(deq.bits.dataSources.zipWithIndex.map { case (ds, j) => deq.valid && (ds.value =/= DataSource.imm) && deq.bits.fuType === t.U })
+      }.reduce(_ +& _))
+
+      XSPerfHistogram(s"issue_datasource_reg_hist_futype_${fuName}", deqBeforeDly.map { deq =>
+        PopCount(deq.bits.dataSources.zipWithIndex.map { case (ds, j) => deq.valid && ds.value === DataSource.reg && deq.bits.fuType === t.U })
+      }.reduce(_ +& _), true.B, 0, params.numDeq * params.numRegSrc + 1, 1)
+      XSPerfHistogram(s"issue_datasource_bypass_hist_futype_${fuName}", deqBeforeDly.map { deq =>
+        PopCount(deq.bits.dataSources.zipWithIndex.map { case (ds, j) => deq.valid && ds.value === DataSource.bypass && deq.bits.fuType === t.U })
+      }.reduce(_ +& _), true.B, 0, params.numDeq * params.numRegSrc + 1, 1)
+      XSPerfHistogram(s"issue_datasource_forward_hist_futype_${fuName}", deqBeforeDly.map { deq =>
+        PopCount(deq.bits.dataSources.zipWithIndex.map { case (ds, j) => deq.valid && ds.value === DataSource.forward && deq.bits.fuType === t.U })
+      }.reduce(_ +& _), true.B, 0, params.numDeq * params.numRegSrc + 1, 1)
+      XSPerfHistogram(s"issue_datasource_noreg_hist_futype_${fuName}", deqBeforeDly.map { deq =>
+        PopCount(deq.bits.dataSources.zipWithIndex.map { case (ds, j) => deq.valid && (ds.value =/= DataSource.imm) && deq.bits.fuType === t.U })
+      }.reduce(_ +& _), true.B, 0, params.numDeq * params.numRegSrc + 1, 1)
+    }
+  }
 }
 
 class IssueQueueMemBundle(implicit p: Parameters, params: IssueBlockParams) extends Bundle {

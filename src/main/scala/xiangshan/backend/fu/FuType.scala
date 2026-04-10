@@ -2,29 +2,15 @@ package xiangshan.backend.fu
 
 import chisel3._
 import chisel3.util.BitPat
-import utils.EnumUtils.OHEnumeration
+import utils.EnumUtils._
 import org.chipsalliance.cde.config.Parameters
 import xiangshan.XSCoreParamsKey
 
 import scala.language.implicitConversions
 
-object FuType extends OHEnumeration {
-  class OHType(i: Int, name: String) extends super.OHVal(i: Int, name: String)
-
-  def OHType(i: Int, name: String): OHType = new OHType(i, name)
-
-  implicit class fromOHValToLiteral(x: OHType) {
-    def U: UInt = x.ohid.U
-    def U(width: Width): UInt = x.ohid.U(width)
-  }
-
-  private var initVal = 0
-
-  private def addType(name: String): OHType = {
-    val ohval = OHType(initVal, name)
-    initVal += 1
-    ohval
-  }
+object FuType extends ChiselOHEnum {
+  type OHType = super.OHType
+  val FuTypeOrR: IsOneOf.type = IsOneOf
 
   // int
   val jmp = addType(name = "jmp")
@@ -131,7 +117,8 @@ object FuType extends OHEnumeration {
   val vecArith = vecOPI ++ vecOPF
   val vecMem = Seq(vldu, vstu, vsegldu, vsegstu)
   val vecArithOrMem = vecArith ++ vecMem
-  val vecAll = vecVSET ++ vecArithOrMem
+  val vecMove = Seq(vmove)
+  val vecAll = vecVSET ++ vecArithOrMem ++ vecMove
   val fpOP = fpArithAll ++ Seq(i2f, i2v)
   val scalaNeedFrm = Seq(i2f, fmac, fDivSqrt)
   val vectorNeedFrm = Seq(vfalu, vfma, vfdiv, vfcvt)
@@ -158,6 +145,8 @@ object FuType extends OHEnumeration {
   def isBrh(fuType: UInt): Bool = FuTypeOrR(fuType, Seq(brh))
 
   def isVset(fuType: UInt): Bool = FuTypeOrR(fuType, vecVSET)
+
+  def isVall(futype: UInt): Bool = FuTypeOrR(futype, vecAll)
 
   def isJump(fuType: UInt): Bool = FuTypeOrR(fuType, jmp)
 
@@ -223,23 +212,9 @@ object FuType extends OHEnumeration {
 
   def isBlockBackCompress(fuType: UInt): Bool = FuTypeOrR(fuType, blockBackCompress)
 
-  object FuTypeOrR {
-    def apply(fuType: UInt, fu0: OHType, fus: OHType*): Bool = {
-      apply(fuType, fu0 +: fus)
-    }
+  def isStoreVstore(fuType: UInt): Bool = isStore(fuType) || isVStore(fuType)
 
-    def apply(fuType: UInt, fus: Seq[OHType]): Bool = {
-      fus.map(x => fuType(x.id)).fold(false.B)(_ || _)
-    }
-
-    def apply(fuType: OHType, fu0: OHType, fus: OHType*): Boolean = {
-      apply(fuType, fu0 +: fus)
-    }
-
-    def apply(fuTupe: OHType, fus: Seq[OHType]): Boolean = {
-      fus.map(x => x == fuTupe).fold(false)(_ || _)
-    }
-  }
+  def isLoadVload(fuType: UInt): Bool = isLoad(fuType) || isVLoad(fuType)
 
   val functionNameMap = Map(
     jmp -> "jmp",

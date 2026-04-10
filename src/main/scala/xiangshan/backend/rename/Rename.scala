@@ -23,9 +23,11 @@ import chisel3.util.experimental.decode.TruthTable
 import utility._
 import utils._
 import xiangshan._
+import xiangshan.TopDownCounters._
 import xiangshan.backend.Bundles.{DecodeOutUop, RenameOutUop, connectSamePort}
 import xiangshan.backend.decode.{FusionDecodeInfo, ImmUnion, Imm_Z, XSDebugDecode}
 import xiangshan.backend.fu.FuType
+import xiangshan.backend.{StoreBubbleReason, PipelineStallReason}
 import xiangshan.backend.rename.freelist._
 import xiangshan.backend.rob.{RobEnqIO, RobPtr}
 import xiangshan.mem.mdp._
@@ -91,6 +93,8 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     val diff_vl_rat      = Option.when(backendParams.basicDebugEn)(Output(Vec(1, UInt(PhyRegIdxWidth.W))))
     val ratSnpt = Input(new SnapshotPort)
     // perf only
+    val debugDispatchAllFire = OptionWrapper(backendParams.debugEn, Input(Bool()))
+    val debugOutValidVec = OptionWrapper(backendParams.debugEn, Vec(RenameWidth, Input(Bool())))
     val stallReason = new Bundle {
       val in = Flipped(new StallReasonIO(RenameWidth))
       val out = new StallReasonIO(RenameWidth)
@@ -221,7 +225,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   vec_old_pdest := rat.io.vec_old_pdest
   v0_old_pdest := rat.io.v0_old_pdest
   vl_old_pdest := rat.io.vl_old_pdest
-  
+
   debug_int_rat.foreach(_ := rat.io.debug_int_rat.get)
   debug_fp_rat.foreach (_ := rat.io.debug_fp_rat.get)
   debug_vec_rat.foreach(_ := rat.io.debug_vec_rat.get)
@@ -525,6 +529,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     uops(i).psrc(2) := Mux1H(uops(i).srcType(2)(2, 1), Seq(fpReadPortsData(i)(2), vecReadPortsData(i)(2)))
     uops(i).psrc(3) := v0ReadPortsData(i)(0)
     uops(i).psrcVl := vlReadPortsData(i).head
+    uops(i).psrcIntForMove := intReadPortsData(i).head
 
     // int psrc2 should be bypassed from next instruction if it is fused
     if (i < RenameWidth - 1) {
@@ -554,6 +559,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     // dirty code
     if (i == 0) {
       io.out(i).bits.psrc(0) := Mux(io.out(i).bits.isLUI, 0.U, uops(i).psrc(0))
+      io.out(i).bits.psrcIntForMove := Mux(io.out(i).bits.isLUI, 0.U, uops(i).psrcIntForMove)
     }
     // Todo: move these shit in decode stage
     // dirty code for fence. The lsrc is passed by imm.
@@ -637,7 +643,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       }
     }.elsewhen(needRobFlags(i)) {
       uops(i).traceBlockInPipe.ilastsize := Mux(lastIsRVC, Ilastsize.HalfWord, Ilastsize.Word)
-      
+
       // CSR systemop instruction excluding ebreak & ecall
       val csrAddr = Imm_Z().getCSRAddr(uops(i).imm(Imm_Z().len - 1, 0))
       val isXret = FuType.isCsr(uops(i).fuType) && CSROpType.isSystemOp(uops(i).fuOpType) && (csrAddr(11, 1).orR)
@@ -711,6 +717,9 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     io.out(i).bits.psrc(0) := Mux(io.out(i).bits.isLUI, 0.U, io.out.take(i).map(_.bits.pdest).zip(bypassCond(0)(i-1).asBools).foldLeft(uops(i).psrc(0)) {
       (z, next) => Mux(next._2, next._1, z)
     })
+    io.out(i).bits.psrcIntForMove := Mux(io.out(i).bits.isLUI, 0.U, io.out.take(i).map(_.bits.pdest).zip(bypassCond(0)(i-1).asBools).foldLeft(uops(i).psrcIntForMove) {
+      (z, next) => Mux(next._2, next._1, z)
+    })
     io.out(i).bits.psrc(1) := io.out.take(i).map(_.bits.pdest).zip(bypassCond(1)(i-1).asBools).foldLeft(uops(i).psrc(1)) {
       (z, next) => Mux(next._2, next._1, z)
     }
@@ -722,9 +731,9 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     }
     io.out(i).bits.psrcVl := MuxCase(
       uops(i).psrcVl,
-      (bypassCondVl(i-1).asBools zip io.out.take(i).map(_.bits.pdest)).reverse
+      (bypassCondVl(i-1).asBools zip io.out.take(i).map(_.bits.pdestVl)).reverse
     )
-    io.out(i).bits.pdest := Mux(isMove(i), io.out(i).bits.psrc(0), uops(i).pdest)
+    io.out(i).bits.pdest := Mux(isMove(i), io.out(i).bits.psrcIntForMove, uops(i).pdest)
 
     // Todo: better implementation for fields reuse
     // For fused-lui-load, load.src(0) is replaced by the imm.
@@ -836,49 +845,135 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       assert(x.bits.ldest =/= 0.U, "rfWen cannot be 1 when Int regfile ldest is 0")
     }
   }
+
+
+  val inValidVec = io.in.map(_.valid)
+  val inReadyVec = io.in.map(_.ready)
+  val outValidVec = io.debugOutValidVec.getOrElse(VecInit.fill(RenameWidth)(false.B))
+  val outReadyVec = io.out.map(_.ready)
+  val outFireVec = outReadyVec.zip(outValidVec).map { case (ready, valid) =>
+    ready && valid
+  }
+  val dispatchAllFire = io.debugDispatchAllFire.getOrElse(false.B)
+
+  // pre pipe stall/bubble
+  val decodeReason = io.stallReason.in.reason
+  val decodeStall  = !inValidVec.reduce(_ || _)
+  val decodeBubble = !inValidVec.reduce(_ && _) && !decodeStall
+  val renameStall = !(inReadyVec.reduce(_ || _))
+  val renameStallReason = Wire(chiselTypeOf(io.stallReason.in.reason(0)))
+
+  val outHasValidAllFire = outValidVec.reduce(_ || _) && dispatchAllFire
+
+
+  val decodeBubbleValidVec = WireInit(VecInit.fill(RenameWidth)(false.B))
+  val decodeBubbleReasonVec = Wire(chiselTypeOf(io.stallReason.in.reason))
+
+  // prepipe bubble
+  for (i <- 0 until RenameWidth) {
+    val decodeBubbleValid = decodeBubble && !inValidVec(i)
+    val bubbleStore = Module(new StoreBubbleReason(log2Ceil(TopDownCounters.NumStallReasons.id)))
+    bubbleStore.io.bubbleValid := decodeBubbleValid
+    bubbleStore.io.bubbleReason := decodeReason(i)
+    bubbleStore.io.redirect := io.redirect.valid
+    bubbleStore.io.reasonFire := outHasValidAllFire && !renameStall
+
+    decodeBubbleValidVec(i) := bubbleStore.io.outReasonValid
+    decodeBubbleReasonVec(i) := bubbleStore.io.outReason
+  }
+
+  // current pipe
+  // current stall
+  // bad speculation (redirect)
+  val redirectStall       = io.redirect.valid
+  val ctrlRedirectStall   = io.redirect.bits.debugIsCtrl
+  val mvioRedirectStall   = io.redirect.bits.debugIsMemVio
+  val otherRedirectStall  = redirectStall && !(ctrlRedirectStall || mvioRedirectStall)
+  val redirectStallReason = MuxCase(BackendOtherCoreStall.id.U, Seq(
+    ctrlRedirectStall  -> ControlRedirectStall.id.U,
+    mvioRedirectStall  -> MemVioRedirectStall.id.U,
+    otherRedirectStall -> OtherRedirectStall.id.U,
+  ))
+
+  // bad pseculation  (rabwalk)
   val debugRedirect = RegEnable(io.redirect.bits, io.redirect.valid)
-  // bad speculation
-  val recStall = io.redirect.valid || io.rabCommits.isWalk
-  val ctrlRecStall = Mux(io.redirect.valid, io.redirect.bits.debugIsCtrl, io.rabCommits.isWalk && debugRedirect.debugIsCtrl)
-  val mvioRecStall = Mux(io.redirect.valid, io.redirect.bits.debugIsMemVio, io.rabCommits.isWalk && debugRedirect.debugIsMemVio)
+  val recStall      = io.rabCommits.isWalk
+  val ctrlRecStall  = debugRedirect.debugIsCtrl
+  val mvioRecStall  = debugRedirect.debugIsMemVio
   val otherRecStall = recStall && !(ctrlRecStall || mvioRecStall)
+  val recStallReason = MuxCase(BackendOtherCoreStall.id.U, Seq(
+    ctrlRecStall  -> ControlRecoveryStall.id.U,
+    mvioRecStall  -> MemVioRecoveryStall.id.U,
+    otherRecStall -> OtherRecoveryStall.id.U,
+  ))
   XSPerfAccumulate("recovery_stall", recStall)
-  XSPerfAccumulate("control_recovery_stall", ctrlRecStall)
-  XSPerfAccumulate("mem_violation_recovery_stall", mvioRecStall)
-  XSPerfAccumulate("other_recovery_stall", otherRecStall)
-  // freelist stall
+  XSPerfAccumulate("control_recovery_stall", ctrlRecStall && recStall)
+  XSPerfAccumulate("mem_violation_recovery_stall", mvioRecStall && recStall)
+  XSPerfAccumulate("other_recovery_stall", otherRecStall && recStall)
+  // freelist stall (we temporarily make the priority: int > fp > vec > v0 > vl)
   val notRecStall = !io.out.head.valid && !recStall
-  val intFlStall = notRecStall && inHeadValid && fpFreeList.io.canAllocate && vecFreeList.io.canAllocate && v0FreeList.io.canAllocate && vlFreeList.io.canAllocate && !intFreeList.io.canAllocate
-  val fpFlStall = notRecStall && inHeadValid && intFreeList.io.canAllocate && vecFreeList.io.canAllocate && v0FreeList.io.canAllocate && vlFreeList.io.canAllocate && !fpFreeList.io.canAllocate
-  val vecFlStall = notRecStall && inHeadValid && intFreeList.io.canAllocate && fpFreeList.io.canAllocate && v0FreeList.io.canAllocate && vlFreeList.io.canAllocate && !vecFreeList.io.canAllocate
-  val v0FlStall = notRecStall && inHeadValid && intFreeList.io.canAllocate && fpFreeList.io.canAllocate && vecFreeList.io.canAllocate && vlFreeList.io.canAllocate && !v0FreeList.io.canAllocate
-  val vlFlStall = notRecStall && inHeadValid && intFreeList.io.canAllocate && fpFreeList.io.canAllocate && vecFreeList.io.canAllocate && v0FreeList.io.canAllocate && !vlFreeList.io.canAllocate
-  val multiFlStall = notRecStall && inHeadValid && (PopCount(Cat(
+  val intFlStall  = !intFreeList.io.canAllocate
+  val fpFlStall   = !fpFreeList.io.canAllocate
+  val vecFlStall  = !vecFreeList.io.canAllocate
+  val v0FlStall   = !v0FreeList.io.canAllocate
+  val vlFlStall   = !vlFreeList.io.canAllocate
+  val multiFlStall = PopCount(Cat(
     !intFreeList.io.canAllocate,
     !fpFreeList.io.canAllocate,
     !vecFreeList.io.canAllocate,
     !v0FreeList.io.canAllocate,
     !vlFreeList.io.canAllocate,
-  )) > 1.U)
-  // other stall
-  val otherStall = notRecStall && !intFlStall && !fpFlStall && !vecFlStall && !v0FlStall && !vlFlStall && !multiFlStall
+  )) > 1.U
 
-  io.stallReason.in.backReason.valid := io.stallReason.out.backReason.valid || !io.in.head.ready
-  io.stallReason.in.backReason.bits := Mux(io.stallReason.out.backReason.valid, io.stallReason.out.backReason.bits,
-    MuxCase(TopDownCounters.OtherCoreStall.id.U, Seq(
-      ctrlRecStall  -> TopDownCounters.ControlRecoveryStall.id.U,
-      mvioRecStall  -> TopDownCounters.MemVioRecoveryStall.id.U,
-      otherRecStall -> TopDownCounters.OtherRecoveryStall.id.U,
-      intFlStall    -> TopDownCounters.IntFlStall.id.U,
-      fpFlStall     -> TopDownCounters.FpFlStall.id.U,
-      vecFlStall    -> TopDownCounters.VecFlStall.id.U,
-      v0FlStall     -> TopDownCounters.V0FlStall.id.U,
-      vlFlStall     -> TopDownCounters.VlFlStall.id.U,
-      multiFlStall  -> TopDownCounters.MultiFlStall.id.U,
-    )
+  renameStallReason := MuxCase(BackendOtherCoreStall.id.U, Seq(
+    redirectStall -> redirectStallReason,
+    recStall      -> recStallReason,
+    multiFlStall  -> MultiFlStall.id.U,
+    intFlStall    -> IntFlStall.id.U,
+    fpFlStall     -> FpFlStall.id.U,
+    vecFlStall    -> VecFlStall.id.U,
+    v0FlStall     -> V0FlStall.id.U,
+    vlFlStall     -> VlFlStall.id.U,
   ))
-  io.stallReason.out.reason.zip(io.stallReason.in.reason).zip(io.in.map(_.valid)).foreach { case ((out, in), valid) =>
-    out := Mux(io.stallReason.in.backReason.valid, io.stallReason.in.backReason.bits, in)
+
+  // current pipe bubble
+  /** Attention: Special care is needed if this stage may generate its own bubble in later cases
+   */
+  val renameBubble = false.B
+  val renameBubbleReason = 0.U
+
+
+  io.stallReason.out.reason.zipWithIndex.foreach{ case (stallReason, idx) =>
+    val inValid = inValidVec(idx)
+    val outValid = outValidVec(idx)
+    val inReason = decodeReason(idx)
+    // TopDown collect pre pipe reason
+    val prePipeStall = decodeStall
+    val prePipeBubble = decodeBubbleValidVec(idx)
+    val prePipeStallReason = inReason
+    val prePieBubbleReason = decodeBubbleReasonVec(idx)
+    // TopDown count current stage stall
+    val redirect = redirectStall
+    val redirectReason = redirectStallReason
+
+    // as decode not generate bubble now, Topdown donot collect current stage Bubble
+    // if decode generate bubble later, Topdown should add here
+
+    val stallReasonPipe = Module(new PipelineStallReason(log2Ceil(TopDownCounters.NumStallReasons.id)))
+    stallReasonPipe.io.rightFire := outFireVec(idx)
+    stallReasonPipe.io.rightHasFire := outHasValidAllFire
+    stallReasonPipe.io.prePipeStall := prePipeStall
+    stallReasonPipe.io.prePipeStallReason := prePipeStallReason
+    stallReasonPipe.io.prePipeBubble := prePipeBubble
+    stallReasonPipe.io.prePipeBubbleReason := prePieBubbleReason
+    stallReasonPipe.io.redirect := redirect
+    stallReasonPipe.io.redirectReason := redirectReason
+    stallReasonPipe.io.currentPipeStall := renameStall
+    stallReasonPipe.io.currentPipeStallReason := renameStallReason
+    stallReasonPipe.io.currentPipeBubble := renameBubble
+    stallReasonPipe.io.currentPipeBubbleReason := renameBubbleReason
+
+    stallReason := stallReasonPipe.io.outReason
   }
 
   XSDebug(io.rabCommits.isWalk, p"Walk Recovery Enabled\n")

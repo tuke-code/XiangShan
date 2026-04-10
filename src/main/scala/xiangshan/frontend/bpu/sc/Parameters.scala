@@ -33,11 +33,13 @@ case class ScParameters(
       new ScTableInfo(128, 4),
       new ScTableInfo(128, 8)
     ),
-    BiasTableSize:       Int = 128,
+    ImliTableInfo:       ScTableInfo = new ScTableInfo(128, 8),
+    BiasTableInfo:       ScTableInfo = new ScTableInfo(128, 0),
     BiasUseTageBitWidth: Int = 2,    // use tage_taken as index bits
     PathEnable:          Boolean = true,
-    GlobalEnable:        Boolean = false,
+    GlobalEnable:        Boolean = true,
     BWEnable:            Boolean = false,
+    ImliEnable:          Boolean = true,
     BiasEnable:          Boolean = true,
     CtrWidth:            Int = 6,
     ThresholdWidth:      Int = 13,
@@ -53,6 +55,7 @@ trait HasScParameters extends HasBpuParameters {
   def PathEnable:   Boolean = scParameters.PathEnable
   def GlobalEnable: Boolean = scParameters.GlobalEnable
   def BWEnable:     Boolean = scParameters.BWEnable
+  def ImliEnable:   Boolean = scParameters.ImliEnable
   def BiasEnable:   Boolean = scParameters.BiasEnable
 
   def TageTakenCtrWidth: Int = bpuParameters.tageParameters.TakenCtrWidth
@@ -68,22 +71,30 @@ trait HasScParameters extends HasBpuParameters {
   def GlobalTableInfos: Seq[ScTableInfo] = scParameters.GlobalTableInfos
   def NumGlobalTables:  Int              = GlobalTableInfos.length
 
-  def BiasTableSize:       Int = scParameters.BiasTableSize
-  def BiasUseTageBitWidth: Int = scParameters.BiasUseTageBitWidth
-  def BiasTableNumWays:    Int = NumWays << BiasUseTageBitWidth // add tage_taken bits as wayIdx
-  def NumBiasTable:        Int = 1
+  def ImliTableInfo: ScTableInfo = scParameters.ImliTableInfo
+  def NumImliTable:  Int         = 1
+
+  def BiasTableInfo:       ScTableInfo = scParameters.BiasTableInfo
+  def BiasUseTageBitWidth: Int         = scParameters.BiasUseTageBitWidth
+  def BiasTableNumWays:    Int         = NumWays << BiasUseTageBitWidth // add tage_taken bits as wayIdx
+  def NumBiasTable:        Int         = 1
 
   def BackwardTableInfos: Seq[ScTableInfo] = scParameters.BackwardTableInfos
   def NumBWTables:        Int              = BackwardTableInfos.length
 
-  // If tage LowConf, the totoalSum should be at least NumTables + 4, Threshold should be (NumTables + 4) << 6(threshold >> 3 + lowConf threshold >> 3)
+  // If tage LowConf, the totalSum should be at least NumTables + 5, Threshold should be (NumTables + 5) << 6(threshold >> 3 + lowConf threshold >> 3)
   // The value of ctr saturation is 63.
   // If all ctrs are saturated, the corresponding Threshold should be (NumTables * 63) << 4(threshold >> 3 + highConf threshold >> 1)
-  def NumTables:    Int = NumPathTables + NumGlobalTables + NumBiasTable + NumBWTables
-  def MinThreshold: Int = (NumTables + 4) << 6
-  def MaxThreshold: Int = min((NumTables * 63) << 4, (1 << ThresholdWidth) - 1)
+  def NumTables:     Int = NumPathTables + NumGlobalTables + NumBiasTable + NumBWTables + NumImliTable
+  def MinThreshold:  Int = (NumTables + 5) << 6
+  def MaxThreshold:  Int = min((NumTables * 63) << 4, (1 << ThresholdWidth) - 1)
+  def ThresholdInit: Int = scParameters.ThresholdInit
+  require(
+    ThresholdInit >= MinThreshold && ThresholdInit <= MaxThreshold,
+    s"ThresholdInit($ThresholdInit) should be in [$MinThreshold, $MaxThreshold]"
+  )
 
   def WriteBufferSize: Int = scParameters.WriteBufferSize
-  def TotalSumWidth: Int = CtrWidth + 1 + log2Ceil(NumPathTables + NumGlobalTables + NumBiasTable) // +1 for counter * 2
+
   def EnableScTrace: Boolean = scParameters.EnableScTrace
 }

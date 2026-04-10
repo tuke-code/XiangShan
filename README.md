@@ -24,11 +24,11 @@ Our paper introduces XiangShan and the practice of agile development methodology
 It covers some representative tools we have developed and used to accelerate the chip development process, including design, functional verification, debugging, performance validation, etc.
 This paper is awarded all three available badges for artifact evaluation (Available, Functional, and Reproduced).
 
-![Artifacts Available](https://github.com/OpenXiangShan/XiangShan-doc/raw/main/publications/images/artifacts_available_dl.jpg)
-![Artifacts Evaluated — Functional](https://github.com/OpenXiangShan/XiangShan-doc/raw/main/publications/images/artifacts_evaluated_functional_dl.jpg)
-![Results Reproduced](https://github.com/OpenXiangShan/XiangShan-doc/raw/main/publications/images/results_reproduced_dl.jpg)
+![Artifacts Available](https://talks-pubs.xiangshan.cc/publications/images/artifacts_available_dl.jpg)
+![Artifacts Evaluated — Functional](https://talks-pubs.xiangshan.cc/publications/images/artifacts_evaluated_functional_dl.jpg)
+![Results Reproduced](https://talks-pubs.xiangshan.cc/publications/images/results_reproduced_dl.jpg)
 
-[Paper PDF](https://github.com/OpenXiangShan/XiangShan-doc/blob/main/publications/micro2022-xiangshan.pdf) | [IEEE Xplore](https://ieeexplore.ieee.org/abstract/document/9923860) | [BibTeX](https://github.com/OpenXiangShan/XiangShan-doc/blob/main/publications/micro2022-xiangshan.bib) | [Presentation Slides](https://github.com/OpenXiangShan/XiangShan-doc/blob/main/publications/micro2022-xiangshan-slides.pdf) | [Presentation Video](https://www.bilibili.com/video/BV1FB4y1j7Jy)
+[Paper PDF](https://talks-pubs.xiangshan.cc/publications/micro2022-xiangshan.pdf) | [IEEE Xplore](https://ieeexplore.ieee.org/abstract/document/9923860) | [BibTeX](https://talks-pubs.xiangshan.cc/publications/micro2022-xiangshan.bib) | [Presentation Slides](https://talks-pubs.xiangshan.cc/publications/micro2022-xiangshan-slides.pdf) | [Presentation Video](https://www.bilibili.com/video/BV1FB4y1j7Jy)
 
 ## Follow us
 
@@ -120,20 +120,19 @@ Example:
 make emu CONFIG=TLMinimalConfig EMU_THREADS=2 -j10
 ./build/emu -b 0 -e 0 -i ./ready-to-run/coremark-2-iteration.bin --diff ./ready-to-run/riscv64-nemu-interpreter-so
 ```
-
-### Run with xspdb 
+### Run with xspdb
 
 There are two ways to use xspdb:
 
 1. Quick Start with Prebuilt Binaries
-* **Why choose this?** lt is lightweight and reguires no compilation. A standard Python environment is sufficient to run the fulXiangShan experience without high memory usage.
-* **Step 1: Download** Get the latest XSPdb from the repository's [Actions](https://github.com/OpenXiangShan/XiangShan/actions/workflows/release.yml?query=is%3Asuccess+event%3Apush) run summary
-* **Step 2: Extract & Run**
+    * **Why choose this?** It is lightweight and requires no compilation. A standard Python environment is enough to run the full XiangShan experience with low memory usage.
+    * **Step 1: Download** Get the latest XSPdb from the run summary of the repository's [Actions](https://github.com/OpenXiangShan/XiangShan/actions/workflows/release.yml?query=is%3Asuccess+event%3Apush) workflow.
+    * **Step 2: Extract & Run**
 
 2. Build from source code
-* Install [picker](https://github.com/XS-MLVP/picker), a verification tool that supports high-level languages.
-* Run `make pdb` to build XiangShan Python binaries.
-* Run `make pdb-run` to run XiangShan binaries.
+    * Install [picker](https://github.com/XS-MLVP/picker), a verification tool that supports high-level languages.
+    * Run `make pdb` to build XiangShan Python binaries.
+    * Run `make pdb-run` to run XiangShan binaries.
 
 Example output and interaction:
 
@@ -146,17 +145,17 @@ Using simulated 32768B flash
 > XiangShan/scripts/pdb-run.py(13)run()
 -> while True:
 (XiangShan) xload ready-to-run/microbench.bin   # Load binary (Tab-compatible)
-(XiangShan) xwatch_commit_pc 0x80000004         # set watch point,  
-(XiangShan) xistep 3                            # Step to next three instruction commit, it will stop at watch point 
+(XiangShan) xwatch_commit_pc 0x80000004         # Set watchpoint
+(XiangShan) xistep 3                            # Step until the next three instructions commit; stops at the watchpoint if hit
 [Info] Find break point (Inst commit), break (step 2107 cycles) at cycle: 2207 (0x89f)
 [Info] Find break point (Inst commit, Target commit), break (step 2108 cycles) at cycle: 2208 (0x8a0)
-(XiangShan) xpc                                 # print pc info
+(XiangShan) xpc                                 # Print PC info
 PC[0]: 0x80000000    Instr: 0x00000093
 PC[1]: 0x80000004    Instr: 0x00000113
 PC[2]: 0x0    Instr: 0x0
 ...
 PC[7]: 0x0    Instr: 0x0
-(XiangShan) xistep 1000000                      # Execute to binary end
+(XiangShan) xistep 1000000                      # Execute until the end of the binary
 [Info] Find break point (Inst commit), break (step 2037 cycles) at cycle: 2207 (0x89f)
 [Info] Find break point (Inst commit), break (step 2180 cycles) at cycle: 2207 (0x89f)
 ...

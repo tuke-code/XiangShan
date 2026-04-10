@@ -104,6 +104,7 @@ case class XSCoreParameters
   LoadUncacheBufferSize: Int = 16,
   LoadQueueNWriteBanks: Int = 8, // NOTE: make sure that LoadQueueRARSize/LoadQueueRAWSize is divided by LoadQueueNWriteBanks
   StoreQueueSize: Int = 56,
+  SQUnalignQueueSize: Int = 2,
   StoreQueueNWriteBanks: Int = 8, // NOTE: make sure that StoreQueueSize is divided by StoreQueueNWriteBanks
   StoreQueueForwardWithMask: Boolean = true,
   VlsQueueSize: Int = 8,
@@ -143,7 +144,7 @@ case class XSCoreParameters
     numRead    = None,
     numWrite   = None,
   ),
-  IntRegCacheSize: Int = 16,
+  IntRegCacheSize: Int = 24,
   MemRegCacheSize: Int = 12,
   intSchdVlWbPort: Int = 0,
   vfSchdVlWbPort: Int = 1,
@@ -524,6 +525,7 @@ case class DebugOptions
   EnablePerfDebug: Boolean = true,
   PerfLevel: String = "VERBOSE",
   EnableXMR: Boolean = true,
+  SimMemSize: Long = 8190L * 1024 * 1024 * 1024, // same as PMA, (0x80000000L, 0x80000000000L)
   UseDRAMSim: Boolean = false,
   EnableConstantin: Boolean = false,
   EnableChiselDB: Boolean = false,
@@ -696,6 +698,7 @@ trait HasXSParameter {
   def LoadUncacheBufferSize = coreParams.LoadUncacheBufferSize
   def LoadQueueNWriteBanks = coreParams.LoadQueueNWriteBanks
   def StoreQueueSize = coreParams.StoreQueueSize
+  def SQUnalignQueueSize = coreParams.SQUnalignQueueSize
   def StoreQueueForceWriteSbufferUpper = coreParams.StoreQueueSize - 4
   def StoreQueueForceWriteSbufferLower = StoreQueueForceWriteSbufferUpper - 5
   def VirtualLoadQueueMaxStoreQueueSize = VirtualLoadQueueSize max StoreQueueSize
@@ -799,7 +802,7 @@ trait HasXSParameter {
   def LFSTEnable = true
 
   def PCntIncrStep: Int = 6
-  def numPCntHc: Int = 12
+  def numPCntHc: Int = 17
   def numPCntPtw: Int = 19
 
   def numCSRPCntFrontend = 8

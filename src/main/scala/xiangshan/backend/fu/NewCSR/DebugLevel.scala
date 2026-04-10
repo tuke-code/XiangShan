@@ -45,7 +45,7 @@ trait DebugLevel { self: NewCSR =>
   val tdata1RegVec: Seq[CSRModule[_]] = Range(0, TriggerNum).map(i =>
     Module(new CSRModule(s"Trigger$i" + s"_Tdata1", new Tdata1Bundle) with HasTriggerBundle {
       when(wen){
-        reg := wdata.writeTdata1(canWriteDmode, chainable).asUInt
+        reg := wdata.writeTdata1(canWriteDmode, chainable, dmodeNextTrigger).asUInt
       }
     })
   )
@@ -131,7 +131,7 @@ class Tdata1Bundle extends CSRBundle{
     res.ACTION
   }
 
-  def writeTdata1(canWriteDmode: Bool, chainable: Bool): Tdata1Bundle = {
+  def writeTdata1(canWriteDmode: Bool, chainable: Bool, dmodeNextTrigger: Bool): Tdata1Bundle = {
     val res = Wire(new Tdata1Bundle)
     res := this.asUInt
     val dmode = this.DMODE.asBool && canWriteDmode
@@ -140,7 +140,8 @@ class Tdata1Bundle extends CSRBundle{
     when(this.TYPE.isLegal) {
       val mcontrol6Res = Wire(new Mcontrol6)
       mcontrol6Res := this.DATA.asUInt
-      res.DATA := mcontrol6Res.writeData(dmode, chainable).asUInt
+      val chain = chainable && !(!dmode && dmodeNextTrigger)
+      res.DATA := mcontrol6Res.writeData(dmode, chain).asUInt
     }.otherwise{
       res.DATA := 0.U
     }
@@ -322,6 +323,7 @@ trait HasTdataSink { self: CSRModule[_] =>
 trait HasTriggerBundle { self: CSRModule[_] =>
   val canWriteDmode = IO(Input(Bool()))
   val chainable = IO(Input(Bool()))
+  val dmodeNextTrigger = IO(Input(Bool()))
 }
 
 trait HasNmipBundle { self: CSRModule[_] =>
@@ -362,6 +364,12 @@ object TriggerUtil {
     !ConsecutiveOnes(chainVec, chainLen)
   }
 
+  def triggerActionMatchVec(triggerCanFireVec: Vec[Bool], actionVec: Vec[UInt], targetAction: UInt): Vec[Bool] = {
+    VecInit(triggerCanFireVec.zip(actionVec).map {
+      case (canFire, action) => canFire && (action === targetAction)
+    })
+  }
+
   /**
    * Generate Trigger action
    * @return triggerAction return
@@ -370,19 +378,15 @@ object TriggerUtil {
    * @param  triggerCanRaiseBpExp from csr
    */
   def triggerActionGen(triggerAction: UInt, triggerCanFireVec: Vec[Bool], actionVec: Vec[UInt], triggerCanRaiseBpExp: Bool): Unit = {
-    // More than one triggers can hit at the same time, but only fire one.
-    // We select the first hit trigger to fire.
-    val hasTriggerFire    = triggerCanFireVec.asUInt.orR
-    val triggerFireOH     = PriorityEncoderOH(triggerCanFireVec)
-    val triggerFireAction = PriorityMux(triggerFireOH, actionVec).asUInt
-    val actionIsBPExp     = hasTriggerFire && (triggerFireAction === TriggerAction.BreakpointExp)
-    val actionIsDmode     = hasTriggerFire && (triggerFireAction === TriggerAction.DebugMode)
-    val breakPointExp     = actionIsBPExp && triggerCanRaiseBpExp
+    val fireDebugModeVec = triggerActionMatchVec(triggerCanFireVec, actionVec, TriggerAction.DebugMode)
+    val fireBreakpointExpVec = triggerActionMatchVec(triggerCanFireVec, actionVec, TriggerAction.BreakpointExp)
+    val fireDebugMode = fireDebugModeVec.asUInt.orR
+    val breakPointExp = fireBreakpointExpVec.asUInt.orR && triggerCanRaiseBpExp
 
     // todo: add more for trace
     triggerAction := MuxCase(TriggerAction.None, Seq(
+      fireDebugMode -> TriggerAction.DebugMode,
       breakPointExp -> TriggerAction.BreakpointExp,
-      actionIsDmode -> TriggerAction.DebugMode,
     ))
   }
 }
