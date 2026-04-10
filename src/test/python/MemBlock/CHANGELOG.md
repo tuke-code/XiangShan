@@ -1,10 +1,290 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-10
+
+### 1. 重构 backend/issue 请求发送接口
+
+本条目记录一次主动控制接口的收敛：把新增的“多 lda”“混合 lda/sta”能力从一组越堆越多的特化 helper，重构成以请求脚本为中心的统一发送接口。
+
+#### 变更摘要
+
+- 在 `transactions.py` 中新增 backend send plan 数据模型：
+  - `EnqueueLoadStep`
+  - `EnqueueStoreStep`
+  - `IssueOp`
+  - `IssueCyclePlan`
+  - `BackendSendPlan`
+  - `StoreRef`
+- `BackendFacade` 新增：
+  - `execute(plan)`
+  - `send(txn_or_plan)`
+  - `send_many(...)`
+- `IssueAgent` 新增通用同拍执行入口：
+  - `issue_cycle(plan)`
+  - `issue_script(plans)`
+- 原有 `send_load_batch_same_cycle` / `send_load_batch_with_sta_same_cycle` 等旧入口继续保留，但全部降级为兼容包装
+- `request_apis.py` 仍保留旧名字，对 tests/sequences 兼容；其内部发送逻辑改为翻译成新 plan 后再交给 `env.backend`
+
+#### 当前接口口径
+
+- 推荐新代码优先使用 `env.backend.send(...)` 或 `env.backend.execute(...)`
+- `request_apis.py` 继续可用，但不再作为新增混合场景接口的扩展点
+- 同拍多 lane / 混合 `load + sta/std` 统一由 `IssueCyclePlan` 表达，不再继续新增特化 helper 名字
+
+#### 验证情况
+
+- `python3 -m py_compile`
+  - `transactions.py`
+  - `agents/backend_facade.py`
+  - `agents/issue_agent.py`
+  - `request_apis.py`
+  - `tests/test_request_apis_backend_facade.py`
+- 接口/兼容测试
+  - `python3 -m pytest src/test/python/MemBlock/tests/test_request_apis_backend_facade.py src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py -k "backend_facade or request_apis" -q`
+  - 结果：`7 passed`
+- 真实 replay 冒烟
+  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -k "scalar_forward_fail_replay_smoke or scalar_bank_conflict_replay_smoke" -q`
+  - 结果：`2 passed`
+
+### 2. 补充 backend 请求模型设计文档
+
+本条目记录对新请求模型的文档化收口，确保后续扩展时优先复用脚本式接口，而不是重新回到特化 helper 持续膨胀的旧路径。
+
+#### 变更摘要
+
+- 新增 `docs/backend_request_model_design.md`
+  - 说明 `LoadTxn` / `StoreTxn`、`IssueOp`、`IssueCyclePlan`、`BackendSendPlan`、`StoreRef` 的职责分工
+  - 解释 `env.backend.send(...)` 与 `env.backend.execute(...)` 的边界
+  - 记录兼容层策略与后续扩展规则
+- 在同一文档中补充 sequence 风格示例，明确 `BackendSendPlan` 适合探路/primitive/debug，稳定场景仍优先上提到 `ResetEnvSequence`、`ScalarLoadSequence`、`ScalarStoreCommitSequence`
+- 在 `README.md` 中加入新文档入口，并把它纳入推荐阅读顺序
+- 在 `README.md` 的“推荐工作方式”中补一句话版选层规则，帮助开发者快速判断何时写 `BackendSendPlan`、何时抽 sequence
+- 在 `docs/verification_env_design.md` 中补充到新文档的专项链接
+- 在 `docs/test_sequence_and_extension_guide.md` 中补充“什么时候写 plan，什么时候写 sequence”的简版规则，方便 testcase 开发阶段快速选层
+
+## 2026-04-09
+
+### 1. 收敛 env 时钟治理
+
+#### 变更摘要
+
+本条目记录一轮面向 env 时钟治理的收敛重构。目标不是继续在 `agents/`、MMU helper 和各类 wait/pulse 逻辑里散落 `Step()`，而是把 DUT 时钟推进统一收口到 `MemBlockEnv` 内核，同时保留对现有同步 facade/testcase 的兼容。
+
+#### 1. env 内新增统一时钟内核
+
+- `MemBlockEnv` 现在持有私有 `EnvClockKernel`，由它独占 `dut.Step(1)` 的执行权。
+- 内核统一负责同步 facade 到 async 协程的桥接，并把每拍的 DUT 推进、拍后 monitor/model 更新与 callback 分发固定在 env 内部。
+- 对外 `env.Step()` 仍保留同步接口，但内部只作为对 env 时钟内核的兼容包装。
+
+#### 2. env 内部 wait/pulse 路径迁入 async 原语
+
+- 新增私有 async 原语：
+  - `_step_async()`
+  - `_await_cycles()`
+  - `_step_and_idle_async()`
+- replay/release/nuke/store-materialize/quiesce/drain/flushSb 这类轮询逻辑不再直接散落调用 `Step()`，而是统一改走 env 内核原语。
+- MMU 相关的 distributed CSR pulse、`enable_sv39()`、`pulse_sfence()` 也改为 async 实现 + 同步兼容 wrapper。
+
+#### 3. active agents 不再自己推进时钟
+
+- `IssueAgent` 与 `LsqAgent` 的内部握手主路径改为 async 协程，由 env 内核统一推进拍数。
+- `BackendFacade.step_commit()` 也不再直接调用 `env.Step()`，而是显式委托给 env 的时钟原语。
+- 这样 `agents/` 中不再保留零散的 `Step()` 调用，时钟推进语义集中回 env。
+
+#### 4. request_apis / sequences 继续去拍级化
+
+- `request_apis.py` 中的 backend reset 等待已改走 `env.wait_backend_reset_deassert()`。
+- `sequences/memblock_sequences.py` 与 `sequences/violation_sequences.py` 中原有的显式 `env.Step(...)` 调用已清理，改为：
+  - `env.advance_cycles(...)`
+  - `env.wait_store_addr_observed(...)`
+  - `env.wait_completed_load_count(...)`
+- 这样 sequence 层继续保留场景语义，不再携带本地拍级轮询细节。
+
+#### 5. callback 与文档同步更新
+
+- `after_step_callback` 现在支持同步函数和 async coroutine callback。
+- `test_MemBlock_env_fixture.py` 中：
+  - `flush_store_buffers_and_wait()` 的观测方式改为 after-step callback，而不是 monkey-patch `env.Step()`。
+  - 新增 async after-step callback smoke，验证 env 内核会在拍后正确 await callback。
+- 新增 `docs/clock_control_and_migration_guide.md`，面向开发者说明如何在 env / agent / request_apis / sequence / testcase 各层复用统一时钟原语。
+
+#### 6. 验证情况
+
+- 已验证：
+  - `python3 -m py_compile`
+  - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -p xdist.plugin -n 16 -q src/test/python/MemBlock/tests`
+- 回归结果：
+  - `64 passed in 249.64s`
+  - 在 `request_apis.py` / `sequences/` 进一步收口后再次执行：
+    - `64 passed in 232.32s`
+- 这轮修改保持对外同步 facade 不变，因此现有 tests / sequences / `request_apis.py` 不需要批量迁移即可继续运行。
+
+### 2. 收紧 `sq_datainvalid_matchinvalid_nuke` 的 replay 排他口径
+
+#### 1. 用例不再接受 redirect 与 LSQ replay 双去路
+
+- `test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke` 不再只排除 `DM/DR/TM/NC`。
+- 现在对同一条 younger load 明确要求：一旦观测到 flush 级 `memoryViolation`，就不能再从 `replay_queue` / `replay_lane` / `ldu` / `nc_out` 看到该 ROB 的 replay cause。
+
+#### 2. transport 统计改为覆盖整个恢复期
+
+- `ScalarSqDataInvalidMatchInvalidTriggerSequence` 现在把 transport 统计的收尾点从“violation 后短窗口”改为“主 load 最终恢复完成之后”。
+- 这样 testcase 可以覆盖整个恢复路径，避免后续 refill / outer 请求只是在短窗口之外发生而被漏检。
+
+#### 3. sequence 补充全流程 replay 观测
+
+- `sequences/violation_sequences.py` 新增对目标 ROB replay 事件的全流程采样。
+- 用例因此能区分“仅有 memoryViolation”与“redirect 后仍向 LSQ 建立 replay 去路”这两类语义。
+
+#### 4. 文档同步更新
+
+- `docs/sq_matchinvalid_nuke_case_analysis.md` 已同步改写为新的排他契约，不再把 `FF` 视为可接受的已知行为。
+
+#### 5. 已知 DUT bug 暂时以精确条件 `xfail` 挂起
+
+- 当前真实 DUT 仍会在 flush 级 `memoryViolation` 之后暴露 `FF` replay path。
+- 该问题已登记为 `DUTBUG-matchinvalid-redirect-replay-dual-path`，并在 `docs/BUGS.md` 中记录 `src/main/` 路径对应的 DUT commit hash。
+- 因此 `test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke` 暂时不是整例无条件 `xfail`，而是在实际观测到这组 replay 事件时调用带 bug tag 的 `pytest.xfail(...)`。
+- 这样已知 DUT 缺陷不会把回归直接打红，但其他不相关断言仍保持真实失败能力。
+
+### 3. 补齐 `BC` / pipeline `NK` 白盒观测与组合场景探索
+
+#### 1. 新增同拍 load issue 能力与 `debugLsInfo` 观测
+
+- `IssueAgent` / `BackendFacade` / `request_apis.py` 新增同拍多 load issue helper，供 replay 场景稳定复用。
+- `MemBlockEnv` 新增 `sample_load_debug_state()`，把顶层 `io_debug_ls_debugLsInfo_*` 白盒口整理成结构化采样结果。
+- `sequences/memblock_sequences.py` 新增 load debug trace / SQ forward 采样 helper，测试侧不再直接散读分散信号。
+
+#### 2. 单独场景先行落地
+
+- `ScalarForwardFailReplaySequence` 现在会回填：
+  - `sq_forward_event`
+  - 目标 load 的 `load_debug_trace`
+- 新增 `ScalarBankConflictReplaySequence`，用于证明“同拍双 load + 同 bank + 不同 set”可稳定打到 `BC`。
+- 新增 `ScalarPipelineStldNukeSequence`，用于探索“older store 晚到 STA”这一条直接 pipeline `NK` 路径。
+
+#### 3. 回归层新增 directed smoke
+
+- `test_MemBlock_replay.py` 新增：
+  - `test_api_MemBlock_scalar_bank_conflict_replay_smoke`
+  - `test_api_MemBlock_scalar_pipeline_stld_nuke_smoke`
+  - `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke`
+- 其中 FF smoke 也同步收紧为必须命中：
+  - `dataInvalid=1`
+  - `matchInvalid=0`
+  - `forwardInvalid=0`
+
+#### 4. 组合场景当前状态
+
+- 当前 directed timing 已能稳定构造：
+  - `BC`
+  - `SQ dataInvalid=1`
+  - `matchInvalid=0`
+  - 且不向 `RAW/RAR` queue 发起 nuke query
+- 但在当前 DUT / issue 时序下，目标 victim load 还没有稳定观测到同一条 load debug `NK` cause。
+- 因此：
+  - standalone pipeline `NK`
+  - `BC + FF + NK` 组合场景
+  暂时都以精确条件 `xfail` 形式挂起，避免把其余已构造成功的回归能力一起打红。
+
+#### 5. 验证情况
+
+- `python3 -m py_compile`
+  - `agents/issue_agent.py`
+  - `agents/backend_facade.py`
+  - `request_apis.py`
+  - `MemBlock_env.py`
+  - `sequences/memblock_sequences.py`
+  - `sequences/violation_sequences.py`
+  - `tests/test_MemBlock_replay.py`
+- `pytest`
+  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -n 16 -q`
+  - 结果：`7 passed, 3 xfailed`
+
+### 4. 收口 standalone pipeline `NK`
+
+本条目记录 `pipeline NK` 单场景从探索态 `xfail` 收口成稳定回归用例的这轮修正。核心结论不是 DUT 完全打不出 `NK`，而是旧 directed timing 把 `STA` 发得过晚，导致 testcase 自己把目标 load 推到了只看见 `DR/DM` 的路径。
+
+#### 变更摘要
+
+- `ScalarPipelineStldNukeSequence` 不再先等 `load_debug.s1` 后再发 `STA`，而是在 load issue 后立即补发 `STA`。
+- `test_api_MemBlock_scalar_pipeline_stld_nuke_smoke` 去掉了场景缺口 `xfail`，改为对 `NK` 路径做硬断言。
+- `sq_pipeline_stld_nuke.md` 同步更新，明确这次修正的根因和当前验证口径。
+
+#### 1. 修正 standalone pipeline NK 的 directed timing
+
+本轮白盒排查表明：
+
+- `STA` 若等到 younger load 已经明显进入 `s1` 再发，`load_debug_trace` 会稳定退化成 `DR/DM`
+- `STA` 若在 load issue 后立即发起，目标 load 可以稳定命中 `NK`
+- 同时 load 最终仍能写回 older store data，store 也能进入 committed
+
+因此问题根因在 testcase/sequence 的时序，而不是“当前 DUT 完全不支持 pipeline NK”。
+
+#### 2. 当前 standalone NK 的验证口径
+
+当前 testcase 硬断言以下事实：
+
+- `load_debug_trace` 命中 `NK`
+- 同一 trace 不混入 `BC`
+- 同一 trace 不混入 `FF`
+- younger load 最终写回 older store data
+- older store 最终进入 committed
+
+需要注意的是，当前 `NK` trace 仍可能同时带着 `DR/DM`。这说明当前用例证明的是“pipeline-side nuke 已稳定出现并能恢复完成”，而不是“只剩一个孤立的 `NK` bit”。
+
+### 5. 收口 `bankconflict + dataInvalid + pipeline NK` 组合场景
+
+本条目记录 `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke` 从 `xfail` 候选收口为稳定回归用例的这轮修正。核心结论是：旧问题主要是 testcase 时序和 writeback 观测口径不对，而不是 DUT 缺少这条组合路径。
+
+#### 变更摘要
+
+- `ScalarBankConflictSqDataInvalidNukeSequence` 改为先等 victim load 的早期 `NK`，再等后续 `BC + FF`，最后才补 `STD` 并提交 store。
+- 同一 sequence 的 writeback 观测改为基于 trace 收口，避免顺序等待 lead/victim writeback 时漏采已发生的写回。
+- `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke` 保持对 `NK` 做硬断言，不再依赖 `xfail`。
+- `sq_bankconflict_datainvalid_nuke_combo.md` 同步更新，明确“pipeline NK 可稳定构造，但恢复后段仍可能出现 RAW/RAR query 流量”。
+
+#### 1. 本轮修正解决了什么
+
+本轮白盒排查确认了两个独立问题：
+
+- 如果 `STD` 补得过早，victim load 会退化成 `FF` 主导的重发表现，看不到稳定 `NK`
+- 即便场景构造成功，按固定顺序去等 lead / victim writeback，也可能错过已经先发生的写回事件
+
+因此旧版失败并不能直接证明 DUT 没有这条组合路径。
+
+#### 2. 当前验证口径
+
+当前 testcase 硬断言以下事实：
+
+- SQ forward 命中 `dataInvalid=1 && matchInvalid=0`
+- victim load 的主 replay 断言点命中 `BC + FF`
+- victim load 的完整 debug trace 中稳定出现 `NK`
+- victim load 最终写回 older store data
+- lead load 不被 older store 污染
+- older store 最终进入 committed
+
+同时，本轮去掉了“全程不允许 target RAW/RAR query”这条过强假设，因为成功恢复的波形上可以看到后段 query 流量。
+
+#### 3. 验证情况
+
+- `python3 -m py_compile`
+  - `src/test/python/MemBlock/sequences/violation_sequences.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_replay.py`
+- 定向稳定性回归
+  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -k bankconflict_sq_datainvalid_nuke -q -rxX`
+  - 连续 5 轮：`5/5` 通过
+- replay 回归
+  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -n 16 -q`
+  - 结果：`9 passed, 1 xfailed`
+
 ## 2026-04-08
+
+### 1. 补全 MMU/PTW/DTLB env/facade 稳定性
 
 本条目记录一轮面向 MMU/PTW/DTLB 外围稳定性的 env/facade 补全。目标不是直接扩 testcase，而是先把 Sv39/PTW/PMP 这条控制面补成一个可复用、可 smoke、能穿过 `idle_inputs()` 与 DUT reset 的稳定入口，为后续 translation/replay 场景复用打底。
 
-### 变更摘要
+#### 变更摘要
 
 - `MemBlockEnv` 新增 `env.mmu` facade，集中管理 Sv39、sfence、PTW responder 与 PMP helper。
 - PTW mock 从“单拍返回一个 256-bit beat”修正为“按 TileLink size 返回完整 multi-beat D 响应”。
@@ -12,7 +292,7 @@
 - `reset()` 在 DUT reset 后会重放持久化的 PMP CSR 写入与当前 Sv39 配置。
 - 新增真实 DUT smoke，证明 Sv39 + PTW + DTLB + cacheable load 的基础 MMU 闭环可正常工作。
 
-### 1. `env.mmu` facade 收口 MMU 控制面
+#### 1. `env.mmu` facade 收口 MMU 控制面
 
 新增的 `env.mmu` 对外提供：
 
@@ -25,13 +305,13 @@
 
 这样后续 testcase 不再需要自己 monkey-patch `idle_inputs()` 或手写分散的 PTW/PMP 临时 helper，而是统一通过 env facade 进入。
 
-### 2. PTW responder 修正为 multi-beat TileLink 响应
+#### 2. PTW responder 修正为 multi-beat TileLink 响应
 
 此前 PTW mock 仅返回一个 D beat，无法覆盖 `size=6` 的 64B 请求，导致 TLB miss replay 长期滞留。现在 responder 会按请求大小切分完整 beat 序列，并逐 beat 在 D 通道握手返回。
 
 这一步是 MMU smoke 能跑通的关键修复之一。
 
-### 3. 稳定 Sv39 / PMP 配置跨越 `idle_inputs()` 与 reset
+#### 3. 稳定 Sv39 / PMP 配置跨越 `idle_inputs()` 与 reset
 
 本轮明确了两类状态的责任归属：
 
@@ -45,14 +325,14 @@
 
 这使得 MMU testcase 可以在标准 env 生命周期中稳定复用，而不用靠测试局部补丁保活。
 
-### 4. 新增真实 DUT MMU smoke
+#### 4. 新增真实 DUT MMU smoke
 
 新增 smoke 覆盖两件事：
 
 - `env.mmu` 激活 Sv39 后，`idle_inputs()` 仍能保持 S-mode + satp 输入稳定。
 - 一条 cacheable load 在 Sv39/PTW/PMP 背景下可以真实完成写回，且走 dcache 路径而不是 outer/uncache 路径。
 
-### 5. 验证情况
+#### 5. 验证情况
 
 本轮建议至少执行：
 
@@ -63,6 +343,75 @@
 - `pytest`
   - `src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py`
   - `src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py`
+
+### 2. 迁移 `sq dataInvalid + matchInvalid + nuke` 到新 MMU 环境
+
+本条目记录在稳定 MMU env/facade 之后，进一步把 `sq dataInvalid + matchInvalid + nuke` 场景切换到新 MMU 环境，并同步把设计摘要沉淀为项目内文档。
+
+#### 变更摘要
+
+- 新增 `ScalarSqDataInvalidMatchInvalidSequence`，把目标 replay 场景切到 `env.mmu`。
+- 新增真实 DUT smoke：`sq_datainvalid_matchinvalid_nuke`。
+- 新增两份文档，收口 MMU 设计/用法和该 replay 用例的设计原理。
+
+#### 1. 用例迁移到新 MMU 环境
+
+当前稳定方案没有继续采用“root-A 下 translated store + root-B 下 translated load”的对称结构，而是采用：
+
+1. bare 模式下对 root-B 目标物理页做 cache warmup
+2. bare 模式下发 older store 的 `STA(main_va)`
+3. 切到 Sv39 root-B
+4. 发 TLB prime load
+5. 发 younger main load，观测 `dataInvalid + matchInvalid + memoryViolation`
+
+这样做的原因是：在真实 DUT 上，store `STA` 侧的 MMU 组合并不如 load 侧稳定；而“bare older store + translated younger load”能够稳定保留所需的相关性与失配行为。
+
+#### 2. 主 load 的后续收敛语义
+
+当前真实 DUT 并不会在出现 `memoryViolation` 后永久没有后续动作。相反，主 load 在后续 replay/recovery 过程中仍可能完成写回，且最终数据来自 older store 补齐后的 store data。
+
+因此 sequence 在观测到目标 invalid/nuke 组合后，还会：
+
+- 补 `STD`
+- 推进 store commit
+- 为主 load 登记 replay completion expectation
+- 等待场景完整收敛
+
+这一步是为了让 testcase 不只“打到一个瞬时波形点”，而是能稳定进入日常回归。
+
+#### 3. 新增文档
+
+新增：
+
+- `docs/mmu_env_design_and_usage.md`
+- `docs/sq_matchinvalid_nuke_case_analysis.md`
+
+其中：
+
+- 前者说明 `env.mmu` 的职责边界、Sv39/PTW/PMP 设计和推荐使用流程。
+- 后者说明 `matchInvalid + dataInvalid + nuke` 场景的设计原理、最终稳定方案和当前 DUT 的实际表现。
+
+#### 4. 验证情况
+
+本轮建议至少执行：
+
+- `unset _SITE_PACKAGE_ACTIVATED && source /nfs/share/unitychip/activate && python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -k sq_datainvalid_matchinvalid_nuke -q`
+- `unset _SITE_PACKAGE_ACTIVATED && source /nfs/share/unitychip/activate && python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -q`
+
+#### 5. MMU / sequence 分层重构
+
+在不改变行为的前提下，本轮进一步把 `matchInvalid_nuke` 的实现从“大而全专题 sequence”重构为：
+
+- `MmuSv39AddressSpaceInstallSequence`
+- `MmuSv39ActivateSequence`
+- `ScalarSqDataInvalidMatchInvalidTriggerSequence`
+
+其中当前 testcase 实际采用：
+
+1. testcase 先多次调用 install sequence，分别配置 root-A / root-B
+2. testcase 再调用 trigger sequence，完成 `bare older store -> activate root-B -> TLB prime -> main load -> recovery`
+
+这样做的目的不是新增能力，而是把“MMU 配置”和“专题行为触发”拆开，使后续其他 MMU testcase 可以直接复用配置部分，同时保住当前用例依赖的关键顺序：older bare store 必须发生在 activation 之前。
 
 ## 2026-04-07
 
@@ -137,75 +486,6 @@
 - `env.backend` 是唯一默认 public control plane。
 - `request_apis.py` 和 `sequences/` 负责把它包装成更适合 testcase 的调用方式。
 - `lsq_agent` / `issue_agent` / `commit_agent` / `rob_agent` 仍然存在，但它们属于 env 内部 backend-facing agents，而不是后续 testcase 应优先直接依赖的 API。
-
-## 2026-04-08（续）
-
-本条目记录在稳定 MMU env/facade 之后，进一步把 `sq dataInvalid + matchInvalid + nuke` 场景切换到新 MMU 环境，并同步把设计摘要沉淀为项目内文档。
-
-### 变更摘要
-
-- 新增 `ScalarSqDataInvalidMatchInvalidSequence`，把目标 replay 场景切到 `env.mmu`。
-- 新增真实 DUT smoke：`sq_datainvalid_matchinvalid_nuke`。
-- 新增两份文档，收口 MMU 设计/用法和该 replay 用例的设计原理。
-
-### 1. 用例迁移到新 MMU 环境
-
-当前稳定方案没有继续采用“root-A 下 translated store + root-B 下 translated load”的对称结构，而是采用：
-
-1. bare 模式下对 root-B 目标物理页做 cache warmup
-2. bare 模式下发 older store 的 `STA(main_va)`
-3. 切到 Sv39 root-B
-4. 发 TLB prime load
-5. 发 younger main load，观测 `dataInvalid + matchInvalid + memoryViolation`
-
-这样做的原因是：在真实 DUT 上，store `STA` 侧的 MMU 组合并不如 load 侧稳定；而“bare older store + translated younger load”能够稳定保留所需的相关性与失配行为。
-
-### 2. 主 load 的后续收敛语义
-
-当前真实 DUT 并不会在出现 `memoryViolation` 后永久没有后续动作。相反，主 load 在后续 replay/recovery 过程中仍可能完成写回，且最终数据来自 older store 补齐后的 store data。
-
-因此 sequence 在观测到目标 invalid/nuke 组合后，还会：
-
-- 补 `STD`
-- 推进 store commit
-- 为主 load 登记 replay completion expectation
-- 等待场景完整收敛
-
-这一步是为了让 testcase 不只“打到一个瞬时波形点”，而是能稳定进入日常回归。
-
-### 3. 新增文档
-
-新增：
-
-- `docs/mmu_env_design_and_usage.md`
-- `docs/sq_matchinvalid_nuke_case_analysis.md`
-
-其中：
-
-- 前者说明 `env.mmu` 的职责边界、Sv39/PTW/PMP 设计和推荐使用流程。
-- 后者说明 `matchInvalid + dataInvalid + nuke` 场景的设计原理、最终稳定方案和当前 DUT 的实际表现。
-
-### 4. 验证情况
-
-本轮建议至少执行：
-
-- `unset _SITE_PACKAGE_ACTIVATED && source /nfs/share/unitychip/activate && python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -k sq_datainvalid_matchinvalid_nuke -q`
-- `unset _SITE_PACKAGE_ACTIVATED && source /nfs/share/unitychip/activate && python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -q`
-
-### 5. MMU / sequence 分层重构
-
-在不改变行为的前提下，本轮进一步把 `matchInvalid_nuke` 的实现从“大而全专题 sequence”重构为：
-
-- `MmuSv39AddressSpaceInstallSequence`
-- `MmuSv39ActivateSequence`
-- `ScalarSqDataInvalidMatchInvalidTriggerSequence`
-
-其中当前 testcase 实际采用：
-
-1. testcase 先多次调用 install sequence，分别配置 root-A / root-B
-2. testcase 再调用 trigger sequence，完成 `bare older store -> activate root-B -> TLB prime -> main load -> recovery`
-
-这样做的目的不是新增能力，而是把“MMU 配置”和“专题行为触发”拆开，使后续其他 MMU testcase 可以直接复用配置部分，同时保住当前用例依赖的关键顺序：older bare store 必须发生在 activation 之前。
 
 ## 2026-04-06
 
@@ -562,21 +842,21 @@ commit: `fa9a9eafa`
 ```text
 testcase
   -> sequences / request_apis / transactions
-    -> MemBlockEnv facade
-      -> active agents
-      -> passive monitors
-      -> MemoryModel
-         -> RefMemory
-         -> TransportResponder
-         -> Scoreboard
-      -> DUT
+ -> MemBlockEnv facade
+   -> active agents
+   -> passive monitors
+   -> MemoryModel
+      -> RefMemory
+      -> TransportResponder
+      -> Scoreboard
+   -> DUT
 ```
 
 这不是终点，但已经完成了核心角色拆分：
 
-1. testcase 与内部实现解耦。
-2. `MemoryModel` 不再承担所有职责。
-3. 观测、驱动、检查、场景、配置各有明确归属。
+### 1. testcase 与内部实现解耦。
+### 2. `MemoryModel` 不再承担所有职责。
+### 3. 观测、驱动、检查、场景、配置各有明确归属。
 
 ### 兼容与约束
 
@@ -615,17 +895,17 @@ testcase
 
 当前最值得继续推进的方向主要有：
 
-1. 统一 monitor 事件对象
-   - 减少 monitor 到 scoreboard 的细粒度方法耦合。
+### 1. 统一 monitor 事件对象
+- 减少 monitor 到 scoreboard 的细粒度方法耦合。
 
-2. 扩展 sequence 组合能力
-   - 增加 mixed traffic、异常路径、flush/replay、memory violation 等高层场景。
+### 2. 扩展 sequence 组合能力
+- 增加 mixed traffic、异常路径、flush/replay、memory violation 等高层场景。
 
-3. 推进结构性参数化
-   - 让当前仍固定的端口宽度与 pipeline 配置逐步纳入真实可配范围。
+### 3. 推进结构性参数化
+- 让当前仍固定的端口宽度与 pipeline 配置逐步纳入真实可配范围。
 
-4. 收紧 legacy 接口
-   - 让新 testcase 优先依赖 sequence + env public API，而不是继续堆叠兼容 helper。
+### 4. 收紧 legacy 接口
+- 让新 testcase 优先依赖 sequence + env public API，而不是继续堆叠兼容 helper。
 
 ### 总结
 
@@ -639,277 +919,3 @@ testcase
 - 默认策略开始由统一 config 管理。
 
 这为后续继续扩异常场景、随机回归和更复杂的检查器提供了可持续的基础。
-
-## 2026-04-09
-
-### 变更摘要
-
-本条目记录一轮面向 env 时钟治理的收敛重构。目标不是继续在 `agents/`、MMU helper 和各类 wait/pulse 逻辑里散落 `Step()`，而是把 DUT 时钟推进统一收口到 `MemBlockEnv` 内核，同时保留对现有同步 facade/testcase 的兼容。
-
-### 1. env 内新增统一时钟内核
-
-- `MemBlockEnv` 现在持有私有 `EnvClockKernel`，由它独占 `dut.Step(1)` 的执行权。
-- 内核统一负责同步 facade 到 async 协程的桥接，并把每拍的 DUT 推进、拍后 monitor/model 更新与 callback 分发固定在 env 内部。
-- 对外 `env.Step()` 仍保留同步接口，但内部只作为对 env 时钟内核的兼容包装。
-
-### 2. env 内部 wait/pulse 路径迁入 async 原语
-
-- 新增私有 async 原语：
-  - `_step_async()`
-  - `_await_cycles()`
-  - `_step_and_idle_async()`
-- replay/release/nuke/store-materialize/quiesce/drain/flushSb 这类轮询逻辑不再直接散落调用 `Step()`，而是统一改走 env 内核原语。
-- MMU 相关的 distributed CSR pulse、`enable_sv39()`、`pulse_sfence()` 也改为 async 实现 + 同步兼容 wrapper。
-
-### 3. active agents 不再自己推进时钟
-
-- `IssueAgent` 与 `LsqAgent` 的内部握手主路径改为 async 协程，由 env 内核统一推进拍数。
-- `BackendFacade.step_commit()` 也不再直接调用 `env.Step()`，而是显式委托给 env 的时钟原语。
-- 这样 `agents/` 中不再保留零散的 `Step()` 调用，时钟推进语义集中回 env。
-
-### 4. request_apis / sequences 继续去拍级化
-
-- `request_apis.py` 中的 backend reset 等待已改走 `env.wait_backend_reset_deassert()`。
-- `sequences/memblock_sequences.py` 与 `sequences/violation_sequences.py` 中原有的显式 `env.Step(...)` 调用已清理，改为：
-  - `env.advance_cycles(...)`
-  - `env.wait_store_addr_observed(...)`
-  - `env.wait_completed_load_count(...)`
-- 这样 sequence 层继续保留场景语义，不再携带本地拍级轮询细节。
-
-### 5. callback 与文档同步更新
-
-- `after_step_callback` 现在支持同步函数和 async coroutine callback。
-- `test_MemBlock_env_fixture.py` 中：
-  - `flush_store_buffers_and_wait()` 的观测方式改为 after-step callback，而不是 monkey-patch `env.Step()`。
-  - 新增 async after-step callback smoke，验证 env 内核会在拍后正确 await callback。
-- 新增 `docs/clock_control_and_migration_guide.md`，面向开发者说明如何在 env / agent / request_apis / sequence / testcase 各层复用统一时钟原语。
-
-### 6. 验证情况
-
-- 已验证：
-  - `python3 -m py_compile`
-  - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -p xdist.plugin -n 16 -q src/test/python/MemBlock/tests`
-- 回归结果：
-  - `64 passed in 249.64s`
-  - 在 `request_apis.py` / `sequences/` 进一步收口后再次执行：
-    - `64 passed in 232.32s`
-- 这轮修改保持对外同步 facade 不变，因此现有 tests / sequences / `request_apis.py` 不需要批量迁移即可继续运行。
-
-## 2026-04-09：收紧 `sq_datainvalid_matchinvalid_nuke` 的 replay 排他口径
-
-### 1. 用例不再接受 redirect 与 LSQ replay 双去路
-
-- `test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke` 不再只排除 `DM/DR/TM/NC`。
-- 现在对同一条 younger load 明确要求：一旦观测到 flush 级 `memoryViolation`，就不能再从 `replay_queue` / `replay_lane` / `ldu` / `nc_out` 看到该 ROB 的 replay cause。
-
-### 2. transport 统计改为覆盖整个恢复期
-
-- `ScalarSqDataInvalidMatchInvalidTriggerSequence` 现在把 transport 统计的收尾点从“violation 后短窗口”改为“主 load 最终恢复完成之后”。
-- 这样 testcase 可以覆盖整个恢复路径，避免后续 refill / outer 请求只是在短窗口之外发生而被漏检。
-
-### 3. sequence 补充全流程 replay 观测
-
-- `sequences/violation_sequences.py` 新增对目标 ROB replay 事件的全流程采样。
-- 用例因此能区分“仅有 memoryViolation”与“redirect 后仍向 LSQ 建立 replay 去路”这两类语义。
-
-### 4. 文档同步更新
-
-- `docs/sq_matchinvalid_nuke_case_analysis.md` 已同步改写为新的排他契约，不再把 `FF` 视为可接受的已知行为。
-
-### 5. 已知 DUT bug 暂时以精确条件 `xfail` 挂起
-
-- 当前真实 DUT 仍会在 flush 级 `memoryViolation` 之后暴露 `FF` replay path。
-- 该问题已登记为 `DUTBUG-matchinvalid-redirect-replay-dual-path`，并在 `docs/BUGS.md` 中记录 `src/main/` 路径对应的 DUT commit hash。
-- 因此 `test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke` 暂时不是整例无条件 `xfail`，而是在实际观测到这组 replay 事件时调用带 bug tag 的 `pytest.xfail(...)`。
-- 这样已知 DUT 缺陷不会把回归直接打红，但其他不相关断言仍保持真实失败能力。
-
-## 2026-04-09：补齐 `BC` / pipeline `NK` 白盒观测与组合场景探索
-
-### 1. 新增同拍 load issue 能力与 `debugLsInfo` 观测
-
-- `IssueAgent` / `BackendFacade` / `request_apis.py` 新增同拍多 load issue helper，供 replay 场景稳定复用。
-- `MemBlockEnv` 新增 `sample_load_debug_state()`，把顶层 `io_debug_ls_debugLsInfo_*` 白盒口整理成结构化采样结果。
-- `sequences/memblock_sequences.py` 新增 load debug trace / SQ forward 采样 helper，测试侧不再直接散读分散信号。
-
-### 2. 单独场景先行落地
-
-- `ScalarForwardFailReplaySequence` 现在会回填：
-  - `sq_forward_event`
-  - 目标 load 的 `load_debug_trace`
-- 新增 `ScalarBankConflictReplaySequence`，用于证明“同拍双 load + 同 bank + 不同 set”可稳定打到 `BC`。
-- 新增 `ScalarPipelineStldNukeSequence`，用于探索“older store 晚到 STA”这一条直接 pipeline `NK` 路径。
-
-### 3. 回归层新增 directed smoke
-
-- `test_MemBlock_replay.py` 新增：
-  - `test_api_MemBlock_scalar_bank_conflict_replay_smoke`
-  - `test_api_MemBlock_scalar_pipeline_stld_nuke_smoke`
-  - `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke`
-- 其中 FF smoke 也同步收紧为必须命中：
-  - `dataInvalid=1`
-  - `matchInvalid=0`
-  - `forwardInvalid=0`
-
-### 4. 组合场景当前状态
-
-- 当前 directed timing 已能稳定构造：
-  - `BC`
-  - `SQ dataInvalid=1`
-  - `matchInvalid=0`
-  - 且不向 `RAW/RAR` queue 发起 nuke query
-- 但在当前 DUT / issue 时序下，目标 victim load 还没有稳定观测到同一条 load debug `NK` cause。
-- 因此：
-  - standalone pipeline `NK`
-  - `BC + FF + NK` 组合场景
-  暂时都以精确条件 `xfail` 形式挂起，避免把其余已构造成功的回归能力一起打红。
-
-### 5. 验证情况
-
-- `python3 -m py_compile`
-  - `agents/issue_agent.py`
-  - `agents/backend_facade.py`
-  - `request_apis.py`
-  - `MemBlock_env.py`
-  - `sequences/memblock_sequences.py`
-  - `sequences/violation_sequences.py`
-  - `tests/test_MemBlock_replay.py`
-- `pytest`
-  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -n 16 -q`
-  - 结果：`7 passed, 3 xfailed`
-
-## 2026-04-09：收口 standalone pipeline `NK`
-
-本条目记录 `pipeline NK` 单场景从探索态 `xfail` 收口成稳定回归用例的这轮修正。核心结论不是 DUT 完全打不出 `NK`，而是旧 directed timing 把 `STA` 发得过晚，导致 testcase 自己把目标 load 推到了只看见 `DR/DM` 的路径。
-
-### 变更摘要
-
-- `ScalarPipelineStldNukeSequence` 不再先等 `load_debug.s1` 后再发 `STA`，而是在 load issue 后立即补发 `STA`。
-- `test_api_MemBlock_scalar_pipeline_stld_nuke_smoke` 去掉了场景缺口 `xfail`，改为对 `NK` 路径做硬断言。
-- `sq_pipeline_stld_nuke.md` 同步更新，明确这次修正的根因和当前验证口径。
-
-### 1. 修正 standalone pipeline NK 的 directed timing
-
-本轮白盒排查表明：
-
-- `STA` 若等到 younger load 已经明显进入 `s1` 再发，`load_debug_trace` 会稳定退化成 `DR/DM`
-- `STA` 若在 load issue 后立即发起，目标 load 可以稳定命中 `NK`
-- 同时 load 最终仍能写回 older store data，store 也能进入 committed
-
-因此问题根因在 testcase/sequence 的时序，而不是“当前 DUT 完全不支持 pipeline NK”。
-
-### 2. 当前 standalone NK 的验证口径
-
-当前 testcase 硬断言以下事实：
-
-- `load_debug_trace` 命中 `NK`
-- 同一 trace 不混入 `BC`
-- 同一 trace 不混入 `FF`
-- younger load 最终写回 older store data
-- older store 最终进入 committed
-
-需要注意的是，当前 `NK` trace 仍可能同时带着 `DR/DM`。这说明当前用例证明的是“pipeline-side nuke 已稳定出现并能恢复完成”，而不是“只剩一个孤立的 `NK` bit”。
-
-## 2026-04-09：收口 `bankconflict + dataInvalid + pipeline NK` 组合场景
-
-本条目记录 `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke` 从 `xfail` 候选收口为稳定回归用例的这轮修正。核心结论是：旧问题主要是 testcase 时序和 writeback 观测口径不对，而不是 DUT 缺少这条组合路径。
-
-### 变更摘要
-
-- `ScalarBankConflictSqDataInvalidNukeSequence` 改为先等 victim load 的早期 `NK`，再等后续 `BC + FF`，最后才补 `STD` 并提交 store。
-- 同一 sequence 的 writeback 观测改为基于 trace 收口，避免顺序等待 lead/victim writeback 时漏采已发生的写回。
-- `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke` 保持对 `NK` 做硬断言，不再依赖 `xfail`。
-- `sq_bankconflict_datainvalid_nuke_combo.md` 同步更新，明确“pipeline NK 可稳定构造，但恢复后段仍可能出现 RAW/RAR query 流量”。
-
-### 1. 本轮修正解决了什么
-
-本轮白盒排查确认了两个独立问题：
-
-- 如果 `STD` 补得过早，victim load 会退化成 `FF` 主导的重发表现，看不到稳定 `NK`
-- 即便场景构造成功，按固定顺序去等 lead / victim writeback，也可能错过已经先发生的写回事件
-
-因此旧版失败并不能直接证明 DUT 没有这条组合路径。
-
-### 2. 当前验证口径
-
-当前 testcase 硬断言以下事实：
-
-- SQ forward 命中 `dataInvalid=1 && matchInvalid=0`
-- victim load 的主 replay 断言点命中 `BC + FF`
-- victim load 的完整 debug trace 中稳定出现 `NK`
-- victim load 最终写回 older store data
-- lead load 不被 older store 污染
-- older store 最终进入 committed
-
-同时，本轮去掉了“全程不允许 target RAW/RAR query”这条过强假设，因为成功恢复的波形上可以看到后段 query 流量。
-
-### 3. 验证情况
-
-- `python3 -m py_compile`
-  - `src/test/python/MemBlock/sequences/violation_sequences.py`
-  - `src/test/python/MemBlock/tests/test_MemBlock_replay.py`
-- 定向稳定性回归
-  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -k bankconflict_sq_datainvalid_nuke -q -rxX`
-  - 连续 5 轮：`5/5` 通过
-- replay 回归
-  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -n 16 -q`
-  - 结果：`9 passed, 1 xfailed`
-
-## 2026-04-10：重构 backend/issue 请求发送接口
-
-本条目记录一次主动控制接口的收敛：把新增的“多 lda”“混合 lda/sta”能力从一组越堆越多的特化 helper，重构成以请求脚本为中心的统一发送接口。
-
-### 变更摘要
-
-- 在 `transactions.py` 中新增 backend send plan 数据模型：
-  - `EnqueueLoadStep`
-  - `EnqueueStoreStep`
-  - `IssueOp`
-  - `IssueCyclePlan`
-  - `BackendSendPlan`
-  - `StoreRef`
-- `BackendFacade` 新增：
-  - `execute(plan)`
-  - `send(txn_or_plan)`
-  - `send_many(...)`
-- `IssueAgent` 新增通用同拍执行入口：
-  - `issue_cycle(plan)`
-  - `issue_script(plans)`
-- 原有 `send_load_batch_same_cycle` / `send_load_batch_with_sta_same_cycle` 等旧入口继续保留，但全部降级为兼容包装
-- `request_apis.py` 仍保留旧名字，对 tests/sequences 兼容；其内部发送逻辑改为翻译成新 plan 后再交给 `env.backend`
-
-### 当前接口口径
-
-- 推荐新代码优先使用 `env.backend.send(...)` 或 `env.backend.execute(...)`
-- `request_apis.py` 继续可用，但不再作为新增混合场景接口的扩展点
-- 同拍多 lane / 混合 `load + sta/std` 统一由 `IssueCyclePlan` 表达，不再继续新增特化 helper 名字
-
-### 验证情况
-
-- `python3 -m py_compile`
-  - `transactions.py`
-  - `agents/backend_facade.py`
-  - `agents/issue_agent.py`
-  - `request_apis.py`
-  - `tests/test_request_apis_backend_facade.py`
-- 接口/兼容测试
-  - `python3 -m pytest src/test/python/MemBlock/tests/test_request_apis_backend_facade.py src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py -k "backend_facade or request_apis" -q`
-  - 结果：`7 passed`
-- 真实 replay 冒烟
-  - `python3 -m pytest src/test/python/MemBlock/tests/test_MemBlock_replay.py -k "scalar_forward_fail_replay_smoke or scalar_bank_conflict_replay_smoke" -q`
-  - 结果：`2 passed`
-
-## 2026-04-10：补充 backend 请求模型设计文档
-
-本条目记录对新请求模型的文档化收口，确保后续扩展时优先复用脚本式接口，而不是重新回到特化 helper 持续膨胀的旧路径。
-
-### 变更摘要
-
-- 新增 `docs/backend_request_model_design.md`
-  - 说明 `LoadTxn` / `StoreTxn`、`IssueOp`、`IssueCyclePlan`、`BackendSendPlan`、`StoreRef` 的职责分工
-  - 解释 `env.backend.send(...)` 与 `env.backend.execute(...)` 的边界
-  - 记录兼容层策略与后续扩展规则
-- 在同一文档中补充 sequence 风格示例，明确 `BackendSendPlan` 适合探路/primitive/debug，稳定场景仍优先上提到 `ResetEnvSequence`、`ScalarLoadSequence`、`ScalarStoreCommitSequence`
-- 在 `README.md` 中加入新文档入口，并把它纳入推荐阅读顺序
-- 在 `README.md` 的“推荐工作方式”中补一句话版选层规则，帮助开发者快速判断何时写 `BackendSendPlan`、何时抽 sequence
-- 在 `docs/verification_env_design.md` 中补充到新文档的专项链接
-- 在 `docs/test_sequence_and_extension_guide.md` 中补充“什么时候写 plan，什么时候写 sequence”的简版规则，方便 testcase 开发阶段快速选层
