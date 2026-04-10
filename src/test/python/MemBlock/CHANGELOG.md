@@ -62,6 +62,24 @@
 - 在 `docs/verification_env_design.md` 中补充到新文档的专项链接
 - 在 `docs/test_sequence_and_extension_guide.md` 中补充“什么时候写 plan，什么时候写 sequence”的简版规则，方便 testcase 开发阶段快速选层
 
+### 3. 重写 clock control 设计与使用文档
+
+本条目记录对 `docs/clock_control_and_migration_guide.md` 的重写。新版本不再只作为“Step 调用迁移提示”，而是升级成完整的 clock control design/usage 文档。
+
+#### 变更摘要
+
+- 以 `EnvClockKernel`、`MemBlockEnv._step_async()`、`after_step_callback` 为中心，重新说明当前环境的时钟推进设计
+- 区分 testcase 同步接口、env/agent async 原语、兼容 API 与推荐 API 的边界
+- 结合当前真实实现说明：
+  - 为什么 `dut.Step(1)` 必须收敛在 env 内核
+  - 一拍推进时 commit / memory / monitor / callback 的固定顺序
+  - `StepRis` 与 `after_step_callback` 的职责区别
+- 结合当前测试和 sequence 给出最佳实践示例：
+  - env fixture 冒烟中的显式 `Step()`
+  - `ScalarStoreCommitSequence` / violation sequence 中的 `advance_cycles()`
+  - replay/debug trace 对 `after_step_callback` 的使用模式
+- 新增反模式与新功能落层建议，方便后续继续扩展 clock-related 功能时保持统一风格
+
 ## 2026-04-09
 
 ### 1. 收敛 env 时钟治理
