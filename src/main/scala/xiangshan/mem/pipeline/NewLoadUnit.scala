@@ -1440,7 +1440,8 @@ class LoadUnitS3(param: ExeUnitParams)(
   // Writeback to LQ
   val lqWriteValid = pipeIn.valid && !doFastReplay && endPipe
   val lqWriteReady = io.lqWrite.ready
-  val lqWriteCause = Mux(s4HeadValid && s4HeadShouldReplay, s4HeadReplayCause, cause)
+  // matchInvalid is a terminal poisoned-load path: it redirects the backend and must not establish replay state in LRQ.
+  val lqWriteCause = Mux(matchInvalid, 0.U.asTypeOf(cause), Mux(s4HeadValid && s4HeadShouldReplay, s4HeadReplayCause, cause))
   val lqWriteCauseOH = PriorityEncoderOH(lqWriteCause)
   val lqWrite = Wire(new LqWriteBundle)
   val lqWriteMshrId = Mux(s4HeadCacheMiss && s4HeadValid, s4HeadMshrId, in.mshrId.get)
@@ -1521,6 +1522,11 @@ class LoadUnitS3(param: ExeUnitParams)(
   lqWrite.rep_info.tlb_full := in.tlbFull.get
   lqWrite.nc_with_data := in.isNCReplay() && !cause(C_UNCACHE)
   lqWrite.data_wen_dup := DontCare // TODO: remove this
+
+  assert(
+    !(lqWriteValid && matchInvalid && lqWriteCause.asUInt.orR),
+    "matchInvalid load should not carry replay causes into LQ/LRQ"
+  )
 
   // Writeback to VLMergeBuffer
   val vecldoutValid = pipeIn.valid && !kill && shouldWriteback && isVector && endPipe
