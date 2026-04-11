@@ -48,6 +48,10 @@ def test_api_MemBlock_two_cacheable_stores_then_load_same_addr(env):
     second_data = 0x5555_6666_7777_8888
 
     state = _reset_env_and_state(env)
+    expected_refmem = env.memory.predict_store(CACHEABLE_ADDR_A, first_data).with_store(
+        CACHEABLE_ADDR_A,
+        second_data,
+    )
     result = ScalarStorePairThenLoadSequence(
         StoreTxn(req_id=0, sq_ptr=state.sq_ptr, addr=CACHEABLE_ADDR_A, data=first_data),
         StoreTxn(
@@ -71,6 +75,9 @@ def test_api_MemBlock_two_cacheable_stores_then_load_same_addr(env):
     assert result.final_state.next_lq_ptr == QueuePtr(flag=0, value=1), "same-addr load 未按预期推进 LQ"
     assert result.final_state.sq_ptr == QueuePtr(flag=0, value=2), "same-addr store 未按预期推进 SQ"
     assert drain_summary["drain_event_count"] >= 1, "same-addr store flush 后未记录到 drain"
+    assert env.memory.read(CACHEABLE_ADDR_A, 8) == expected_refmem.read(
+        CACHEABLE_ADDR_A, 8
+    ), "same-addr store flush 后最终 golden memory 不匹配"
     env.assert_no_outstanding()
 
 
@@ -89,6 +96,7 @@ def test_api_MemBlock_cacheable_store_then_unrelated_load(env):
 
     state = _reset_env_and_state(env)
     env.preload_u64(CACHEABLE_ADDR_B, unrelated_data)
+    expected_refmem = env.memory.predict_store(CACHEABLE_ADDR_A, store_data)
 
     store_result = ScalarStoreSequence(
         StoreTxn(req_id=0, sq_ptr=state.sq_ptr, addr=CACHEABLE_ADDR_A, data=store_data),
@@ -111,6 +119,12 @@ def test_api_MemBlock_cacheable_store_then_unrelated_load(env):
     assert _store_data_low64_matches(store_result.store_view, store_data), "unrelated load 场景中的 store 数据不匹配"
     assert load_result.next_lq_ptr == QueuePtr(flag=0, value=1), "unrelated load 未按预期推进 LQ"
     assert drain_summary["drain_event_count"] >= 1, "unrelated load 场景 flush 后未记录到 drain"
+    assert env.memory.read(CACHEABLE_ADDR_A, 8) == expected_refmem.read(
+        CACHEABLE_ADDR_A, 8
+    ), "unrelated load 场景中的 store 最终 golden memory 不匹配"
+    assert env.memory.read(CACHEABLE_ADDR_B, 8) == expected_refmem.read(
+        CACHEABLE_ADDR_B, 8
+    ), "unrelated load 场景中的无关地址被意外污染"
     env.assert_no_outstanding()
 
 
@@ -147,6 +161,10 @@ def test_api_MemBlock_small_directed_mixed_ld_st_sequence(env):
         ("load", CACHEABLE_ADDR_A, None),
         ("load", CACHEABLE_ADDR_B, None),
     ]
+    expected_refmem = env.memory.fork_ref_memory()
+    for op_kind, addr, data in operations:
+        if op_kind == "store":
+            expected_refmem.apply_store(addr, data)
 
     result = ScalarMixedTrafficSequence(
         operations,
@@ -167,3 +185,12 @@ def test_api_MemBlock_small_directed_mixed_ld_st_sequence(env):
     assert result.final_state.sq_ptr == QueuePtr(flag=0, value=3), "定向 mixed 场景 SQ 指针异常"
     assert result.drain_summary is not None, "定向 mixed 场景缺少 flush/drain 收尾"
     assert result.drain_summary["drain_event_count"] >= 1, "定向 mixed 场景未记录到 drain"
+    assert env.memory.read(CACHEABLE_ADDR_A, 8) == expected_refmem.read(
+        CACHEABLE_ADDR_A, 8
+    ), "定向 mixed 场景中的地址 A 最终 golden memory 不匹配"
+    assert env.memory.read(CACHEABLE_ADDR_B, 8) == expected_refmem.read(
+        CACHEABLE_ADDR_B, 8
+    ), "定向 mixed 场景中的地址 B 最终 golden memory 不匹配"
+    assert env.memory.read(CACHEABLE_ADDR_C, 8) == expected_refmem.read(
+        CACHEABLE_ADDR_C, 8
+    ), "定向 mixed 场景中的地址 C 不应被无关 store 污染"

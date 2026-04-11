@@ -76,6 +76,8 @@
   - 验证环境总设计，涵盖 `MemBlockEnv`、统一时钟内核、`agents`、`monitors`、`Scoreboard`、`sequences`、`EnvConfig` 的分层关系、实现思路和演进方向。
 - `backend_request_model_design.md`
   - backend 主动控制请求模型专项说明，重点覆盖 `env.backend.send(...)`、`env.backend.execute(...)`、`IssueCyclePlan`、`BackendSendPlan`、`StoreTxn.mask -> SB/SH/SW/SD` 映射与兼容层收敛策略。
+- `misalign.md`
+  - 面向 scalar load/store misalign 的专题分析，集中说明 DUT 中 misalign 的当前设计形态、验证功能点、推荐验证方案，以及当前环境与 testcase 的满足情况。
 - `clock_control_and_migration_guide.md`
   - 面向开发者的时钟控制与迁移指南，说明各层应该如何复用 env 时钟原语，避免重新引入零散 `Step()`。
 - `memory_model_design.md`

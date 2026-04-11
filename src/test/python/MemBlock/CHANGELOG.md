@@ -2,6 +2,44 @@
 
 ## 2026-04-11
 
+### 7. 推进 golden merge helper 在 random/order 场景落地
+
+本条目记录把前一轮引入的 golden merge helper 从 `scalar_store_pipeline` 扩展到更多真实 DUT testcase，并顺手把 helper API 收敛得更接近 golden memory 本身。
+
+#### 变更摘要
+
+- `model/ref_memory.py`
+  - 新增 `apply_store()` / `with_store()`，直接按 `StoreTxn.mask` 语义推导 `SB/SH/SW/SD` 宽度
+  - helper 仍复用 `RefMemory` 的字节级写规则，没有引入第二套 merge 语义
+- `memory_model.py`
+  - 新增 `apply_store()` / `predict_store()` facade，便于 testcase 从当前 golden memory 分叉出 stimulus-derived expected
+- `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 单 store/misalign/partial 场景改为优先使用 `predict_store()` 生成 forked golden view
+- `tests/test_MemBlock_random_store.py`
+  - 为 cacheable store flush smoke 补充最终 golden memory 断言
+  - 保持 MMIO+cacheable mixed-path case 以路径/分类断言为主，不强行把未稳定的 mixed drain 语义塞进同一 testcase
+- `tests/test_MemBlock_scalar_ordering.py`
+  - 为 same-addr overwrite、unrelated load、directed mixed ld/st 场景补充最终 golden memory 断言
+  - 这些断言只依赖 preload + stimulus，不再从 DUT 中间观测反推 expected
+- `tests/test_memory_model_store_logic.py`
+  - 补充 `apply_store()` / `with_store()` / `predict_store()` 的单测，覆盖宽度解码与 forked-view 语义
+- `docs/misalign.md`
+  - 文档中的推荐 helper 口径同步更新为 `apply_store()/with_store()/predict_store()`
+
+#### 验证情况
+
+- `python3 -m py_compile`
+  - `src/test/python/MemBlock/model/ref_memory.py`
+  - `src/test/python/MemBlock/memory_model.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_random_store.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_scalar_ordering.py`
+  - `src/test/python/MemBlock/tests/test_memory_model_store_logic.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_memory_model_store_logic.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'misaligned or partial or burst'`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_random_store.py -k 'cacheable_store_flush_smoke or mmio_then_cacheable_store_mixed_paths'`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_ordering.py`
+
 ### 1. 打通 scalar partial-store 请求模型
 
 本条目记录一次面向 backend/request 的接口补强：把原先只停留在事务模型与 scoreboard 侧的 `StoreTxn.mask`，真正打通到 `BackendFacade` / `IssueAgent` 的 issue 驱动路径。
@@ -130,6 +168,90 @@
   - cross-16B / cross-beat partial-store
   - partial-store + backpressure / delayed drain
   - 更深的 store queue 并存与 merge 顺序
+
+#### 验证情况
+
+- 文档一致性检查
+  - 核对 `docs/misalign.md` 已落盘，且包含：
+    - DUT 设计分析
+    - 验证功能点
+    - 验证方案
+    - 当前环境与 testcase 状态
+    - 多个 Mermaid 图与表格
+- 内容来源交叉核对
+  - 对照 `MemBlock.scala`、`StoreMisalignBuffer.scala`、`NewStoreQueue.scala`、`ExceptionInfoGen.scala`
+  - 对照 `coverage_summary.md`、`coverage_todo.md`、`rob_model.md`
+  - 对照现有 `test_MemBlock_scalar_store_pipeline.py` 中 misalign / partial / burst 相关 testcase
+
+### 5. 审查未提交 testcase assert 的独立性与有效性
+
+本条目记录一次针对当前未提交 testcase 的静态评审，目标不是新增 testcase，而是回答两个问题：
+
+1. 这些 assert 是否存在“用 DUT 观测结果反推期望值”的问题；
+2. 即便存在，这批用例还具有什么层次的验证价值。
+
+#### 变更摘要
+
+- `docs/misalign.md`
+  - 新增“当前未提交 testcase 的 assert 审查方法”与“逐类审查结论”章节
+  - 把当前 working tree 中相关 testcase 分成 `A/B/C/D` 四档：
+    - `A`：独立 expected 的强断言
+    - `B`：不反推 expected，但证明面不完整的路径型断言
+    - `C`：明显存在 `committed_store_view -> expected_word/window` 反推的自洽型断言
+    - `D`：fake backend / facade 契约断言
+  - 明确指出 `test_MemBlock_scalar_store_pipeline.py` 中多条 misalign / partial-store case 使用 `_apply_store_to_window(... , committed_store_view)`，属于当前最集中的风险点
+  - 同时保留对这批用例的正面评价：
+    - 它们仍能证明路径可稳定构造
+    - 仍能证明 shadow / load compare / final drain 没有明显互相打架
+    - 但不应被高估为独立 golden 证明
+  - 给出后续整改方向：
+    - 引入只依赖 stimulus 的 pure-python golden helper
+    - 把 shadow-derived expected 降级为调试辅助
+    - 优先整改 misalign 主代表 case 与迭代式 partial merge case
+
+#### 验证情况
+
+- 静态审查范围
+  - `tests/test_MemBlock_scalar_store_pipeline.py`
+  - `tests/test_MemBlock_random_store.py`
+  - `tests/test_request_apis_backend_facade.py`
+- 审查方式
+  - 按 testcase 逐条核对 expected 的来源
+  - 特别检查 `_apply_store_to_window()`、`committed_store_view`、`env.memory.read(...)` 之间的依赖关系
+
+### 6. 引入与 golden memory 共存的 merge helper
+
+本条目记录一次 model/test 协同收口：不再让 testcase 维护独立的 bytearray merge 逻辑，而是把“预测性 merge”能力直接建立在现有 golden memory 抽象之上。
+
+#### 变更摘要
+
+- `model/ref_memory.py`
+  - 新增 `clone()`
+  - 新增 `with_masked_write()`
+  - 让 testcase 可以从当前 golden memory 派生一个不影响主 `RefMemory` 的 expected 视图
+- `memory_model.py`
+  - 新增 `fork_ref_memory()`
+  - 对 tests 暴露稳定 facade，避免直接依赖 `env.memory.ref_memory` 内部实现
+- `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 引入基于 stimulus 的 golden merge helper
+  - 用 `env.memory.fork_ref_memory()` + masked write 预测结果，替换原先依赖 `_apply_store_to_window(..., committed_store_view)` 的主断言路径
+  - 保留 `committed_store_view.mask` / `committed` / LQ 指针等路径断言，但不再让 DUT 中间观测参与 expected 生成
+- `tests/test_memory_model_store_logic.py`
+  - 新增 `RefMemory.clone()` / `with_masked_write()` / `MemoryModel.fork_ref_memory()` 的纯 Python 单测
+- `docs/misalign.md`
+  - 把“建议引入 pure-python golden helper”升级为当前推荐方案：
+    - helper 应建立在 `RefMemory` 之上
+    - golden merge 应与 golden mem 共用同一字节写语义
+
+#### 验证情况
+
+- pure-python 单测
+  - 计划覆盖 `RefMemory.clone()` 隔离性
+  - 计划覆盖 `with_masked_write()` 的 fork 语义
+  - 计划覆盖 `fork_ref_memory()` 不污染主 golden mem
+- 真实 DUT 聚焦回归
+  - 计划重跑受影响的 misalign / partial-store / burst directed case，确认迁移后行为稳定
+
 
 ## 2026-04-10
 

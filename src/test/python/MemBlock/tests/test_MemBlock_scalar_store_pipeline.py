@@ -44,27 +44,9 @@ def _store_data_low64_matches(store, expected_data: int) -> bool:
     return (int(store.data) & ((1 << 64) - 1)) == (expected_data & ((1 << 64) - 1))
 
 
-def _apply_store_to_window(window_words: tuple[int, int], store) -> tuple[int, int]:
-    window = bytearray()
-    for word in window_words:
-        window.extend(int(word).to_bytes(8, byteorder="little", signed=False))
-
-    base_addr = int(store.addr) & ~0xF
-    byte_offset = int(store.addr) - base_addr
-    effective_mask = int(store.mask)
-    if byte_offset and (effective_mask & 0x1):
-        effective_mask <<= byte_offset
-    effective_mask &= (1 << 16) - 1
-    effective_data = int(store.data) << (byte_offset * 8)
-
-    for byte_idx in range(16):
-        if (effective_mask >> byte_idx) & 0x1:
-            window[byte_idx] = (effective_data >> (byte_idx * 8)) & 0xFF
-
-    return (
-        int.from_bytes(window[:8], byteorder="little", signed=False),
-        int.from_bytes(window[8:], byteorder="little", signed=False),
-    )
+def _apply_store_stimulus_to_ref_memory(refmem, *, addr: int, data: int, mask: int = 0xFF):
+    refmem.apply_store(addr=addr, data=data, mask=mask)
+    return refmem
 
 
 def _commit_scalar_store(env, sq_ptr: QueuePtr, *, req_id: int, addr: int, data: int, mask: int = 0xFF):
@@ -196,6 +178,7 @@ def test_api_MemBlock_misaligned_store_dual_overlap_loads_directed(env):
     state = _reset_env_and_state(env)
     env.preload_u64(MISALIGNED_WINDOW_ADDRS[0], initial_low)
     env.preload_u64(MISALIGNED_WINDOW_ADDRS[1], initial_high)
+    expected_refmem = env.memory.predict_store(MISALIGNED_STORE_ADDR, store_data)
 
     commit_result = ScalarStoreCommitSequence(
         StoreTxn(
@@ -212,11 +195,6 @@ def test_api_MemBlock_misaligned_store_dual_overlap_loads_directed(env):
     assert committed_store is not None and committed_store.committed, "misaligned store 未进入 committed"
     assert committed_store.addr == MISALIGNED_STORE_ADDR, "misaligned store 地址不匹配"
     assert committed_store.mask not in (0, 0xFF), "misaligned store 未形成预期的非 aligned mask"
-
-    expected_low, expected_high = _apply_store_to_window(
-        (initial_low, initial_high),
-        committed_store,
-    )
 
     low_load = ScalarLoadSequence(
         LoadTxn(
@@ -238,8 +216,12 @@ def test_api_MemBlock_misaligned_store_dual_overlap_loads_directed(env):
     ).run(env)
     drain_summary = FlushStoreBuffersSequence(max_cycles=800).run(env)
 
-    assert env.memory.read(MISALIGNED_WINDOW_ADDRS[0], 8) == expected_low, "misaligned store 的低 8B 视图不匹配"
-    assert env.memory.read(MISALIGNED_WINDOW_ADDRS[1], 8) == expected_high, "misaligned store 的高 8B 视图不匹配"
+    assert env.memory.read(MISALIGNED_WINDOW_ADDRS[0], 8) == expected_refmem.read(
+        MISALIGNED_WINDOW_ADDRS[0], 8
+    ), "misaligned store 的低 8B 视图不匹配"
+    assert env.memory.read(MISALIGNED_WINDOW_ADDRS[1], 8) == expected_refmem.read(
+        MISALIGNED_WINDOW_ADDRS[1], 8
+    ), "misaligned store 的高 8B 视图不匹配"
     assert low_load.next_lq_ptr == QueuePtr(flag=0, value=1), "第一个 overlap load 未按预期推进 LQ"
     assert high_load.next_lq_ptr == QueuePtr(flag=0, value=2), "第二个 overlap load 未按预期推进 LQ"
     assert drain_summary["drain_event_count"] >= 1, "misaligned store flush 后未记录到 drain 事件"
@@ -262,6 +244,11 @@ def test_api_MemBlock_partial_word_store_then_aligned_load_directed(env):
 
     state = _reset_env_and_state(env)
     env.preload_u64(PARTIAL_STORE_WINDOW_BASE, initial_word)
+    expected_refmem = env.memory.predict_store(
+        PARTIAL_STORE_WINDOW_BASE,
+        store_data,
+        mask=0x0F,
+    )
 
     commit_result = ScalarStoreCommitSequence(
         StoreTxn(
@@ -279,8 +266,6 @@ def test_api_MemBlock_partial_word_store_then_aligned_load_directed(env):
     assert committed_store is not None and committed_store.committed, "partial word store 未进入 committed"
     assert committed_store.mask == 0x0F, "partial word store 未保持 4B mask"
 
-    expected_word, _ = _apply_store_to_window((initial_word, 0), committed_store)
-
     load_result = ScalarLoadSequence(
         LoadTxn(
             req_id=1,
@@ -293,7 +278,9 @@ def test_api_MemBlock_partial_word_store_then_aligned_load_directed(env):
     drain_summary = FlushStoreBuffersSequence(max_cycles=800).run(env)
 
     assert load_result.next_lq_ptr == QueuePtr(flag=0, value=1), "partial word store 后的 load 未按预期推进 LQ"
-    assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_word, "partial word store merge 结果不匹配"
+    assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_refmem.read(
+        PARTIAL_STORE_WINDOW_BASE, 8
+    ), "partial word store merge 结果不匹配"
     assert drain_summary["touched_byte_count"] >= 4, "partial word store flush 覆盖字节数不足"
     env.assert_no_outstanding()
 
@@ -314,6 +301,11 @@ def test_api_MemBlock_partial_byte_store_high_offset_directed(env):
 
     state = _reset_env_and_state(env)
     env.preload_u64(PARTIAL_STORE_WINDOW_BASE, initial_word)
+    expected_refmem = env.memory.predict_store(
+        store_addr,
+        store_data,
+        mask=0x01,
+    )
 
     commit_result = ScalarStoreCommitSequence(
         StoreTxn(
@@ -331,8 +323,6 @@ def test_api_MemBlock_partial_byte_store_high_offset_directed(env):
     assert committed_store is not None and committed_store.committed, "high-offset byte store 未进入 committed"
     assert committed_store.mask == (1 << (store_addr & 0x7)), "high-offset byte store 未落在目标字节位置"
 
-    expected_word, _ = _apply_store_to_window((initial_word, 0), committed_store)
-
     load_result = ScalarLoadSequence(
         LoadTxn(
             req_id=1,
@@ -345,7 +335,9 @@ def test_api_MemBlock_partial_byte_store_high_offset_directed(env):
     drain_summary = FlushStoreBuffersSequence(max_cycles=800).run(env)
 
     assert load_result.next_lq_ptr == QueuePtr(flag=0, value=1), "high-offset byte store 后的 load 未按预期推进 LQ"
-    assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_word, "high-offset byte store merge 结果不匹配"
+    assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_refmem.read(
+        PARTIAL_STORE_WINDOW_BASE, 8
+    ), "high-offset byte store merge 结果不匹配"
     assert drain_summary["touched_byte_count"] >= 1, "high-offset byte store flush 覆盖字节数不足"
     env.assert_no_outstanding()
 
@@ -372,7 +364,7 @@ def test_api_MemBlock_partial_byte_merge_same_dword_directed(env):
     env.preload_u64(PARTIAL_STORE_WINDOW_BASE, initial_word)
 
     sq_ptr = state.sq_ptr
-    expected_window = (initial_word, 0)
+    expected_refmem = env.memory.fork_ref_memory()
     committed_masks = []
 
     for req_id, (addr, data) in enumerate(byte_updates):
@@ -386,7 +378,12 @@ def test_api_MemBlock_partial_byte_merge_same_dword_directed(env):
         )
         committed_store = commit_result.committed_store_view
         committed_masks.append(int(committed_store.mask))
-        expected_window = _apply_store_to_window(expected_window, committed_store)
+        _apply_store_stimulus_to_ref_memory(
+            expected_refmem,
+            addr=addr,
+            data=data,
+            mask=0x01,
+        )
 
     load_result = ScalarLoadSequence(
         LoadTxn(
@@ -401,7 +398,9 @@ def test_api_MemBlock_partial_byte_merge_same_dword_directed(env):
 
     assert committed_masks == [0x01, 0x04, 0x20, 0x80], "byte merge store 未落在预期字节 lane"
     assert load_result.next_lq_ptr == QueuePtr(flag=0, value=1), "byte merge 场景下 load 未按预期推进 LQ"
-    assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_window[0], "byte merge 后最终 dword 结果不匹配"
+    assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_refmem.read(
+        PARTIAL_STORE_WINDOW_BASE, 8
+    ), "byte merge 后最终 dword 结果不匹配"
     assert drain_summary["touched_byte_count"] >= len(byte_updates), "byte merge flush 覆盖字节数不足"
     env.assert_no_outstanding()
 
@@ -421,11 +420,17 @@ def test_api_MemBlock_full_store_then_partial_overwrite_directed(env):
     overwrite_data = 0xEE
 
     state = _reset_env_and_state(env)
+    expected_refmem = env.memory.fork_ref_memory()
 
     first_result, sq_ptr = _commit_scalar_store(
         env,
         state.sq_ptr,
         req_id=0,
+        addr=PARTIAL_STORE_WINDOW_BASE,
+        data=base_data,
+    )
+    _apply_store_stimulus_to_ref_memory(
+        expected_refmem,
         addr=PARTIAL_STORE_WINDOW_BASE,
         data=base_data,
     )
@@ -437,9 +442,11 @@ def test_api_MemBlock_full_store_then_partial_overwrite_directed(env):
         data=overwrite_data,
         mask=0x01,
     )
-    expected_word, _ = _apply_store_to_window(
-        (base_data, 0),
-        second_result.committed_store_view,
+    _apply_store_stimulus_to_ref_memory(
+        expected_refmem,
+        addr=overwrite_addr,
+        data=overwrite_data,
+        mask=0x01,
     )
 
     load_result = ScalarLoadSequence(
@@ -458,7 +465,9 @@ def test_api_MemBlock_full_store_then_partial_overwrite_directed(env):
         "partial overwrite 未落在预期字节 lane"
     )
     assert load_result.next_lq_ptr == QueuePtr(flag=0, value=1), "overwrite 场景下 load 未按预期推进 LQ"
-    assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_word, "full store + partial overwrite 结果不匹配"
+    assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_refmem.read(
+        PARTIAL_STORE_WINDOW_BASE, 8
+    ), "full store + partial overwrite 结果不匹配"
     assert drain_summary["touched_byte_count"] >= 8, "overwrite 场景 flush 覆盖字节数不足"
     env.assert_no_outstanding()
 
@@ -489,7 +498,7 @@ def test_api_MemBlock_interleaved_partial_stores_two_addresses_directed(env):
     env.preload_u64(PARTIAL_STORE_WINDOW_ADDRS[1], initial_words[1])
 
     sq_ptr = state.sq_ptr
-    expected_window = initial_words
+    expected_refmem = env.memory.fork_ref_memory()
 
     for req_id, (addr, data, mask) in enumerate(partial_ops):
         commit_result, sq_ptr = _commit_scalar_store(
@@ -500,9 +509,11 @@ def test_api_MemBlock_interleaved_partial_stores_two_addresses_directed(env):
             data=data,
             mask=mask,
         )
-        expected_window = _apply_store_to_window(
-            expected_window,
-            commit_result.committed_store_view,
+        _apply_store_stimulus_to_ref_memory(
+            expected_refmem,
+            addr=addr,
+            data=data,
+            mask=mask,
         )
 
     first_load = ScalarLoadSequence(
@@ -527,10 +538,14 @@ def test_api_MemBlock_interleaved_partial_stores_two_addresses_directed(env):
 
     assert first_load.next_lq_ptr == QueuePtr(flag=0, value=1), "第一个交织 partial-store load 未按预期推进 LQ"
     assert second_load.next_lq_ptr == QueuePtr(flag=0, value=2), "第二个交织 partial-store load 未按预期推进 LQ"
-    assert env.memory.read(PARTIAL_STORE_WINDOW_ADDRS[0], 8) == expected_window[0], (
+    assert env.memory.read(PARTIAL_STORE_WINDOW_ADDRS[0], 8) == expected_refmem.read(
+        PARTIAL_STORE_WINDOW_ADDRS[0], 8
+    ), (
         "交织 partial-store 后窗口 0 结果不匹配"
     )
-    assert env.memory.read(PARTIAL_STORE_WINDOW_ADDRS[1], 8) == expected_window[1], (
+    assert env.memory.read(PARTIAL_STORE_WINDOW_ADDRS[1], 8) == expected_refmem.read(
+        PARTIAL_STORE_WINDOW_ADDRS[1], 8
+    ), (
         "交织 partial-store 后窗口 1 结果不匹配"
     )
     assert drain_summary["touched_byte_count"] >= 6, "交织 partial-store flush 覆盖字节数不足"

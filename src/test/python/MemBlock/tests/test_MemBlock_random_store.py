@@ -138,6 +138,7 @@ def test_api_MemBlock_single_cacheable_store_flush_smoke(env):
     store_data = 0xAABBCCDDEEFF0011
 
     sq_ptr = _reset_env_and_state(env)
+    expected_refmem = env.memory.predict_store(CACHEABLE_STORE_ADDR, store_data)
     result = ScalarStoreFlushSequence(
         StoreTxn(req_id=req_id, sq_ptr=sq_ptr, addr=CACHEABLE_STORE_ADDR, data=store_data),
         expected_mmio=False,
@@ -157,6 +158,9 @@ def test_api_MemBlock_single_cacheable_store_flush_smoke(env):
     assert result.outer_write_delta == 0, "cacheable store 不应走 outer/mmio 写路径"
     assert drain_summary["drain_event_count"] > 0, "flushSb 后未记录到任何 drain 事件"
     assert drain_summary["touched_byte_count"] >= 8, "drain 覆盖字节数异常"
+    assert env.memory.read(CACHEABLE_STORE_ADDR, 8) == expected_refmem.read(
+        CACHEABLE_STORE_ADDR, 8
+    ), "cacheable store flush 后 golden memory 结果不匹配"
     env.assert_no_outstanding()
 
 
