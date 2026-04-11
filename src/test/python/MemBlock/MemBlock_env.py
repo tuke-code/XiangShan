@@ -1567,11 +1567,6 @@ class MemBlockEnv:
         await self._step_async(cycles)
         self.idle_inputs()
 
-    def Step(self, cycles: int = 1) -> None:
-        """推进 DUT 时钟。"""
-
-        self._run_async(self._step_async(cycles))
-
     def advance_cycles(self, cycles: int = 1) -> None:
         """按 env 统一时钟语义推进若干周期。"""
 
@@ -2641,7 +2636,7 @@ class MemBlockEnv:
         self.dut.xclock.RemoveStepRisCbByDesc(self.memory.on_memory_edge.__name__)
 
     def add_after_step_callback(self, callback) -> None:
-        """注册在每次 `Step(1)` 结束后执行的 Python 回调。"""
+        """注册在 env 每次推进一拍结束后执行的 Python 回调。"""
 
         if callback not in self._after_step_callbacks:
             self._after_step_callbacks.append(callback)

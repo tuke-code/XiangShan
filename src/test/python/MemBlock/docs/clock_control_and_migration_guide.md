@@ -7,7 +7,7 @@
 与旧版“迁移指南”相比，本文档不再只强调“不要乱写 `Step()`”，而是把当前环境的 clock control 当成一个完整子系统来描述。它主要回答以下问题：
 
 1. 现在到底谁拥有 DUT 时钟推进权。
-2. 一次 `env.Step(1)` 背后，环境内部到底做了哪些事情。
+2. 一次 env 单拍推进背后，环境内部到底做了哪些事情。
 3. 哪些接口是给 testcase 用的，哪些只应该在 env/agent 内部使用。
 4. 如何基于当前环境的真实测试用例，写出既稳定又易维护的 clock-related 代码。
 5. 后续扩展时，怎样避免重新把时钟控制打散回高层。
@@ -62,7 +62,7 @@ testcase / sequence / request_apis / env.backend
 
 这里最重要的设计点有三个：
 
-1. testcase 仍可调用 `env.Step()`，但这只是兼容同步 facade。
+1. testcase 对外使用 `env.advance_cycles()`，而不是再直接依赖旧 `Step()` facade。
 2. env 内部真正工作的，是 `_step_async()`、`_await_cycles()`、`_await_until()`、`_step_and_idle_async()` 这些 async 原语。
 3. 最底层真正触发 DUT 时钟边沿的地方，集中在 `EnvClockKernel.step()`。
 
@@ -146,13 +146,10 @@ dut.Step(1) 不能绕过 _step_async() 的统一语义栈。
 
 当前允许 testcase 直接使用的 clock-related 公共接口主要包括：
 
-- `env.Step(cycles=1)`
-  - 最底层同步推进入口；
-  - 适合 env fixture 冒烟、最小化 debug、少量显式节拍控制。
 - `env.reset(cycles=10, settle_cycles=5)`
   - 同步复位入口；
 - `env.advance_cycles(cycles=1)`
-  - 语义化的“让 env 再前进若干拍”；
+  - 唯一公开的显式拍推进入口；
 - `env.wait_until(predicate, max_cycles, timeout_message)`
   - 统一条件轮询入口；
 - `env.add_after_step_callback(callback)` / `env.remove_after_step_callback(callback)`
@@ -160,9 +157,8 @@ dut.Step(1) 不能绕过 _step_async() 的统一语义栈。
 
 其中：
 
-- `env.Step()` 是“我明确要推进几拍”；
-- `env.advance_cycles()` 是“我只关心 settle / 等待若干拍的语义”；
-- `env.wait_until()` 是“我想让 env 用统一拍语义轮询某个条件”。
+- `env.advance_cycles()` 是“我明确要让 env 再前进若干拍”；
+- `env.wait_until()` 是“我想让 env 用统一拍语义轮询某个条件”；
 
 这三个接口的定位不同，不建议混用成一个“大杂烩习惯”。
 
@@ -187,31 +183,31 @@ dut.Step(1) 不能绕过 _step_async() 的统一语义栈。
 
 ### 5.3 兼容 API 与推荐 API
 
-当前环境仍保留一些兼容入口，例如：
+当前环境中，旧的兼容 clock API 已删除；当前应直接使用：
 
-- `api_MemBlock_step(env, cycles, max_cycles)`
-- `api_MemBlock_reset(env, cycles, max_cycles)`
+- `env.reset(...)`
+- `env.advance_cycles(...)`
 - `request_apis.reset_env_and_wait_backend(...)`
 
-这些 API 仍然可用，但它们都已经是对 env 统一时钟语义的包装。新代码的推荐顺序是：
+新代码的推荐顺序是：
 
 1. 先选 sequence；
 2. 再选 `env.backend` / `request_apis`；
-3. 最后才在 testcase 中直接写 `env.Step()`。
+3. 最后才在 testcase 中直接写 `env.advance_cycles(...)`。
 
 ## 6. 当前环境中的典型 clock usage 模式
 
-### 6.1 最底层 smoke：显式 `Step()`
+### 6.1 最底层 smoke：显式 `advance_cycles()`
 
 `src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py` 里保留了若干最底层用法，这是有意为之，因为这些测试的目标就是验证 env 本身的时钟推进和 bundle 绑定是否可用。
 
 典型模式如下：
 
 ```python
-api_MemBlock_reset(env, cycles=2, max_cycles=20)
-api_MemBlock_step(env, cycles=3, max_cycles=10)
+env.reset(cycles=2, settle_cycles=5)
+env.advance_cycles(3)
 env.reset(cycles=2, settle_cycles=1)
-env.Step(2)
+env.advance_cycles(2)
 ```
 
 这类写法适合：
@@ -232,7 +228,7 @@ if settle_cycles > 0:
     env.advance_cycles(settle_cycles)
 ```
 
-这里比直接写 `env.Step(settle_cycles)` 更清楚，因为调用者表达的是：
+这里比直接把“推进若干拍”散落写在本地循环里更清楚，因为调用者表达的是：
 
 - 先给一个 store commit 脉冲；
 - 再让环境按统一语义 settle 若干拍。
@@ -242,7 +238,7 @@ if settle_cycles > 0:
 - `src/test/python/MemBlock/sequences/memblock_sequences.py`
 - `src/test/python/MemBlock/sequences/violation_sequences.py`
 
-当你看到“commit 后等几拍”“观测某事件后再等几拍”的语义时，优先想到 `advance_cycles()`，而不是 `Step()`。
+当你看到“commit 后等几拍”“观测某事件后再等几拍”的语义时，优先想到 `advance_cycles()`。
 
 ### 6.3 条件等待：`wait_until()` 与专用 wait helper
 
@@ -266,7 +262,7 @@ if settle_cycles > 0:
 for _ in range(max_cycles):
     if cond():
         return value
-    env.Step(1)
+    env.advance_cycles(1)
 ```
 
 因为这种写法一旦散落开来，就会让 clock semantics 重新变成“每个人各写各的 while 循环”。
@@ -308,7 +304,7 @@ self.env.idle_inputs()
 - 采样时机统一；
 - 不需要侵入业务驱动路径；
 - 可同步可异步；
-- 不需要 monkey-patch `env.Step()`。
+- 不需要 monkey-patch env 的公开拍推进接口。
 
 因此，如果你需要新增一个“每拍都看一眼”的观测器，首选应该是：
 
@@ -346,20 +342,20 @@ state = ResetEnvSequence(
 ```python
 env.reset(...)
 for _ in range(...):
-    env.Step(1)
+    env.advance_cycles(1)
     ...
 ```
 
 它更稳定，也更符合环境当前的 clock discipline。
 
-### 7.2 最佳实践二：业务驱动优先走 sequence，其次才是直接 `Step()`
+### 7.2 最佳实践二：业务驱动优先走 sequence，其次才是少量 `advance_cycles()`
 
 例如一条标准 load，当前最佳实践不是：
 
 ```python
 env.backend.send(txn)
 env.expect_scalar_load(...)
-env.Step(...)
+    env.advance_cycles(...)
 ```
 
 而是：
@@ -399,7 +395,7 @@ finally:
 - 采样逻辑可复用；
 - trace 窗口边界清晰。
 
-如果你把观察逻辑直接塞进 `for ... env.Step(1)` 循环，通常意味着这段逻辑应该被下沉或重构。
+如果你把观察逻辑直接塞进“推进一拍再检查一次”的本地循环，通常意味着这段逻辑应该被下沉或重构。
 
 ### 7.4 最佳实践四：agent 内部使用 async 握手，同步接口只做桥接
 
@@ -415,9 +411,9 @@ finally:
 
 如果未来新增 agent 接口，也建议沿用这一模式。
 
-### 7.5 最佳实践五：兼容 `Step()`，但不要扩散 `Step()`
+### 7.5 最佳实践五：显式拍推进统一写成 `advance_cycles()`
 
-当前环境并没有禁用 `env.Step()`，因为它仍然对以下场景有价值：
+当前环境不再保留 `env.Step()`；如果你确实需要在 testcase 中显式推进若干拍，应统一写成 `env.advance_cycles()`，它仍然适合以下场景：
 
 - env smoke；
 - 最小调试；
@@ -427,18 +423,18 @@ finally:
 
 一个简单判断标准是：
 
-- 如果你写的是环境自测，直接 `Step()` 很正常；
+- 如果你写的是环境自测，直接 `advance_cycles()` 很正常；
 - 如果你写的是业务场景验证，优先 sequence / wait helper / backend facade；
-- 如果你发现自己在 testcase 里开始写第三个 `for ... Step(1)` 循环，通常说明抽象层选错了。
+- 如果你发现自己在 testcase 里开始写第三个“推进一拍再检查”的本地循环，通常说明抽象层选错了。
 
 ## 8. 常见反模式
 
 以下写法应尽量避免继续新增：
 
-1. 在 `agents/` 中直接写新的 `env.Step(...)`
+1. 在 `agents/` 中直接写新的公开拍推进 wrapper
 2. 在 `request_apis.py` 中新增拍级 while/for 轮询
-3. 在 `sequences/` 中为了等条件，手工复制 `for ... Step(1)`
-4. 用 monkey-patch `env.Step` 的方式做采样或 coverage
+3. 在 `sequences/` 中为了等条件，手工复制“推进一拍 + 检查条件”的本地循环
+4. 用 monkey-patch env 的拍推进入口做采样或 coverage
 5. 在 testcase 本地拼出“pulse + settle + 条件轮询”的临时 helper，而不下沉到 env 或 sequence
 
 这些反模式的共同问题是：
@@ -462,7 +458,7 @@ finally:
 5. 这是完整测试故事吗？
    - 放到 `sequences/`。
 6. 这是 env 自身最小 smoke 吗？
-   - 可以在测试中直接 `Step()`。
+   - 可以在测试中直接 `advance_cycles()`。
 
 只要沿着这条判断链扩展，clock control 的所有权就不会再次散落。
 

@@ -80,6 +80,20 @@
   - replay/debug trace 对 `after_step_callback` 的使用模式
 - 新增反模式与新功能落层建议，方便后续继续扩展 clock-related 功能时保持统一风格
 
+### 4. 删除旧公开 clock API 并迁移调用点
+
+本条目记录新 clock 方案的最后一轮接口收口：把仍为兼容保留的旧公开 clock API 删除，并把主验证路径中的调用点统一改到 `reset()` / `advance_cycles()`。
+
+#### 变更摘要
+
+- 删除 `MemBlock_api.py` 中的 `api_MemBlock_reset()` / `api_MemBlock_step()`
+- 删除 `MemBlockEnv` 的公开 `Step()` 入口，保留 `advance_cycles()` 作为唯一显式拍推进接口
+- env fixture / ROB coverage 测试迁移到：
+  - `env.reset(...)`
+  - `env.advance_cycles(...)`
+- 为避免破坏现有 WebUI 控制面，`lsq_webui.py` 内部仅把其私有 `Step()` 包装改为委托到 `env.advance_cycles(...)`，不改变 WebUI 对外形状
+- 设计文档同步删去“旧 clock API 仍保留”的口径，明确当前方案已经完成公开接口收口
+
 ## 2026-04-09
 
 ### 1. 收敛 env 时钟治理

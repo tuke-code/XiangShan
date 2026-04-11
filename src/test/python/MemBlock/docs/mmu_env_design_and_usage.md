@@ -97,7 +97,7 @@ flowchart LR
 4. 发送一次 `sfence`。
 5. 等待若干拍让 DUT 状态收敛。
 
-这使得 testcase 后续即使执行了普通 `env.Step()` 或触发了 `idle_inputs()`，translation 背景也不会被意外清空。
+这使得 testcase 后续即使执行了普通 `env.advance_cycles()` 或触发了 `idle_inputs()`，translation 背景也不会被意外清空。
 
 ### 5.2 PTW responder 必须返回 multi-beat D
 

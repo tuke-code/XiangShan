@@ -95,7 +95,7 @@ pytest testcase
    创建 bundle、agent、monitor、`MemoryModel`，并把 `memory.on_memory_edge` 注册到时钟回调。
 
 2. 协调
-   负责 `Step()`、`reset()`、`idle_inputs()` 等顶层时序编排；同时在每拍末尾调用 `MemStatusMonitor` 与 `CommitAgent.advance()`，维持 pending pointer 和 commit 相关闭环。
+   负责 `advance_cycles()`、`reset()`、`idle_inputs()` 等顶层时序编排；同时在每拍末尾调用 `MemStatusMonitor` 与 `CommitAgent.advance()`，维持 pending pointer 和 commit 相关闭环。
 
 3. 对外暴露稳定 facade
    例如 `preload_u64()`、`expect_scalar_load()`、`get_counter()`、`wait_store_materialized()`、`wait_memory_quiesce()`、`flush_store_buffers_and_wait()`、`assert_no_outstanding()`；主动控制入口则统一收口到 `env.backend`。
@@ -110,7 +110,7 @@ pytest testcase
 
 1. `dut.Step(1)` 只允许从 env 内核发起。
 2. `agents/`、MMU helper 和各类 wait/pulse 逻辑不再各自推进时钟。
-3. testcase 仍然可以继续使用同步 `env.Step()` / `env.reset()` / `env.backend.*`，但这些同步入口本质上只是 env 内部 async 时序原语的兼容包装。
+3. testcase 对外只继续使用同步 `env.reset()` / `env.advance_cycles()` / `env.backend.*`，这些同步入口本质上只是 env 内部 async 时序原语的语义化包装。
 
 因此，当前 `MemBlockEnv` 的时钟分层可以理解为：
 
@@ -128,9 +128,9 @@ testcase / sequence / request_apis / env.backend
 - env 可以在统一位置固定“每拍前 drive、每拍后 monitor/model/update callback”的顺序；
 - agent 只表达业务语义与握手条件，而不是再携带散落的本地 `Step()` 时序。
 
-### 5.2 `Step()`、async 原语与 callback 关系
+### 5.2 `advance_cycles()`、async 原语与 callback 关系
 
-对外公开的 `env.Step()` 仍保留，因为现有 tests、sequences 和 `request_apis.py` 大量依赖它；但环境内部主要依赖以下私有原语：
+对外公开的拍推进入口已经收口到 `env.advance_cycles()`；但环境内部主要依赖以下私有原语：
 
 - `_step_async()`
   - 推进一个或多个周期，并在每拍后固定执行：
@@ -140,7 +140,7 @@ testcase / sequence / request_apis / env.backend
     - `CommitAgent.advance()`
     - after-step callback 分发
 - `_await_cycles()`
-  - 只表达“等待若干拍”的语义，用于替代 agent/facade 层的直接 `Step()`。
+  - 只表达“等待若干拍”的语义，用于替代 agent/facade 层的直接拍推进。
 - `_step_and_idle_async()`
   - 适合一拍握手后立刻恢复默认输入的驱动路径，例如 LSQ enqueue。
 
@@ -149,7 +149,7 @@ testcase / sequence / request_apis / env.backend
 - 普通同步函数
 - async coroutine callback
 
-这意味着 coverage collector、WebUI 采样器或后续新的 env 内辅助观察器，都可以继续挂在统一的拍后阶段，而不需要再私自 monkey-patch `env.Step()`。
+这意味着 coverage collector、WebUI 采样器或后续新的 env 内辅助观察器，都可以继续挂在统一的拍后阶段，而不需要再私自 monkey-patch env 的拍推进入口。
 
 ## 6. Active Agents
 

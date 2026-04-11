@@ -7,9 +7,7 @@ MemBlockEnv 冒烟测试。
 """
 
 import pytest
-
-from MemBlock_api import api_MemBlock_reset, api_MemBlock_step
-
+import MemBlock_api
 
 def test_api_MemBlock_env_create(env):
     """验证 env、dut 和 MemoryModel 能正常创建。"""
@@ -78,13 +76,13 @@ def test_api_MemBlock_env_has_core_bundles(env):
     assert len(env.sq_shadow_entries) == env.config.store_queue_size
 
 
-def test_api_MemBlock_env_step_and_reset(env):
-    """验证基础 API 和 env 方法都能正常推进时钟。"""
+def test_api_MemBlock_env_advance_cycles_and_reset(env):
+    """验证新 clock facade 能正常复位并推进时钟。"""
 
-    api_MemBlock_reset(env, cycles=2, max_cycles=20)
-    api_MemBlock_step(env, cycles=3, max_cycles=10)
+    env.reset(cycles=2, settle_cycles=5)
+    env.advance_cycles(3)
     env.reset(cycles=2, settle_cycles=1)
-    env.Step(2)
+    env.advance_cycles(2)
     assert env.dut.reset.value == 0
 
 
@@ -98,9 +96,9 @@ def test_api_MemBlock_env_lsq_enq_bundle_access(env):
     env.lsq_enq_req[0].bits_robIdx_value.value = 0x11
     env.lsq_enq_req[0].bits_lqIdx_value.value = 0x22
     env.lsq_enq_req[0].bits_sqIdx_value.value = 0x7
-    env.Step(1)
+    env.advance_cycles(1)
     env.idle_inputs()
-    env.Step(1)
+    env.advance_cycles(1)
     assert env.lsq_enq_req[0].valid.value == 0
     _ = env.lsq_enq_meta.canAccept.value
     _ = env.lsq_enq_resp[0].lqIdx_value.value
@@ -115,9 +113,9 @@ def test_api_MemBlock_env_issue_bundle_access(env):
         bundle.bits_src_0.value = idx + 2
         bundle.bits_robIdx_value.value = idx + 3
         bundle.bits_sqIdx_value.value = idx + 4
-    env.Step(1)
+    env.advance_cycles(1)
     env.idle_inputs()
-    env.Step(1)
+    env.advance_cycles(1)
     for bundle in env.issue:
         assert bundle.valid.value == 0
         _ = bundle.ready.value
@@ -126,7 +124,7 @@ def test_api_MemBlock_env_issue_bundle_access(env):
 def test_api_MemBlock_env_mem_status_access(env):
     """验证 mem_to_ooo 相关状态口可读。"""
 
-    env.Step(1)
+    env.advance_cycles(1)
     _ = env.mem_status.lqDeq.value
     _ = env.mem_status.sqDeq.value
     _ = env.mem_status.lqDeqPtr_value.value
@@ -141,7 +139,7 @@ def test_api_MemBlock_env_mem_status_access(env):
 def test_api_MemBlock_env_commit_agent_exports_rob_state(env):
     """验证 commit agent 暴露了 ROB packet 与五元组能力状态。"""
 
-    env.Step(1)
+    env.advance_cycles(1)
     packet = env.commit_agent.latest_commit_packet
     assert packet is not None
     assert hasattr(env.commit_agent.pending_ptr, "flag")
@@ -189,18 +187,21 @@ def test_api_MemBlock_env_backend_note_store_allocated_updates_state(env):
 
 
 def test_api_MemBlock_env_cleanup_removes_legacy_control_helpers(env):
-    """验证旧的 env.note_*/pulse_* 公共控制入口已清理。"""
+    """验证旧的 env.note_*/pulse_* 与 `Step()` 公共控制入口已清理。"""
 
     assert not hasattr(env, "note_load_issued")
     assert not hasattr(env, "note_store_allocated")
     assert not hasattr(env, "note_load_completed")
     assert not hasattr(env, "pulse_store_commit")
+    assert not hasattr(env, "Step")
+    assert not hasattr(MemBlock_api, "api_MemBlock_reset")
+    assert not hasattr(MemBlock_api, "api_MemBlock_step")
 
 
 def test_api_MemBlock_env_outer_buffer_mock_ready(env):
     """验证 MemoryModel 会持续驱动 outer TL-A ready。"""
 
-    env.Step(1)
+    env.advance_cycles(1)
     assert env.outer_tl_a.ready.value == 1
     stats = env.get_transport_stats()
     assert stats["pending_outer_d_count"] == 0
@@ -212,7 +213,7 @@ def test_api_MemBlock_env_outer_buffer_mock_response_queue(env):
 
     env.inject_outer_d_response(delay_cycles=3, opcode=4, source=2, data=0x55AA)
     assert env.get_transport_stats()["pending_outer_d_count"] == 1
-    env.Step(3)
+    env.advance_cycles(3)
     stats = env.get_transport_stats()
     assert stats["pending_outer_d_count"] + stats["active_outer_d_count"] <= 1
     assert env.outer_tl_a.ready.value == 1
@@ -221,7 +222,7 @@ def test_api_MemBlock_env_outer_buffer_mock_response_queue(env):
 def test_api_MemBlock_env_dcache_client_mock_ready(env):
     """验证 MemoryModel 会持续驱动 dcache ready 信号。"""
 
-    env.Step(1)
+    env.advance_cycles(1)
     assert env.dcache_a.ready.value == 1
     assert env.dcache_c.ready.value == 1
     assert env.dcache_e.ready.value == 1
@@ -235,7 +236,7 @@ def test_api_MemBlock_env_dcache_client_mock_response_queue(env):
     stats = env.get_transport_stats()
     assert stats["pending_b_count"] == 1
     assert stats["pending_d_count"] == 1
-    env.Step(2)
+    env.advance_cycles(2)
     stats = env.get_transport_stats()
     assert stats["pending_b_count"] + stats["active_b_count"] <= 1
     assert stats["pending_d_count"] + stats["active_d_count"] <= 1
@@ -251,7 +252,7 @@ def test_api_MemBlock_env_memory_preload_access(env):
 def test_api_MemBlock_env_facade_counter_access(env):
     """验证 env facade 能返回计数与完成数量。"""
 
-    env.Step(1)
+    env.advance_cycles(1)
     assert env.get_counter("outer_request_count") >= 0
     assert env.get_completed_load_count() == 0
 
@@ -288,7 +289,7 @@ def test_api_MemBlock_env_csr_mock_default_m_mode(env):
 def test_api_MemBlock_env_flush_store_buffers_noop(env):
     """空闲状态下 sfence+flushSb 应能快速返回并完成 drain 校验。"""
 
-    api_MemBlock_reset(env, cycles=2, max_cycles=20)
+    env.reset(cycles=2, settle_cycles=5)
     observed_barriers = []
 
     def _record_barrier():
@@ -320,7 +321,7 @@ def test_api_MemBlock_env_async_after_step_callback_runs(env):
 
     env.add_after_step_callback(_async_sample)
     try:
-        env.Step(2)
+        env.advance_cycles(2)
     finally:
         env.remove_after_step_callback(_async_sample)
 

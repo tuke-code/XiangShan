@@ -53,10 +53,10 @@ sequenceDiagram
 
     T->>E: reset_env_and_wait_backend()
     E->>D: reset = 1
-    E->>D: Step(reset_cycles)
+    E->>D: advance_cycles(reset_cycles)
     D-->>E: io_reset_backend assert
     E->>D: reset = 0
-    E->>D: Step(settle_cycles)
+    E->>D: advance_cycles(settle_cycles)
     D-->>E: io_reset_backend deassert
     E-->>T: issue ready / lqCanAccept / sqCanAccept ready
 ```

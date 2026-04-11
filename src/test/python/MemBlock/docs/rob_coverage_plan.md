@@ -140,7 +140,7 @@
 4. 用例结束时调用 `collector.finalize()`
 5. 通过 `set_func_coverage(request, collector.all_groups())` 汇报
 
-因此现有真实 DUT 用例不需要额外改写，只要走 `env.Step()` / 现有 sequence，就会自动累积这套覆盖。
+因此现有真实 DUT 用例不需要额外改写，只要走 `env.advance_cycles()` / 现有 sequence，就会自动累积这套覆盖。
 
 ## 5. 当前边界
 

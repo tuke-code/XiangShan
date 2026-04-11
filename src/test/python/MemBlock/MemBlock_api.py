@@ -5,7 +5,6 @@ MemBlock DUT 创建与基础 API。
 本文件只提供环境层验证所需的最小接口：
   1. `create_dut(request)`：创建 DUT 实例
   2. `dut` fixture：管理 DUT 生命周期
-  3. `api_MemBlock_reset` / `api_MemBlock_step`：基础时钟推进接口
 """
 
 import os
@@ -153,42 +152,3 @@ def dut(request):
     set_user_info("MemBlock-Testbench-v0.2", "xiangshan@example.com")
     set_title_info("MemBlock Environment Test Report")
     _dut.Finish()
-
-
-def api_MemBlock_step(env, cycles: int = 1, max_cycles: int = 1000) -> None:
-    """
-    推进 MemBlock DUT 若干个时钟周期。
-
-    Args:
-        env: `MemBlockEnv` 实例。
-        cycles (int): 希望推进的时钟周期数。
-        max_cycles (int): 本次调用允许推进的最大周期数。
-
-    Returns:
-        None
-    """
-
-    if cycles < 0:
-        raise ValueError(f"cycles 必须非负，当前值为 {cycles}")
-    env.Step(min(cycles, max_cycles))
-
-
-def api_MemBlock_reset(env, cycles: int = 10, max_cycles: int = 100) -> None:
-    """
-    对 MemBlock DUT 执行同步复位。
-
-    Args:
-        env: `MemBlockEnv` 实例。
-        cycles (int): `reset` 保持高电平的周期数。
-        max_cycles (int): 本次调用允许消耗的最大周期数。
-
-    Returns:
-        None
-    """
-
-    if cycles <= 0:
-        raise ValueError(f"cycles 必须大于 0，当前值为 {cycles}")
-    if cycles > max_cycles:
-        raise ValueError("cycles 不能大于 max_cycles")
-
-    env.reset(cycles=cycles, settle_cycles=min(5, max_cycles - cycles))

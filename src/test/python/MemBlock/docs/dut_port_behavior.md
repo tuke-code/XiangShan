@@ -226,7 +226,7 @@ sequenceDiagram
     T->>E: enqueue_scalar_load/store()
     E->>D: needAlloc[port] = 1 or 2
     E->>D: req.valid = 1 + req.bits_*
-    E->>D: Step(1)
+    E->>D: advance_cycles(1)
     D-->>E: resp.lqIdx / resp.sqIdx
     E->>D: idle_inputs()
 ```
@@ -348,7 +348,7 @@ sequenceDiagram
 1. 每拍先驱动输入。
 2. 读取 `issue.ready`。
 3. 若 ready 为 1，则本拍 handshake 成功。
-4. 立即 `Step(1)` 让请求被 DUT 吃进去。
+4. 立即推进 1 拍，让请求被 DUT 吃进去。
 5. 随后 `idle_inputs()` 清空输入。
 
 因此，测试环境对 issue 口的解释是标准 ready/valid。

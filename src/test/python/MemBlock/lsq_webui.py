@@ -158,7 +158,7 @@ class ScenarioEnvProxy:
                 if self._service._consume_driver_step_budget():
                     break
                 self._service._driver_run_event.wait(0.05)
-            self._service._call_on_loop_sync(self._env.Step, 1, generation=self._generation)
+            self._service._call_on_loop_sync(self._env.advance_cycles, 1, generation=self._generation)
             if continuous_run and self._service.tick_ms > 0:
                 if self._service._driver_stop_event.wait(self._service.tick_ms / 1000.0):
                     raise ScenarioStopped("scenario stopped")
