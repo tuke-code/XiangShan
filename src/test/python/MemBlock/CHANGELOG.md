@@ -1,5 +1,136 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-11
+
+### 1. 打通 scalar partial-store 请求模型
+
+本条目记录一次面向 backend/request 的接口补强：把原先只停留在事务模型与 scoreboard 侧的 `StoreTxn.mask`，真正打通到 `BackendFacade` / `IssueAgent` 的 issue 驱动路径。
+
+#### 变更摘要
+
+- `transactions.py`
+  - 新增 scalar store mask 解码规则：
+    - `0x01 -> SB`
+    - `0x03 -> SH`
+    - `0x0F -> SW`
+    - `0xFF -> SD`
+  - `StoreTxn` 新增按 `mask` 解析 `size_bytes` / `fu_op_type` 的属性
+  - `IssueOp.sta/std` 现在显式携带 `mask`，并在构造阶段拒绝不受支持的非标量连续掩码
+- `agents/backend_facade.py` / `agents/issue_agent.py`
+  - `env.backend.send(StoreTxn)` 不再固定发 `SD`
+  - `issue_scalar_sta()` / `issue_scalar_std()` 及同拍 `STA` 兼容包装支持显式 `mask`
+  - issue 驱动会根据 `mask` 自动写入匹配的 store `fuOpType`
+- 新增验证：
+  - `test_request_apis_backend_facade.py` 补充 partial-store 请求模型单测
+  - `test_MemBlock_scalar_store_pipeline.py` 新增：
+    - partial word store + aligned full load
+    - high-offset byte store + aligned full load
+- 设计文档同步更新：
+  - `README.md`
+  - `docs/verification_env_design.md`
+  - `docs/backend_request_model_design.md`
+  - `docs/coverage_summary.md`
+  - `docs/coverage_todo.md`
+
+#### 验证情况
+
+- `python3 -m py_compile`
+  - `transactions.py`
+  - `agents/backend_facade.py`
+  - `agents/issue_agent.py`
+  - `request_apis.py`
+  - `tests/test_request_apis_backend_facade.py`
+  - `tests/test_MemBlock_scalar_store_pipeline.py`
+- 接口/兼容测试
+  - `/nfs/share/unitychip/unitychip/bin/pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：`9 passed`
+- 真实 DUT store 相关回归
+  - `/nfs/share/unitychip/unitychip/bin/pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py`
+  - 结果：`6 passed`
+  - `/nfs/share/unitychip/unitychip/bin/pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py src/test/python/MemBlock/tests/test_MemBlock_random_store.py`
+  - 结果：`11 passed`
+
+### 2. 扩展 partial-store 场景矩阵
+
+本条目记录在请求模型打通后，继续沿 `P0-1 partial-mask store` 方向补 directed case，把“接口可用”推进到“真实矩阵开始成形”。
+
+#### 变更摘要
+
+- `test_MemBlock_scalar_store_pipeline.py` 新增：
+  - same-dword multi-byte partial merge
+  - full store + high-offset partial overwrite
+  - interleaved partial stores across two addresses
+- 新用例覆盖了三类此前仍明显缺失的语义：
+  - 同一 dword 上多次 byte merge
+  - full-width base store 后的 partial overwrite
+  - 多地址交织下的 partial-store 独立 merge
+- `coverage_summary.md` / `coverage_todo.md` 已同步把 `P0-1` 的状态从“接口待补”更新为“已有基础矩阵，继续补更复杂组合”
+
+#### 验证情况
+
+- focused 新增 partial-store 用例
+  - `/nfs/share/unitychip/unitychip/bin/pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'partial_byte_merge_same_dword_directed or full_store_then_partial_overwrite_directed or interleaved_partial_stores_two_addresses_directed'`
+  - 结果：`3 passed`
+- store 相关回归
+  - `/nfs/share/unitychip/unitychip/bin/pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py src/test/python/MemBlock/tests/test_MemBlock_random_store.py`
+  - 结果：`14 passed`
+
+### 3. 补强标量 store 深状态覆盖
+
+本条目记录一轮面向标量访存覆盖率的 testcase 补强。本轮没有扩大 env 公共接口，而是优先复用现有 sequence，在 store 深状态上补齐更有价值的 directed case。
+
+#### 变更摘要
+
+- 在 `test_MemBlock_scalar_store_pipeline.py` 新增：
+  - misaligned store + dual overlap load directed case
+  - store burst + interleaved load + final flush directed case
+- 在 `test_MemBlock_random_store.py` 新增：
+  - MMIO + cacheable store mixed-path smoke
+- 新增局部 helper，用于在 testcase 内根据 store shadow 的 `addr/mask/data` 还原 overlap 窗口期望值
+- 通过一轮新的完整回归与 toffee 报告刷新当前 coverage 状态：
+  - `74` 个用例，`73 passed + 1 xfailed`
+  - line coverage 提升到 `65.3%`
+  - branch coverage 提升到 `57.6%`
+- 文档同步更新：
+  - `coverage_summary.md`
+  - `coverage_todo.md`
+
+#### 结果解读
+
+- `NewStoreQueue`、`SbufferData`、`Sbuffer`、`StoreUnit` 的覆盖率继续小幅上升，说明新 case 的确打到了 store 深状态相关路径
+- `StoreMisalignBuffer` 虽然已经有了稳定 directed case，但覆盖率提升仍然很有限，说明后续还需要更激进的 misalign / cross-16B / cross-beat 组合
+- 本轮同时确认了一个接口事实：当前 `StoreTxn.mask` 还没有真正下沉为 backend send 的 partial-store 驱动能力，因此真正的 partial-mask store 仍需先补请求模型
+- `nc_store_flush_drain_observed` 与 `mmio_store_excluded_from_drain_observed` 仍未命中，且 MMIO exclusion 已暴露出环境 drain 语义上的后续分析点
+
+### 4. 量化 partial-store 补强后的全量 coverage
+
+本条目记录在 partial-store 请求模型与 testcase 矩阵补齐后，对完整 MemBlock 回归重新执行的一轮 toffee coverage。
+
+#### 变更摘要
+
+- 执行命令：
+  - `/nfs/share/unitychip/unitychip/bin/pytest -q src/test/python/MemBlock/tests --toffee-report --report-dir src/test/python/MemBlock/data/toffee_report_full_serial_20260411_partial_store_cov --report-name memblock_full_serial_20260411_partial_store_cov --report-dump-json`
+- 回归结果：
+  - `82` 个用例
+  - `81 passed + 1 xfailed`
+- 相对上一版完整 coverage 基线：
+  - line hit：`192959 -> 192972`，增量 `+13`
+  - branch hit：`906296 -> 906590`，增量 `+294`
+  - function coverage 维持 `25/29`，未新增命中 point/bin
+- 模块级增量主要集中在：
+  - `DCache.sv`：`+6` line hit，`+1` branch hit
+  - `Sbuffer.sv`：`+6` line hit
+- `NewStoreQueue` / `SbufferData` / `StoreMisalignBuffer` 本轮基本横盘
+
+#### 结果解读
+
+- 本轮 partial-store 工作已经被 coverage 量化证明为“有效增益”，但当前仍属于小幅、集中式提升
+- 新增用例主要强化了 cacheable partial-store 的数据路径与 sbuffer 收尾路径
+- 下一步若要继续明显拉升 store 深状态覆盖，应优先转向：
+  - cross-16B / cross-beat partial-store
+  - partial-store + backpressure / delayed drain
+  - 更深的 store queue 并存与 merge 顺序
+
 ## 2026-04-10
 
 ### 1. 重构 backend/issue 请求发送接口

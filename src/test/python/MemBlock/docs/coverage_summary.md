@@ -11,11 +11,11 @@
 
 ## 2. 记录时间与版本
 
-- 记录时间：2026-04-06（Asia/Shanghai）
+- 记录时间：2026-04-11（Asia/Shanghai，partial-store 补强后）
 - 覆盖率执行环境：`/nfs/share/unitychip/`
 - Git branch：`memblock_ut`
-- Git commit：`1c9e965b26fd0318129f39239985253eeeb62c2e`
-- Commit 摘要：`test(memblock): add ROB function coverage via toffee`
+- Git commit：`9fab671f59f62f06c5b91ea0739efc69a48babb0`
+- Commit 摘要：`refactor(memblock): remove legacy public clock apis`
 
 ## 3. 覆盖率执行命令与产物
 
@@ -25,8 +25,8 @@
 source /nfs/share/unitychip/activate >/dev/null 2>&1 || true
 pytest -q src/test/python/MemBlock/tests \
   --toffee-report \
-  --report-dir src/test/python/MemBlock/data/toffee_report_run \
-  --report-name memblock_rob_cov \
+  --report-dir src/test/python/MemBlock/data/toffee_report_full_serial_20260411_partial_store_cov \
+  --report-name memblock_full_serial_20260411_partial_store_cov \
   --report-dump-json
 ```
 
@@ -37,24 +37,33 @@ pytest -q src/test/python/MemBlock/tests \
 ```bash
 source ~/.profile >/dev/null 2>&1 || true
 genhtml --branch-coverage \
-  src/test/python/MemBlock/data/toffee_report_run/line_dat/merged.info \
-  -o src/test/python/MemBlock/data/toffee_report_run/line_dat
+  src/test/python/MemBlock/data/toffee_report_full_serial_20260411_partial_store_cov/line_dat/merged.info \
+  -o src/test/python/MemBlock/data/toffee_report_full_serial_20260411_partial_store_cov/line_dat
 ```
 
 ### 3.3 主要报告产物
 
-- toffee HTML 报告：`src/test/python/MemBlock/data/toffee_report_run/memblock_rob_cov`
-- toffee JSON 报告：`src/test/python/MemBlock/data/toffee_report_run/toffee_report.json`
-- DUT 行覆盖率 HTML：`src/test/python/MemBlock/data/toffee_report_run/line_dat/index.html`
-- DUT lcov 汇总：`src/test/python/MemBlock/data/toffee_report_run/line_dat/merged.info`
-- DUT 覆盖率摘要 JSON：`src/test/python/MemBlock/data/toffee_report_run/line_dat/code_coverage.json`
+- toffee HTML 报告：`src/test/python/MemBlock/data/toffee_report_full_serial_20260411_partial_store_cov/memblock_full_serial_20260411_partial_store_cov`
+- toffee JSON 报告：`src/test/python/MemBlock/data/toffee_report_full_serial_20260411_partial_store_cov/toffee_report.json`
+- DUT 行覆盖率 HTML：`src/test/python/MemBlock/data/toffee_report_full_serial_20260411_partial_store_cov/line_dat/index.html`
+- DUT lcov 汇总：`src/test/python/MemBlock/data/toffee_report_full_serial_20260411_partial_store_cov/line_dat/merged.info`
+- DUT 覆盖率摘要 JSON：`src/test/python/MemBlock/data/toffee_report_full_serial_20260411_partial_store_cov/line_dat/code_coverage.json`
 
 ## 4. 测试执行结果概况
 
-- 执行用例数：`48`
-- 用例状态：`48/48 PASSED`
+- 执行用例数：`82`
+- 用例状态：`81 PASSED, 1 XFAIL`
 
 这说明当前覆盖率分析基于一轮完整通过的真实 DUT 回归，而不是基于中途失败或半收敛的测试数据。
+
+与上一版覆盖率统计相比，本轮新增了 8 个用例：
+
+- partial word store + aligned full load
+- high-offset byte store + aligned full load
+- same-dword multi-byte partial merge
+- full store + high-offset partial overwrite
+- interleaved partial stores across two addresses
+- partial-store 请求模型单测 3 条
 
 ## 5. 功能覆盖率结果
 
@@ -63,8 +72,10 @@ genhtml --branch-coverage \
 本轮 ROB 相关 function coverage 通过 toffee 官方 `set_func_coverage` 机制汇总，结果如下：
 
 - Group：`2/4`
-- Point：`29/32`
-- Bin：`29/32`
+- Point：`25/29`
+- Bin：`25/29`
+
+与上一版完整回归相比，这三项结果保持不变。说明本轮 partial-store 补强主要提升的是 RTL 代码路径覆盖，而不是现有 ROB function coverage 定义中的新 point/bin 命中。
 
 ### 5.2 分组结果
 
@@ -135,44 +146,41 @@ genhtml --branch-coverage \
 
 #### `MemBlock.ROB.GapObserved`
 
-- 覆盖结果：`3/4`
+- 覆盖结果：`2/4`
 
 已命中：
 
-- `gap_mmio_busy_without_commit_bool`
 - `gap_backend_feedback_without_model`
 - `gap_replay_without_redirect_cancel_model`
 
 未命中：
 
+- `gap_mmio_busy_without_commit_bool`
 - `gap_mixed_commit_window_without_packet_model`
 
 解读：
 
 这组不是“功能通过”，而是“当前 DUT 已经暴露出这些真实窗口，但环境模型仍存在缺口”。当前结果说明：
 
-- MMIO busy 相关窗口确实出现了。
 - backend feedback（`sqDeq/lqDeqPtr/sqDeqPtr`）相关真实行为确实出现了。
 - replay / violation / release 恢复窗口已经出现。
 
 但：
 
+- 当前测试尚未稳定把 `mmioBusy` 长窗口留成可重复命中的 directed case。
 - 当前测试尚未明确命中“同拍混合 `lcommit + scommit` commit packet”这一缺口。
 
 因此，ROB 模型的下一个增强点之一应继续围绕 mixed commit packet 设计 directed case。
 
 #### `MemBlock.ROB.KnownModelGaps`
 
-- 覆盖结果：`6/6`
+- 覆盖结果：`3/3`
 
 命中项包括：
 
 - `known_gap_pending_ptr_next_not_modelled`
-- `known_gap_commit_bool_not_modelled`
-- `known_gap_non_mem_blocker_not_modelled`
 - `known_gap_mixed_lcommit_scommit_not_modelled`
-- `known_gap_redirect_cancel_not_modelled`
-- `known_gap_backend_feedback_credit_not_modelled`
+- `known_gap_non_mem_blocker_not_modelled`
 
 解读：
 
@@ -185,13 +193,20 @@ genhtml --branch-coverage \
 
 ### 6.1 总体结果
 
-基于 `code_coverage.json` 与重新生成的 `genhtml` HTML 页面，当前 DUT 行/分支覆盖率为：
+基于 `code_coverage.json` 与新生成的 `genhtml` HTML 页面，当前 DUT 行/分支覆盖率为：
 
 - Source files：`314`
-- Line coverage：`63.6%`（`187993 / 295581`）
-- Branch coverage：`55.9%`（`878905 / 1573403`）
+- Line coverage：`65.3%`（`192972 / 295581`）
+- Branch coverage：`57.6%`（`906590 / 1573403`）
 
 这是当前最可信的 DUT 代码覆盖率结果。
+
+与上一版完整 coverage 基线相比，本轮量化增量为：
+
+- Line hit：`+13`
+- Branch hit：`+294`
+
+也就是说，本轮 partial-store 补强确实让真实 DUT 多走到了一些新路径，但当前增量仍属于“小幅、集中式提升”，而不是会显著改写全局百分比的大跳升。
 
 ### 6.2 与当前目标最相关模块的覆盖率
 
@@ -213,10 +228,10 @@ genhtml --branch-coverage \
 
 #### 主 store pipeline / wrapper
 
-- `StoreUnit.sv`：line `86.38%`，branch `73.03%`
-- `MainPipe.sv`：line `89.26%`，branch `64.71%`
-- `LsqWrapper.sv`：line `80.18%`，branch `93.33%`
-- `MemBlock.sv`：line `68.50%`，branch `57.61%`
+- `StoreUnit.sv`：line `86.6%`，branch `66.3%`
+- `MainPipe.sv`：line `89.4%`，branch `73.0%`
+- `LsqWrapper.sv`：line `82.9%`，branch `70.7%`
+- `MemBlock.sv`：line `74.9%`，branch `59.3%`
 
 解读：
 
@@ -228,13 +243,13 @@ store execute 和 wrapper 主路径整体并不差，说明：
 
 #### LSQ / replay / ordering 相关
 
-- `LoadQueue.sv`：line `79.38%`
-- `LoadQueueRAW.sv`：line `65.01%`，branch `71.86%`
-- `LoadQueueRAR.sv`：line `62.28%`，branch `77.66%`
-- `LoadQueueReplay.sv`：line `65.59%`，branch `70.49%`
-- `VirtualLoadQueue.sv`：line `58.38%`，branch `42.89%`
-- `ForwardModule.sv`：line `83.01%`，branch `70.00%`
-- `ExceptionInfoGen.sv`：line `84.57%`，branch `75.00%`
+- `LoadQueue.sv`：line `80.1%`，branch `68.2%`
+- `LoadQueueRAW.sv`：line `65.0%`，branch `51.2%`
+- `LoadQueueRAR.sv`：line `62.3%`，branch `62.0%`
+- `LoadQueueReplay.sv`：line `66.3%`，branch `63.4%`
+- `VirtualLoadQueue.sv`：line `58.5%`，branch `60.1%`
+- `ForwardModule.sv`：line `84.6%`，branch `40.1%`
+- `ExceptionInfoGen.sv`：line `84.7%`，branch `53.9%`
 
 解读：
 
@@ -249,10 +264,10 @@ store execute 和 wrapper 主路径整体并不差，说明：
 
 #### store queue / sbuffer / misalign
 
-- `NewStoreQueue.sv`：line `58.13%`，branch `39.34%`
-- `Sbuffer.sv`：line `84.42%`，branch `54.50%`
-- `SbufferData.sv`：line `55.46%`，branch `52.79%`
-- `StoreMisalignBuffer.sv`：line `58.77%`，branch `48.72%`
+- `NewStoreQueue.sv`：line `58.4%`，branch `43.1%`
+- `Sbuffer.sv`：line `84.9%`，branch `71.6%`
+- `SbufferData.sv`：line `56.0%`，branch `34.5%`
+- `StoreMisalignBuffer.sv`：line `58.8%`，branch `36.8%`
 
 解读：
 
@@ -272,13 +287,36 @@ store execute 和 wrapper 主路径整体并不差，说明：
 - misaligned scalar store
 - 更复杂的 partial write / cross-line / exception / delay drain 场景
 
-如果未来只想提升一个方向的覆盖价值，这一组是最高优先级。
+与上一版完整 coverage 基线相比，本轮 partial-store 补强带来的模块级变化非常集中：
+
+- `DCache.sv`
+  - line `63.291% -> 63.335%`
+  - branch `77.381% -> 77.399%`
+  - 对应 `+6` line hit、`+1` branch hit
+- `Sbuffer.sv`
+  - line `84.863% -> 84.946%`
+  - 对应 `+6` line hit
+
+而下面几块当前基本横盘：
+
+- `NewStoreQueue.sv`
+- `SbufferData.sv`
+- `StoreMisalignBuffer.sv`
+- `StoreUnit.sv`
+
+这说明本轮新增用例的真实收益，主要体现在：
+
+1. partial-store 的 cacheable 数据路径确实被进一步打到了；
+2. sbuffer 收尾与 flush/drain 路径也有额外覆盖；
+3. 但 store queue 深层状态、misalign buffer 深层切分，以及更复杂的 merge/backpressure 状态，仍没有被真正打开。
+
+换句话说，本轮已经证明“partial-store 路径可稳定构造并能对 coverage 产生正向增益”，但 `P0-1` 还远没到打透的程度。
 
 #### uncache / MMIO / 外围路径
 
-- `LoadQueueUncache.sv`：line `61.66%`，branch `51.45%`
-- `Uncache.sv`：line `64.19%`，branch `53.80%`
-- `UncacheEntry.sv`：line `82.74%`，branch `86.84%`
+- `LoadQueueUncache.sv`：line `62.2%`，branch `59.2%`
+- `Uncache.sv`：line `62.2%`，branch `59.2%`
+- `UncacheEntry.sv`：line `82.7%`，branch `75.7%`
 
 解读：
 
@@ -296,13 +334,13 @@ store execute 和 wrapper 主路径整体并不差，说明：
 
 #### TLB / PTW / PMP
 
-- `TLBFA.sv`：line `47.00%`，branch `40.49%`
-- `TLBFA_1.sv`：line `45.56%`，branch `40.22%`
-- `TLBFA_2.sv`：line `38.42%`，branch `42.66%`
-- `PMP.sv`：line `50.77%`，branch `54.68%`
-- `PtwCache.sv`：line `61.35%`，branch `28.11%`
-- `L2TLB.sv`：line `48.97%`，branch `50.56%`
-- `LLPTW.sv`：line `34.80%`，branch `43.45%`
+- `TLBFA.sv`：line `47.9%`，branch `32.7%`
+- `TLBFA_1.sv`：line `45.7%`，branch `29.7%`
+- `TLBFA_2.sv`：line `38.6%`，branch `30.0%`
+- `PMP.sv`：line `53.5%`，branch `72.2%`
+- `PtwCache.sv`：line `72.6%`，branch `46.0%`
+- `L2TLB.sv`：line `51.2%`，branch `57.3%`
+- `LLPTW.sv`：line `34.9%`，branch `48.6%`
 
 解读：
 
@@ -339,10 +377,15 @@ store execute 和 wrapper 主路径整体并不差，说明：
 从覆盖率结果出发，后续最值得投入的方向依次是：
 
 1. **store 深状态补强**
-   - partial write
-   - misaligned scalar store
-   - cross-line store
-   - deeper sbuffer/drain/backpressure
+   - 当前已新增 misaligned store、store burst + interleaved load、MMIO + cacheable mixed-path smoke
+   - partial-store 基础矩阵已扩到：
+     - partial word + full load
+     - high-offset byte store
+     - same-dword multi-byte merge
+     - full store 后 partial overwrite
+     - 双地址交织 partial-store
+   - 量化结果表明，本轮增量主要落在 `DCache` 与 `Sbuffer`，而 `NewStoreQueue` / `SbufferData` / `StoreMisalignBuffer` 基本横盘
+   - 下一步优先补的仍是 cross-16B/cross-beat store、更深的 drain/backpressure，以及更复杂的 partial merge 顺序
 
 2. **replay 精细化**
    - replay cause 分类
@@ -353,8 +396,13 @@ store execute 和 wrapper 主路径整体并不差，说明：
    - 多 outstanding
    - mmioBusy 持续阻塞
    - nc store 尾部 flush/drain 一致性
+   - MMIO store exclusion 的 final drain 语义
 
-4. **translation / permission 子系统覆盖**
+4. **request model 能力补齐**
+   - 当前这块的基础能力已经补齐：`StoreTxn.mask` 可直接下沉为标量 `SB/SH/SW/SD` issue 宽度
+   - 已新增 `0x0F` partial word 与高偏移 `0x01` byte store directed case，证明 partial-store 路径可稳定构造
+   - 下一步不再是先补接口，而是把 partial-store 场景矩阵扩到多次 merge、full-store 覆写和多地址交织
+5. **translation / permission 子系统覆盖**
    - TLB miss / refill
    - PTW cache 分支
    - PMP allow/deny
