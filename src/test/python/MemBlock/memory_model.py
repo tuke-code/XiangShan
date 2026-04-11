@@ -222,6 +222,15 @@ class MemoryModel:
     def apply_masked_write(self, addr: int, data: int, mask: int, width_bytes: int) -> None:
         self.ref_memory.apply_masked_write(addr, data, mask, width_bytes)
 
+    def apply_store(self, addr: int, data: int, mask: int = 0xFF) -> None:
+        self.ref_memory.apply_store(addr, data, mask)
+
+    def fork_ref_memory(self) -> RefMemory:
+        return self.ref_memory.clone()
+
+    def predict_store(self, addr: int, data: int, mask: int = 0xFF) -> RefMemory:
+        return self.ref_memory.with_store(addr, data, mask)
+
     def expect_load(
         self,
         rob_idx_flag: int,

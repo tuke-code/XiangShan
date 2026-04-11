@@ -301,6 +301,70 @@ def test_ref_memory_masked_write_and_read():
     assert refmem.read_masked(0x1000, 0x0F, width_bytes=8) == 0xEEFF0011
 
 
+def test_ref_memory_clone_isolated_from_mutations():
+    refmem = RefMemory()
+
+    refmem.preload_u64(0x1000, 0x1122334455667788)
+    cloned = refmem.clone()
+    cloned.apply_masked_write(0x1000, 0xAABBCCDDEEFF0011, 0x0F, 8)
+
+    assert refmem.read(0x1000, 8) == 0x1122334455667788
+    assert cloned.read(0x1000, 8) == 0x11223344EEFF0011
+
+
+def test_ref_memory_with_masked_write_returns_forked_view():
+    refmem = RefMemory()
+
+    refmem.preload_u64(0x1000, 0x0)
+    predicted = refmem.with_masked_write(0x1004, 0x1122334455667788, 0xFF, 8)
+
+    assert refmem.read(0x1000, 8) == 0x0
+    assert predicted.read(0x1000, 8) == 0x5566778800000000
+    assert predicted.read(0x1008, 8) == 0x0000000011223344
+
+
+def test_ref_memory_apply_store_decodes_mask_width():
+    refmem = RefMemory()
+
+    refmem.preload_u64(0x1000, 0x1122334455667788)
+    refmem.apply_store(0x1006, 0xA1A2, 0x03)
+
+    assert refmem.read(0x1000, 8) == 0xA1A2334455667788
+
+
+def test_ref_memory_with_store_returns_predicted_view():
+    refmem = RefMemory()
+
+    refmem.preload_u64(0x1000, 0x0)
+    predicted = refmem.with_store(0x1004, 0x1122334455667788)
+
+    assert refmem.read(0x1000, 8) == 0x0
+    assert predicted.read(0x1000, 8) == 0x5566778800000000
+    assert predicted.read(0x1008, 8) == 0x0000000011223344
+
+
+def test_memory_model_can_fork_current_ref_memory():
+    model = _create_model()
+
+    model.preload_u64(0x1000, 0x1122334455667788)
+    forked = model.fork_ref_memory()
+    forked.apply_masked_write(0x1000, 0xAABBCCDDEEFF0011, 0x0F, 8)
+
+    assert model.read(0x1000, 8) == 0x1122334455667788
+    assert forked.read(0x1000, 8) == 0x11223344EEFF0011
+
+
+def test_memory_model_predict_store_returns_forked_view():
+    model = _create_model()
+
+    model.preload_u64(0x1000, 0x0)
+    predicted = model.predict_store(0x1004, 0x1122334455667788)
+
+    assert model.read(0x1000, 8) == 0x0
+    assert predicted.read(0x1000, 8) == 0x5566778800000000
+    assert predicted.read(0x1008, 8) == 0x0000000011223344
+
+
 def test_scoreboard_can_be_unit_tested_without_transport():
     writeback = FakeWriteback(
         valid=1,
