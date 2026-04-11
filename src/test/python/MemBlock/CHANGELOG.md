@@ -2,6 +2,28 @@
 
 ## 2026-04-11
 
+### 8. 修复 MMIO outer drain 与 final golden compare 的环境语义
+
+本条目记录一次环境语义修复：让 mixed MMIO+cacheable store 在显式 flush 阶段，真正满足“MMIO outer drain 可见，但不参与 non-MMIO golden compare”的预期口径。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_random_store.py`
+  - 保留原有 `mmio_then_cacheable_store_mixed_paths` 作为稳定路径/分类 smoke
+  - 新增 `test_api_MemBlock_mmio_then_cacheable_store_flush_excludes_mmio_from_final_compare`
+- `model/scoreboard.py`
+  - `finalize_and_check_drain()` 现在会先根据已观测 MMIO store 归一化出 touched-byte 集合
+  - 最终 drain/golden compare 会跳过这些 MMIO outer drain 字节，只保留 non-MMIO 字节参与一致性检查
+- `tests/test_memory_model_store_logic.py`
+  - 新增 unit test，验证 mixed `outer(mmio) + sbuffer(cacheable)` drain 不会再把 MMIO 写出误纳入 golden compare
+- `docs/coverage_todo.md`
+  - 将该问题从环境缺口状态更新为已修复语义，并说明 mixed flush 现在可作为正常回归
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_memory_model_store_logic.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_random_store.py -k 'mmio_then_cacheable_store_mixed_paths or mmio_then_cacheable_store_flush_excludes_mmio_from_final_compare'`
+
 ### 7. 推进 golden merge helper 在 random/order 场景落地
 
 本条目记录把前一轮引入的 golden merge helper 从 `scalar_store_pipeline` 扩展到更多真实 DUT testcase，并顺手把 helper API 收敛得更接近 golden memory 本身。

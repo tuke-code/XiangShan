@@ -12,6 +12,23 @@ from dataclasses import dataclass
 STORE_DATA_WIDTH_BYTES = 16
 
 
+def _normalized_store_window(addr: int | None, mask: int, width_bytes: int) -> tuple[int, int, frozenset[int]] | None:
+    if addr is None or width_bytes <= 0:
+        return None
+    aligned_addr = int(addr) & ~(int(width_bytes) - 1)
+    byte_offset = int(addr) & (int(width_bytes) - 1)
+    effective_mask = int(mask)
+    if byte_offset and (effective_mask & 0x1):
+        effective_mask <<= byte_offset
+    effective_mask &= (1 << int(width_bytes)) - 1
+    touched_bytes = frozenset(
+        aligned_addr + byte_idx
+        for byte_idx in range(int(width_bytes))
+        if (effective_mask >> byte_idx) & 0x1
+    )
+    return aligned_addr, effective_mask, touched_bytes
+
+
 @dataclass(frozen=True)
 class RobIndex:
     """ROB 索引键。"""
@@ -346,6 +363,23 @@ class Scoreboard:
         if expected_visible_store_count and not self.drain_log:
             raise AssertionError("存在已提交 store，但测试结束时未观测到任何 drain 写出事件")
 
+        mmio_touched_bytes = set()
+        for store in self.pending_stores.values():
+            if not (
+                store.mmio
+                and store.committed
+                and store.addr_valid
+                and store.data_valid
+                and store.addr is not None
+                and store.data is not None
+                and store.mask != 0
+            ):
+                continue
+            normalized = _normalized_store_window(store.addr, store.mask, store.width_bytes)
+            if normalized is not None:
+                _, _, touched_bytes = normalized
+                mmio_touched_bytes.update(touched_bytes)
+
         drained_memory = {}
         touched_addresses = set()
         for event in self.drain_log:
@@ -355,10 +389,13 @@ class Scoreboard:
                 event["data"],
                 event["mask"],
                 event["width_bytes"],
+                skipped_addresses=mmio_touched_bytes,
             )
             for byte_idx in range(event["width_bytes"]):
                 if (event["mask"] >> byte_idx) & 0x1:
-                    touched_addresses.add(event["addr"] + byte_idx)
+                    byte_addr = event["addr"] + byte_idx
+                    if byte_addr not in mmio_touched_bytes:
+                        touched_addresses.add(byte_addr)
 
         mismatches = []
         for addr in sorted(touched_addresses):
@@ -450,16 +487,16 @@ class Scoreboard:
             store.retired = True
 
     def _retire_store(self, store: PendingStore) -> None:
-        aligned_addr = store.addr & ~(store.width_bytes - 1)
-        effective_mask = store.mask
+        normalized = _normalized_store_window(store.addr, store.mask, store.width_bytes)
+        if normalized is None:
+            return
+        aligned_addr, effective_mask, _ = normalized
         byte_offset = store.addr & (store.width_bytes - 1)
         effective_data = store.data << (byte_offset * 8)
-        if byte_offset and (effective_mask & 0x1):
-            effective_mask <<= byte_offset
         self.ref_memory.apply_masked_write(
             aligned_addr,
             effective_data,
-            effective_mask & ((1 << store.width_bytes) - 1),
+            effective_mask,
             store.width_bytes,
         )
 
@@ -468,7 +505,18 @@ class Scoreboard:
             return -1
         return rob_idx.flag * self.rob_size + rob_idx.value
 
-    def _apply_masked_write_to_dict(self, backing: dict, addr: int, data: int, mask: int, width_bytes: int) -> None:
+    def _apply_masked_write_to_dict(
+        self,
+        backing: dict,
+        addr: int,
+        data: int,
+        mask: int,
+        width_bytes: int,
+        skipped_addresses: set[int] | None = None,
+    ) -> None:
         for byte_idx in range(width_bytes):
             if (mask >> byte_idx) & 0x1:
-                backing[addr + byte_idx] = (data >> (byte_idx * 8)) & 0xFF
+                byte_addr = addr + byte_idx
+                if skipped_addresses is not None and byte_addr in skipped_addresses:
+                    continue
+                backing[byte_addr] = (data >> (byte_idx * 8)) & 0xFF

@@ -5,6 +5,7 @@ MemoryModel store/deferred-compare 纯 Python 单元测试。
 
 from memory_model import (
     MemoryModel,
+    TL_A_PUT_FULL,
     TL_A_PUT_PARTIAL,
 )
 from model.ref_memory import RefMemory
@@ -289,6 +290,70 @@ def test_memory_model_records_outer_put_partial_as_drain_event():
     assert model.drain_log[-1]["channel"] == "outer"
     assert model.drain_log[-1]["addr"] == 0x3000
     assert model.outer_d.valid.value == 1
+
+
+def test_memory_model_finalize_ignores_mmio_outer_drain_in_golden_compare():
+    mmio_shadow = FakeReadBundle(
+        allocated=1,
+        addrvalid=1,
+        datavalid=1,
+        committed=1,
+        completed=1,
+        nc=0,
+        robIdx_flag=0,
+        robIdx_value=2,
+    )
+    cacheable_shadow = FakeReadBundle(
+        allocated=1,
+        addrvalid=1,
+        datavalid=1,
+        committed=1,
+        completed=1,
+        nc=0,
+        robIdx_flag=0,
+        robIdx_value=3,
+    )
+    mmio_addr = FakeReadBundle(valid=1, sqIdx_value=0, paddr=0x1000, miss=0, nc=0)
+    cacheable_addr = FakeReadBundle(valid=1, sqIdx_value=1, paddr=0x2000, miss=0, nc=0)
+    mmio_addr_re = FakeReadBundle(updateAddrValid=1, sqIdx_value=0, nc=0, mmio=1, memBackTypeMM=0, hasException=0)
+    mmio_mask = FakeReadBundle(valid=1, sqIdx_value=0, mask=0x00FF)
+    cacheable_mask = FakeReadBundle(valid=1, sqIdx_value=1, mask=0x00FF)
+    mmio_data = FakeReadBundle(valid=1, sqIdx_value=0, fuType=1 << 17, fuOpType=0x3, data=0x1020304050607080)
+    cacheable_data = FakeReadBundle(valid=1, sqIdx_value=1, fuType=1 << 17, fuOpType=0x3, data=0xAABBCCDDEEFF0011)
+    sbuffer_write = FakeReadBundle(
+        valid=1,
+        ready=1,
+        addr=0x2000,
+        data=0xAABBCCDDEEFF0011,
+        mask=0x00FF,
+        wline=0,
+        vecValid=1,
+    )
+
+    model = _create_model(
+        outer_delay=0,
+        store_addr_inputs=[mmio_addr, cacheable_addr],
+        store_addr_re_inputs=[mmio_addr_re],
+        store_mask_inputs=[mmio_mask, cacheable_mask],
+        store_data_inputs=[mmio_data, cacheable_data],
+        sq_shadow_entries=[mmio_shadow, cacheable_shadow],
+        sbuffer_writes=[sbuffer_write],
+    )
+
+    model.after_cycle()
+    model.outer_a.valid.value = 1
+    model.outer_a.bits_opcode.value = TL_A_PUT_FULL
+    model.outer_a.bits_size.value = 3
+    model.outer_a.bits_source.value = 1
+    model.outer_a.bits_address.value = 0x1000
+    model.outer_a.bits_data.value = 0x1020304050607080
+
+    model.on_memory_edge(1)
+    result = model.finalize_and_check_drain()
+
+    assert result["drain_event_count"] == 2
+    assert model.read(0x1000, 8) == 0x0
+    assert model.read(0x2000, 8) == 0xAABBCCDDEEFF0011
 
 
 def test_ref_memory_masked_write_and_read():

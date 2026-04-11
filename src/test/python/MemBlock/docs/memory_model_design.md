@@ -274,16 +274,26 @@ store 的完整信息来自多个入口拼装：
 
 1. 统计 ready-for-retire store 数量。
 2. 调用 `_retire_all_ready_stores()` 更新黄金内存。
-3. 若按理应有 store 可见，但 `drain_log` 为空，则报错。
-4. 根据 `drain_log` 重建一份 `drained_memory`。
-5. 对比 `drained_memory` 与 `self.memory` 在被触碰字节上的内容。
+3. 收集已观测 MMIO store 的 touched-byte 窗口。
+4. 若按理应有 store 可见，但 `drain_log` 为空，则报错。
+5. 根据 `drain_log` 重建一份 `drained_memory`。
+6. 对比 `drained_memory` 与 `self.memory` 在被触碰字节上的内容。
+
+注意：
+
+- MMIO outer drain 仍会保留在 `drain_log` 中，便于 testcase 和 coverage 证明“outer 写路径确实发生过”；
+- 但这些 MMIO touched bytes 不再参与最终 non-MMIO golden compare；
+- 因而 mixed `MMIO + cacheable` flush 场景现在可以同时满足：
+  - 路径上看得到 outer / sbuffer 两类 drain
+  - 最终一致性只约束 cacheable / non-MMIO 写出结果
 
 如果任一字节不一致，会直接抛出首个不匹配地址。
 
 这个检查适合用于：
 
 - cacheable store flush 结束后的最终一致性确认。
-- MMIO / uncache 写路径是否按预期写出。
+- mixed MMIO + cacheable flush 场景下的最终一致性确认。
+- non-MMIO outer/uncache 写路径是否按预期写出。
 
 ## 9. 与测试环境的协作关系
 

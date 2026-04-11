@@ -18,6 +18,7 @@ from request_apis import (
     ptr_inc,
 )
 from sequences import (
+    FlushStoreBuffersSequence,
     ResetEnvSequence,
     ScalarMixedTrafficSequence,
     ScalarStoreCommitSequence,
@@ -271,4 +272,57 @@ def test_api_MemBlock_mmio_then_cacheable_store_mixed_paths(env):
     assert env.get_counter("sbuffer_drain_count") > sbuffer_before, "mixed 场景未观测到 cacheable sbuffer drain"
     assert "outer" in drain_channels, "mixed 场景未记录到 outer drain"
     assert "sbuffer" in drain_channels, "mixed 场景未记录到 sbuffer drain"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_mmio_then_cacheable_store_flush_excludes_mmio_from_final_compare(env):
+    """
+    MMIO + cacheable store 混合后执行显式 flush。
+
+    目标语义：
+      - MMIO outer drain 仍可见，但不应被纳入 non-MMIO golden compare
+      - cacheable store 仍应在最终 flush 后与 stimulus-derived golden memory 一致
+    """
+
+    mmio_data = 0x1020_3040_5060_7080
+    cacheable_data = 0x8877_6655_4433_2211
+    cacheable_addr = CACHEABLE_STORE_ADDR + 0x20
+
+    sq_ptr = _reset_env_and_state(env)
+    expected_refmem = env.memory.predict_store(cacheable_addr, cacheable_data)
+
+    mmio_result = ScalarStoreCommitSequence(
+        StoreTxn(req_id=0, sq_ptr=sq_ptr, addr=MMIO_STORE_ADDR, data=mmio_data),
+        expected_mmio=True,
+        settle_cycles=env.config.sequence.store_settle_cycles,
+        wait_quiesce=True,
+        quiesce_cycles=300,
+    ).run(env)
+    cacheable_result = ScalarStoreCommitSequence(
+        StoreTxn(
+            req_id=1,
+            sq_ptr=ptr_inc(sq_ptr, env.config.sequence.store_queue_size),
+            addr=cacheable_addr,
+            data=cacheable_data,
+        ),
+        expected_mmio=False,
+        require_committed=True,
+        materialize_cycles=300,
+        settle_cycles=env.config.sequence.store_settle_cycles,
+        wait_quiesce=True,
+        quiesce_cycles=300,
+    ).run(env)
+
+    assert mmio_result.committed_store_view is not None and mmio_result.committed_store_view.mmio
+    assert cacheable_result.committed_store_view is not None and not cacheable_result.committed_store_view.mmio
+
+    drain_summary = FlushStoreBuffersSequence().run(env)
+    drain_channels = _drain_channels(env)
+
+    assert drain_summary["drain_event_count"] >= 1, "mixed flush 场景未记录到 drain"
+    assert "outer" in drain_channels, "mixed flush 场景未记录到 outer drain"
+    assert "sbuffer" in drain_channels, "mixed flush 场景未记录到 sbuffer drain"
+    assert env.memory.read(cacheable_addr, 8) == expected_refmem.read(
+        cacheable_addr, 8
+    ), "mixed flush 场景中的 cacheable store 最终 golden memory 不匹配"
     env.assert_no_outstanding()
