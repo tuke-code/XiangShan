@@ -191,6 +191,27 @@
   - partial-store + backpressure / delayed drain
   - 更深的 store queue 并存与 merge 顺序
 
+### 5. 新增 misalign 专题设计与验证状态文档
+
+本条目记录一次文档层收口：把目前分散在 DUT 变更分析、pipeline 方案、coverage 文档和 testcase 中的 misalign 相关事实，集中整
+理成一份独立专题文档，便于后续围绕 scalar load/store misalign 持续补用例与对齐验证口径。
+
+#### 变更摘要
+
+- 新增 `docs/misalign.md`
+  - 聚焦 scalar load/store misalign，而不是泛化到所有访存类型
+  - 同时覆盖 DUT 设计分析、验证功能点、推荐验证方案、当前环境满足情况与限制
+  - 明确区分：
+    - store misalign 仍有 `StoreMisalignBuffer` / `NewStoreQueue` / `ExceptionInfoGen` 主线
+    - load misalign 已脱离旧 `LoadMisalignBuffer` 语义，需要按 replay / exception / writeback 现象重新组织验证
+  - 用 Mermaid 与矩阵表统一表达：
+    - DUT 路径关系
+    - 功能点矩阵
+    - 当前 testcase 满足情况
+    - 后续优先级建议
+- `README.md`
+  - 在 `docs/` 文档列表中补入 `misalign.md` 入口，避免专题文档只存在于目录中而没有统一索引
+
 #### 验证情况
 
 - 文档一致性检查
