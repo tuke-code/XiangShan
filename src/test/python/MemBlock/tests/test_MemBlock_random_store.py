@@ -15,6 +15,7 @@ import random
 from request_apis import (
     QueuePtr,
     StoreTxn,
+    ptr_inc,
 )
 from sequences import (
     ResetEnvSequence,
@@ -45,6 +46,10 @@ def _store_data_low64_matches(store, expected_data: int) -> bool:
     if store.data is None:
         return False
     return (int(store.data) & ((1 << 64) - 1)) == (expected_data & ((1 << 64) - 1))
+
+
+def _drain_channels(env) -> set[str]:
+    return {event.get("channel", "") for event in env.memory.drain_log}
 
 
 def test_api_MemBlock_single_mmio_store_smoke(env):
@@ -204,4 +209,62 @@ def test_api_MemBlock_small_mixed_load_store_random(env):
     assert env.get_completed_load_count() == result.total_loads, "mixed random load 未全部完成 compare"
     assert env.get_counter("sbuffer_drain_count") > 0, "mixed random 未观测到任何 sbuffer drain"
     assert result.drain_summary["drain_event_count"] > 0, "mixed random flush 后未记录到 drain 事件"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_mmio_then_cacheable_store_mixed_paths(env):
+    """
+    先发一条 MMIO store，再发一条 cacheable store，观测混合写路径。
+
+    检查点：
+      - MMIO store 仍走 outer 写路径，且不会进入 sbuffer drain
+      - cacheable store 仍能进入 sbuffer 路径
+      - 同一用例里能同时观测到 outer 与 sbuffer 两类写出事件
+    """
+
+    mmio_data = 0x1020_3040_5060_7080
+    cacheable_data = 0x8877_6655_4433_2211
+    cacheable_addr = CACHEABLE_STORE_ADDR + 0x20
+
+    sq_ptr = _reset_env_and_state(env)
+    outer_before = env.get_counter("outer_write_request_count")
+    sbuffer_before = env.get_counter("sbuffer_drain_count")
+
+    mmio_result = ScalarStoreCommitSequence(
+        StoreTxn(req_id=0, sq_ptr=sq_ptr, addr=MMIO_STORE_ADDR, data=mmio_data),
+        expected_mmio=True,
+        settle_cycles=env.config.sequence.store_settle_cycles,
+        wait_quiesce=True,
+        quiesce_cycles=300,
+    ).run(env)
+    cacheable_result = ScalarStoreCommitSequence(
+        StoreTxn(
+            req_id=1,
+            sq_ptr=ptr_inc(sq_ptr, env.config.sequence.store_queue_size),
+            addr=cacheable_addr,
+            data=cacheable_data,
+        ),
+        expected_mmio=False,
+        require_committed=True,
+        materialize_cycles=300,
+        settle_cycles=env.config.sequence.store_settle_cycles,
+        wait_quiesce=True,
+        quiesce_cycles=300,
+    ).run(env)
+    env.wait_counter_growth("sbuffer_drain_count", sbuffer_before, max_cycles=300)
+
+    mmio_store = mmio_result.committed_store_view
+    cacheable_store = cacheable_result.committed_store_view
+    drain_channels = _drain_channels(env)
+
+    assert mmio_store is not None and mmio_store.mmio, "mixed 场景中的 MMIO store 未被识别为 mmio"
+    assert mmio_store.addr == MMIO_STORE_ADDR, "mixed 场景中的 MMIO store 地址不匹配"
+    assert _store_data_low64_matches(mmio_store, mmio_data), "mixed 场景中的 MMIO store 数据不匹配"
+    assert cacheable_store is not None and not cacheable_store.mmio, "mixed 场景中的 cacheable store 被误判为 mmio"
+    assert cacheable_store.addr == cacheable_addr, "mixed 场景中的 cacheable store 地址不匹配"
+    assert _store_data_low64_matches(cacheable_store, cacheable_data), "mixed 场景中的 cacheable store 数据不匹配"
+    assert env.get_counter("outer_write_request_count") > outer_before, "mixed 场景未观测到 MMIO outer 写请求"
+    assert env.get_counter("sbuffer_drain_count") > sbuffer_before, "mixed 场景未观测到 cacheable sbuffer drain"
+    assert "outer" in drain_channels, "mixed 场景未记录到 outer drain"
+    assert "sbuffer" in drain_channels, "mixed 场景未记录到 sbuffer drain"
     env.assert_no_outstanding()
