@@ -68,7 +68,16 @@
 这两个对象仍然是最基础的“单笔事务”表示：
 
 - `LoadTxn` 描述一条 load 的 enqueue 信息、issue 地址、LQ/SQ 指针、等待位、lane 等。
-- `StoreTxn` 描述一条 store 的 enqueue 起始 SQ 指针、地址、数据、STA/STD lane 等。
+- `StoreTxn` 描述一条 store 的 enqueue 起始 SQ 指针、地址、数据、字节掩码以及 STA/STD lane 等。
+
+其中 `StoreTxn.mask` 现在不再只是 scoreboard 侧的辅助字段，而是请求模型本身的一部分。当前环境把它收敛成“标量连续低位字节掩码”语义，支持：
+
+- `0x01` -> `SB`
+- `0x03` -> `SH`
+- `0x0F` -> `SW`
+- `0xFF` -> `SD`
+
+也就是说，backend/request 层现在已经能够把 `StoreTxn.mask` 一路下沉到 issue `fuOpType`。如果地址本身带偏移，例如 `addr + 5` 配合 `mask=0x01`，DUT 最终观测到的 store mask 可能已经是移位后的窗口位置；但请求模型对外仍然保持“从 store 地址起始的连续字节宽度”这个稳定语义。
 
 它们的价值在于：**让单笔场景仍然保持简单**。如果只是发一笔 load，就不应该要求 testcase 手工写 `EnqueueLoadStep + IssueCyclePlan` 这么长的一段脚本。因此：
 
@@ -95,6 +104,8 @@
 - `std`
 
 它比旧 helper 更清楚的一点在于：它把 issue 层的最小原子动作抽象成了统一形状。无论是 load 还是 store address/data，本质上都是“在某条 lane 上驱动一组字段并握手一拍”。以前这些差异分散在不同 helper 里，现在则统一收敛到 `IssueOp`。
+
+对于 `sta/std`，`IssueOp` 还显式携带 `mask`。这使得同一个 store 的 address issue 与 data issue 能共享同一份宽度语义，`IssueAgent` 则根据该 `mask` 自动解码对应的标量 store `fuOpType`。因此，后续如果 testcase 需要写 partial-store 的拍级脚本，已经不需要再手工猜 DUT 的 `fuOpType` 编码。
 
 这样做的直接收益是：
 
@@ -206,6 +217,21 @@ allocated_sq_ptr = env.backend.send(txn)
 
 这里 `send()` 返回实际分配到的 SQ pointer，供外部需要时继续使用。
 
+如果需要表达 partial-store，可以直接在 `StoreTxn.mask` 上描述标量宽度：
+
+```python
+txn = StoreTxn(
+    req_id=req_id,
+    sq_ptr=sq_ptr,
+    addr=addr,
+    data=0xA1A2_A3A4,
+    mask=0x0F,
+)
+allocated_sq_ptr = env.backend.send(txn)
+```
+
+上面这条请求会被 backend 自动翻译成 `SW` 宽度的 `STD + STA` 组合，而不是旧版本里那种固定 `SD` 的 issue 方式。
+
 ### 6.3 多条 load 同拍
 
 ```python
@@ -231,10 +257,20 @@ result = env.backend.execute(
     BackendSendPlan.from_steps(
         EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
         IssueCyclePlan.from_ops(
-            IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data),
+            IssueOp.std(
+                req_id=store_txn.req_id,
+                sq_ptr=store_ref,
+                data=store_txn.data,
+                mask=store_txn.mask,
+            ),
         ),
         IssueCyclePlan.from_ops(
-            IssueOp.sta(req_id=store_txn.req_id, sq_ptr=store_ref, addr=store_txn.addr),
+            IssueOp.sta(
+                req_id=store_txn.req_id,
+                sq_ptr=store_ref,
+                addr=store_txn.addr,
+                mask=store_txn.mask,
+            ),
         ),
     )
 )
@@ -371,7 +407,7 @@ store_result = ScalarStoreCommitSequence(
 更具体地说：
 
 - `verification_env_design.md` 解释“为什么主动控制要统一收口到 `env.backend`”；
-- 本文档解释“`env.backend` 收口之后，内部推荐用什么模型表达复杂发送脚本”；
+- 本文档解释“`env.backend` 收口之后，内部推荐用什么模型表达复杂发送脚本，以及 `StoreTxn.mask` 如何映射到真实标量 store 宽度”；
 - `README.md` 则给出最短上手入口，告诉开发者该从哪种用法开始。
 
 因此三份文档的定位分别是：

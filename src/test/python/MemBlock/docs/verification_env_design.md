@@ -165,6 +165,8 @@ testcase / sequence / request_apis / env.backend
 
 关于 `env.backend.send(...)` / `env.backend.execute(...)` 及 `IssueCyclePlan`、`BackendSendPlan` 的专项设计说明，见 `src/test/python/MemBlock/docs/backend_request_model_design.md`。
 
+需要特别补充的一点是：当前 backend facade 已经把 `StoreTxn.mask` 下沉到标量 store 的 issue `fuOpType`。也就是说，连续低位字节掩码语义的 `SB/SH/SW/SD` 不再需要 testcase 手工写 DUT 编码，公共请求模型已经能直接表达 partial-store。
+
 这种划分与 UVM driver 的思想一致，但比传统 driver/seq_item 体系更简单：Python 场景对象不直接碰 pin，agent 统一持有时序细节；testcase 只描述“我要发一个 load/store/flush”，不描述“第几拍拉哪个 valid”。这既降低了 testcase 冗余，也避免多个用例各自复制握手时序。
 
 ## 7. Passive Monitors

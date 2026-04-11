@@ -299,12 +299,19 @@ sequenceDiagram
 
 - `valid`
 - `fuType = STU`
-- `fuOpType = SD`
+- `fuOpType = 由 store mask 解码出的 SB/SH/SW/SD`
 - `src_0 = data`
 - `robIdx`
 - `sqIdx`
 
 这意味着环境把 STD 看成“把 store data 填入指定 SQ 槽位”的动作。
+
+当前公共请求模型里，标量 store mask 支持以下连续字节宽度：
+
+- `0x01 -> SB`
+- `0x03 -> SH`
+- `0x0F -> SW`
+- `0xFF -> SD`
 
 模型不会期待 STD 本身立即导致外存行为。
 
@@ -319,7 +326,7 @@ sequenceDiagram
 
 - `valid`
 - `fuType = STU`
-- `fuOpType = SD`
+- `fuOpType = 由 store mask 解码出的 SB/SH/SW/SD`
 - `src_0 = addr`
 - `robIdx`
 - `sqIdx`

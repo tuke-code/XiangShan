@@ -3,11 +3,10 @@
 Issue active agent.
 """
 
-from transactions import IssueCyclePlan, IssueOp
+from transactions import IssueCyclePlan, IssueOp, scalar_store_fu_op_type_from_mask
 
 
 LSU_OP_LD = 0x3
-LSU_OP_SD = 0x3
 
 
 def _set_optional_signal(dut, signal_name: str, value: int) -> None:
@@ -29,10 +28,11 @@ class IssueAgent:
         sq_ptr,
         data: int,
         lane: int,
+        mask: int = 0xFF,
     ) -> None:
         issue = self.env.issue[lane]
         issue.valid.value = 1
-        issue.bits_fuOpType.value = LSU_OP_SD
+        issue.bits_fuOpType.value = scalar_store_fu_op_type_from_mask(mask)
         issue.bits_src_0.value = data
         issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
         issue.bits_robIdx_value.value = req_id & 0x1FF
@@ -60,6 +60,7 @@ class IssueAgent:
                 sq_ptr=op.sq_ptr,
                 addr=op.addr,
                 lane=int(op.lane),
+                mask=op.mask,
             )
             return
         if op.kind == "std":
@@ -68,6 +69,7 @@ class IssueAgent:
                 sq_ptr=op.sq_ptr,
                 data=op.data,
                 lane=int(op.lane),
+                mask=op.mask,
             )
             return
         raise ValueError(f"unsupported issue op kind: {op.kind}")
@@ -127,11 +129,12 @@ class IssueAgent:
         sq_ptr,
         addr: int,
         lane: int,
+        mask: int = 0xFF,
     ) -> None:
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        issue.bits_fuOpType.value = LSU_OP_SD
+        issue.bits_fuOpType.value = scalar_store_fu_op_type_from_mask(mask)
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
         issue.bits_robIdx_value.value = req_id & 0x1FF
@@ -218,6 +221,7 @@ class IssueAgent:
         sta_sq_ptr,
         sta_addr: int,
         sta_lane: int = 3,
+        sta_mask: int = 0xFF,
         max_cycles: int = 50,
     ) -> None:
         txns = tuple(txns)
@@ -230,23 +234,24 @@ class IssueAgent:
                         sq_ptr=sta_sq_ptr,
                         addr=sta_addr,
                         lane=sta_lane,
+                        mask=sta_mask,
                     ),
                 ),
                 max_cycles=max_cycles,
             )
         )
 
-    def issue_scalar_std(self, req_id: int, sq_ptr, data: int, lane: int = 5) -> None:
+    def issue_scalar_std(self, req_id: int, sq_ptr, data: int, lane: int = 5, mask: int = 0xFF) -> None:
         self.issue_cycle(
             IssueCyclePlan.from_ops(
-                IssueOp.std(req_id=req_id, sq_ptr=sq_ptr, data=data, lane=lane)
+                IssueOp.std(req_id=req_id, sq_ptr=sq_ptr, data=data, lane=lane, mask=mask)
             )
         )
 
-    def issue_scalar_sta(self, req_id: int, sq_ptr, addr: int, lane: int = 3) -> None:
+    def issue_scalar_sta(self, req_id: int, sq_ptr, addr: int, lane: int = 3, mask: int = 0xFF) -> None:
         self.issue_cycle(
             IssueCyclePlan.from_ops(
-                IssueOp.sta(req_id=req_id, sq_ptr=sq_ptr, addr=addr, lane=lane)
+                IssueOp.sta(req_id=req_id, sq_ptr=sq_ptr, addr=addr, lane=lane, mask=mask)
             )
         )
 

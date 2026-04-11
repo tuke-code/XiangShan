@@ -16,6 +16,7 @@ from transactions import (
     QueuePtr,
     StoreRef,
     StoreTxn,
+    scalar_store_fu_op_type_from_mask,
 )
 
 from request_apis import (
@@ -51,11 +52,11 @@ class _FakeBackend:
     def issue_scalar_load(self, req_id, addr, lq_ptr, sq_ptr, **kwargs) -> None:
         self.calls.append(("issue_scalar_load", req_id, addr, lq_ptr, sq_ptr, kwargs))
 
-    def issue_scalar_std(self, req_id, sq_ptr, data, lane: int = 5) -> None:
-        self.calls.append(("issue_scalar_std", req_id, sq_ptr, data, lane))
+    def issue_scalar_std(self, req_id, sq_ptr, data, lane: int = 5, mask: int = 0xFF) -> None:
+        self.calls.append(("issue_scalar_std", req_id, sq_ptr, data, lane, mask))
 
-    def issue_scalar_sta(self, req_id, sq_ptr, addr, lane: int = 3) -> None:
-        self.calls.append(("issue_scalar_sta", req_id, sq_ptr, addr, lane))
+    def issue_scalar_sta(self, req_id, sq_ptr, addr, lane: int = 3, mask: int = 0xFF) -> None:
+        self.calls.append(("issue_scalar_sta", req_id, sq_ptr, addr, lane, mask))
 
     def send_load(self, txn) -> None:
         self.calls.append(("send_load", txn))
@@ -168,8 +169,8 @@ def test_api_request_apis_enqueue_and_issue_delegate_to_backend():
     enqueue_scalar_load(env, req_id=5, lq_ptr=lq_ptr, sq_ptr=sq_ptr, enq_port=1)
     returned_sq_ptr = enqueue_scalar_store(env, req_id=6, sq_ptr=sq_ptr, enq_port=2)
     issue_scalar_load(env, req_id=7, addr=0x1000, lq_ptr=lq_ptr, sq_ptr=sq_ptr, lane=4)
-    issue_scalar_std(env, req_id=8, sq_ptr=sq_ptr, data=0x55, lane=6)
-    issue_scalar_sta(env, req_id=9, sq_ptr=sq_ptr, addr=0x2000, lane=3)
+    issue_scalar_std(env, req_id=8, sq_ptr=sq_ptr, data=0x55, lane=6, mask=0x0F)
+    issue_scalar_sta(env, req_id=9, sq_ptr=sq_ptr, addr=0x2000, lane=3, mask=0x03)
 
     assert returned_sq_ptr == QueuePtr(flag=0, value=4)
     assert env.backend.calls[0] == ("wait_load_enq_ready", 19)
@@ -177,8 +178,8 @@ def test_api_request_apis_enqueue_and_issue_delegate_to_backend():
     assert env.backend.calls[2][0] == "enqueue_scalar_load"
     assert env.backend.calls[3][0] == "enqueue_scalar_store"
     assert env.backend.calls[4][0] == "issue_scalar_load"
-    assert env.backend.calls[5][0] == "issue_scalar_std"
-    assert env.backend.calls[6][0] == "issue_scalar_sta"
+    assert env.backend.calls[5] == ("issue_scalar_std", 8, sq_ptr, 0x55, 6, 0x0F)
+    assert env.backend.calls[6] == ("issue_scalar_sta", 9, sq_ptr, 0x2000, 3, 0x03)
 
 
 def test_api_request_apis_send_txns_delegate_to_backend():
@@ -221,6 +222,7 @@ def test_api_request_apis_batch_wrappers_delegate_to_backend_execute():
         sta_sq_ptr=QueuePtr(1, 5),
         sta_addr=0x3000,
         sta_lane=3,
+        sta_mask=0x0F,
         max_cycles=17,
     )
 
@@ -230,6 +232,7 @@ def test_api_request_apis_batch_wrappers_delegate_to_backend_execute():
     assert isinstance(env.backend.calls[1][1], BackendSendPlan)
     assert [op.kind for op in env.backend.calls[0][1].steps[-1].ops] == ["load", "load"]
     assert [op.kind for op in env.backend.calls[1][1].steps[-1].ops] == ["load", "load", "sta"]
+    assert env.backend.calls[1][1].steps[-1].ops[-1].mask == 0x0F
 
 
 def test_api_backend_facade_send_store_translates_to_enqueue_and_issue_cycles():
@@ -251,8 +254,48 @@ def test_api_backend_facade_send_store_translates_to_enqueue_and_issue_cycles():
     second_cycle = env.issue_agent.calls[1][1]
     assert first_cycle.ops[0].kind == "std"
     assert first_cycle.ops[0].sq_ptr == QueuePtr(flag=0, value=5)
+    assert first_cycle.ops[0].mask == 0xFF
     assert second_cycle.ops[0].kind == "sta"
     assert second_cycle.ops[0].sq_ptr == QueuePtr(flag=0, value=5)
+    assert second_cycle.ops[0].mask == 0xFF
+
+
+def test_api_backend_facade_send_partial_store_keeps_mask_on_sta_and_std():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+    txn = StoreTxn(
+        req_id=0x23,
+        sq_ptr=QueuePtr(flag=0, value=7),
+        addr=0x5000,
+        data=0x11223344,
+        mask=0x0F,
+    )
+
+    allocated = backend.send(txn)
+
+    assert allocated == QueuePtr(flag=1, value=8)
+    first_cycle = env.issue_agent.calls[0][1]
+    second_cycle = env.issue_agent.calls[1][1]
+    assert first_cycle.ops[0].mask == 0x0F
+    assert second_cycle.ops[0].mask == 0x0F
+
+
+def test_api_scalar_store_mask_decodes_to_size_and_fu_op():
+    txn = StoreTxn(
+        req_id=0x24,
+        sq_ptr=QueuePtr(flag=0, value=1),
+        addr=0x6000,
+        data=0xAA,
+        mask=0x03,
+    )
+
+    assert txn.size_bytes == 2
+    assert txn.fu_op_type == scalar_store_fu_op_type_from_mask(0x03)
+
+
+def test_api_issue_op_rejects_non_scalar_store_mask():
+    with pytest.raises(ValueError):
+        IssueOp.std(req_id=1, sq_ptr=QueuePtr(0, 1), data=0x11, lane=5, mask=0x05)
 
 
 def test_api_backend_facade_execute_resolves_store_ref_in_issue_cycle():

@@ -133,6 +133,7 @@ def send_load_batch_with_sta_same_cycle(
     sta_sq_ptr,
     sta_addr: int,
     sta_lane: int = DEFAULT_STA_LANE,
+    sta_mask: int = 0xFF,
     max_cycles: int = 50,
 ) -> None:
     """兼容入口：enqueue 多笔标量 load，并与一条 `STA` 在同一拍完成 issue。"""
@@ -149,6 +150,7 @@ def send_load_batch_with_sta_same_cycle(
                         sq_ptr=sta_sq_ptr,
                         addr=sta_addr,
                         lane=sta_lane,
+                        mask=sta_mask,
                     ),
                 ),
                 max_cycles=max_cycles,
@@ -213,8 +215,9 @@ def issue_scalar_std(
     sq_ptr: QueuePtr,
     data: int,
     lane: int = DEFAULT_STD_LANE,
+    mask: int = 0xFF,
 ) -> None:
-    env.backend.issue_scalar_std(req_id, sq_ptr, data, lane=lane)
+    env.backend.issue_scalar_std(req_id, sq_ptr, data, lane=lane, mask=mask)
 
 
 def issue_scalar_sta(
@@ -223,5 +226,6 @@ def issue_scalar_sta(
     sq_ptr: QueuePtr,
     addr: int,
     lane: int = DEFAULT_STA_LANE,
+    mask: int = 0xFF,
 ) -> None:
-    env.backend.issue_scalar_sta(req_id, sq_ptr, addr, lane=lane)
+    env.backend.issue_scalar_sta(req_id, sq_ptr, addr, lane=lane, mask=mask)

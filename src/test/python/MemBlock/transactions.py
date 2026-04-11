@@ -6,6 +6,37 @@ MemBlock 事务对象定义。
 from dataclasses import dataclass
 
 
+SCALAR_STORE_MASK_TO_SIZE_BYTES = {
+    0x01: 1,
+    0x03: 2,
+    0x0F: 4,
+    0xFF: 8,
+}
+SCALAR_STORE_SIZE_BYTES_TO_FU_OP_TYPE = {
+    1: 0x0,
+    2: 0x1,
+    4: 0x2,
+    8: 0x3,
+}
+
+
+def scalar_store_size_bytes_from_mask(mask: int) -> int:
+    """Decode scalar store width from the byte mask carried by StoreTxn/IssueOp."""
+
+    normalized_mask = int(mask) & 0xFF
+    size_bytes = SCALAR_STORE_MASK_TO_SIZE_BYTES.get(normalized_mask)
+    if size_bytes is None:
+        raise ValueError(
+            "unsupported scalar store mask "
+            f"{int(mask):#x}; expected one of {sorted(SCALAR_STORE_MASK_TO_SIZE_BYTES)}"
+        )
+    return size_bytes
+
+
+def scalar_store_fu_op_type_from_mask(mask: int) -> int:
+    return SCALAR_STORE_SIZE_BYTES_TO_FU_OP_TYPE[scalar_store_size_bytes_from_mask(mask)]
+
+
 @dataclass(frozen=True)
 class QueuePtr:
     """环形队列指针。"""
@@ -67,6 +98,14 @@ class StoreTxn:
     def rob_idx_value(self) -> int:
         return self.req_id & 0x1FF
 
+    @property
+    def size_bytes(self) -> int:
+        return scalar_store_size_bytes_from_mask(self.mask)
+
+    @property
+    def fu_op_type(self) -> int:
+        return scalar_store_fu_op_type_from_mask(self.mask)
+
 
 @dataclass(frozen=True)
 class StoreRef:
@@ -124,6 +163,7 @@ class IssueOp:
     addr: int | None = None
     data: int | None = None
     lq_ptr: QueuePtr | None = None
+    mask: int = 0xFF
     store_set_hit: int = 0
     load_wait_bit: int = 0
     load_wait_strict: int = 0
@@ -139,8 +179,11 @@ class IssueOp:
         elif self.kind == "sta":
             if self.addr is None:
                 raise ValueError("STA issue op requires `addr`")
-        elif self.kind == "std" and self.data is None:
-            raise ValueError("STD issue op requires `data`")
+            scalar_store_size_bytes_from_mask(self.mask)
+        elif self.kind == "std":
+            if self.data is None:
+                raise ValueError("STD issue op requires `data`")
+            scalar_store_size_bytes_from_mask(self.mask)
 
     @classmethod
     def load_from_txn(cls, txn: LoadTxn) -> "IssueOp":
@@ -166,8 +209,9 @@ class IssueOp:
         sq_ptr: QueuePtr | StoreRef,
         addr: int,
         lane: int = 3,
+        mask: int = 0xFF,
     ) -> "IssueOp":
-        return cls(kind="sta", req_id=req_id, lane=lane, sq_ptr=sq_ptr, addr=addr)
+        return cls(kind="sta", req_id=req_id, lane=lane, sq_ptr=sq_ptr, addr=addr, mask=mask)
 
     @classmethod
     def std(
@@ -177,8 +221,17 @@ class IssueOp:
         sq_ptr: QueuePtr | StoreRef,
         data: int,
         lane: int = 5,
+        mask: int = 0xFF,
     ) -> "IssueOp":
-        return cls(kind="std", req_id=req_id, lane=lane, sq_ptr=sq_ptr, data=data)
+        return cls(kind="std", req_id=req_id, lane=lane, sq_ptr=sq_ptr, data=data, mask=mask)
+
+    @property
+    def store_size_bytes(self) -> int:
+        return scalar_store_size_bytes_from_mask(self.mask)
+
+    @property
+    def store_fu_op_type(self) -> int:
+        return scalar_store_fu_op_type_from_mask(self.mask)
 
 
 @dataclass(frozen=True)

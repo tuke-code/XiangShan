@@ -104,6 +104,7 @@ class BackendFacade:
                             sq_ptr=store_ref,
                             data=request.data,
                             lane=request.std_lane,
+                            mask=request.mask,
                         )
                     ),
                     IssueCyclePlan.from_ops(
@@ -112,6 +113,7 @@ class BackendFacade:
                             sq_ptr=store_ref,
                             addr=request.addr,
                             lane=request.sta_lane,
+                            mask=request.mask,
                         )
                     ),
                 )
@@ -199,6 +201,7 @@ class BackendFacade:
         sta_sq_ptr,
         sta_addr: int,
         sta_lane: int = 3,
+        sta_mask: int = 0xFF,
         max_cycles: int = 50,
     ) -> None:
         txns = tuple(txns)
@@ -211,6 +214,7 @@ class BackendFacade:
                         sq_ptr=sta_sq_ptr,
                         addr=sta_addr,
                         lane=sta_lane,
+                        mask=sta_mask,
                     ),
                 ),
                 max_cycles=max_cycles,
@@ -225,6 +229,7 @@ class BackendFacade:
         sta_sq_ptr,
         sta_addr: int,
         sta_lane: int = 3,
+        sta_mask: int = 0xFF,
         max_cycles: int = 50,
     ) -> None:
         self.issue_load_batch_with_sta_same_cycle(
@@ -233,28 +238,29 @@ class BackendFacade:
             sta_sq_ptr=sta_sq_ptr,
             sta_addr=sta_addr,
             sta_lane=sta_lane,
+            sta_mask=sta_mask,
             max_cycles=max_cycles,
         )
 
-    def issue_std(self, req_id: int, sq_ptr, data: int, lane: int = 5) -> None:
+    def issue_std(self, req_id: int, sq_ptr, data: int, lane: int = 5, mask: int = 0xFF) -> None:
         self.issue.issue_cycle(
             IssueCyclePlan.from_ops(
-                IssueOp.std(req_id=req_id, sq_ptr=sq_ptr, data=data, lane=lane)
+                IssueOp.std(req_id=req_id, sq_ptr=sq_ptr, data=data, lane=lane, mask=mask)
             )
         )
 
-    def issue_scalar_std(self, req_id: int, sq_ptr, data: int, lane: int = 5) -> None:
-        self.issue_std(req_id, sq_ptr, data, lane=lane)
+    def issue_scalar_std(self, req_id: int, sq_ptr, data: int, lane: int = 5, mask: int = 0xFF) -> None:
+        self.issue_std(req_id, sq_ptr, data, lane=lane, mask=mask)
 
-    def issue_sta(self, req_id: int, sq_ptr, addr: int, lane: int = 3) -> None:
+    def issue_sta(self, req_id: int, sq_ptr, addr: int, lane: int = 3, mask: int = 0xFF) -> None:
         self.issue.issue_cycle(
             IssueCyclePlan.from_ops(
-                IssueOp.sta(req_id=req_id, sq_ptr=sq_ptr, addr=addr, lane=lane)
+                IssueOp.sta(req_id=req_id, sq_ptr=sq_ptr, addr=addr, lane=lane, mask=mask)
             )
         )
 
-    def issue_scalar_sta(self, req_id: int, sq_ptr, addr: int, lane: int = 3) -> None:
-        self.issue_sta(req_id, sq_ptr, addr, lane=lane)
+    def issue_scalar_sta(self, req_id: int, sq_ptr, addr: int, lane: int = 3, mask: int = 0xFF) -> None:
+        self.issue_sta(req_id, sq_ptr, addr, lane=lane, mask=mask)
 
     def send_load(self, txn: LoadTxn) -> None:
         self.send(txn)
