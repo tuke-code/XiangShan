@@ -163,12 +163,12 @@ case class MdpTageTableParameters(
     new MdpTageTableInfo(512, 4, 36  ),
     new MdpTageTableInfo(512, 4, 56  ),
     new MdpTageTableInfo(256, 4, 108 ),
-    new MdpTageTableInfo(256, 4, 160 )
+    new MdpTageTableInfo(128, 4, 160 )
   ),
   NumBanks:            Int = 4, // to alleviate read-write conflicts in single-port SRAM
   NumWays:             Int = 4,
   TagWidth:            Int = 16,
-  WriteBufferSize:     Int = 4,
+  WriteBufferSize:     Int = 8,
 
   TakenCtrWidth:       Int = 3,
   UsefulCtrWidth:      Int = 3,
@@ -187,7 +187,7 @@ case class MdpBaseTableParameters( //fromMainBtb
   NumAlignBanks:   Int = 2,
   TagWidth:        Int = 16,
   TargetWidth:     Int = 20,       // 2B aligned
-  WriteBufferSize: Int = 4,
+  WriteBufferSize: Int = 8,
   Replacer:        String = "Lru", // "Lru" or "Plru"
   // Mbtb write trace
 ){}
