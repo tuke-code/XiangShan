@@ -256,6 +256,37 @@
   - 全局 branch coverage：`57.7%`（`907150 / 1573403`，相对上一版 `+560` hit）
   - `StoreMisalignBuffer.sv`：line `58.8%`（`325 / 553`），branch `37.0%`（`1258 / 3404`），本轮仍基本横盘
 
+### 8. 收缩 ROB todo，只保留未完成缺口并清理旧 coverage 口径
+
+本条目记录一次 ROB 文档收口：确认 `non-mem blocker`、`store commit readiness` 与当前 ROB 半模型能力已经在正式设计文档中稳定落地后，把 `rob_todo.md` 缩减为仅保留剩余未完成项，同时清理 `coverage_summary.md` 与 `rob_coverage_plan.md` 中残留的旧 known-gap 口径。
+
+#### 变更摘要
+
+- `docs/rob_todo.md`
+  - 删除已完成的 P0/P1 计划细节
+  - 改为仅保留剩余未完成项：
+    - `redirect / flush / cancel` 建模
+    - `backend feedback / credit` 半模型
+  - 明确已完成能力的正式文档真源：
+    - `docs/rob_model.md`
+    - `docs/backend_request_model_design.md`
+    - `docs/backend_rob_cookbook.md`
+    - `README.md`
+- `docs/coverage_summary.md`
+  - 将 `MemBlock.ROB.KnownModelGaps` 从旧的 `3/3` 口径改为当前仍存在的 `2/2`
+  - 去掉对 `pending_ptr_next` / mixed commit / non-mem blocker 未建模的旧描述
+- `docs/rob_coverage_plan.md`
+  - 去掉已完成项在 known-gap 列表中的旧口径
+  - 保留当前真实剩余缺口：
+    - `redirect_cancel_not_modelled`
+    - `backend_feedback_credit_not_modelled`
+
+#### 说明
+
+- 这次变更不改代码行为，目标是让 ROB 文档集重新回到单一一致口径：
+  - 已完成能力看正式设计文档
+  - 未完成能力只保留在 `rob_todo.md`
+
 ## 2026-04-11
 
 ### 8. 修复 MMIO outer drain 与 final golden compare 的环境语义

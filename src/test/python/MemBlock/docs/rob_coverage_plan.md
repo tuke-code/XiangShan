@@ -93,10 +93,6 @@
 
 当前固定列出：
 
-- `pending_ptr_next_not_modelled`
-- `commit_bool_not_modelled`
-- `non_mem_blocker_not_modelled`
-- `mixed_lcommit_scommit_not_modelled`
 - `redirect_cancel_not_modelled`
 - `backend_feedback_credit_not_modelled`
 
@@ -124,9 +120,6 @@
    - backend feedback `sqDeq/lqDeqPtr/sqDeqPtr`
    - `scommit + lqDeq` 同拍窗口
 2. 若当前环境根本还没有对应 forward model，则进入 `KnownModelGaps`
-   - `pendingPtrNext`
-   - `commit` bool
-   - non-mem blocker
    - redirect / cancel
    - backend credit/resource model
 

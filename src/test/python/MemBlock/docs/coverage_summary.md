@@ -222,20 +222,26 @@ genhtml --branch-coverage \
 
 #### `MemBlock.ROB.KnownModelGaps`
 
-- 覆盖结果：`3/3`
+- 覆盖结果：`2/2`
 
 命中项包括：
 
-- `known_gap_pending_ptr_next_not_modelled`
-- `known_gap_mixed_lcommit_scommit_not_modelled`
-- `known_gap_non_mem_blocker_not_modelled`
+- `known_gap_redirect_cancel_not_modelled`
+- `known_gap_backend_feedback_credit_not_modelled`
 
 解读：
 
 这组不是执行时“偶然命中”，而是用来把 `rob_model.md` 里已经确认的当前模型缺口，稳定挂入 toffee 功能覆盖报告。它保证阅读报告的人不会因为 `ObservedBehavior` 命中率高，就误以为 ROB forward model 已经接近真实后端。当前真实结论仍是：
 
-- 基础 mem-only commit frontier proxy 可用；
-- 但还不是完整 ROB 模型。
+- 当前 ROB 半模型已经支持：
+  - `pending_ptr_next`
+  - `commit bool`
+  - mixed `lcommit/scommit` packet
+  - `non-mem blocker`
+  - `store commit readiness`
+- 但还不是完整 ROB 模型，剩余缺口主要集中在：
+  - redirect / flush / cancel 恢复
+  - backend feedback / credit 闭环
 
 ## 6. DUT 行覆盖率结果
 
