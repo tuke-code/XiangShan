@@ -8,6 +8,7 @@ from dataclasses import replace
 from transactions import (
     BackendSendPlan,
     BackendSendResult,
+    EnqueueLoadCyclePlan,
     EnqueueLoadStep,
     EnqueueStoreStep,
     IssueCyclePlan,
@@ -44,6 +45,9 @@ class BackendFacade:
     def enqueue_scalar_load(self, req_id: int, lq_ptr, sq_ptr, enq_port: int = 0) -> None:
         self.enqueue_load(req_id, lq_ptr, sq_ptr, enq_port=enq_port)
 
+    def enqueue_load_cycle(self, plan: EnqueueLoadCyclePlan) -> None:
+        self.lsq.enqueue_load_cycle(plan)
+
     def enqueue_store(self, req_id: int, sq_ptr, enq_port: int = 0):
         return self.lsq.enqueue_scalar_store(req_id, sq_ptr, enq_port=enq_port)
 
@@ -68,6 +72,8 @@ class BackendFacade:
                     sq_ptr=step.sq_ptr,
                     enq_port=step.enq_port,
                 )
+            elif isinstance(step, EnqueueLoadCyclePlan):
+                self.enqueue_load_cycle(step)
             elif isinstance(step, EnqueueStoreStep):
                 allocated_sq_ptr = self.enqueue_store(
                     req_id=step.req_id,
@@ -308,7 +314,7 @@ class BackendFacade:
         txns = tuple(txns)
         self.execute(
             BackendSendPlan.from_steps(
-                *(EnqueueLoadStep.from_txn(txn) for txn in txns),
+                EnqueueLoadCyclePlan.from_txns(*txns),
                 IssueCyclePlan(
                     ops=tuple(IssueOp.load_from_txn(txn) for txn in txns),
                     max_cycles=max_cycles,
@@ -329,7 +335,7 @@ class BackendFacade:
         txns = tuple(txns)
         self.execute(
             BackendSendPlan.from_steps(
-                *(EnqueueLoadStep.from_txn(txn) for txn in txns),
+                EnqueueLoadCyclePlan.from_txns(*txns),
                 IssueCyclePlan(
                     ops=tuple(IssueOp.load_from_txn(txn) for txn in txns)
                     + (

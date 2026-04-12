@@ -152,12 +152,11 @@ env.drain_writebacks()
 如果需要在同一拍发多条 `load`，或组合 `load + sta/std`，推荐直接构造脚本化计划：
 
 ```python
-from transactions import BackendSendPlan, EnqueueLoadStep, IssueCyclePlan, IssueOp
+from transactions import BackendSendPlan, EnqueueLoadCyclePlan, IssueCyclePlan, IssueOp
 
 env.backend.execute(
     BackendSendPlan.from_steps(
-        EnqueueLoadStep.from_txn(load0),
-        EnqueueLoadStep.from_txn(load1),
+        EnqueueLoadCyclePlan.from_txns(load0, load1),
         IssueCyclePlan.from_ops(
             IssueOp.load_from_txn(load0),
             IssueOp.load_from_txn(load1),

@@ -3,7 +3,7 @@
 LSQ enqueue active agent.
 """
 
-from transactions import QueuePtr
+from transactions import EnqueueLoadCyclePlan, QueuePtr
 
 
 FU_TYPE_LDU = 1 << 16
@@ -79,6 +79,38 @@ class LsqAgent:
                 enq_port=enq_port,
             )
         )
+
+    async def _enqueue_load_cycle_async(self, plan: EnqueueLoadCyclePlan) -> None:
+        ports = [int(step.enq_port) for step in plan.steps]
+        if len(set(ports)) != len(ports):
+            raise ValueError(f"同拍 load enqueue 需要 port 唯一: ports={ports}")
+
+        for _ in range(plan.max_cycles):
+            if int(self.env.dut.io_reset_backend.value):
+                raise RuntimeError(f"等待同拍 load enqueue 握手时 backend 进入 reset: ports={ports}")
+            if self.env.lsq_enq_meta.canAccept.value and self.env.lsq_status.lqCanAccept.value:
+                for step in plan.steps:
+                    req = self.env.lsq_enq_req[step.enq_port]
+                    self.env.lsq_enq_meta.need_alloc[step.enq_port].value = 1
+                    req.valid.value = 1
+                    req.bits_fuType.value = FU_TYPE_LDU
+                    req.bits_uopIdx.value = step.req_id & 0x7F
+                    req.bits_robIdx_flag.value = (step.req_id >> 9) & 0x1
+                    req.bits_robIdx_value.value = step.req_id & 0x1FF
+                    req.bits_lqIdx_flag.value = step.lq_ptr.flag
+                    req.bits_lqIdx_value.value = step.lq_ptr.value
+                    req.bits_sqIdx_flag.value = step.sq_ptr.flag
+                    req.bits_sqIdx_value.value = step.sq_ptr.value
+                    req.bits_numLsElem.value = 1
+                await self.env._step_and_idle_async(1)
+                return
+            await self.env._step_async(1)
+
+        self.env.idle_inputs()
+        raise TimeoutError(f"等待同拍 load enqueue 完成握手超时: ports={ports}")
+
+    def enqueue_load_cycle(self, plan: EnqueueLoadCyclePlan) -> None:
+        self.env._run_async(self._enqueue_load_cycle_async(plan))
 
     async def _enqueue_scalar_store_async(
         self,

@@ -8,6 +8,7 @@ import pytest
 from agents.backend_facade import BackendFacade
 from transactions import (
     BackendSendPlan,
+    EnqueueLoadCyclePlan,
     EnqueueLoadStep,
     EnqueueStoreStep,
     IssueCyclePlan,
@@ -87,6 +88,9 @@ class _FakeLsqAgent:
 
     def enqueue_scalar_load(self, req_id, lq_ptr, sq_ptr, enq_port: int = 0) -> None:
         self.calls.append(("enqueue_scalar_load", req_id, lq_ptr, sq_ptr, enq_port))
+
+    def enqueue_load_cycle(self, plan) -> None:
+        self.calls.append(("enqueue_load_cycle", plan))
 
     def enqueue_scalar_store(self, req_id, sq_ptr, enq_port: int = 0):
         allocated = QueuePtr(flag=sq_ptr.flag ^ 1, value=sq_ptr.value + 1)
@@ -254,9 +258,12 @@ def test_api_request_apis_batch_wrappers_delegate_to_backend_execute():
     assert isinstance(env.backend.calls[0][1], BackendSendPlan)
     assert env.backend.calls[1][0] == "execute"
     assert isinstance(env.backend.calls[1][1], BackendSendPlan)
+    assert isinstance(env.backend.calls[0][1].steps[0], EnqueueLoadCyclePlan)
+    assert isinstance(env.backend.calls[1][1].steps[0], EnqueueLoadCyclePlan)
     assert [op.kind for op in env.backend.calls[0][1].steps[-1].ops] == ["load", "load"]
     assert [op.kind for op in env.backend.calls[1][1].steps[-1].ops] == ["load", "load", "sta"]
     assert env.backend.calls[1][1].steps[-1].ops[-1].mask == 0x0F
+    assert [step.enq_port for step in env.backend.calls[0][1].steps[0].steps] == [0, 1]
 
 
 def test_api_backend_facade_send_store_translates_to_enqueue_and_issue_cycles():
@@ -343,6 +350,35 @@ def test_api_backend_facade_execute_resolves_store_ref_in_issue_cycle():
     assert all(op.sq_ptr == QueuePtr(flag=1, value=3) for op in issued_plan.ops)
     assert ("mark_store_data_ready", 1, 3) in env.commit_agent.calls
     assert ("mark_store_addr_ready", 1, 3) in env.commit_agent.calls
+
+
+def test_api_backend_facade_execute_routes_same_cycle_load_enqueue_plan():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+    plan = BackendSendPlan.from_steps(
+        EnqueueLoadCyclePlan.from_steps(
+            EnqueueLoadStep(req_id=1, lq_ptr=QueuePtr(flag=0, value=1), sq_ptr=QueuePtr(flag=0, value=2), enq_port=0),
+            EnqueueLoadStep(req_id=2, lq_ptr=QueuePtr(flag=0, value=2), sq_ptr=QueuePtr(flag=0, value=2), enq_port=1),
+        ),
+        IssueCyclePlan.from_ops(
+            IssueOp.load_from_txn(LoadTxn(req_id=1, addr=0x1000, lq_ptr=QueuePtr(0, 1), sq_ptr=QueuePtr(0, 2), issue_lane=0)),
+            IssueOp.load_from_txn(LoadTxn(req_id=2, addr=0x2000, lq_ptr=QueuePtr(0, 2), sq_ptr=QueuePtr(0, 2), issue_lane=1)),
+        ),
+    )
+
+    backend.execute(plan)
+
+    assert env.lsq_agent.calls[0][0] == "enqueue_load_cycle"
+    assert [step.enq_port for step in env.lsq_agent.calls[0][1].steps] == [0, 1]
+    assert env.issue_agent.calls[0][0] == "issue_cycle"
+
+
+def test_api_enqueue_load_cycle_plan_rejects_duplicate_ports():
+    with pytest.raises(ValueError):
+        EnqueueLoadCyclePlan.from_steps(
+            EnqueueLoadStep(req_id=1, lq_ptr=QueuePtr(0, 1), sq_ptr=QueuePtr(0, 2), enq_port=0),
+            EnqueueLoadStep(req_id=2, lq_ptr=QueuePtr(0, 2), sq_ptr=QueuePtr(0, 2), enq_port=0),
+        )
 
 
 def test_api_backend_facade_execute_routes_non_mem_blocker_steps():

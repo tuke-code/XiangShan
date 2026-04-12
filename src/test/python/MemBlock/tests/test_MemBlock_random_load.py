@@ -15,7 +15,13 @@ MemBlock 随机 load 流量测试。
 import random
 
 from request_apis import (
+    BackendSendPlan,
+    EnqueueLoadCyclePlan,
+    EnqueueLoadStep,
+    IssueCyclePlan,
+    IssueOp,
     LoadTxn,
+    ptr_inc,
 )
 from sequences import (
     ResetEnvSequence,
@@ -138,6 +144,83 @@ def test_api_MemBlock_single_preloaded_load_data_check(env):
         expected_completed_loads=1,
         assert_no_outstanding=True,
     ).run(env)
+
+
+def test_api_MemBlock_three_random_mem_loads_same_cycle_via_plan(env):
+    """
+    使用 `BackendSendPlan` 同拍发三条随机 cacheable load，并检查三条写回都能完成。
+
+    检查点：
+      - `BackendSendPlan` 能表达同拍三 lane load issue
+      - 三条 load 都能按预加载值写回并完成 compare
+      - 场景结束后无残留事务
+    """
+
+    rng = random.Random(RANDOM_SEED ^ 0x33CC)
+    load0_addr = _random_addr(rng, MEM_ADDR_BASE)
+    load1_addr = _random_addr(rng, MEM_ADDR_BASE)
+    load2_addr = _random_addr(rng, MEM_ADDR_BASE)
+    expected0 = rng.getrandbits(64)
+    expected1 = rng.getrandbits(64)
+    expected2 = rng.getrandbits(64)
+
+    stream_state = _reset_env_and_state(env)
+    env.preload_u64(load0_addr, expected0)
+    env.preload_u64(load1_addr, expected1)
+    env.preload_u64(load2_addr, expected2)
+
+    load0 = LoadTxn(
+        req_id=0x41,
+        addr=load0_addr,
+        lq_ptr=stream_state.next_lq_ptr,
+        sq_ptr=stream_state.sq_ptr,
+        size=8,
+        mask=0xFF,
+        enq_port=0,
+        issue_lane=0,
+    )
+    load1 = LoadTxn(
+        req_id=0x42,
+        addr=load1_addr,
+        lq_ptr=ptr_inc(stream_state.next_lq_ptr, env.config.sequence.load_queue_size),
+        sq_ptr=stream_state.sq_ptr,
+        size=8,
+        mask=0xFF,
+        enq_port=1,
+        issue_lane=1,
+    )
+    load2 = LoadTxn(
+        req_id=0x43,
+        addr=load2_addr,
+        lq_ptr=ptr_inc(stream_state.next_lq_ptr, env.config.sequence.load_queue_size, step=2),
+        sq_ptr=stream_state.sq_ptr,
+        size=8,
+        mask=0xFF,
+        enq_port=2,
+        issue_lane=2,
+    )
+
+    env.backend.execute(
+        BackendSendPlan.from_steps(
+            EnqueueLoadCyclePlan.from_steps(
+                EnqueueLoadStep.from_txn(load0),
+                EnqueueLoadStep.from_txn(load1),
+                EnqueueLoadStep.from_txn(load2),
+            ),
+            IssueCyclePlan.from_ops(
+                IssueOp.load_from_txn(load0),
+                IssueOp.load_from_txn(load1),
+                IssueOp.load_from_txn(load2),
+            ),
+        )
+    )
+    env.expect_scalar_load(req_id=load0.req_id, addr=load0.addr)
+    env.expect_scalar_load(req_id=load1.req_id, addr=load1.addr)
+    env.expect_scalar_load(req_id=load2.req_id, addr=load2.addr)
+    env.wait_completed_load_count(3, max_cycles=400)
+    env.drain_writebacks(max_cycles=400)
+    assert env.get_completed_load_count() == 3, "plan 同拍三 load 未全部完成 compare"
+    env.assert_no_outstanding()
 
 
 def test_api_MemBlock_random_io_1000_load_requests(env):

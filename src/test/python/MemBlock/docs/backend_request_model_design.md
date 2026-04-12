@@ -95,11 +95,12 @@
 
 也就是说，txn 是用户最先接触的对象，而 plan 是在组合场景下才需要显式使用的对象。
 
-### 4.2 `EnqueueLoadStep` / `EnqueueStoreStep`
+### 4.2 `EnqueueLoadStep` / `EnqueueLoadCyclePlan` / `EnqueueStoreStep`
 
-这两个对象表示 backend 脚本中的“enqueue 阶段动作”。
+这几个对象表示 backend 脚本中的“enqueue 阶段动作”。
 
 - `EnqueueLoadStep` 表示把一条 load 放进 LSQ enqueue 口。
+- `EnqueueLoadCyclePlan` 表示把多条 load 在同一拍一起送进不同的 LSQ enqueue port。
 - `EnqueueStoreStep` 表示把一条 store 放进 store queue，并可选择把运行时分配到的实际 SQ pointer 绑定到某个 `StoreRef`。
 
 这层对象的意义，是把“请求进入队列”与“请求在 issue lane 上发射”分开。对乱序访存流水线来说，这是必要的，因为 enqueue 和 issue 本来就是两个不同阶段。旧模型下很多 helper 把这两件事打包到一起，短期方便，长期却掩盖了时序结构。
@@ -285,8 +286,7 @@ allocated_sq_ptr = env.backend.send(txn)
 ```python
 env.backend.execute(
     BackendSendPlan.from_steps(
-        EnqueueLoadStep.from_txn(load0),
-        EnqueueLoadStep.from_txn(load1),
+        EnqueueLoadCyclePlan.from_txns(load0, load1),
         IssueCyclePlan.from_ops(
             IssueOp.load_from_txn(load0),
             IssueOp.load_from_txn(load1),
@@ -295,7 +295,7 @@ env.backend.execute(
 )
 ```
 
-这个例子说明：所谓“多 load 同拍”不再需要专门的 helper 名字，本质上只是“两个 enqueue step + 一个同拍 issue cycle”。
+这个例子说明：所谓“多 load 同拍”不再需要专门的 helper 名字，本质上只是“一个同拍 enqueue cycle + 一个同拍 issue cycle”。
 
 ### 6.4 store enqueue 后复用实际 SQ pointer
 

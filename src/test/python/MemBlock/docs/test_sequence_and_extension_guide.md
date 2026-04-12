@@ -102,12 +102,11 @@ env.drain_writebacks()
 如果你需要表达“多条 load 同拍 issue”或“load 与 sta/std 混合同拍 issue”，不要继续扩 `request_apis.py` 的特化 helper；优先改为构造 `BackendSendPlan` / `IssueCyclePlan`：
 
 ```python
-from transactions import BackendSendPlan, EnqueueLoadStep, IssueCyclePlan, IssueOp
+from transactions import BackendSendPlan, EnqueueLoadCyclePlan, IssueCyclePlan, IssueOp
 
 env.backend.execute(
     BackendSendPlan.from_steps(
-        EnqueueLoadStep.from_txn(load0),
-        EnqueueLoadStep.from_txn(load1),
+        EnqueueLoadCyclePlan.from_txns(load0, load1),
         IssueCyclePlan.from_ops(
             IssueOp.load_from_txn(load0),
             IssueOp.sta(req_id=sta_req_id, sq_ptr=sta_sq_ptr, addr=sta_addr, lane=3),

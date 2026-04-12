@@ -134,6 +134,40 @@ class EnqueueLoadStep:
 
 
 @dataclass(frozen=True)
+class EnqueueLoadCyclePlan:
+    """All load enqueue actions that must fire in the same cycle."""
+
+    steps: tuple[EnqueueLoadStep, ...]
+    max_cycles: int = 200
+
+    def __post_init__(self) -> None:
+        if not self.steps:
+            raise ValueError("load enqueue cycle plan requires at least one step")
+        ports = [int(step.enq_port) for step in self.steps]
+        if len(set(ports)) != len(ports):
+            raise ValueError(f"load enqueue cycle plan requires unique ports: {ports}")
+
+    @classmethod
+    def from_steps(cls, *steps: EnqueueLoadStep, max_cycles: int = 200) -> "EnqueueLoadCyclePlan":
+        return cls(steps=tuple(steps), max_cycles=max_cycles)
+
+    @classmethod
+    def from_txns(cls, *txns: LoadTxn, max_cycles: int = 200) -> "EnqueueLoadCyclePlan":
+        return cls(
+            steps=tuple(
+                EnqueueLoadStep(
+                    req_id=txn.req_id,
+                    lq_ptr=txn.lq_ptr,
+                    sq_ptr=txn.sq_ptr,
+                    enq_port=index,
+                )
+                for index, txn in enumerate(txns)
+            ),
+            max_cycles=max_cycles,
+        )
+
+
+@dataclass(frozen=True)
 class EnqueueStoreStep:
     """One store enqueue action inside a backend send plan."""
 
@@ -304,6 +338,7 @@ class BackendSendPlan:
                 step,
                 (
                     EnqueueLoadStep,
+                    EnqueueLoadCyclePlan,
                     EnqueueStoreStep,
                     IssueCyclePlan,
                     StoreCommitStep,

@@ -69,12 +69,11 @@ allocated_sq_ptr = env.backend.send(
 ### 3.3 两条 load 同拍 issue
 
 ```python
-from transactions import BackendSendPlan, EnqueueLoadStep, IssueCyclePlan, IssueOp
+from transactions import BackendSendPlan, EnqueueLoadCyclePlan, IssueCyclePlan, IssueOp
 
 env.backend.execute(
     BackendSendPlan.from_steps(
-        EnqueueLoadStep.from_txn(load0),
-        EnqueueLoadStep.from_txn(load1),
+        EnqueueLoadCyclePlan.from_txns(load0, load1),
         IssueCyclePlan.from_ops(
             IssueOp.load_from_txn(load0),
             IssueOp.load_from_txn(load1),

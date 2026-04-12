@@ -198,6 +198,58 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py -k 'send_store_translates_to_enqueue_and_issue_cycles or send_partial_store_keeps_mask_on_sta_and_std'`
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_store_misalign.py`
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'misaligned or partial or burst'`
+
+### 6. 为随机 load 追加 `BackendSendPlan` 同拍三 issue 示例
+
+本条目记录一次 testcase 补强：在 `random load` 测试文件中追加一个直接使用 `BackendSendPlan` 的 cacheable load 例子，用真实 DUT 验证“enqueue 三条 load + 同拍三 lane issue + 最终 compare 收敛”的最小脚本。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_random_load.py`
+  - 新增 `test_api_MemBlock_three_random_mem_loads_same_cycle_via_plan`
+  - 使用：
+    - `BackendSendPlan`
+    - `EnqueueLoadStep`
+    - `IssueCyclePlan`
+    - `IssueOp.load_from_txn(...)`
+  - 验证三条随机 cacheable load 能在同拍 issue 后全部完成 compare，并最终无 outstanding
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/tests/test_MemBlock_random_load.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_random_load.py -k 'three_random_mem_loads_same_cycle_via_plan or non_mem_blocker_delays_compare'`
+
+### 7. 为 backend plan 补上同拍多 load enqueue，并把示例切到真同拍三发
+
+本条目记录一次 backend 主动控制面补强：此前 `BackendSendPlan` 虽然能表达“多条 load 同拍 issue”，但多个 `EnqueueLoadStep` 仍会按 step 顺序逐拍执行。当前补入 `EnqueueLoadCyclePlan` 后，plan 已能显式表达“多条 load 同拍 enqueue”，并把随机 load 示例切到真实的“同拍 3 enqueue + 同拍 3 issue”。
+
+#### 变更摘要
+
+- `transactions.py` / `agents/lsq_agent.py` / `agents/backend_facade.py` / `request_apis.py`
+  - 新增 `EnqueueLoadCyclePlan`
+  - `LsqAgent` / `BackendFacade` 新增同拍多 load enqueue 执行路径
+  - `send_load_batch_same_cycle()` / `send_load_batch_with_sta_same_cycle()` 改为先构造同拍 enqueue cycle，再进入同拍 issue cycle
+- `tests/test_request_apis_backend_facade.py`
+  - 新增同拍 load enqueue plan 的 facade 单测
+  - 补充 `EnqueueLoadCyclePlan` 端口唯一性校验测试
+- `tests/test_MemBlock_random_load.py`
+  - `test_api_MemBlock_three_random_mem_loads_same_cycle_via_plan` 改为真实同拍：
+    - `enqLsq[0:2]` 三口同拍 enqueue
+    - `intIssue[0:2]` 三 lane 同拍 issue
+- `README.md` / `docs/backend_request_model_design.md` / `docs/backend_rob_cookbook.md` / `docs/test_sequence_and_extension_guide.md`
+  - 同步把“多条 load 同拍”示例改成 `EnqueueLoadCyclePlan.from_txns(...)`
+
+#### 验证情况
+
+- `python3 -m py_compile`
+  - `src/test/python/MemBlock/transactions.py`
+  - `src/test/python/MemBlock/agents/lsq_agent.py`
+  - `src/test/python/MemBlock/agents/backend_facade.py`
+  - `src/test/python/MemBlock/request_apis.py`
+  - `src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_random_load.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py -k 'batch_wrappers_delegate_to_backend_execute or same_cycle_load_enqueue_plan or enqueue_load_cycle_plan_rejects_duplicate_ports'`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_random_load.py -k 'three_random_mem_loads_same_cycle_via_plan or non_mem_blocker_delays_compare'`
 - `python3 -m pytest -q src/test/python/MemBlock/tests --toffee-report --report-dir src/test/python/MemBlock/data/toffee_report_full_serial_20260412_store_misalign_cov --report-name memblock_full_serial_20260412_store_misalign_cov --report-dump-json`
   - 结果：`95 PASSED, 1 XFAIL`
   - 全局 line coverage：`65.3%`（`193043 / 295581`，相对上一版 `+71` hit）

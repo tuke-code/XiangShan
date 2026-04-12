@@ -5,6 +5,7 @@ MemBlock 真实 DUT 请求发送公共 API。
 
 from transactions import (
     BackendSendPlan,
+    EnqueueLoadCyclePlan,
     EnqueueLoadStep,
     IssueCyclePlan,
     IssueOp,
@@ -116,7 +117,7 @@ def send_load_batch_same_cycle(env, txns, max_cycles: int = 50) -> None:
     txns = tuple(txns)
     env.backend.execute(
         BackendSendPlan.from_steps(
-            *(EnqueueLoadStep.from_txn(txn) for txn in txns),
+            EnqueueLoadCyclePlan.from_txns(*txns),
             IssueCyclePlan(
                 ops=tuple(IssueOp.load_from_txn(txn) for txn in txns),
                 max_cycles=max_cycles,
@@ -141,7 +142,7 @@ def send_load_batch_with_sta_same_cycle(
     txns = tuple(txns)
     env.backend.execute(
         BackendSendPlan.from_steps(
-            *(EnqueueLoadStep.from_txn(txn) for txn in txns),
+            EnqueueLoadCyclePlan.from_txns(*txns),
             IssueCyclePlan(
                 ops=tuple(IssueOp.load_from_txn(txn) for txn in txns)
                 + (
