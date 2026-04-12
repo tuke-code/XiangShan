@@ -1,0 +1,1821 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MemBlock 验证平台三大精妙设计</title>
+  <style>
+    :root {
+      --paper: #fffaf4;
+      --ink: #1f252a;
+      --muted: #5d686f;
+      --line: rgba(31, 37, 42, 0.1);
+      --brick: #a34931;
+      --brick-soft: rgba(163, 73, 49, 0.09);
+      --teal: #0f6a63;
+      --teal-soft: rgba(15, 106, 99, 0.1);
+      --blue: #31527b;
+      --blue-soft: rgba(49, 82, 123, 0.09);
+      --gold: #cb9527;
+      --gold-soft: rgba(203, 149, 39, 0.12);
+      --shadow: 0 24px 64px rgba(31, 37, 42, 0.14);
+      --slide-w: min(1440px, calc(100vw - 18px));
+      --slide-h: min(900px, calc(100vh - 14px));
+      --radius: 28px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      min-height: 100%;
+      background:
+        radial-gradient(circle at top left, rgba(163, 73, 49, 0.15), transparent 24%),
+        radial-gradient(circle at 85% 18%, rgba(15, 106, 99, 0.1), transparent 20%),
+        radial-gradient(circle at bottom right, rgba(49, 82, 123, 0.12), transparent 24%),
+        linear-gradient(180deg, #efe5d7 0%, #f6eee2 100%);
+      color: var(--ink);
+      font-family: "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+    }
+
+    body { overflow: hidden; }
+
+    .deck {
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 7px;
+    }
+
+    .slide {
+      display: none;
+      width: var(--slide-w);
+      height: var(--slide-h);
+      position: relative;
+      overflow: hidden;
+      border-radius: var(--radius);
+      border: 1px solid rgba(31, 37, 42, 0.08);
+      background:
+        linear-gradient(145deg, rgba(255,255,255,0.96), rgba(255,250,244,0.98)),
+        var(--paper);
+      box-shadow: var(--shadow);
+    }
+
+    .slide.active {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+
+    .slide::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(31, 37, 42, 0.03) 0, rgba(31, 37, 42, 0.03) 1px, transparent 1px, transparent 100%),
+        linear-gradient(180deg, rgba(31, 37, 42, 0.025) 0, rgba(31, 37, 42, 0.025) 1px, transparent 1px, transparent 100%);
+      background-size: 120px 120px;
+      opacity: 0.35;
+      pointer-events: none;
+    }
+
+    .slide::after {
+      content: "";
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: 12px;
+      background: linear-gradient(180deg, var(--brick), var(--gold));
+      pointer-events: none;
+    }
+
+    .header, .body, .footer {
+      position: relative;
+      z-index: 1;
+    }
+
+    .header {
+      display: grid;
+      grid-template-columns: 120px minmax(0, 1fr) auto;
+      gap: 18px;
+      align-items: stretch;
+      padding: 18px 24px 6px 28px;
+    }
+
+    .chapter {
+      display: grid;
+      align-content: start;
+      gap: 6px;
+      padding: 14px 12px 12px;
+      border-radius: 20px;
+      color: #fff7ef;
+      background: linear-gradient(180deg, var(--brick) 0%, #7f301d 100%);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.18);
+    }
+
+    .chapter-num {
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+      font-size: 56px;
+      line-height: 0.9;
+      letter-spacing: 0.03em;
+      font-weight: 700;
+    }
+
+    .chapter-text {
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+      font-size: 13px;
+      line-height: 1.25;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      opacity: 0.95;
+    }
+
+    .hero { min-width: 0; }
+
+    .eyebrow {
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+      font-size: 12px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--teal);
+      margin-bottom: 10px;
+    }
+
+    h1, h2, h3 {
+      margin: 0;
+      line-height: 1.05;
+    }
+
+    h1,
+    h2 {
+      font-size: clamp(24px, 2.3vw, 33px);
+      max-width: none;
+      white-space: nowrap;
+    }
+
+    h3 {
+      font-size: 20px;
+      color: var(--blue);
+    }
+
+    .subtitle {
+      margin: 12px 0 0;
+      max-width: 74ch;
+      color: var(--muted);
+      font-size: 19px;
+      line-height: 1.35;
+    }
+
+    .accent-bar {
+      width: 92px;
+      height: 5px;
+      border-radius: 999px;
+      margin: 14px 0 0;
+      background: linear-gradient(90deg, var(--brick), var(--gold));
+    }
+
+    .badge-stack {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      align-content: start;
+      gap: 8px;
+      max-width: 360px;
+      padding-top: 4px;
+    }
+
+    .badge {
+      padding: 7px 11px;
+      border-radius: 999px;
+      border: 1px solid rgba(31, 37, 42, 0.09);
+      background: rgba(255,255,255,0.8);
+      color: var(--muted);
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .badge.warn {
+      color: #9f2d24;
+      background: rgba(163, 73, 49, 0.1);
+      border-color: rgba(163, 73, 49, 0.2);
+    }
+
+    .body {
+      padding: 8px 24px 10px 28px;
+      overflow: auto;
+      display: grid;
+      gap: 18px;
+      align-content: start;
+    }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 14px;
+      padding: 6px 24px 10px 28px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .story-grid,
+    .compare-grid,
+    .anchor-grid,
+    .gain-grid,
+    .summary-grid,
+    .flow-grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .story-grid,
+    .compare-grid,
+    .anchor-grid,
+    .gain-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+    .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .flow-grid { grid-template-columns: 1.1fr 0.9fr; }
+    .split-stage { grid-template-columns: 1.08fr 0.92fr; }
+
+    .card,
+    .panel,
+    .anchor,
+    .summary,
+    .mermaid-box,
+    .lane {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: rgba(255,255,255,0.78);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
+    }
+
+    .card,
+    .panel,
+    .anchor,
+    .summary,
+    .lane {
+      padding: 18px 18px 16px;
+    }
+
+    .card strong,
+    .panel strong,
+    .anchor strong,
+    .summary strong {
+      display: block;
+      margin-bottom: 10px;
+      font-size: 22px;
+      color: var(--ink);
+    }
+
+    .panel strong { margin-bottom: 12px; }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+
+    .chip {
+      padding: 6px 11px;
+      border-radius: 999px;
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+
+    .chip.problem {
+      color: var(--brick);
+      background: var(--brick-soft);
+      border: 1px solid rgba(163, 73, 49, 0.18);
+    }
+
+    .chip.solution {
+      color: var(--teal);
+      background: var(--teal-soft);
+      border: 1px solid rgba(15, 106, 99, 0.18);
+    }
+
+    .chip.design {
+      color: var(--blue);
+      background: var(--blue-soft);
+      border: 1px solid rgba(49, 82, 123, 0.16);
+    }
+
+    .problem-card {
+      background: linear-gradient(180deg, rgba(255,247,243,0.92), rgba(255,255,255,0.82));
+      border-top: 4px solid rgba(163, 73, 49, 0.24);
+    }
+
+    .solution-card {
+      background: linear-gradient(180deg, rgba(242,251,249,0.96), rgba(255,255,255,0.82));
+      border-top: 4px solid rgba(15, 106, 99, 0.24);
+    }
+
+    .design-card {
+      background: linear-gradient(180deg, rgba(244,247,252,0.96), rgba(255,255,255,0.82));
+      border-top: 4px solid rgba(49, 82, 123, 0.22);
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 20px;
+    }
+
+    li {
+      font-size: 19px;
+      line-height: 1.36;
+      margin-bottom: 7px;
+    }
+
+    li::marker { color: var(--brick); }
+
+    .gain-grid .summary {
+      padding: 18px 20px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.88), rgba(252,246,237,0.9));
+    }
+
+    .gain-grid .summary strong {
+      margin-bottom: 5px;
+      font-size: 16px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--brick);
+    }
+
+    .gain-grid .summary p,
+    .summary p,
+    .anchor p,
+    .mini,
+    .lane p,
+    .footnote {
+      margin: 0;
+      font-size: 18px;
+      line-height: 1.34;
+      color: var(--muted);
+    }
+
+    .mermaid-box {
+      padding: 18px 18px 16px;
+      background:
+        linear-gradient(180deg, rgba(250,244,235,0.98), rgba(255,255,255,0.85));
+      border-top: 4px solid rgba(203, 149, 39, 0.2);
+    }
+
+    .mermaid-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+
+    .mermaid-head strong {
+      display: block;
+      font-size: 22px;
+      color: var(--blue);
+    }
+
+    .mermaid-head span {
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--gold);
+    }
+
+    .mermaid-flow,
+    .lane-flow {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .fork-flow {
+      display: grid;
+      gap: 10px;
+    }
+
+    .fork-main,
+    .fork-branch {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    .fork-branch {
+      padding-left: 44px;
+    }
+
+    .branch-arrow {
+      color: rgba(49, 82, 123, 0.7);
+      font-size: 20px;
+      line-height: 1;
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+    }
+
+    .store-graph {
+      display: grid;
+      grid-template-columns: minmax(108px, 1.05fr) 26px minmax(108px, 1fr) 26px minmax(108px, 1fr);
+      grid-template-areas:
+        "start a1 drain a2 close"
+        "fork  a3 exp   a4 close";
+      gap: 10px 8px;
+      align-items: center;
+    }
+
+    .sg-start { grid-area: start; }
+    .sg-a1 { grid-area: a1; }
+    .sg-drain { grid-area: drain; }
+    .sg-a2 { grid-area: a2; }
+    .sg-close {
+      grid-area: close;
+      align-self: stretch;
+      min-height: 114px;
+    }
+    .sg-fork { grid-area: fork; }
+    .sg-a3 { grid-area: a3; }
+    .sg-exp { grid-area: exp; }
+    .sg-a4 { grid-area: a4; }
+
+    .fork-pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 34px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      border: 1px dashed rgba(15, 106, 99, 0.24);
+      background: rgba(15, 106, 99, 0.06);
+      color: var(--teal);
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+      font-size: 13px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      font-weight: 700;
+      justify-self: start;
+    }
+
+    .node {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 52px;
+      padding: 10px 14px;
+      border-radius: 15px;
+      border: 1px solid rgba(31, 37, 42, 0.12);
+      background: rgba(255,255,255,0.9);
+      text-align: center;
+      font-size: 16px;
+      line-height: 1.22;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.82);
+    }
+
+    .node.problem {
+      background: rgba(163, 73, 49, 0.09);
+      color: var(--brick);
+      border-color: rgba(163, 73, 49, 0.18);
+    }
+
+    .node.solution {
+      background: rgba(15, 106, 99, 0.09);
+      color: var(--teal);
+      border-color: rgba(15, 106, 99, 0.18);
+    }
+
+    .node.shared {
+      background: rgba(49, 82, 123, 0.09);
+      color: var(--blue);
+      border-color: rgba(49, 82, 123, 0.18);
+      font-weight: 700;
+    }
+
+    .arrow {
+      color: rgba(163, 73, 49, 0.74);
+      font-size: 22px;
+      line-height: 1;
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+    }
+
+    .footnote {
+      margin-top: 12px;
+    }
+
+    .compare-panel {
+      display: grid;
+      gap: 12px;
+      padding: 18px 18px 16px;
+    }
+
+    .panel-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .panel-label {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 11px;
+      border-radius: 999px;
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+      font-size: 12px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-weight: 700;
+    }
+
+    .panel-label.legacy {
+      color: var(--brick);
+      background: var(--brick-soft);
+      border: 1px solid rgba(163, 73, 49, 0.18);
+    }
+
+    .panel-label.plan {
+      color: var(--teal);
+      background: var(--teal-soft);
+      border: 1px solid rgba(15, 106, 99, 0.18);
+    }
+
+    .panel-note {
+      font-size: 16px;
+      color: var(--muted);
+    }
+
+    .code {
+      margin: 0;
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: #1f2529;
+      color: #f8f1e6;
+      font-family: Consolas, Menlo, monospace;
+      font-size: 15px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      overflow: auto;
+    }
+
+    .mini {
+      font-size: 17px;
+    }
+
+    .summary-grid .summary {
+      background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(246,250,254,0.9));
+      border-top: 3px solid rgba(49, 82, 123, 0.18);
+    }
+
+    .summary-grid .summary strong {
+      font-size: 18px;
+      margin-bottom: 6px;
+      color: var(--blue);
+    }
+
+    .anchor-grid .anchor {
+      background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(252,247,240,0.88));
+      border-top: 3px solid rgba(203, 149, 39, 0.18);
+    }
+
+    .anchor-grid .anchor strong {
+      font-size: 18px;
+      margin-bottom: 8px;
+      color: var(--blue);
+    }
+
+    .flow-grid .lane {
+      display: grid;
+      gap: 14px;
+      background: rgba(255,255,255,0.84);
+    }
+
+    .lane-stack {
+      display: grid;
+      gap: 16px;
+    }
+
+    .explain-box {
+      display: grid;
+      gap: 14px;
+      padding: 18px 18px 16px;
+      background: linear-gradient(180deg, rgba(244, 250, 249, 0.95), rgba(255, 255, 255, 0.88));
+      border-top: 4px solid rgba(15, 106, 99, 0.2);
+    }
+
+    .explain-box strong {
+      display: block;
+      margin-bottom: 2px;
+      font-size: 22px;
+      color: var(--ink);
+    }
+
+    .subbox {
+      padding: 14px 15px;
+      border-radius: 16px;
+      border: 1px solid rgba(15, 106, 99, 0.12);
+      background: rgba(255,255,255,0.72);
+    }
+
+    .subbox-title {
+      margin-bottom: 7px;
+      font-size: 17px;
+      line-height: 1.2;
+      color: var(--blue);
+      font-weight: 700;
+    }
+
+    .lane-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .lane-title {
+      font-size: 21px;
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .lane-tag {
+      padding: 5px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+      color: var(--blue);
+      background: var(--blue-soft);
+      border: 1px solid rgba(49, 82, 123, 0.16);
+    }
+
+    .tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .tag {
+      padding: 5px 9px;
+      border-radius: 999px;
+      font-size: 13px;
+      color: var(--teal);
+      background: var(--teal-soft);
+      border: 1px solid rgba(15, 106, 99, 0.16);
+    }
+
+    .formula {
+      padding: 14px 16px;
+      border-radius: 16px;
+      background: linear-gradient(180deg, rgba(245,249,255,0.95), rgba(255,255,255,0.92));
+      border: 1px solid rgba(49, 82, 123, 0.12);
+      font-size: 17px;
+      line-height: 1.38;
+      color: var(--muted);
+    }
+
+    .formula code {
+      font-family: Consolas, Menlo, monospace;
+      font-size: 15px;
+      color: var(--ink);
+    }
+
+    .bar-list {
+      display: grid;
+      gap: 14px;
+    }
+
+    .bar-item {
+      display: grid;
+      gap: 7px;
+    }
+
+    .bar-top {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .bar-name {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .bar-value {
+      font-size: 16px;
+      color: var(--muted);
+    }
+
+    .bar-track {
+      height: 10px;
+      border-radius: 999px;
+      background: rgba(31, 37, 42, 0.08);
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      background: linear-gradient(90deg, var(--brick), var(--gold));
+    }
+
+    .coverage-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .kpi {
+      padding: 16px 16px 14px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.74);
+    }
+
+    .kpi strong {
+      display: block;
+      margin-bottom: 4px;
+      font-size: 31px;
+      color: var(--brick);
+      line-height: 1;
+    }
+
+    .kpi span {
+      font-size: 15px;
+      color: var(--muted);
+    }
+
+    .layer-map {
+      display: grid;
+      gap: 12px;
+    }
+
+    .layer-card {
+      display: grid;
+      gap: 8px;
+      padding: 14px 15px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.72);
+      justify-self: center;
+    }
+
+    .layer-card strong {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 19px;
+      color: var(--ink);
+      margin: 0;
+    }
+
+    .layer-card em {
+      font-style: normal;
+      font-size: 14px;
+      color: var(--muted);
+      font-weight: 400;
+    }
+
+    .layer-card p {
+      margin: 0;
+      font-size: 16px;
+      line-height: 1.34;
+      color: var(--muted);
+    }
+
+    .layer-card.platform {
+      background: linear-gradient(180deg, rgba(255,247,243,0.94), rgba(255,255,255,0.82));
+      border-left: 5px solid rgba(163, 73, 49, 0.26);
+    }
+
+    .layer-card.semantic {
+      background: linear-gradient(180deg, rgba(244,247,252,0.95), rgba(255,255,255,0.82));
+      border-left: 5px solid rgba(49, 82, 123, 0.24);
+    }
+
+    .layer-card.pipeline {
+      background: linear-gradient(180deg, rgba(242,251,249,0.95), rgba(255,255,255,0.82));
+      border-left: 5px solid rgba(15, 106, 99, 0.24);
+    }
+
+    .layer-card.corner {
+      background: linear-gradient(180deg, rgba(251,247,238,0.95), rgba(255,255,255,0.82));
+      border-left: 5px solid rgba(203, 149, 39, 0.26);
+    }
+
+    .layer-card.level-1 { width: 100%; }
+    .layer-card.level-2 { width: 92%; }
+    .layer-card.level-3 { width: 84%; }
+    .layer-card.level-4 { width: 76%; }
+
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 14px;
+    }
+
+    .scenario-card {
+      padding: 14px 15px;
+      border-radius: 18px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.72);
+    }
+
+    .scenario-card strong {
+      display: block;
+      margin-bottom: 7px;
+      font-size: 18px;
+      color: var(--ink);
+    }
+
+    .scenario-card p {
+      margin: 0;
+      font-size: 16px;
+      line-height: 1.34;
+      color: var(--muted);
+    }
+
+    .scenario-card.warn {
+      background: linear-gradient(180deg, rgba(255,247,243,0.94), rgba(255,255,255,0.82));
+      border-color: rgba(163, 73, 49, 0.16);
+    }
+
+    .xfail-mark {
+      color: #9f2d24;
+      font-weight: 700;
+    }
+
+    #slide-4 .body {
+      gap: 10px;
+      overflow: hidden;
+    }
+
+    #slide-4 .summary-grid {
+      gap: 8px;
+    }
+
+    #slide-4 .summary {
+      padding: 10px 12px 9px;
+      border-radius: 18px;
+    }
+
+    #slide-4 .summary strong {
+      font-size: 16px;
+      margin-bottom: 3px;
+      color: var(--blue);
+    }
+
+    #slide-4 .summary p {
+      font-size: 13px;
+      line-height: 1.2;
+    }
+
+    #slide-4 .flow-grid.split-stage {
+      gap: 9px;
+    }
+
+    #slide-4 .panel {
+      padding: 12px 12px 10px;
+      border-radius: 20px;
+    }
+
+    #slide-4 .panel strong {
+      font-size: 18px;
+      margin-bottom: 7px;
+    }
+
+    #slide-4 .chip-row {
+      margin-bottom: 7px;
+    }
+
+    #slide-4 .layer-map,
+    #slide-4 .scenario-grid,
+    #slide-4 .coverage-grid {
+      gap: 7px;
+    }
+
+    #slide-4 .layer-card,
+    #slide-4 .scenario-card,
+    #slide-4 .kpi {
+      padding: 10px 11px 9px;
+    }
+
+    #slide-4 .layer-card strong,
+    #slide-4 .scenario-card strong {
+      font-size: 15px;
+      margin-bottom: 0;
+    }
+
+    #slide-4 .layer-card p,
+    #slide-4 .scenario-card p,
+    #slide-4 .kpi span {
+      font-size: 12px;
+      line-height: 1.18;
+    }
+
+    #slide-4 .kpi strong {
+      font-size: 23px;
+    }
+
+    .feature-tabs {
+      display: grid;
+      grid-template-columns: repeat(7, minmax(0, 1fr));
+      gap: 6px;
+      margin-top: 0;
+    }
+
+    .feature-tab {
+      padding: 8px 8px 7px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.74);
+      display: grid;
+      gap: 3px;
+    }
+
+    .feature-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .feature-name {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--ink);
+    }
+
+    .feature-state {
+      padding: 3px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-family: "Avenir Next Condensed", "Trebuchet MS", sans-serif;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .feature-tab.active {
+      border-color: rgba(15, 106, 99, 0.18);
+      background: linear-gradient(180deg, rgba(242,251,249,0.96), rgba(255,255,255,0.82));
+    }
+
+    .feature-tab.active .feature-state {
+      color: var(--teal);
+      background: rgba(15, 106, 99, 0.1);
+      border: 1px solid rgba(15, 106, 99, 0.16);
+    }
+
+    .feature-tab.passive {
+      border-color: rgba(49, 82, 123, 0.14);
+      background: linear-gradient(180deg, rgba(245,247,250,0.96), rgba(255,255,255,0.82));
+    }
+
+    .feature-tab.passive .feature-state {
+      color: var(--blue);
+      background: rgba(49, 82, 123, 0.08);
+      border: 1px solid rgba(49, 82, 123, 0.14);
+    }
+
+    .feature-pct {
+      font-size: 19px;
+      line-height: 1;
+      color: var(--brick);
+      font-weight: 700;
+    }
+
+    .feature-desc {
+      font-size: 10px;
+      line-height: 1.15;
+      color: var(--muted);
+    }
+
+    .feature-note {
+      margin-top: 6px;
+      font-size: 11px;
+      line-height: 1.18;
+      color: var(--muted);
+    }
+
+    .token-grid {
+      display: grid;
+      gap: 16px;
+    }
+
+    .token-hero-card {
+      padding: 16px 18px 14px;
+    }
+
+    .token-chart-frame {
+      margin-top: 12px;
+      border: 1px solid rgba(49, 82, 123, 0.12);
+      border-radius: 22px;
+      background:
+        radial-gradient(circle at top right, rgba(22, 180, 216, 0.12), transparent 24%),
+        linear-gradient(180deg, rgba(255,255,255,0.96), rgba(245,250,252,0.94));
+      overflow: hidden;
+    }
+
+    .token-chart-frame svg {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
+    .token-metrics {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .token-stat {
+      padding: 14px 15px 12px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: rgba(255,255,255,0.8);
+      box-shadow: inset 0 1px 0 rgba(255,255,255,0.72);
+    }
+
+    .token-stat strong {
+      display: block;
+      font-size: 24px;
+      line-height: 1;
+      color: var(--brick);
+      margin-bottom: 8px;
+    }
+
+    .token-stat span {
+      display: block;
+      font-size: 12px;
+      line-height: 1.25;
+      color: var(--muted);
+    }
+
+    .token-notes {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 16px;
+    }
+
+    .token-note {
+      padding: 16px 17px 14px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: rgba(255,255,255,0.82);
+    }
+
+    .token-note strong {
+      display: block;
+      margin-bottom: 8px;
+    }
+
+    .token-note p,
+    .token-note li {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.45;
+      color: var(--muted);
+    }
+
+    .token-note ul {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 7px;
+    }
+
+    .highlight {
+      color: var(--brick);
+      font-weight: 700;
+    }
+
+    @media (max-width: 1100px) {
+      .header,
+      .story-grid,
+      .compare-grid,
+      .anchor-grid,
+      .gain-grid,
+      .flow-grid,
+      .summary-grid,
+      .token-metrics,
+      .token-notes {
+        grid-template-columns: 1fr;
+      }
+
+      .header {
+        grid-template-columns: 110px 1fr;
+      }
+
+      .badge-stack {
+        justify-content: flex-start;
+        max-width: none;
+      }
+    }
+
+    @media (max-width: 760px) {
+      body { overflow: auto; }
+
+      .deck {
+        display: block;
+        padding: 6px;
+      }
+
+      .slide,
+      .slide.active {
+        display: grid;
+        width: 100%;
+        height: auto;
+        min-height: calc(100vh - 12px);
+        margin-bottom: 8px;
+      }
+
+      .slide:not(.active) { opacity: 0.45; }
+
+      .header {
+        grid-template-columns: 1fr;
+      }
+
+      .badge-stack {
+        justify-content: flex-start;
+      }
+
+      .header,
+      .body,
+      .footer {
+        padding-left: 18px;
+        padding-right: 18px;
+      }
+
+      .token-stat strong {
+        font-size: 21px;
+      }
+    }
+
+    @media print {
+      body {
+        overflow: visible;
+        background: white;
+      }
+
+      .deck {
+        display: block;
+        padding: 0;
+      }
+
+      .slide,
+      .slide.active {
+        display: grid;
+        width: 100%;
+        min-height: 100vh;
+        margin: 0;
+        border-radius: 0;
+        box-shadow: none;
+        page-break-after: always;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="deck">
+    <section class="slide active" id="slide-1">
+      <header class="header">
+        <div class="chapter">
+          <div class="chapter-num">00</div>
+          <div class="chapter-text">AI token<br>usage trend</div>
+        </div>
+        <div class="hero">
+          <div class="eyebrow">Context Snapshot</div>
+          <h1>当前 AI 模型 Token 使用情况</h1>
+          <div class="accent-bar"></div>
+        </div>
+        <div></div>
+      </header>
+      <div class="body" style="padding-top: 6px; padding-bottom: 18px;">
+        <div class="token-chart-frame">
+          <svg viewBox="0 0 1280 420" xmlns="http://www.w3.org/2000/svg" aria-label="AI token usage trend">
+                <defs>
+                  <linearGradient id="cacheArea" x1="0" x2="0" y1="0" y2="1">
+                    <stop offset="0%" stop-color="#16b4d8" stop-opacity="0.28"/>
+                    <stop offset="100%" stop-color="#16b4d8" stop-opacity="0.06"/>
+                  </linearGradient>
+                  <linearGradient id="inputArea" x1="0" x2="0" y1="0" y2="1">
+                    <stop offset="0%" stop-color="#3b82f6" stop-opacity="0.24"/>
+                    <stop offset="100%" stop-color="#3b82f6" stop-opacity="0.04"/>
+                  </linearGradient>
+                </defs>
+
+                <rect x="0" y="0" width="1280" height="420" fill="transparent"/>
+                <text x="24" y="34" fill="#1f252a" font-size="28" font-weight="700">Token 使用趋势</text>
+
+                <g font-size="12" fill="#425166">
+                  <circle cx="420" cy="28" r="11" fill="none" stroke="#3b82f6" stroke-width="2"/>
+                  <text x="438" y="34">Input</text>
+                  <circle cx="498" cy="28" r="11" fill="none" stroke="#10b981" stroke-width="2"/>
+                  <text x="516" y="34">Output</text>
+                  <circle cx="612" cy="28" r="11" fill="none" stroke="#f59e0b" stroke-width="2"/>
+                  <text x="630" y="34">Cache Creation</text>
+                  <circle cx="772" cy="28" r="11" fill="none" stroke="#16b4d8" stroke-width="2"/>
+                  <text x="790" y="34">Cache Read</text>
+                  <circle cx="924" cy="28" r="11" fill="none" stroke="#8b5cf6" stroke-width="2"/>
+                  <text x="942" y="34">Cache Hit Rate</text>
+                </g>
+
+                <g stroke="#d7dee6" stroke-width="1">
+                  <line x1="70" y1="345" x2="1220" y2="345"/>
+                  <line x1="70" y1="304" x2="1220" y2="304"/>
+                  <line x1="70" y1="264" x2="1220" y2="264"/>
+                  <line x1="70" y1="223" x2="1220" y2="223"/>
+                  <line x1="70" y1="182" x2="1220" y2="182"/>
+                  <line x1="70" y1="142" x2="1220" y2="142"/>
+                  <line x1="70" y1="101" x2="1220" y2="101"/>
+                  <line x1="70" y1="60" x2="1220" y2="60"/>
+                </g>
+
+                <g stroke="#d7dee6" stroke-width="1">
+                  <line x1="70.0" y1="60" x2="70.0" y2="345"/>
+                  <line x1="137.6" y1="60" x2="137.6" y2="345"/>
+                  <line x1="205.3" y1="60" x2="205.3" y2="345"/>
+                  <line x1="272.9" y1="60" x2="272.9" y2="345"/>
+                  <line x1="340.6" y1="60" x2="340.6" y2="345"/>
+                  <line x1="408.2" y1="60" x2="408.2" y2="345"/>
+                  <line x1="475.9" y1="60" x2="475.9" y2="345"/>
+                  <line x1="543.5" y1="60" x2="543.5" y2="345"/>
+                  <line x1="611.2" y1="60" x2="611.2" y2="345"/>
+                  <line x1="678.8" y1="60" x2="678.8" y2="345"/>
+                  <line x1="746.5" y1="60" x2="746.5" y2="345"/>
+                  <line x1="814.1" y1="60" x2="814.1" y2="345"/>
+                  <line x1="881.8" y1="60" x2="881.8" y2="345"/>
+                  <line x1="949.4" y1="60" x2="949.4" y2="345"/>
+                  <line x1="1017.1" y1="60" x2="1017.1" y2="345"/>
+                  <line x1="1084.7" y1="60" x2="1084.7" y2="345"/>
+                  <line x1="1152.4" y1="60" x2="1152.4" y2="345"/>
+                  <line x1="1220.0" y1="60" x2="1220.0" y2="345"/>
+                </g>
+
+                <g font-size="12" fill="#425166">
+                  <text x="18" y="349">0</text>
+                  <text x="6" y="308">100M</text>
+                  <text x="6" y="268">200M</text>
+                  <text x="6" y="227">300M</text>
+                  <text x="6" y="186">400M</text>
+                  <text x="6" y="146">500M</text>
+                  <text x="6" y="105">600M</text>
+                  <text x="6" y="64">700M</text>
+                  <text x="1232" y="64" fill="#8b5cf6">100%</text>
+                  <text x="1238" y="349" fill="#8b5cf6">0%</text>
+                </g>
+
+                <line x1="70" y1="60" x2="1220" y2="60" stroke="#8b5cf6" stroke-width="2.2" stroke-dasharray="10 8"/>
+
+                <path d="M 70.0,345.0 L 137.6,324.6 L 205.3,255.4 L 272.9,182.1 L 340.6,255.4 L 408.2,308.4 L 475.9,108.9 L 543.5,137.4 L 611.2,153.6 L 678.8,214.7 L 746.5,72.2 L 814.1,275.8 L 881.8,304.3 L 949.4,328.7 L 1017.1,84.4 L 1084.7,184.2 L 1152.4,110.9 L 1220.0,320.6 L 1220,345 L 70,345 Z" fill="url(#cacheArea)"/>
+                <path d="M 70.0,345.0 L 137.6,343.0 L 205.3,332.8 L 272.9,308.4 L 340.6,286.0 L 408.2,326.7 L 475.9,306.3 L 543.5,304.3 L 611.2,310.4 L 678.8,296.1 L 746.5,316.5 L 814.1,273.8 L 881.8,320.6 L 949.4,326.7 L 1017.1,257.5 L 1084.7,277.8 L 1152.4,220.8 L 1220.0,345.0 L 1220,345 L 70,345 Z" fill="url(#inputArea)"/>
+
+                <polyline points="70.0,345.0 137.6,324.6 205.3,255.4 272.9,182.1 340.6,255.4 408.2,308.4 475.9,108.9 543.5,137.4 611.2,153.6 678.8,214.7 746.5,72.2 814.1,275.8 881.8,304.3 949.4,328.7 1017.1,84.4 1084.7,184.2 1152.4,110.9 1220.0,320.6" fill="none" stroke="#16b4d8" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+                <polyline points="70.0,345.0 137.6,343.0 205.3,332.8 272.9,308.4 340.6,286.0 408.2,326.7 475.9,306.3 543.5,304.3 611.2,310.4 678.8,296.1 746.5,316.5 814.1,273.8 881.8,320.6 949.4,326.7 1017.1,257.5 1084.7,277.8 1152.4,220.8 1220.0,345.0" fill="none" stroke="#3b82f6" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <polyline points="70.0,345.0 137.6,344.6 205.3,344.2 272.9,343.4 340.6,343.4 408.2,344.2 475.9,344.2 543.5,344.2 611.2,344.2 678.8,344.2 746.5,344.6 814.1,344.6 881.8,344.6 949.4,343.8 1017.1,343.4 1084.7,343.8 1152.4,343.4 1220.0,344.6" fill="none" stroke="#10b981" stroke-width="3" stroke-linecap="round"/>
+                <polyline points="70.0,345.0 137.6,345.0 205.3,343.0 272.9,341.7 340.6,342.6 408.2,343.8 475.9,343.4 543.5,343.4 611.2,343.8 678.8,344.2 746.5,344.2 814.1,344.6 881.8,344.6 949.4,344.2 1017.1,343.8 1084.7,344.2 1152.4,344.2 1220.0,345.0" fill="none" stroke="#f59e0b" stroke-width="3" stroke-linecap="round"/>
+
+                <g fill="#ffffff" stroke-width="3">
+                  <g stroke="#16b4d8">
+                    <circle cx="70.0" cy="345.0" r="4.5"/><circle cx="137.6" cy="324.6" r="4.5"/><circle cx="205.3" cy="255.4" r="4.5"/><circle cx="272.9" cy="182.1" r="4.5"/><circle cx="340.6" cy="255.4" r="4.5"/><circle cx="408.2" cy="308.4" r="4.5"/><circle cx="475.9" cy="108.9" r="4.5"/><circle cx="543.5" cy="137.4" r="4.5"/><circle cx="611.2" cy="153.6" r="4.5"/><circle cx="678.8" cy="214.7" r="4.5"/><circle cx="746.5" cy="72.2" r="4.5"/><circle cx="814.1" cy="275.8" r="4.5"/><circle cx="881.8" cy="304.3" r="4.5"/><circle cx="949.4" cy="328.7" r="4.5"/><circle cx="1017.1" cy="84.4" r="4.5"/><circle cx="1084.7" cy="184.2" r="4.5"/><circle cx="1152.4" cy="110.9" r="4.5"/><circle cx="1220.0" cy="320.6" r="4.5"/>
+                  </g>
+                  <g stroke="#3b82f6">
+                    <circle cx="70.0" cy="345.0" r="4"/><circle cx="137.6" cy="343.0" r="4"/><circle cx="205.3" cy="332.8" r="4"/><circle cx="272.9" cy="308.4" r="4"/><circle cx="340.6" cy="286.0" r="4"/><circle cx="408.2" cy="326.7" r="4"/><circle cx="475.9" cy="306.3" r="4"/><circle cx="543.5" cy="304.3" r="4"/><circle cx="611.2" cy="310.4" r="4"/><circle cx="678.8" cy="296.1" r="4"/><circle cx="746.5" cy="316.5" r="4"/><circle cx="814.1" cy="273.8" r="4"/><circle cx="881.8" cy="320.6" r="4"/><circle cx="949.4" cy="326.7" r="4"/><circle cx="1017.1" cy="257.5" r="4"/><circle cx="1084.7" cy="277.8" r="4"/><circle cx="1152.4" cy="220.8" r="4"/><circle cx="1220.0" cy="345.0" r="4"/>
+                  </g>
+                </g>
+
+                <g font-size="10.5" fill="#425166" text-anchor="middle">
+                  <text x="70.0" y="372">03-24</text>
+                  <text x="137.6" y="372">03-25</text>
+                  <text x="205.3" y="372">03-26</text>
+                  <text x="272.9" y="372">03-27</text>
+                  <text x="340.6" y="372">03-28</text>
+                  <text x="408.2" y="372">03-29</text>
+                  <text x="475.9" y="372">03-30</text>
+                  <text x="543.5" y="372">03-31</text>
+                  <text x="611.2" y="372">04-01</text>
+                  <text x="678.8" y="372">04-02</text>
+                  <text x="746.5" y="372">04-03</text>
+                  <text x="814.1" y="372">04-04</text>
+                  <text x="881.8" y="372">04-05</text>
+                  <text x="949.4" y="372">04-06</text>
+                  <text x="1017.1" y="372">04-07</text>
+                  <text x="1084.7" y="372">04-08</text>
+                  <text x="1152.4" y="372">04-09</text>
+                  <text x="1220.0" y="372">04-10</text>
+                </g>
+          </svg>
+        </div>
+      </div>
+      <footer class="footer">
+        <div></div>
+        <div>Slide 0 / 4</div>
+      </footer>
+    </section>
+
+    <section class="slide" id="slide-2">
+      <header class="header">
+        <div class="chapter">
+          <div class="chapter-num">01</div>
+          <div class="chapter-text">Clock ownership<br>platform law</div>
+        </div>
+        <div class="hero">
+          <div class="eyebrow">Platform Highlight</div>
+          <h1>精妙设计一：`MemBlockEnv` 独占时钟推进权</h1>
+          <div class="accent-bar"></div>
+          <p class="subtitle">关键不是“多跑几拍”，而是 <span class="highlight">谁定义每一拍的执行顺序</span>。平台先把拍的解释权收回来，后续 monitor、model、coverage 才有统一基准。</p>
+        </div>
+        <div class="badge-stack">
+          <div class="badge">EnvClockKernel</div>
+          <div class="badge">Single owner of `Step()`</div>
+          <div class="badge">drive -&gt; DUT -&gt; update</div>
+        </div>
+      </header>
+      <div class="body">
+        <div class="story-grid">
+          <article class="card problem-card">
+            <div class="chip-row"><span class="chip problem">Problem</span></div>
+            <strong>`Step()` 权力分散</strong>
+            <ul>
+              <li>agent / helper / wait 各自推进，拍前拍后顺序漂移</li>
+              <li>一次 bug 可能依赖“谁先抢到这拍”</li>
+              <li>callback、coverage、commit update 没有统一挂点</li>
+            </ul>
+          </article>
+          <article class="card solution-card">
+            <div class="chip-row"><span class="chip solution">Solution</span></div>
+            <strong>所有入口都只“申请推进”</strong>
+            <ul>
+              <li>`dut.Step(1)` 只允许 env 内核发起</li>
+              <li>`advance_cycles()`、backend facade、wait helper 全变包装层</li>
+              <li>每拍固定顺序：drive -&gt; DUT -&gt; monitor/model/update</li>
+            </ul>
+          </article>
+        </div>
+
+        <div class="gain-grid">
+          <article class="summary">
+            <strong>Gain 1</strong>
+            <p>debug 可复现，因为所有异步动作都回到同一拍序里。</p>
+          </article>
+          <article class="summary">
+            <strong>Gain 2</strong>
+            <p>平台级观察点有了固定拍后挂载位置，语义不再飘。</p>
+          </article>
+        </div>
+
+        <div class="summary-grid">
+          <article class="summary">
+            <strong>唯一 owner</strong>
+            <p>所有入口最终只落到一个 `step()`。</p>
+          </article>
+          <article class="summary">
+            <strong>固定拍序</strong>
+            <p>每拍都按 drive -&gt; DUT -&gt; update 执行。</p>
+          </article>
+          <article class="summary">
+            <strong>统一挂点</strong>
+            <p>callback、coverage、commit update 都挂在拍后。</p>
+          </article>
+        </div>
+
+        <section class="mermaid-box">
+          <div class="mermaid-head">
+            <strong>统一时钟所有权</strong>
+            <span>Mermaid-like flow</span>
+          </div>
+          <div class="mermaid-flow">
+            <div class="node problem">testcase /<br>sequence</div>
+            <div class="arrow">-&gt;</div>
+            <div class="node problem">backend facade /<br>wait helper</div>
+            <div class="arrow">-&gt;</div>
+            <div class="node shared">MemBlockEnv<br>facade</div>
+            <div class="arrow">-&gt;</div>
+            <div class="node shared">EnvClockKernel<br>.step()</div>
+            <div class="arrow">-&gt;</div>
+            <div class="node solution">dut.Step(1)</div>
+          </div>
+          <p class="footnote">上层组件可以请求推进，但不再直接拥有 DUT 拍推进权。</p>
+        </section>
+      </div>
+      <footer class="footer">
+        <div>本质：先把“拍”的解释权制度化，再谈上层 helper 的易用性。</div>
+        <div>Slide 1 / 4</div>
+      </footer>
+    </section>
+
+    <section class="slide" id="slide-3">
+      <header class="header">
+        <div class="chapter">
+          <div class="chapter-num">02</div>
+          <div class="chapter-text">Plan beats<br>helper explosion</div>
+        </div>
+        <div class="hero">
+          <div class="eyebrow">Platform Highlight</div>
+          <h2>精妙设计二：`BackendSendPlan` 收敛 helper 爆炸</h2>
+          <div class="accent-bar"></div>
+          <p class="subtitle">核心转变：复杂性不再写进 helper 名字，而是写进 <span class="highlight">plan 的组合语义</span>。接口数量不再随场景笛卡尔膨胀。</p>
+        </div>
+        <div class="badge-stack">
+          <div class="badge">Txn -&gt; CyclePlan -&gt; Script</div>
+          <div class="badge">Legacy vs Plan</div>
+          <div class="badge">ROB semantics in one place</div>
+        </div>
+      </header>
+      <div class="body">
+        <div class="compare-grid">
+          <article class="panel compare-panel problem-card">
+            <div class="panel-top">
+              <span class="panel-label legacy">Legacy</span>
+              <span class="panel-note">函数名承担组合语义</span>
+            </div>
+            <strong>旧接口：名字越长，边界越糊</strong>
+            <pre class="code">send_load(load0)
+send_load_batch_same_cycle(load0, load1)
+send_load_batch_with_sta_same_cycle(
+  [load0, load1],
+  sta_req_id=..., sta_sq_ptr=..., sta_addr=...
+)</pre>
+            <p class="mini">每加一种并发 / 排序组合，就要再造一个 public helper。</p>
+          </article>
+
+          <article class="panel compare-panel solution-card">
+            <div class="panel-top">
+              <span class="panel-label plan">Plan</span>
+              <span class="panel-note">结构直接写进脚本</span>
+            </div>
+            <strong>`Plan`：testcase 直接描述发送结构</strong>
+            <pre class="code">env.backend.execute(
+  BackendSendPlan.from_steps(
+    EnqueueLoadCyclePlan.from_txns(load0, load1),
+    IssueCyclePlan.from_ops(
+      IssueOp.load_from_txn(load0),
+      IssueOp.load_from_txn(load1),
+    ),
+  )
+)</pre>
+            <p class="mini">“同拍 enqueue + 同拍双 lane issue” 直接写成脚本，不再编码到名字里。</p>
+          </article>
+        </div>
+
+        <div class="summary-grid">
+          <article class="summary">
+            <strong>Txn</strong>
+            <p>单笔事务保持小而稳定，不负责跨拍编排。</p>
+          </article>
+          <article class="summary">
+            <strong>IssueCyclePlan</strong>
+            <p>描述这一拍发什么，lane 关系天然可组合。</p>
+          </article>
+          <article class="summary">
+            <strong>BackendSendPlan</strong>
+            <p>负责多拍脚本，也能容纳 blocker / commit frontier。</p>
+          </article>
+        </div>
+
+        <article class="panel design-card">
+          <div class="chip-row"><span class="chip design">One more example</span></div>
+          <strong>更高阶的 ROB 语义仍留在同一个 plan</strong>
+          <pre class="code">BackendSendPlan.from_steps(
+  NonMemBlockerStep.insert(...),
+  EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
+  StoreCommitStep(count=1),
+  NonMemBlockerStep.release(...),
+  StoreCommitStep(count=1),
+)</pre>
+          <p class="mini">请求顺序、阻塞条件、commit frontier 继续留在一段脚本里，而不是散成多套 helper。</p>
+        </article>
+      </div>
+      <footer class="footer">
+        <div>本质：把“接口数量问题”改写成“脚本表达能力问题”。</div>
+        <div>Slide 2 / 4</div>
+      </footer>
+    </section>
+
+    <section class="slide" id="slide-4">
+      <header class="header">
+        <div class="chapter">
+          <div class="chapter-num">03</div>
+          <div class="chapter-text">Commit boundary<br>plus clone</div>
+        </div>
+        <div class="hero">
+          <div class="eyebrow">Platform Highlight</div>
+          <h2>精妙设计三：`MemoryModel` 收口乱序语义</h2>
+          <div class="accent-bar"></div>
+          <p class="subtitle">关键不是“有一个内存数组”，而是同时回答两个难题：<span class="highlight">何时 compare 才合法</span>，以及 <span class="highlight">golden 预期如何不依赖 DUT 中间态</span>。</p>
+        </div>
+        <div class="badge-stack">
+          <div class="badge">commit-boundary compare</div>
+          <div class="badge">flush / drain closure</div>
+          <div class="badge">RefMemory.clone()</div>
+        </div>
+      </header>
+      <div class="body">
+        <div class="summary-grid">
+          <article class="summary">
+            <strong>Load：按边界比</strong>
+            <p>writeback 先缓存，等 commit boundary 再 compare。</p>
+          </article>
+          <article class="summary">
+            <strong>Store：按收口比</strong>
+            <p>store 在 `flush / drain` 做 closure compare。</p>
+          </article>
+          <article class="summary">
+            <strong>Expected：由 fork 推演</strong>
+            <p>store expected 来自 fork 后的 golden 推演。</p>
+          </article>
+        </div>
+
+        <div class="flow-grid split-stage">
+          <div class="lane-stack">
+            <article class="lane">
+              <div class="lane-head">
+                <div class="lane-title">Load compare</div>
+                <div class="lane-tag">retire-aware</div>
+              </div>
+              <div class="lane-flow">
+                <div class="node problem">expect<br>load</div>
+                <div class="arrow">-&gt;</div>
+                <div class="node problem">observe<br>writeback</div>
+                <div class="arrow">-&gt;</div>
+                <div class="node shared">wait commit<br>boundary</div>
+                <div class="arrow">-&gt;</div>
+                <div class="node shared">retire older<br>stores</div>
+                <div class="arrow">-&gt;</div>
+                <div class="node solution">compare vs<br>golden</div>
+              </div>
+              <p>compare 时机由程序序边界决定，不由 writeback 到达时刻决定。</p>
+            </article>
+
+            <article class="lane">
+              <div class="lane-head">
+                <div class="lane-title">Store compare</div>
+                <div class="lane-tag">closure</div>
+              </div>
+              <div class="store-graph">
+                <div class="node problem sg-start">track store<br>intent</div>
+                <div class="arrow sg-a1">-&gt;</div>
+                <div class="node shared sg-drain">flushSb +<br>drain</div>
+                <div class="arrow sg-a2">-&gt;</div>
+                <div class="node solution sg-close">closure<br>compare</div>
+
+                <div class="fork-pill sg-fork">fork</div>
+                <div class="arrow sg-a3">-&gt;</div>
+                <div class="node solution sg-exp">golden<br>expected</div>
+                <div class="branch-arrow sg-a4">--&gt;</div>
+              </div>
+              <p>主线负责收口最终可见性，fork 支线派生 golden expected，最后一起汇到 closure compare。</p>
+            </article>
+          </div>
+
+          <article class="panel explain-box">
+            <div class="chip-row"><span class="chip solution">Store expected</span></div>
+            <strong>`clone` 只负责生成 store expected</strong>
+            <p class="mini">它不是另一条 compare 主线，只是把 expected 留在独立 golden view 里。</p>
+
+            <div class="subbox">
+              <div class="subbox-title">机制层</div>
+              <p class="mini">`RefMemory.clone()`：fork 后推演不污染主 golden state。</p>
+            </div>
+
+            <div class="subbox">
+              <div class="subbox-title">用法层</div>
+              <p class="mini">`fork_ref_memory()` 后连续 `apply_store(...)`，把多笔 store 的预期留在 fork 出来的 golden view 里。</p>
+            </div>
+
+            <div class="formula"><code>expected_ref = env.memory.fork_ref_memory()</code><br><code>expected_ref.apply_store(addr0, data0, mask0)</code><br><code>expected_ref.apply_store(addr1, data1, mask1)</code></div>
+          </article>
+        </div>
+
+        <div class="tags">
+          <div class="tag">semantic checker</div>
+          <div class="tag">deferred visibility</div>
+          <div class="tag">stimulus-derived golden</div>
+        </div>
+      </div>
+      <footer class="footer">
+        <div>本质：compare 时机由程序序边界定义，golden 预期由 clone/fork 机制保持独立。</div>
+        <div>Slide 3 / 4</div>
+      </footer>
+    </section>
+
+    <section class="slide" id="slide-5">
+      <header class="header">
+        <div class="chapter">
+          <div class="chapter-num">04</div>
+          <div class="chapter-text">Test spread<br>coverage status</div>
+        </div>
+        <div class="hero">
+          <div class="eyebrow">Current Status</div>
+          <h2>当前状态：测试分布与覆盖率</h2>
+          <div class="accent-bar"></div>
+          <p class="subtitle">这页不讲某个 testcase，而是回答两个现实问题：<span class="highlight">平台的测试力量投在哪</span>，以及 <span class="highlight">coverage 目前真正亮到了哪里</span>。</p>
+        </div>
+        <div class="badge-stack">
+          <div class="badge">Layer map</div>
+          <div class="badge">Scenario coverage</div>
+          <div class="badge warn">XFAIL remains</div>
+        </div>
+      </header>
+      <div class="body">
+        <div class="summary-grid">
+          <article class="summary">
+            <strong>14 个文件</strong>
+            <p>覆盖平台、语义、主流水与深状态层。</p>
+          </article>
+          <article class="summary">
+            <strong>110 个函数</strong>
+            <p>不是只堆 directed case，也在托住平台演进。</p>
+          </article>
+          <article class="summary">
+            <strong>完整快照</strong>
+            <p>2026-04-13：`107 PASSED + <span class="xfail-mark">3 XFAIL</span>`。</p>
+          </article>
+        </div>
+
+        <div class="flow-grid split-stage">
+          <article class="panel design-card">
+            <div class="chip-row"><span class="chip design">Layer map</span></div>
+            <strong>层次覆盖：从平台地基托到访存深状态</strong>
+            <div class="layer-map">
+              <div class="layer-card corner level-4">
+                <strong>深状态 / 边角层 <em>7 tests</em></strong>
+                <p>`store_misalign` 继续往 `StoreMisalignBuffer`、cross-16B、cross-page 这些硬路径压。</p>
+              </div>
+              <div class="layer-card pipeline level-3">
+                <strong>主访存流水层 <em>34 tests</em></strong>
+                <p>`scalar_load/store_pipeline`、`random_load/store`、`replay`、`ordering`，覆盖 cacheable ld/st 主干行为。</p>
+              </div>
+              <div class="layer-card semantic level-2">
+                <strong>语义判定层 <em>24 tests</em></strong>
+                <p>`memory_model_store_logic`、`rob_agent`、`rob_coverage`，负责 compare、frontier、drain、coverage 解释。</p>
+              </div>
+              <div class="layer-card platform level-1">
+                <strong>平台控制层 <em>45 tests</em></strong>
+                <p>`env_fixture`、`request_apis_backend_facade`、`env_mmu_smoke`、`lsq_webui_backend`，先托稳 clock、facade、API、观测面。</p>
+              </div>
+            </div>
+          </article>
+
+          <article class="panel solution-card">
+            <div class="chip-row"><span class="chip solution">Coverage snapshot</span></div>
+            <strong>场景覆盖：主线已亮，未覆盖特性也很明确</strong>
+            <div class="coverage-grid">
+              <div class="kpi">
+                <strong>65.3%</strong>
+                <span>line coverage</span>
+              </div>
+              <div class="kpi">
+                <strong>61.5%</strong>
+                <span>branch coverage</span>
+              </div>
+              <div class="kpi">
+                <strong>107 / 3</strong>
+                <span>passed / <span class="xfail-mark">XFAIL</span></span>
+              </div>
+              <div class="kpi">
+                <strong>4 类</strong>
+                <span>主线、深状态、空洞、未涉及</span>
+              </div>
+            </div>
+            <div class="scenario-grid">
+              <div class="scenario-card">
+                <strong>已覆盖主线</strong>
+                <p>cacheable scalar ld/st、random、replay、ordering、commit/drain 主干已有真实 DUT 闭环。</p>
+              </div>
+              <div class="scenario-card">
+                <strong>已推进深状态</strong>
+                <p>partial-mask、cross-16B misalign、overlap compare 已进入稳定 directed case。</p>
+              </div>
+              <div class="scenario-card warn">
+                <strong>仍在推进的空洞</strong>
+                <p>NC / MMIO 尾部语义、cross-page misalign 还没闭环，当前仍保留 <span class="xfail-mark">XFAIL</span>。</p>
+              </div>
+              <div class="scenario-card">
+                <strong>尚未系统涉及</strong>
+                <p>CMO、prefetch、向量访存等特性当前基本还没进入这套验证主线。</p>
+              </div>
+            </div>
+          </article>
+        </div>
+
+        <div class="feature-tabs">
+          <div class="feature-tab active">
+            <div class="feature-top">
+              <div class="feature-name">LoadPipeline</div>
+              <div class="feature-state">已开始</div>
+            </div>
+            <div class="feature-pct">65.8%</div>
+            <div class="feature-desc">`LoadUnit` / `LoadQueue` / `VirtualLoadQueue`</div>
+          </div>
+          <div class="feature-tab active">
+            <div class="feature-top">
+              <div class="feature-name">StorePipeline</div>
+              <div class="feature-state">已开始</div>
+            </div>
+            <div class="feature-pct">63.3%</div>
+            <div class="feature-desc">`StoreUnit` / `NewStoreQueue` / `Sbuffer`</div>
+          </div>
+          <div class="feature-tab active">
+            <div class="feature-top">
+              <div class="feature-name">Replay</div>
+              <div class="feature-state">已开始</div>
+            </div>
+            <div class="feature-pct">65.9%</div>
+            <div class="feature-desc">`LoadQueueReplay` / `RAW` / `RAR`</div>
+          </div>
+          <div class="feature-tab passive">
+            <div class="feature-top">
+              <div class="feature-name">Prefetch</div>
+              <div class="feature-state">被动命中</div>
+            </div>
+            <div class="feature-pct">56.1%</div>
+            <div class="feature-desc">`PrefetcherWrapper` / `L1` / `SMS` / `Berti`</div>
+          </div>
+          <div class="feature-tab passive">
+            <div class="feature-top">
+              <div class="feature-name">DCache</div>
+              <div class="feature-state">被动命中</div>
+            </div>
+            <div class="feature-pct">64.3%</div>
+            <div class="feature-desc">`DCache` / `DCacheWrapper`</div>
+          </div>
+          <div class="feature-tab passive">
+            <div class="feature-top">
+              <div class="feature-name">MMU</div>
+              <div class="feature-state">被动命中</div>
+            </div>
+            <div class="feature-pct">56.8%</div>
+            <div class="feature-desc">`TLBFA` / `L2TLB` / `LLPTW`</div>
+          </div>
+          <div class="feature-tab passive">
+            <div class="feature-top">
+              <div class="feature-name">向量访存</div>
+              <div class="feature-state">被动命中</div>
+            </div>
+            <div class="feature-pct">45.0%</div>
+            <div class="feature-desc">`VSegment` / `VL/VS split-merge`</div>
+          </div>
+        </div>
+        <div class="feature-note">line 覆盖率来自 `toffee_report_full/line_dat/merged.info`，按各特性对应 RTL 模块聚合统计。</div>
+      </div>
+      <footer class="footer">
+        <div>结论：当前平台不是“只有 case 没 coverage”，而是主干已亮、深状态与边角语义仍待继续推进。</div>
+        <div>Slide 4 / 4</div>
+      </footer>
+    </section>
+  </main>
+
+  <script>
+    (function () {
+      const slides = Array.from(document.querySelectorAll('.slide'));
+      let index = 0;
+
+      function show(nextIndex, syncHash = true) {
+        index = Math.max(0, Math.min(nextIndex, slides.length - 1));
+        slides.forEach((slide, i) => slide.classList.toggle('active', i === index));
+        if (syncHash) {
+          history.replaceState(null, '', '#slide-' + (index + 1));
+        }
+        const body = slides[index].querySelector('.body');
+        if (body) {
+          body.scrollTop = 0;
+        }
+        if (window.innerWidth <= 760) {
+          slides[index].scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      }
+
+      document.addEventListener('keydown', (event) => {
+        const key = event.key;
+        if (['ArrowRight', 'PageDown', ' '].includes(key)) {
+          event.preventDefault();
+          show(index + 1);
+        } else if (['ArrowLeft', 'PageUp'].includes(key)) {
+          event.preventDefault();
+          show(index - 1);
+        } else if (key === 'Home') {
+          event.preventDefault();
+          show(0);
+        } else if (key === 'End') {
+          event.preventDefault();
+          show(slides.length - 1);
+        }
+      });
+
+      const fromHash = /^#slide-(\d+)$/.exec(window.location.hash || '');
+      show(fromHash ? Number(fromHash[1]) - 1 : 0, false);
+    })();
+  </script>
+</body>
+</html>
