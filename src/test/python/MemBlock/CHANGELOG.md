@@ -2,7 +2,94 @@
 
 ## 2026-04-12
 
-### 1. 补入 cross-page store-misalign 回归并确认当前 DUT 卡死点
+### 1. 补强 backend / ROB 文档，明确当前半模型与 non-mem blocker 用法
+
+本条目记录一次文档收口：把 backend 主动控制文档与 ROB 建模文档更新到当前实现状态，明确说明 `BackendSendPlan` 已同时承载 backend 脚本与 ROB 语义步骤，并补充 `non-mem blocker` / `store readiness` 的用法示例。
+
+#### 变更摘要
+
+- `README.md`
+  - 补充在同一个 `BackendSendPlan` 中同时编排：
+    - `NonMemBlockerStep`
+    - `StoreCommitReadyStep`
+    - `StoreCommitStep`
+  - 明确当前所谓 `non-mem` 是 ROB 程序序中的 placeholder，而不是新的 `IssueOp`
+- `docs/verification_env_design.md`
+  - 同步 env 总设计文档中的 backend facade / commit path 说明
+  - 明确 `BackendFacade` 现在同时承担 backend 脚本解释与 ROB 半模型语义入口
+  - 增加 env 视角下的 `non-mem blocker` 最小示例
+- `docs/backend_request_model_design.md`
+  - 新增“当前 ROB 半模型与 non-mem op 的语义”说明
+  - 明确：
+    - `load/store/non_mem` 三类 entry 的当前提交规则
+    - `STA/STD` 与 store readiness 的自动同步关系
+    - `non-mem op` 当前是 blocker placeholder，而不是 issue lane 动作
+  - 新增两个完整使用示例：
+    - `non-mem blocker` 阻塞 / release younger mem commit
+    - 显式 `StoreCommitReadyStep` 控制 store readiness
+- `docs/backend_rob_cookbook.md`
+  - 新增面向 testcase / sequence 作者的 cookbook
+  - 收敛单笔 load/store、同拍多 lane、non-mem blocker、store readiness 的常见模板
+- `docs/test_sequence_and_extension_guide.md`
+  - 新增 backend / ROB 场景下“继续写 plan 还是上提成 sequence”的判断规则
+  - 补充：
+    - 一个应继续保留在 plan 层的 `non-mem blocker` 脚本示例
+    - 一个应收敛成 sequence 的 ROB 场景模板判断
+- `docs/rob_model.md`
+  - 在文档前部新增“当前实现快照”，用短摘要说明当前 ROB 半模型已经落地的能力、边界与推荐控制面
+
+#### 说明
+
+- 这次变更不改变代码行为，目标是让后续 testcase / sequence 开发者能直接从文档理解：
+  - 现在的 ROB 半模型到底已经支持到哪一步
+  - non-mem blocker 应该如何表达
+  - 何时应该用 `send()`，何时应该切到 `execute(BackendSendPlan(...))`
+
+### 2. 打通 ROB 语义步骤与 non-mem/store-readiness 半模型
+
+本条目记录一次围绕 ROB/backend 主动控制面的补强：把 `BackendSendPlan` 从“enqueue/issue/commit 脚本”扩展为“既能编排 backend 请求，也能编排 ROB 语义步骤”的统一脚本容器，同时落地 `non-mem blocker` 与 `store commit readiness` 两项 ROB 半模型能力。
+
+#### 变更摘要
+
+- `transactions.py` / `agents/backend_facade.py`
+  - `BackendSendPlan` 新增：
+    - `NonMemBlockerStep`
+    - `StoreCommitReadyStep`
+  - `BackendFacade.execute()` 现在除了原有 enqueue / issue / commit pulse 外，还能解释：
+    - insert / release non-mem blocker
+    - 显式 store commit readiness 更新
+  - `IssueCyclePlan` 中的 `STA/STD` 还会自动把 store addr/data 就绪状态同步到 ROB 半模型
+- `agents/commit_agent.py` / `agents/rob_agent.py`
+  - `RobEntry` 从原先的 mem-only `load/store` 扩展为 `load/store/non_mem`
+  - `non_mem` 支持 release 前阻塞 frontier，release 后恢复推进
+  - store commit 从 token-only 升级为 `token + readiness`
+  - 新增按 `sq_idx` 跟踪 store readiness 的内部映射，并补充 blocker/readiness 统计，供 coverage 与调试复用
+- `model/rob_coverage.py`
+  - 移除 `non_mem_blocker_not_modelled`
+  - 新增 non-mem blocker 与 store readiness 正向 coverage 点
+- `tests/test_request_apis_backend_facade.py` / `tests/test_MemBlock_rob_agent.py` / `tests/test_MemBlock_rob_coverage.py` / `tests/test_MemBlock_env_fixture.py`
+  - 补齐 ROB 语义步骤、store readiness、non-mem blocker 的单测与 env fixture 冒烟
+- `README.md` / `docs/backend_request_model_design.md` / `docs/rob_model.md` / `docs/rob_todo.md`
+  - 同步记录 `BackendSendPlan` 现已承载 ROB 语义步骤，以及当前 ROB 半模型边界
+
+#### 验证情况
+
+- `python3 -m py_compile`
+  - `src/test/python/MemBlock/transactions.py`
+  - `src/test/python/MemBlock/agents/backend_facade.py`
+  - `src/test/python/MemBlock/agents/commit_agent.py`
+  - `src/test/python/MemBlock/agents/rob_agent.py`
+  - `src/test/python/MemBlock/model/rob_coverage.py`
+  - `src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_rob_agent.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_rob_coverage.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_rob_agent.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_rob_coverage.py -k 'smoke_sample or samples_new_rob_frontier_points'`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py -k 'backend_non_mem_blocker_controls_rob or backend_mark_store_commit_ready_updates_rob or backend_note_store_allocated_updates_state or backend_note_load_completed_advances_pending_ptr'`
+
+### 3. 补入 cross-page store-misalign 回归并确认当前 DUT 卡死点
 
 本条目记录在独立 `store-misalign` 测试文件中继续推进 cross-page 标量 store-misalign。该轮工作没有通过放宽 assert 来“做绿”，而是把真实失败收敛成可重复的 xfail 触发器，并明确区分 testcase 设计、环境能力与 DUT 行为。
 
@@ -39,7 +126,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'misaligned or partial or burst'`
   - 结果：`7 passed, 2 deselected`
 
-### 2. 新增独立 store-misalign 测试文件并修复 cross-16B 环境建模
+### 4. 新增独立 store-misalign 测试文件并修复 cross-16B 环境建模
 
 本条目记录一次围绕 `StoreMisalignBuffer` 的专项补强：新增独立的 cross-16B store-misalign directed testcase，同时根据这些 testcase 暴露出来的真实失败，修复环境对 split store retire 与 sbuffer drain pair 的建模缺口。
 

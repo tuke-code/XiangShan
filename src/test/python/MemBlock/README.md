@@ -76,6 +76,8 @@
   - 验证环境总设计，涵盖 `MemBlockEnv`、统一时钟内核、`agents`、`monitors`、`Scoreboard`、`sequences`、`EnvConfig` 的分层关系、实现思路和演进方向。
 - `backend_request_model_design.md`
   - backend 主动控制请求模型专项说明，重点覆盖 `env.backend.send(...)`、`env.backend.execute(...)`、`IssueCyclePlan`、`BackendSendPlan`、`StoreTxn.mask -> SB/SH/SW/SD` 映射与兼容层收敛策略。
+- `backend_rob_cookbook.md`
+  - 面向 testcase / sequence 作者的 backend/ROB cookbook，集中给出 `BackendSendPlan`、`NonMemBlockerStep`、`StoreCommitReadyStep` 的常见脚本模板。
 - `misalign.md`
   - 面向 scalar load/store misalign 的专题分析，集中说明 DUT 中 misalign 的当前设计形态、验证功能点、推荐验证方案，以及当前环境与 testcase 的满足情况。
 - `clock_control_and_migration_guide.md`
@@ -107,16 +109,17 @@
 2. `CHANGELOG.md`
 3. `docs/verification_env_design.md`
 4. `docs/backend_request_model_design.md`
-5. `docs/clock_control_and_migration_guide.md`
-6. `docs/memory_model_design.md`
-7. `docs/rob_model.md`
-8. `docs/coverage_summary.md`
-9. `docs/coverage_todo.md`
-10. `docs/vp_pipeline_plan.md`
-11. `tests/test_MemBlock_scalar_load_pipeline.py`
-12. `tests/test_MemBlock_scalar_store_pipeline.py`
-13. `tests/test_MemBlock_scalar_ordering.py`
-14. `tests/test_MemBlock_replay.py`
+5. `docs/backend_rob_cookbook.md`
+6. `docs/clock_control_and_migration_guide.md`
+7. `docs/memory_model_design.md`
+8. `docs/rob_model.md`
+9. `docs/coverage_summary.md`
+10. `docs/coverage_todo.md`
+11. `docs/vp_pipeline_plan.md`
+12. `tests/test_MemBlock_scalar_load_pipeline.py`
+13. `tests/test_MemBlock_scalar_store_pipeline.py`
+14. `tests/test_MemBlock_scalar_ordering.py`
+15. `tests/test_MemBlock_replay.py`
 
 ## 当前测试与报告入口
 
@@ -163,6 +166,44 @@ env.backend.execute(
 )
 ```
 
+如果场景还需要显式操控 ROB 侧阻塞/放行语义，也继续在同一个 `BackendSendPlan` 中补充 ROB 语义步骤，例如 `NonMemBlockerStep`、`StoreCommitReadyStep`，而不是直接操作 `env.rob_agent` 内部队列。
+
+例如，下面这类场景适合直接写在同一个 plan 里：
+
+```python
+from transactions import (
+    BackendSendPlan,
+    EnqueueStoreStep,
+    IssueCyclePlan,
+    IssueOp,
+    NonMemBlockerStep,
+    StoreCommitReadyStep,
+    StoreCommitStep,
+    StoreRef,
+)
+
+store_ref = StoreRef("younger_store")
+
+env.backend.execute(
+    BackendSendPlan.from_steps(
+        NonMemBlockerStep.insert(rob_idx_flag=0, rob_idx_value=0x22),
+        EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
+        IssueCyclePlan.from_ops(
+            IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data, mask=store_txn.mask)
+        ),
+        IssueCyclePlan.from_ops(
+            IssueOp.sta(req_id=store_txn.req_id, sq_ptr=store_ref, addr=store_txn.addr, mask=store_txn.mask)
+        ),
+        StoreCommitReadyStep(sq_ptr=store_ref, ready=True),
+        StoreCommitStep(count=1),  # 这里仍会被 older non-mem blocker 卡住
+        NonMemBlockerStep.release(rob_idx_flag=0, rob_idx_value=0x22),
+        StoreCommitStep(count=1),
+    )
+)
+```
+
+这里的 `non-mem` 不是一条真的 issue 到 lane 的指令，而是 ROB 程序序里的一个 non-mem placeholder，用来表达“older non-mem op 还没允许提交，younger mem 不能越过它”的语义。
+
 这套请求脚本模型的设计动机、对象关系与扩展规则，详见 `src/test/python/MemBlock/docs/backend_request_model_design.md`。
 
 当前已稳定存在的测试类型：
@@ -185,7 +226,7 @@ env.backend.execute(
 
 - 新 testcase 优先通过 sequence + `MemBlockEnv` public facade 组织，不直接依赖 `env.memory` 内部容器。
 - 主动控制入口默认使用 `env.backend` 或 `request_apis.py`，不要再新增 `env.note_*` / `env.pulse_*` 风格 helper。
-- 需要验证 backend/issue 的拍级发送组合时优先写 `BackendSendPlan`；需要沉淀可复用测试场景时优先上提成 sequence。
+- 需要验证 backend/issue 的拍级发送组合，或显式编排 ROB blocker / store readiness 时优先写 `BackendSendPlan`；需要沉淀可复用测试场景时优先上提成 sequence。
 - 需要新增 DUT 白盒观测时，优先扩 `monitors/` 或 env facade，不把私有 DUT 命名直接散落到测试文件。
 - 需要增强检查逻辑时，优先修改 `model/` 与相应设计文档，不在 testcase 中堆临时判断。
 - 覆盖率状态与下一步补强工作以 `coverage_summary.md` 和 `coverage_todo.md` 为准。

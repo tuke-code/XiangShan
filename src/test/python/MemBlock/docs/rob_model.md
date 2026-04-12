@@ -30,6 +30,60 @@ load compare 则仍然主要靠 MemBlock 对外导出的 `lqDeq` 做提交预算
 
 本文档聚焦的是 `ROB <-> MemBlock` 的验证代理建模问题，不讨论完整后端流水线功能验证，也不尝试在 Python 侧重建整个 XiangShan backend。
 
+> 2026-04-12 更新：当前代码已经落地本文后续规划中的两项关键补强——`non-mem blocker` 与 `store commit readiness`。因此这里对“当前模型”的描述，应理解为“一个已支持 `load/store/non_mem`、可通过 `BackendSendPlan` 编排 ROB 语义步骤的半模型”，而不再是最早期的 mem-only token 模型。
+
+## 1.1 当前实现快照
+
+为了避免把后文的大量历史分析与“当前代码到底已经做到哪里”混在一起，这里先给出一个简明快照。以当前实现为准，ROB 半模型具备以下行为：
+
+- entry 类型
+  - `load`
+  - `store`
+  - `non_mem`
+- commit frontier 规则
+  - `load` 只有在 `exec_completed=True` 时才能进入 commit packet
+  - `store` 只有在 `store token` 可用且 entry 自身 `commit_ready=True` 时才能进入 commit packet
+  - `non_mem` 在 release 前会卡住 ROB 连续前缀，younger mem 不得越过
+- store readiness 来源
+  - 常规路径下，`STD` / `STA` 对应的数据和地址就绪会在 `BackendFacade.execute()` 执行 `IssueCyclePlan` 时自动同步到 ROB 半模型
+  - 如 testcase 需要更细粒度地控制 ready 时机，可显式使用 `StoreCommitReadyStep`
+- non-mem op 的语义
+  - 当前实现里的 “non-mem op” 本质上是 **ROB non-mem placeholder / blocker**
+  - 它表达的是“ROB 程序序上存在一条 older non-mem 指令，当前是否允许提交”
+  - 它不是 `IssueOp`，不会去驱动某条 issue lane
+- 推荐控制面
+  - 普通单笔 load/store 继续优先用 `env.backend.send(...)`
+  - 需要控制拍级排列、non-mem blocker、store readiness 时，优先用 `env.backend.execute(BackendSendPlan(...))`
+  - testcase 不应直接改 `env.rob_agent` 内部状态
+
+一个最小示意例如下：
+
+```python
+env.backend.execute(
+    BackendSendPlan.from_steps(
+        NonMemBlockerStep.insert(rob_idx_flag=0, rob_idx_value=0x21),
+        EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
+        IssueCyclePlan.from_ops(
+            IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data, mask=store_txn.mask)
+        ),
+        IssueCyclePlan.from_ops(
+            IssueOp.sta(req_id=store_txn.req_id, sq_ptr=store_ref, addr=store_txn.addr, mask=store_txn.mask)
+        ),
+        StoreCommitStep(count=1),  # younger store 仍会被 non-mem blocker 卡住
+        NonMemBlockerStep.release(rob_idx_flag=0, rob_idx_value=0x21),
+        StoreCommitStep(count=1),
+    )
+)
+```
+
+如果你关心的是“当前代码怎么用”，优先参考：
+
+- `src/test/python/MemBlock/docs/backend_request_model_design.md`
+- `src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+- `src/test/python/MemBlock/tests/test_MemBlock_rob_agent.py`
+
+后文则更多保留设计分析、历史缺口与长期演进背景。
+
 ## 2. 真实后端与 MemBlock 的 ROB 交互接口概览
 
 ### 2.1 真实接口定义

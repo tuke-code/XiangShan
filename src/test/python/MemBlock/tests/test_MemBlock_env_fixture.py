@@ -186,6 +186,32 @@ def test_api_MemBlock_env_backend_note_store_allocated_updates_state(env):
     assert env.rob_agent.stats["rob_pending_entry_count"] == 1
 
 
+def test_api_MemBlock_env_backend_non_mem_blocker_controls_rob(env):
+    """验证 backend facade 能插入并 release non-mem blocker。"""
+
+    env.backend.insert_non_mem_blocker(0, 6)
+    assert env.rob_agent.stats["rob_non_mem_insert_count"] == 1
+    env.backend.release_non_mem_blocker(0, 6)
+    assert env.rob_agent.stats["rob_non_mem_release_count"] == 1
+
+
+def test_api_MemBlock_env_backend_mark_store_commit_ready_updates_rob(env):
+    """验证 backend facade 能按 SQ 指针更新 store commit readiness。"""
+
+    env.backend.note_store_allocated(
+        sq_idx_flag=0,
+        sq_idx_value=8,
+        rob_idx_flag=0,
+        rob_idx_value=0x21,
+    )
+    env.backend.mark_store_commit_ready(0, 8, ready=True)
+    env.backend.queue_store_commit(1)
+    env.rob_agent.advance()
+    env.rob_agent.drive()
+    assert env.commit_agent.latest_commit_packet.commit is True
+    assert env.commit_agent.latest_commit_packet.scommit == 1
+
+
 def test_api_MemBlock_env_cleanup_removes_legacy_control_helpers(env):
     """验证旧的 env.note_*/pulse_* 与 `Step()` 公共控制入口已清理。"""
 

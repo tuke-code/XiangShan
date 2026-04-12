@@ -165,7 +165,136 @@ testcase / sequence / request_apis / env.backend
 
 关于 `env.backend.send(...)` / `env.backend.execute(...)` 及 `IssueCyclePlan`、`BackendSendPlan` 的专项设计说明，见 `src/test/python/MemBlock/docs/backend_request_model_design.md`。
 
+如果你更关心“常见 testcase 到底该怎么写脚本”，而不是对象设计背景，可以直接看：
+
+- `src/test/python/MemBlock/docs/backend_request_model_design.md`
+- `src/test/python/MemBlock/docs/backend_rob_cookbook.md`
+
 需要特别补充的一点是：当前 backend facade 已经把 `StoreTxn.mask` 下沉到标量 store 的 issue `fuOpType`。也就是说，连续低位字节掩码语义的 `SB/SH/SW/SD` 不再需要 testcase 手工写 DUT 编码，公共请求模型已经能直接表达 partial-store。
+
+### 6.1 `BackendFacade` 的当前职责边界
+
+当前 `BackendFacade` 不只是一个“把 load/store helper 包一层”的轻量 facade，它已经承担两类主动控制职责：
+
+1. backend/issue 脚本解释器
+   - enqueue load/store
+   - issue 某一拍的一组 lane 动作
+   - 触发 commit pulse
+2. ROB 半模型语义入口
+   - 插入 / release `non_mem` blocker
+   - 显式设置某条 store 的 commit readiness
+
+因此，testcase / sequence 现在应把 `env.backend` 理解成“统一的 backend-facing 控制面”，而不是只把它当作旧 `send_load()` / `send_store()` 的新名字。
+
+更具体地说：
+
+- 简单单笔事务
+  - 优先 `env.backend.send(load_txn)` / `env.backend.send(store_txn)`
+- 需要拍级组合的 backend 场景
+  - 优先 `env.backend.execute(BackendSendPlan(...))`
+- 需要表达 ROB 程序序阻塞或 store readiness 切换
+  - 仍然优先 `env.backend.execute(BackendSendPlan(...))`
+  - 不要直接修改 `env.rob_agent`
+
+这样做的价值是，backend 请求顺序与 ROB frontier 约束可以留在同一段顺序脚本中表达，便于验证“older op 是否真的挡住了 younger mem”的问题。
+
+### 6.2 当前 ROB 半模型在 env 里的位置
+
+当前 env 内部的 commit/ROB 相关路径，可以概括成：
+
+```text
+Issue / enqueue path
+  -> BackendFacade
+  -> CommitAgent
+  -> RobAgent
+  -> DUT rob-lsq inputs
+
+Monitor / status path
+  -> MemStatusMonitor / StoreMonitor / WritebackMonitor
+  -> Scoreboard / MemoryModel / CommitAgent.advance()
+```
+
+其中 `RobAgent` 当前已经是一个 **ROB-aware 半模型**，而不再是最初只推 `pendingPtr` 的 mem-only token proxy。它当前支持：
+
+- `load`
+  - 只有完成后才可进入 commit frontier
+- `store`
+  - 同时受 `store token` 与 entry 自身 `commit_ready` 约束
+- `non_mem`
+  - 作为 ROB 程序序中的 placeholder / blocker
+  - release 前卡住连续前缀，younger mem 不得越过
+
+这里的 `non_mem` 需要专门强调：
+
+- 它不是新的 `IssueOp`
+- 它不是一条真的会去占用 issue lane 的非访存指令
+- 它是一个 **测试侧 ROB 顺序占位项**
+
+也就是说，env 当前建模的是“non-mem op 对 ROB frontier 的顺序影响”，而不是“完整 backend 非访存执行模型”。这让验证环境能够覆盖：
+
+- older non-mem 挡住 younger load compare
+- older non-mem 挡住 younger store commit
+- older store / non-mem / younger mem 的程序序阻塞
+
+但仍然没有扩展到：
+
+- redirect / cancel / flush 对 frontier 的重建
+- backend feedback / credit 闭环
+- 完整非访存执行来源建模
+
+### 6.3 为什么 non-mem blocker 仍属于 backend 控制面
+
+很多人第一次看到 `NonMemBlockerStep` 会本能地觉得它应该属于 “ROB 专用接口”，不该放在 backend request 模型里。当前设计刻意没有这么做，原因是：
+
+1. testcase 关心的是“一段程序序脚本”
+   - 先 enqueue/issue 哪些 mem
+   - 中间哪里有一个 older non-mem 挡住 frontier
+   - 什么时候 release
+   - 什么时候再给 commit pulse
+2. 这些动作在验证意义上属于同一段顺序脚本
+3. 如果拆成 backend 一套 API、ROB 再一套 API，testcase 反而更容易把程序序写散
+
+因此当前推荐做法是：**凡是同时涉及 backend 发包与 ROB 程序序约束的场景，都优先收敛在同一个 `BackendSendPlan` 里表达。**
+
+### 6.4 一个 env 视角下的最小示例
+
+下面这个例子同时展示：
+
+- 一条 younger store 如何通过 `StoreRef` 绑定实际 SQ pointer
+- `non_mem` blocker 如何卡住 ROB frontier
+- release blocker 后再继续 commit
+
+```python
+from transactions import (
+    BackendSendPlan,
+    EnqueueStoreStep,
+    IssueCyclePlan,
+    IssueOp,
+    NonMemBlockerStep,
+    StoreCommitStep,
+    StoreRef,
+)
+
+store_ref = StoreRef("younger_store")
+
+env.backend.execute(
+    BackendSendPlan.from_steps(
+        NonMemBlockerStep.insert(rob_idx_flag=0, rob_idx_value=0x40),
+        EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
+        IssueCyclePlan.from_ops(
+            IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data, mask=store_txn.mask)
+        ),
+        IssueCyclePlan.from_ops(
+            IssueOp.sta(req_id=store_txn.req_id, sq_ptr=store_ref, addr=store_txn.addr, mask=store_txn.mask)
+        ),
+        StoreCommitStep(count=1),  # 这拍仍会被 older non-mem blocker 卡住
+        NonMemBlockerStep.release(rob_idx_flag=0, rob_idx_value=0x40),
+        StoreCommitStep(count=1),
+    )
+)
+```
+
+如果你想进一步验证“token 已到但 store 自身暂时不应提交”，则在同一类脚本里插入 `StoreCommitReadyStep` 即可。更完整的模板见 `src/test/python/MemBlock/docs/backend_rob_cookbook.md`。
 
 这种划分与 UVM driver 的思想一致，但比传统 driver/seq_item 体系更简单：Python 场景对象不直接碰 pin，agent 统一持有时序细节；testcase 只描述“我要发一个 load/store/flush”，不描述“第几拍拉哪个 valid”。这既降低了 testcase 冗余，也避免多个用例各自复制握手时序。
 

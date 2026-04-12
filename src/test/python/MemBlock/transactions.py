@@ -262,6 +262,35 @@ class StoreCommitStep:
 
 
 @dataclass(frozen=True)
+class NonMemBlockerStep:
+    """Inject or release a ROB-side non-mem blocker inside a backend send plan."""
+
+    action: str
+    rob_idx_flag: int
+    rob_idx_value: int
+
+    def __post_init__(self) -> None:
+        if self.action not in {"insert", "release"}:
+            raise ValueError(f"unsupported non-mem blocker action: {self.action}")
+
+    @classmethod
+    def insert(cls, *, rob_idx_flag: int, rob_idx_value: int) -> "NonMemBlockerStep":
+        return cls(action="insert", rob_idx_flag=rob_idx_flag, rob_idx_value=rob_idx_value)
+
+    @classmethod
+    def release(cls, *, rob_idx_flag: int, rob_idx_value: int) -> "NonMemBlockerStep":
+        return cls(action="release", rob_idx_flag=rob_idx_flag, rob_idx_value=rob_idx_value)
+
+
+@dataclass(frozen=True)
+class StoreCommitReadyStep:
+    """Set the effective ROB-side commit readiness for a store entry."""
+
+    sq_ptr: QueuePtr | StoreRef
+    ready: bool = True
+
+
+@dataclass(frozen=True)
 class BackendSendPlan:
     """Ordered enqueue/issue/commit script executed by BackendFacade."""
 
@@ -270,6 +299,19 @@ class BackendSendPlan:
     def __post_init__(self) -> None:
         if not self.steps:
             raise ValueError("backend send plan requires at least one step")
+        for step in self.steps:
+            if not isinstance(
+                step,
+                (
+                    EnqueueLoadStep,
+                    EnqueueStoreStep,
+                    IssueCyclePlan,
+                    StoreCommitStep,
+                    NonMemBlockerStep,
+                    StoreCommitReadyStep,
+                ),
+            ):
+                raise TypeError(f"unsupported backend send step: {type(step)!r}")
 
     @classmethod
     def from_steps(cls, *steps: object) -> "BackendSendPlan":

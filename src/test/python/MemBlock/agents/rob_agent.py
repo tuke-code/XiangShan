@@ -8,6 +8,8 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
 
+from transactions import QueuePtr
+
 
 @dataclass(frozen=True)
 class RobIndex:
@@ -19,13 +21,17 @@ class RobIndex:
 
 @dataclass
 class RobEntry:
-    """Minimal mem-only ROB entry for Phase 1 commit packet generation."""
+    """ROB entry tracked by the MemBlock-side commit proxy."""
 
     rob_idx: RobIndex
     kind: str
+    sq_ptr: QueuePtr | None = None
     issued: bool = True
     exec_completed: bool = False
-    store_commit_eligible: bool = False
+    addr_ready: bool = False
+    data_ready: bool = False
+    commit_ready: bool = False
+    explicit_commit_ready: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,7 @@ class RobCommitPacket:
     pending_ptr_after: RobIndex
     pending_ptr_next: RobIndex
     committed_entries: tuple[RobEntry, ...] = field(default_factory=tuple)
+    blocked_by: str | None = None
 
     @staticmethod
     def empty(ptr: RobIndex) -> "RobCommitPacket":
@@ -50,11 +57,12 @@ class RobCommitPacket:
             pending_ptr_after=ptr,
             pending_ptr_next=ptr,
             committed_entries=(),
+            blocked_by=None,
         )
 
 
 class RobAgent:
-    """Drive MemBlock ROB/LSQ interface from a mem-only ROB proxy model."""
+    """Drive MemBlock ROB/LSQ interface from a ROB-aware proxy model."""
 
     def __init__(self, dut, rob_size: int) -> None:
         self.dut = dut
@@ -102,6 +110,19 @@ class RobAgent:
             "rob_commit_cycle_count": self.commit_cycle_count,
             "rob_missing_signal_count": sum(0 if present else 1 for present in self.signal_support.values()),
             "rob_pending_entry_count": len(self._entries),
+            "rob_non_mem_insert_count": self.non_mem_insert_count,
+            "rob_non_mem_release_count": self.non_mem_release_count,
+            "rob_non_mem_blocked_cycle_count": self.non_mem_blocked_cycle_count,
+            "rob_non_mem_resume_count": self.non_mem_resume_count,
+            "rob_store_addr_ready_count": self.store_addr_ready_count,
+            "rob_store_data_ready_count": self.store_data_ready_count,
+            "rob_store_explicit_ready_count": self.store_explicit_ready_count,
+            "rob_store_ready_and_token_commit_count": self.store_ready_and_token_commit_count,
+            "rob_store_token_without_ready_count": self.store_token_without_ready_count,
+            "rob_store_ready_without_token_count": self.store_ready_without_token_count,
+            "rob_store_readiness_block_count": self.store_readiness_block_count,
+            "rob_store_readiness_resume_count": self.store_readiness_resume_count,
+            "rob_store_blocks_younger_count": self.store_blocks_younger_count,
         }
 
     def reset(self) -> None:
@@ -109,6 +130,9 @@ class RobAgent:
         self.pending_ptr_next = self.pending_ptr
         self._entries: deque[RobEntry] = deque()
         self._orphan_load_completions: defaultdict[RobIndex, int] = defaultdict(int)
+        self._orphan_non_mem_releases: defaultdict[RobIndex, int] = defaultdict(int)
+        self._store_entries_by_sq: dict[tuple[int, int], RobEntry] = {}
+        self._pending_store_state: dict[tuple[int, int], dict[str, object]] = {}
         self._queued_store_tokens = 0
         self._active_store_tokens = 0
         self._prepared_for_cycle = False
@@ -116,28 +140,134 @@ class RobAgent:
         self.driven_lcommit_count = 0
         self.driven_scommit_count = 0
         self.commit_cycle_count = 0
+        self.non_mem_insert_count = 0
+        self.non_mem_release_count = 0
+        self.non_mem_blocked_cycle_count = 0
+        self.non_mem_resume_count = 0
+        self.store_addr_ready_count = 0
+        self.store_data_ready_count = 0
+        self.store_explicit_ready_count = 0
+        self.store_ready_and_token_commit_count = 0
+        self.store_token_without_ready_count = 0
+        self.store_ready_without_token_count = 0
+        self.store_readiness_block_count = 0
+        self.store_readiness_resume_count = 0
+        self.store_blocks_younger_count = 0
+        self._resume_after_non_mem_block = False
+        self._resume_after_store_block = False
 
     def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         rob_idx = RobIndex(flag=int(rob_idx_flag), value=int(rob_idx_value))
         entry = RobEntry(rob_idx=rob_idx, kind="load")
         if self._orphan_load_completions[rob_idx] > 0:
             entry.exec_completed = True
+            entry.commit_ready = True
             self._orphan_load_completions[rob_idx] -= 1
             if self._orphan_load_completions[rob_idx] == 0:
                 del self._orphan_load_completions[rob_idx]
         self._entries.append(entry)
 
-    def note_store_allocated(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+    def note_store_allocated(
+        self,
+        rob_idx_flag: int,
+        rob_idx_value: int,
+        *,
+        sq_idx_flag: int | None = None,
+        sq_idx_value: int | None = None,
+    ) -> None:
         rob_idx = RobIndex(flag=int(rob_idx_flag), value=int(rob_idx_value))
-        self._entries.append(RobEntry(rob_idx=rob_idx, kind="store"))
+        sq_ptr = None
+        if sq_idx_flag is not None and sq_idx_value is not None:
+            sq_ptr = QueuePtr(flag=int(sq_idx_flag), value=int(sq_idx_value))
+        entry = RobEntry(rob_idx=rob_idx, kind="store", sq_ptr=sq_ptr)
+        if sq_ptr is not None:
+            sq_key = self._sq_key(sq_ptr.flag, sq_ptr.value)
+            self._store_entries_by_sq[sq_key] = entry
+            pending_state = self._pending_store_state.pop(sq_key, None)
+            if pending_state is not None:
+                entry.addr_ready = bool(pending_state.get("addr_ready", False))
+                entry.data_ready = bool(pending_state.get("data_ready", False))
+                entry.explicit_commit_ready = pending_state.get("explicit_commit_ready")
+                self._refresh_store_commit_ready(entry)
+        self._entries.append(entry)
+
+    def note_non_mem_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        rob_idx = RobIndex(flag=int(rob_idx_flag), value=int(rob_idx_value))
+        entry = RobEntry(rob_idx=rob_idx, kind="non_mem")
+        if self._orphan_non_mem_releases[rob_idx] > 0:
+            entry.commit_ready = True
+            self._orphan_non_mem_releases[rob_idx] -= 1
+            if self._orphan_non_mem_releases[rob_idx] == 0:
+                del self._orphan_non_mem_releases[rob_idx]
+        self._entries.append(entry)
+        self.non_mem_insert_count += 1
+
+    def release_non_mem(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        rob_idx = RobIndex(flag=int(rob_idx_flag), value=int(rob_idx_value))
+        for entry in self._entries:
+            if entry.kind == "non_mem" and entry.rob_idx == rob_idx and not entry.commit_ready:
+                entry.commit_ready = True
+                self.non_mem_release_count += 1
+                return
+        self.non_mem_release_count += 1
+        self._orphan_non_mem_releases[rob_idx] += 1
 
     def note_load_completed(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         rob_idx = RobIndex(flag=int(rob_idx_flag), value=int(rob_idx_value))
         for entry in self._entries:
             if entry.kind == "load" and entry.rob_idx == rob_idx and not entry.exec_completed:
                 entry.exec_completed = True
+                entry.commit_ready = True
                 return
         self._orphan_load_completions[rob_idx] += 1
+
+    def mark_store_addr_ready(self, sq_idx_flag: int, sq_idx_value: int) -> None:
+        entry = self._lookup_store_entry(sq_idx_flag, sq_idx_value)
+        if entry is None:
+            pending_state = self._pending_store_state.setdefault(
+                self._sq_key(sq_idx_flag, sq_idx_value),
+                {"addr_ready": False, "data_ready": False, "explicit_commit_ready": None},
+            )
+            if pending_state["addr_ready"]:
+                return
+            pending_state["addr_ready"] = True
+            self.store_addr_ready_count += 1
+            return
+        if not entry.addr_ready:
+            entry.addr_ready = True
+            self.store_addr_ready_count += 1
+        self._refresh_store_commit_ready(entry)
+
+    def mark_store_data_ready(self, sq_idx_flag: int, sq_idx_value: int) -> None:
+        entry = self._lookup_store_entry(sq_idx_flag, sq_idx_value)
+        if entry is None:
+            pending_state = self._pending_store_state.setdefault(
+                self._sq_key(sq_idx_flag, sq_idx_value),
+                {"addr_ready": False, "data_ready": False, "explicit_commit_ready": None},
+            )
+            if pending_state["data_ready"]:
+                return
+            pending_state["data_ready"] = True
+            self.store_data_ready_count += 1
+            return
+        if not entry.data_ready:
+            entry.data_ready = True
+            self.store_data_ready_count += 1
+        self._refresh_store_commit_ready(entry)
+
+    def mark_store_commit_ready(self, sq_idx_flag: int, sq_idx_value: int, ready: bool = True) -> None:
+        entry = self._lookup_store_entry(sq_idx_flag, sq_idx_value)
+        if entry is None:
+            pending_state = self._pending_store_state.setdefault(
+                self._sq_key(sq_idx_flag, sq_idx_value),
+                {"addr_ready": False, "data_ready": False, "explicit_commit_ready": None},
+            )
+            pending_state["explicit_commit_ready"] = bool(ready)
+            self.store_explicit_ready_count += 1
+            return
+        entry.explicit_commit_ready = bool(ready)
+        self.store_explicit_ready_count += 1
+        self._refresh_store_commit_ready(entry)
 
     def queue_store_commit(self, count: int = 1) -> None:
         self._queued_store_tokens = max(0, int(count))
@@ -169,8 +299,11 @@ class RobAgent:
             self.commit_cycle_count += 1
 
         for _ in packet.committed_entries:
-            if self._entries:
-                self._entries.popleft()
+            if not self._entries:
+                break
+            entry = self._entries.popleft()
+            if entry.kind == "store" and entry.sq_ptr is not None:
+                self._store_entries_by_sq.pop(self._sq_key(entry.sq_ptr.flag, entry.sq_ptr.value), None)
         self.pending_ptr = packet.pending_ptr_after
         self.pending_ptr_next = self.pending_ptr
         self._active_store_tokens = 0
@@ -186,22 +319,53 @@ class RobAgent:
         scommit = 0
         committed: list[RobEntry] = []
         remaining_store_tokens = max(0, int(store_tokens))
+        blocked_by = None
 
-        for entry in self._entries:
+        for index, entry in enumerate(self._entries):
             if entry.kind == "load":
                 if not entry.exec_completed:
+                    blocked_by = "load_not_ready"
                     break
                 lcommit += 1
             elif entry.kind == "store":
+                if not entry.commit_ready:
+                    blocked_by = "store_not_ready"
+                    self.store_readiness_block_count += 1
+                    if remaining_store_tokens > 0:
+                        self.store_token_without_ready_count += 1
+                    if len(self._entries) > index + 1:
+                        self.store_blocks_younger_count += 1
+                    break
                 if remaining_store_tokens <= 0:
+                    blocked_by = "store_token_unavailable"
+                    self.store_ready_without_token_count += 1
                     break
                 remaining_store_tokens -= 1
                 scommit += 1
+            elif entry.kind == "non_mem":
+                if not entry.commit_ready:
+                    blocked_by = "non_mem_blocked"
+                    self.non_mem_blocked_cycle_count += 1
+                    break
             else:
+                blocked_by = "unsupported_entry_kind"
                 break
             committed.append(entry)
 
         commit_count = len(committed)
+        if blocked_by == "non_mem_blocked":
+            self._resume_after_non_mem_block = True
+        if blocked_by == "store_not_ready":
+            self._resume_after_store_block = True
+        if commit_count > 0 and self._resume_after_non_mem_block and blocked_by != "non_mem_blocked":
+            self.non_mem_resume_count += 1
+            self._resume_after_non_mem_block = False
+        if commit_count > 0 and self._resume_after_store_block and blocked_by != "store_not_ready":
+            self.store_readiness_resume_count += 1
+            self._resume_after_store_block = False
+        if scommit > 0:
+            self.store_ready_and_token_commit_count += scommit
+
         pending_after = self._inc_many(pending_before, commit_count)
         pending_next = pending_after if commit_count else pending_before
         return RobCommitPacket(
@@ -212,7 +376,24 @@ class RobAgent:
             pending_ptr_after=pending_after,
             pending_ptr_next=pending_next,
             committed_entries=tuple(committed),
+            blocked_by=blocked_by,
         )
+
+    def _refresh_store_commit_ready(self, entry: RobEntry) -> None:
+        if entry.kind != "store":
+            return
+        derived_ready = entry.addr_ready and entry.data_ready
+        if entry.explicit_commit_ready is None:
+            entry.commit_ready = derived_ready
+        else:
+            entry.commit_ready = bool(entry.explicit_commit_ready)
+
+    def _lookup_store_entry(self, sq_idx_flag: int, sq_idx_value: int) -> RobEntry | None:
+        return self._store_entries_by_sq.get(self._sq_key(sq_idx_flag, sq_idx_value))
+
+    @staticmethod
+    def _sq_key(flag: int, value: int) -> tuple[int, int]:
+        return (int(flag), int(value))
 
     def _inc_many(self, ptr: RobIndex, count: int) -> RobIndex:
         result = ptr

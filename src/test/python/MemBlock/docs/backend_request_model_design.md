@@ -15,6 +15,7 @@
 
 - 环境总设计：`src/test/python/MemBlock/docs/verification_env_design.md`
 - 项目入口与用法概览：`src/test/python/MemBlock/README.md`
+- 常见脚本模板：`src/test/python/MemBlock/docs/backend_rob_cookbook.md`
 
 ## 2. 背景：旧接口为什么会越来越臃肿
 
@@ -62,6 +63,14 @@
 ## 4. 新模型的核心对象
 
 新模型不是一个大而全的类，而是一组职责单一的事务/计划对象。
+
+在继续展开对象细节之前，先明确一个经常会让人困惑的点：当前 `BackendSendPlan` 已经不只是“backend enqueue/issue 脚本”，它同时也是 **ROB 半模型的语义编排入口**。也就是说：
+
+- backend lane 级动作仍然通过 `Enqueue*Step` / `IssueCyclePlan` 描述；
+- ROB 侧阻塞/放行语义则通过独立的 ROB 语义步骤描述；
+- testcase 不应该绕过 `env.backend` 直接去改 `env.rob_agent`。
+
+这让“请求怎么发”和“ROB frontier 如何被约束”仍然能留在同一段顺序脚本里描述，便于验证程序序相关行为。
 
 ### 4.1 `LoadTxn` / `StoreTxn`
 
@@ -150,8 +159,12 @@
 - enqueue store
 - issue 某一拍的一组 op
 - commit pulse
+- 插入 / release 一条 ROB-side non-mem blocker
+- 显式设置某条 store 的 ROB commit readiness
 
 `BackendSendResult` 则负责承载脚本执行过程中生成的运行时结果，例如 `StoreRef -> QueuePtr` 的映射。它的作用不是暴露一大堆状态，而是只把脚本后续可能需要的运行时产物保存下来。
+
+其中后两类步骤的设计目的，是把“ROB 语义编排”继续收敛在同一个 backend 脚本模型中：调用者仍然描述一段顺序脚本，`BackendFacade` 负责解释这段脚本并把它翻译到 `CommitAgent/RobAgent`，而不是让 testcase 直接去修改 `rob_agent` 内部状态。
 
 从抽象层级看：
 
@@ -160,6 +173,39 @@
 - `BackendSendPlan` 是“多拍顺序脚本”。
 
 这三个层级构成了新的请求模型骨架。
+
+### 4.7 当前 ROB 半模型与 non-mem op 的语义
+
+当前环境中的 `RobAgent` 已经不再是最早期的 mem-only token proxy，而是一个 **ROB-aware 半模型**。对使用者而言，最重要的是理解它当前支持什么、又明确不支持什么。
+
+当前 ROB entry 类型有三类：
+
+- `load`
+  - 由 `note_load_issued()` 或 load issue 流程登记
+  - 只有在 `exec_completed=True` 后，才允许沿 ROB frontier 提交
+- `store`
+  - 由 `note_store_allocated()` 或 store enqueue 流程登记
+  - 进入 commit packet 的条件是：`store token` 可用，且该 entry 自身 `commit_ready=True`
+  - 默认情况下，`STA` / `STD` 对应的 addr/data ready 会在 `IssueCyclePlan` 执行时自动同步到 ROB 半模型
+  - 如 testcase 需要显式控制 ready 节点，也可以使用 `StoreCommitReadyStep`
+- `non_mem`
+  - 这是一个 **ROB 程序序占位项**，不是 `IssueOp`
+  - 它不模拟真实 ALU/FPU/backend 执行，只表达“这里存在一条 older non-mem op，目前是否允许提交”
+  - 当它位于 ROB head 或连续前缀内且尚未 release 时，younger load/store 都不得越过它进入 commit frontier
+
+这里要特别强调：当前文档里的 “non-mem op” 在实现上是一个 **non-mem blocker placeholder**，用于表达 ROB 顺序约束，而不是一条真的会去驱动 issue lane 的非访存指令。因此：
+
+- 不要把它建成 `IssueOp(kind=...)`
+- 不要在 testcase 里试图给它补一堆 backend 执行细节
+- 正确做法是通过 `NonMemBlockerStep` 或 `env.backend.insert_non_mem_blocker(...)` / `release_non_mem_blocker(...)` 表达它
+
+当前半模型仍然明确 **不负责**：
+
+- redirect / cancel / flush 对 ROB frontier 的恢复与重建
+- backend feedback / credit 闭环
+- 完整复刻真实 backend 的所有 non-mem 执行来源
+
+因此它的定位依然是：**足够真实地表达 MemBlock 所关心的 ROB 程序序阻塞与 store commit 边界，而不是重建整个 backend。**
 
 ## 5. `send()` 与 `execute()` 的分工
 
@@ -188,6 +234,8 @@
 - load 与 STA 混合 issue
 - 先 enqueue 一批请求，再在后续多拍按某种顺序 issue
 - 需要在脚本中间插入 commit pulse
+- 需要显式插入 / release non-mem blocker
+- 需要在脚本中显式改变某条 store 的 commit readiness
 
 `execute()` 的设计理念是：**facade 不替你猜复杂意图，而是解释你明确给出的意图**。这能避免 helper 风格接口常见的一个问题：调用者以为 helper 做的是 A+B+C，维护者后来为了新场景把它扩成 A+B+D+E，最后 nobody can remember the contract。
 
@@ -279,7 +327,99 @@ real_sq_ptr = result.resolve_sq_ptr(store_ref)
 
 这个例子体现了新模型处理“运行时分配值”的能力，也是旧 helper 很难优雅表达的部分。
 
-### 6.5 对应的 sequence 风格：单笔 load
+### 6.5 插入 non-mem blocker，阻塞 younger mem commit
+
+当你需要表达“older non-mem op 卡在 ROB head，younger mem 不能提交”时，应把它当作 ROB 语义步骤写进同一个 `BackendSendPlan`，而不是把它当作 issue 动作：
+
+```python
+from transactions import (
+    BackendSendPlan,
+    EnqueueLoadStep,
+    EnqueueStoreStep,
+    IssueCyclePlan,
+    IssueOp,
+    NonMemBlockerStep,
+    StoreCommitStep,
+    StoreRef,
+)
+
+younger_store = StoreRef("younger_store")
+
+env.backend.execute(
+    BackendSendPlan.from_steps(
+        EnqueueLoadStep.from_txn(load0),
+        NonMemBlockerStep.insert(
+            rob_idx_flag=0,
+            rob_idx_value=load0.req_id + 1,
+        ),
+        EnqueueStoreStep.from_txn(store1, ref=younger_store),
+        IssueCyclePlan.from_ops(IssueOp.load_from_txn(load0)),
+        IssueCyclePlan.from_ops(
+            IssueOp.std(req_id=store1.req_id, sq_ptr=younger_store, data=store1.data, mask=store1.mask)
+        ),
+        IssueCyclePlan.from_ops(
+            IssueOp.sta(req_id=store1.req_id, sq_ptr=younger_store, addr=store1.addr, mask=store1.mask)
+        ),
+        StoreCommitStep(count=1),
+        NonMemBlockerStep.release(
+            rob_idx_flag=0,
+            rob_idx_value=load0.req_id + 1,
+        ),
+        StoreCommitStep(count=1),
+    )
+)
+```
+
+这个脚本表达的是：
+
+1. older load 可以先完成并提交到 blocker 前；
+2. 中间 non-mem blocker 未 release 时，younger store 即使 addr/data 都 ready，也不应提交；
+3. release blocker 后，再给一拍 `StoreCommitStep`，younger store 才能进入 commit frontier。
+
+### 6.6 显式控制 store commit readiness
+
+对大多数 scalar store 来说，`STD + STA` 对应的 data/address ready 会自动同步到 ROB 半模型，因此 testcase 通常不需要手工再写 ready 步骤。
+
+但如果你要做更细粒度的 ROB 边界实验，想把“store 已 enqueue / 已 issue”与“ROB 允许提交”拆开，推荐显式写 `StoreCommitReadyStep`：
+
+```python
+from transactions import (
+    BackendSendPlan,
+    EnqueueStoreStep,
+    IssueCyclePlan,
+    IssueOp,
+    StoreCommitReadyStep,
+    StoreCommitStep,
+    StoreRef,
+)
+
+store_ref = StoreRef("blocked_store")
+
+env.backend.execute(
+    BackendSendPlan.from_steps(
+        EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
+        IssueCyclePlan.from_ops(
+            IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data, mask=store_txn.mask)
+        ),
+        IssueCyclePlan.from_ops(
+            IssueOp.sta(req_id=store_txn.req_id, sq_ptr=store_ref, addr=store_txn.addr, mask=store_txn.mask)
+        ),
+        StoreCommitReadyStep(sq_ptr=store_ref, ready=False),
+        StoreCommitStep(count=1),
+        StoreCommitReadyStep(sq_ptr=store_ref, ready=True),
+        StoreCommitStep(count=1),
+    )
+)
+```
+
+这个例子适合用来验证：
+
+- token 有了但 store entry 还不该提交；
+- ready 状态切换后，ROB frontier 才继续前推。
+
+如果你的目标只是普通 scalar store 主路径，请不要滥用这个接口；默认的 `send(store_txn)` 或 sequence 会更简洁。
+
+### 6.7 对应的 sequence 风格：单笔 load
 
 如果当前目标只是“reset 环境 -> 发送一笔 load -> compare -> drain”，那么 sequence 风格依然更推荐。它把 reset、期望登记、写回收敛这些标准步骤一起封装掉，避免 testcase 反复复制样板代码。
 
@@ -309,7 +449,7 @@ load_result = ScalarLoadSequence(
 
 也就是说，sequence 并没有绕开新请求模型；它只是把新模型再封成更适合 testcase 复用的业务模板。
 
-### 6.6 对应的 sequence 风格：单笔 store
+### 6.8 对应的 sequence 风格：单笔 store
 
 对 store 也一样。如果你的目标不是研究 enqueue/STA/STD 的分拍结构，而只是要完成“发一笔 store，并确认它 materialize/committed”的业务语义，那么优先用 sequence：
 
@@ -332,7 +472,7 @@ store_result = ScalarStoreCommitSequence(
 
 这里 sequence 内部仍然会走 `send_store()`，而 `send_store()` 又已经下沉到 `env.backend.send(store_txn)`。因此，新的 backend 请求模型并不会削弱 sequence，反而让 sequence 的底座变得更统一。
 
-### 6.7 如何理解 sequence 与 plan 的边界
+### 6.9 如何理解 sequence 与 plan 的边界
 
 很多时候，开发者会犹豫“这个场景到底该直接写 `BackendSendPlan`，还是应该抽成 sequence”。经验上可以按下面这个标准判断：
 
@@ -342,7 +482,7 @@ store_result = ScalarStoreCommitSequence(
 
 例如，“两条 load 同拍 issue”本身属于 backend 脚本结构，plan 很合适；但“构造两条 load 同拍 issue，然后等待 replay event，再检查最终 writeback 和 outstanding 清空”则已经进入 testcase 场景模板的范畴，更适合 sequence。
 
-### 6.8 一个推荐的工作流
+### 6.10 一个推荐的工作流
 
 结合当前环境，比较稳妥的演进方式通常是：
 
@@ -364,7 +504,8 @@ store_result = ScalarStoreCommitSequence(
 
 1. enqueue 某条请求；
 2. 在某一拍的若干 lane 上发起 issue；
-3. 在必要时插入 commit 推进。
+3. 在必要时插入 ROB 语义步骤，例如 non-mem blocker / readiness 变化；
+4. 在必要时插入 commit 推进。
 
 换句话说，硬件并不知道什么叫“send_load_batch_with_sta_same_cycle”这种 API 名字；硬件只知道某拍哪些 lane 发了什么、某笔 store 何时 enqueue、何时拿到 data/address。新的请求模型正是按这个真实结构来建模，因此更稳定，也更贴近 DUT。
 

@@ -137,7 +137,124 @@ env.backend.execute(
 2. 确认路径可达后，把外层固定流程收敛成 sequence；
 3. 最终让 testcase 尽量消费 sequence result，而不是长期手拼 backend 细节。
 
-### 4.2 为什么 `expect_load()` 放在 issue 后
+### 4.2 backend / ROB 场景下，什么时候继续写 plan
+
+随着当前 ROB 半模型已经支持：
+
+- `non_mem` blocker
+- store `token + readiness`
+- `BackendSendPlan` 中的 ROB 语义步骤
+
+现在的一个常见问题是：**这类场景到底还算“backend plan”，还是应该直接上提成 sequence？**
+
+推荐判断方式如下：
+
+1. 如果你关心的是“ROB 连续前缀怎么被卡住/放开”，优先继续写 plan。
+2. 如果你关心的是“这个业务场景从 reset 到 compare/drain 应该怎么组织”，优先写 sequence。
+3. 如果一个 `NonMemBlockerStep` / `StoreCommitReadyStep` 脚本已经在多个 testcase 中重复出现，就应该把它外层收敛成 sequence，而不是长期散落在 tests 里。
+
+也就是说：
+
+- `plan`
+  - 更适合表达：
+    - `NonMemBlockerStep.insert(...)`
+    - `StoreCommitReadyStep(...)`
+    - `StoreCommitStep(...)`
+    - 与 `IssueCyclePlan` 交织的拍级顺序
+- `sequence`
+  - 更适合表达：
+    - “older non-mem 挡住 younger store，再 release 后恢复提交”的完整 testcase 模板
+    - “older unready store 阻塞 younger mem，再切 ready 后恢复”的稳定验证场景
+
+一个经验规则是：
+
+> 如果你还在调“哪一拍插 blocker / 哪一拍 release / 哪一拍给 token”，就先写 plan；  
+> 如果你已经清楚这个脚本就是某类 ROB 场景的固定模板，就该开始抽 sequence。
+
+### 4.3 一个应继续保留为 plan 的例子
+
+下面这种脚本更适合继续停留在 primitive plan 层，因为它的重点是拍级结构本身：
+
+```python
+from transactions import (
+    BackendSendPlan,
+    EnqueueStoreStep,
+    IssueCyclePlan,
+    IssueOp,
+    NonMemBlockerStep,
+    StoreCommitStep,
+    StoreRef,
+)
+
+store_ref = StoreRef("younger_store")
+
+env.backend.execute(
+    BackendSendPlan.from_steps(
+        NonMemBlockerStep.insert(rob_idx_flag=0, rob_idx_value=0x40),
+        EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
+        IssueCyclePlan.from_ops(
+            IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data, mask=store_txn.mask)
+        ),
+        IssueCyclePlan.from_ops(
+            IssueOp.sta(req_id=store_txn.req_id, sq_ptr=store_ref, addr=store_txn.addr, mask=store_txn.mask)
+        ),
+        StoreCommitStep(count=1),
+        NonMemBlockerStep.release(rob_idx_flag=0, rob_idx_value=0x40),
+        StoreCommitStep(count=1),
+    )
+)
+```
+
+这个例子里，测试者真正关心的是：
+
+- blocker 插入的位置对 younger store 的影响；
+- first commit pulse 为什么还不能放行；
+- release 后哪一拍 frontier 恢复。
+
+这些问题本质上都是“拍级脚本问题”，因此 plan 最合适。
+
+### 4.4 一个应该上提成 sequence 的例子
+
+如果多个 testcase 都在重复这样的业务套路：
+
+1. reset 环境
+2. 发 older load/store
+3. 插入一个 non-mem blocker
+4. 发 younger mem
+5. 验证 blocker 期间 younger 不提交/不 compare
+6. release blocker
+7. 再验证恢复提交和最终无 outstanding
+
+那就不要继续让每个 testcase 都手拼 `BackendSendPlan` + `expect/drain/assert`。更推荐的做法是：
+
+- 保留底层 plan 作为 sequence 内部实现；
+- 对外提供一个语义更清楚的 sequence，例如：
+  - `ScalarNonMemBlockerOrderingSequence`
+  - `ScalarStoreReadinessBlockingSequence`
+
+这样 testcase 最终关心的就不再是：
+
+- 第几拍插 `NonMemBlockerStep`
+- 第几拍写 `StoreCommitReadyStep`
+
+而是：
+
+- 这个 ROB 顺序场景是否符合预期
+
+### 4.5 与 cookbook 的关系
+
+如果你已经知道自己要写的是 backend / ROB 类 testcase，推荐按下面顺序使用文档：
+
+1. `backend_rob_cookbook.md`
+   - 快速找模板，先把脚本写出来
+2. 当前文件
+   - 判断这个模板应继续保留为 plan，还是该上提成 sequence
+3. `backend_request_model_design.md`
+   - 看对象设计与接口边界
+4. `rob_model.md`
+   - 看当前 ROB 半模型的长期边界与设计背景
+
+### 4.6 为什么 `expect_load()` 放在 issue 后
 
 当前 `ScalarLoadSequence` 已经把 “send_load + expect_load + drain_writebacks” 这一标准骨架封装起来。保留这一节，是为了说明 sequence 内部仍沿用了先 issue、再登记期望的顺序。
 
@@ -148,7 +265,7 @@ env.backend.execute(
 
 如果后续引入零延迟路径或更激进的 mock，则可以考虑在 issue 前登记期望，以减少竞态风险。
 
-### 4.3 为什么最后要 `check_no_outstanding_transactions()`
+### 4.7 为什么最后要 `check_no_outstanding_transactions()`
 
 因为一次数据 compare 成功，并不代表环境已经完全收敛。
 
@@ -160,7 +277,7 @@ env.backend.execute(
 
 这个检查是为了避免“主断言已过，但后台还有未完成事务”的假阳性。
 
-### 4.4 推荐优先复用的高层 sequence
+### 4.8 推荐优先复用的高层 sequence
 
 当 testcase 不再是“单笔 primitive”而是“一个完整场景”时，更推荐直接使用高层 sequence，而不是在测试文件里手工拼循环和指针推进。
 
@@ -213,7 +330,7 @@ env.backend.execute(
    - 用于真实 DUT 下的 `sq dataInvalid + matchInvalid + nuke` 冒烟。
    - 当前推荐由 testcase 先组织 `MmuSv39AddressSpaceInstallSequence`，再调用该 trigger sequence。
 
-### 4.4 replay 观测辅助 API
+### 4.9 replay 观测辅助 API
 
 当前 env 已经把真实 DUT replay 观测收口成公共 helper，testcase 不需要自己逐拍扫内部信号：
 

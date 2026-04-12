@@ -13,7 +13,9 @@ from transactions import (
     IssueCyclePlan,
     IssueOp,
     LoadTxn,
+    NonMemBlockerStep,
     QueuePtr,
+    StoreCommitReadyStep,
     StoreCommitStep,
     StoreRef,
     StoreTxn,
@@ -75,9 +77,29 @@ class BackendFacade:
                 if step.ref is not None:
                     store_ptrs[step.ref] = allocated_sq_ptr
             elif isinstance(step, IssueCyclePlan):
-                self.issue.issue_cycle(self._resolve_issue_cycle(step, result))
+                resolved_cycle = self._resolve_issue_cycle(step, result)
+                self.issue.issue_cycle(resolved_cycle)
+                self._note_issue_cycle_store_progress(resolved_cycle)
             elif isinstance(step, StoreCommitStep):
                 self.step_commit(count=step.count, cycles=step.cycles)
+            elif isinstance(step, NonMemBlockerStep):
+                if step.action == "insert":
+                    self.insert_non_mem_blocker(
+                        rob_idx_flag=step.rob_idx_flag,
+                        rob_idx_value=step.rob_idx_value,
+                    )
+                else:
+                    self.release_non_mem_blocker(
+                        rob_idx_flag=step.rob_idx_flag,
+                        rob_idx_value=step.rob_idx_value,
+                    )
+            elif isinstance(step, StoreCommitReadyStep):
+                resolved_sq_ptr = result.resolve_sq_ptr(step.sq_ptr)
+                self.mark_store_commit_ready(
+                    sq_idx_flag=resolved_sq_ptr.flag,
+                    sq_idx_value=resolved_sq_ptr.value,
+                    ready=step.ready,
+                )
             else:
                 raise TypeError(f"unsupported backend send step: {type(step)!r}")
         return result
@@ -131,6 +153,15 @@ class BackendFacade:
 
     def send_many(self, requests):
         return [self.send(request) for request in requests]
+
+    def _note_issue_cycle_store_progress(self, plan: IssueCyclePlan) -> None:
+        for op in plan.ops:
+            if not isinstance(op.sq_ptr, QueuePtr):
+                raise TypeError(f"unresolved SQ pointer in issue cycle: {op.sq_ptr!r}")
+            if op.kind == "sta":
+                self.commit.mark_store_addr_ready(op.sq_ptr.flag, op.sq_ptr.value)
+            elif op.kind == "std":
+                self.commit.mark_store_data_ready(op.sq_ptr.flag, op.sq_ptr.value)
 
     def issue_load(
         self,
@@ -328,7 +359,12 @@ class BackendFacade:
         rob_idx_flag: int,
         rob_idx_value: int,
     ) -> None:
-        self.commit.note_store_allocated(rob_idx_flag, rob_idx_value)
+        self.commit.note_store_allocated(
+            rob_idx_flag,
+            rob_idx_value,
+            sq_idx_flag=sq_idx_flag,
+            sq_idx_value=sq_idx_value,
+        )
         self.env.memory.note_store_allocated(
             sq_idx_flag=sq_idx_flag,
             sq_idx_value=sq_idx_value,
@@ -338,6 +374,15 @@ class BackendFacade:
 
     def note_load_completed(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         self.commit.note_load_completed(rob_idx_flag, rob_idx_value)
+
+    def insert_non_mem_blocker(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        self.commit.note_non_mem_issued(rob_idx_flag, rob_idx_value)
+
+    def release_non_mem_blocker(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        self.commit.release_non_mem(rob_idx_flag, rob_idx_value)
+
+    def mark_store_commit_ready(self, sq_idx_flag: int, sq_idx_value: int, ready: bool = True) -> None:
+        self.commit.mark_store_commit_ready(sq_idx_flag, sq_idx_value, ready=ready)
 
     def queue_store_commit(self, count: int = 1) -> None:
         self.commit.queue_store_commit(count)

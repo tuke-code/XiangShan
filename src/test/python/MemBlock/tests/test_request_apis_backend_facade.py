@@ -13,7 +13,9 @@ from transactions import (
     IssueCyclePlan,
     IssueOp,
     LoadTxn,
+    NonMemBlockerStep,
     QueuePtr,
+    StoreCommitReadyStep,
     StoreRef,
     StoreTxn,
     scalar_store_fu_op_type_from_mask,
@@ -107,11 +109,33 @@ class _FakeCommitAgent:
     def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         self.calls.append(("note_load_issued", rob_idx_flag, rob_idx_value))
 
-    def note_store_allocated(self, rob_idx_flag: int, rob_idx_value: int) -> None:
-        self.calls.append(("note_store_allocated", rob_idx_flag, rob_idx_value))
+    def note_store_allocated(
+        self,
+        rob_idx_flag: int,
+        rob_idx_value: int,
+        *,
+        sq_idx_flag: int | None = None,
+        sq_idx_value: int | None = None,
+    ) -> None:
+        self.calls.append(("note_store_allocated", rob_idx_flag, rob_idx_value, sq_idx_flag, sq_idx_value))
 
     def note_load_completed(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         self.calls.append(("note_load_completed", rob_idx_flag, rob_idx_value))
+
+    def note_non_mem_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        self.calls.append(("note_non_mem_issued", rob_idx_flag, rob_idx_value))
+
+    def release_non_mem(self, rob_idx_flag: int, rob_idx_value: int) -> None:
+        self.calls.append(("release_non_mem", rob_idx_flag, rob_idx_value))
+
+    def mark_store_addr_ready(self, sq_idx_flag: int, sq_idx_value: int) -> None:
+        self.calls.append(("mark_store_addr_ready", sq_idx_flag, sq_idx_value))
+
+    def mark_store_data_ready(self, sq_idx_flag: int, sq_idx_value: int) -> None:
+        self.calls.append(("mark_store_data_ready", sq_idx_flag, sq_idx_value))
+
+    def mark_store_commit_ready(self, sq_idx_flag: int, sq_idx_value: int, ready: bool = True) -> None:
+        self.calls.append(("mark_store_commit_ready", sq_idx_flag, sq_idx_value, ready))
 
     def queue_store_commit(self, count: int = 1) -> None:
         self.calls.append(("queue_store_commit", count))
@@ -258,6 +282,8 @@ def test_api_backend_facade_send_store_translates_to_enqueue_and_issue_cycles():
     assert second_cycle.ops[0].kind == "sta"
     assert second_cycle.ops[0].sq_ptr == QueuePtr(flag=0, value=5)
     assert second_cycle.ops[0].mask == 0xFF
+    assert ("mark_store_data_ready", 0, 5) in env.commit_agent.calls
+    assert ("mark_store_addr_ready", 0, 5) in env.commit_agent.calls
 
 
 def test_api_backend_facade_send_partial_store_keeps_mask_on_sta_and_std():
@@ -315,6 +341,40 @@ def test_api_backend_facade_execute_resolves_store_ref_in_issue_cycle():
     assert result.resolve_sq_ptr(store_ref) == QueuePtr(flag=1, value=3)
     issued_plan = env.issue_agent.calls[0][1]
     assert all(op.sq_ptr == QueuePtr(flag=1, value=3) for op in issued_plan.ops)
+    assert ("mark_store_data_ready", 1, 3) in env.commit_agent.calls
+    assert ("mark_store_addr_ready", 1, 3) in env.commit_agent.calls
+
+
+def test_api_backend_facade_execute_routes_non_mem_blocker_steps():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+
+    backend.execute(
+        BackendSendPlan.from_steps(
+            NonMemBlockerStep.insert(rob_idx_flag=0, rob_idx_value=9),
+            NonMemBlockerStep.release(rob_idx_flag=0, rob_idx_value=9),
+        )
+    )
+
+    assert env.commit_agent.calls == [
+        ("note_non_mem_issued", 0, 9),
+        ("release_non_mem", 0, 9),
+    ]
+
+
+def test_api_backend_facade_execute_resolves_store_ref_for_commit_ready_step():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+    store_ref = StoreRef("ready_store")
+
+    backend.execute(
+        BackendSendPlan.from_steps(
+            EnqueueStoreStep(req_id=7, sq_ptr=QueuePtr(flag=0, value=2), ref=store_ref),
+            StoreCommitReadyStep(sq_ptr=store_ref, ready=True),
+        )
+    )
+
+    assert ("mark_store_commit_ready", 1, 3, True) in env.commit_agent.calls
 
 
 def test_api_issue_cycle_plan_rejects_duplicate_lanes():

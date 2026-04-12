@@ -102,7 +102,6 @@ class RobCoverageCollector:
             gaps.append("mixed_lcommit_scommit_not_modelled")
         gaps.extend(
             (
-                "non_mem_blocker_not_modelled",
                 "redirect_cancel_not_modelled",
                 "backend_feedback_credit_not_modelled",
             )
@@ -223,6 +222,51 @@ class RobCoverageCollector:
             {"mmio_excluded_seen": fc.Eq(1)},
             name="mmio_store_excluded_from_drain_observed",
         )
+        current.add_watch_point(
+            self._box("non_mem_blocker_inserted_observed"),
+            {"non_mem_insert_seen": fc.Eq(1)},
+            name="non_mem_blocker_inserted_observed",
+        )
+        current.add_watch_point(
+            self._box("non_mem_blocker_blocks_frontier_observed"),
+            {"non_mem_block_seen": fc.Eq(1)},
+            name="non_mem_blocker_blocks_frontier_observed",
+        )
+        current.add_watch_point(
+            self._box("non_mem_blocker_released_observed"),
+            {"non_mem_release_seen": fc.Eq(1)},
+            name="non_mem_blocker_released_observed",
+        )
+        current.add_watch_point(
+            self._box("non_mem_release_resumes_commit_observed"),
+            {"non_mem_resume_seen": fc.Eq(1)},
+            name="non_mem_release_resumes_commit_observed",
+        )
+        current.add_watch_point(
+            self._box("store_token_without_ready_observed"),
+            {"store_token_without_ready_seen": fc.Eq(1)},
+            name="store_token_without_ready_observed",
+        )
+        current.add_watch_point(
+            self._box("store_ready_without_token_observed"),
+            {"store_ready_without_token_seen": fc.Eq(1)},
+            name="store_ready_without_token_observed",
+        )
+        current.add_watch_point(
+            self._box("store_ready_and_token_commit_observed"),
+            {"store_ready_and_token_commit_seen": fc.Eq(1)},
+            name="store_ready_and_token_commit_observed",
+        )
+        current.add_watch_point(
+            self._box("older_unready_store_blocks_younger_mem_observed"),
+            {"store_blocks_younger_seen": fc.Eq(1)},
+            name="older_unready_store_blocks_younger_mem_observed",
+        )
+        current.add_watch_point(
+            self._box("store_readiness_resumes_frontier_observed"),
+            {"store_readiness_resume_seen": fc.Eq(1)},
+            name="store_readiness_resumes_frontier_observed",
+        )
 
         gap_observed = fc.CovGroup("MemBlock.ROB.GapObserved")
         gap_observed.add_watch_point(
@@ -280,6 +324,7 @@ class RobCoverageCollector:
         self._sample_writebacks()
         self._sample_drain_log()
         self._sample_replay_related()
+        self._sample_rob_agent()
         for group in self._groups:
             group.sample()
 
@@ -287,6 +332,7 @@ class RobCoverageCollector:
         self._sample_store_shadow()
         self._sample_drain_log()
         self._sample_mem_status()
+        self._sample_rob_agent()
         if self._box("flushsb_command_observed").value and self._box("sbuffer_drain_observed").value:
             self._latch("cacheable_store_flush_drain_observed")
         if self._box("flushsb_command_observed").value and self._box("outer_drain_observed").value:
@@ -531,3 +577,24 @@ class RobCoverageCollector:
 
         if _read_signal(getattr(self.env.dut, "MemBlock_inner_lsq_io_release_valid", None), 0):
             self._latch("release_hint_observed")
+
+    def _sample_rob_agent(self) -> None:
+        stats = getattr(getattr(self.env, "rob_agent", None), "stats", {})
+        if stats.get("rob_non_mem_insert_count", 0) > 0:
+            self._latch("non_mem_blocker_inserted_observed")
+        if stats.get("rob_non_mem_blocked_cycle_count", 0) > 0:
+            self._latch("non_mem_blocker_blocks_frontier_observed")
+        if stats.get("rob_non_mem_release_count", 0) > 0:
+            self._latch("non_mem_blocker_released_observed")
+        if stats.get("rob_non_mem_resume_count", 0) > 0:
+            self._latch("non_mem_release_resumes_commit_observed")
+        if stats.get("rob_store_token_without_ready_count", 0) > 0:
+            self._latch("store_token_without_ready_observed")
+        if stats.get("rob_store_ready_without_token_count", 0) > 0:
+            self._latch("store_ready_without_token_observed")
+        if stats.get("rob_store_ready_and_token_commit_count", 0) > 0:
+            self._latch("store_ready_and_token_commit_observed")
+        if stats.get("rob_store_blocks_younger_count", 0) > 0:
+            self._latch("older_unready_store_blocks_younger_mem_observed")
+        if stats.get("rob_store_readiness_resume_count", 0) > 0:
+            self._latch("store_readiness_resumes_frontier_observed")
