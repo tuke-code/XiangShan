@@ -163,7 +163,8 @@ case class MdpTageTableParameters(
     new MdpTageTableInfo(512, 4, 36  ),
     new MdpTageTableInfo(512, 4, 56  ),
     new MdpTageTableInfo(256, 4, 108 ),
-    new MdpTageTableInfo(128, 4, 160 )
+    new MdpTageTableInfo(128, 4, 160 ),
+    new MdpTageTableInfo(128, 4, 280 )
   ),
   NumBanks:            Int = 4, // to alleviate read-write conflicts in single-port SRAM
   NumWays:             Int = 4,
