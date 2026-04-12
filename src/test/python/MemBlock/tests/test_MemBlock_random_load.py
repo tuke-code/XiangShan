@@ -170,3 +170,62 @@ def test_api_MemBlock_mem_io_1000_load_requests(env):
     assert all(addr > IO_ADDR_LIMIT for _, addr in requests), "mem_io 请求地址未落入 cacheable 地址空间"
     result = _run_random_load_requests(env, requests)
     _assert_mem_io_transport(result.transport_stats_before, result.transport_stats_after)
+
+
+def test_api_MemBlock_random_mem_load_non_mem_blocker_delays_compare(env):
+    """
+    在随机 cacheable load 前插入 older non-mem blocker，验证 compare 会被阻塞到 release 之后。
+
+    检查点：
+      - younger load 仍能先在 intWriteback 口被观测到
+      - blocker 未 release 前，ROB commit frontier 会被 `non_mem` 卡住
+      - release blocker 后，ROB frontier 恢复推进，且最终无残留事务
+    """
+
+    rng = random.Random(RANDOM_SEED ^ 0x5A5A)
+    req_id = 1
+    load_addr = _random_addr(rng, MEM_ADDR_BASE)
+    expected_data = rng.getrandbits(64)
+
+    stream_state = _reset_env_and_state(env)
+    env.preload_u64(load_addr, expected_data)
+    env.backend.insert_non_mem_blocker(rob_idx_flag=0, rob_idx_value=0)
+
+    txn = LoadTxn(
+        req_id=req_id,
+        addr=load_addr,
+        lq_ptr=stream_state.next_lq_ptr,
+        sq_ptr=stream_state.sq_ptr,
+        size=8,
+        mask=0xFF,
+    )
+    env.backend.send(txn)
+    env.expect_scalar_load(req_id=txn.req_id, addr=txn.addr)
+
+    writeback = env.wait_load_writeback_observed(
+        rob_idx_flag=txn.rob_idx_flag,
+        rob_idx_value=txn.rob_idx_value,
+        data=expected_data,
+        max_cycles=400,
+    )
+    assert writeback["data"] == expected_data
+
+    env.advance_cycles(12)
+    assert env.rob_agent.stats["rob_non_mem_blocked_cycle_count"] > 0, (
+        "non-mem blocker 未 release 前，ROB frontier 未出现阻塞记录"
+    )
+    assert env.rob_agent.stats["rob_pending_entry_count"] > 0, (
+        "non-mem blocker 未 release 前，younger load 不应从 ROB 队列移除"
+    )
+
+    env.backend.release_non_mem_blocker(rob_idx_flag=0, rob_idx_value=0)
+    env.advance_cycles(12)
+    env.drain_writebacks(max_cycles=400)
+    assert env.rob_agent.stats["rob_non_mem_resume_count"] > 0, (
+        "release blocker 后，ROB frontier 未记录恢复推进"
+    )
+    assert env.rob_agent.stats["rob_pending_entry_count"] == 0, (
+        "release blocker 后，younger load 应已从 ROB 队列退休"
+    )
+    assert env.get_completed_load_count() == 1, "release blocker 后，load compare 应能完成"
+    env.assert_no_outstanding()

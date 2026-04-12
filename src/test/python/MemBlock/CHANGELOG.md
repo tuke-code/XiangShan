@@ -2,7 +2,30 @@
 
 ## 2026-04-12
 
-### 1. 补强 backend / ROB 文档，明确当前半模型与 non-mem blocker 用法
+### 1. 为随机 load 补入 non-mem blocker 回归
+
+本条目记录一次 testcase 补强：在 `random load` 测试文件中新增一条 `non-mem blocker` 用例，验证 cacheable load 在真实 DUT 上仍可先写回，但测试侧 ROB 半模型会在 blocker release 前维持 frontier 阻塞，直到 release 后再恢复退休。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_random_load.py`
+  - 新增 `test_api_MemBlock_random_mem_load_non_mem_blocker_delays_compare`
+  - 用随机 cacheable 地址发起单条 load，并在其前方插入一条 older `non_mem` blocker
+  - 先验证：
+    - younger load 的 writeback 仍可被观测到
+    - `rob_non_mem_blocked_cycle_count` 增长
+    - blocker 未 release 前，ROB pending entry 仍保留
+  - 再 release blocker，并验证：
+    - `rob_non_mem_resume_count` 增长
+    - pending ROB entry 清空
+    - load compare 最终完成且无 outstanding
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/tests/test_MemBlock_random_load.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_random_load.py -k 'non_mem_blocker_delays_compare'`
+
+### 2. 补强 backend / ROB 文档，明确当前半模型与 non-mem blocker 用法
 
 本条目记录一次文档收口：把 backend 主动控制文档与 ROB 建模文档更新到当前实现状态，明确说明 `BackendSendPlan` 已同时承载 backend 脚本与 ROB 语义步骤，并补充 `non-mem blocker` / `store readiness` 的用法示例。
 
@@ -45,7 +68,7 @@
   - non-mem blocker 应该如何表达
   - 何时应该用 `send()`，何时应该切到 `execute(BackendSendPlan(...))`
 
-### 2. 打通 ROB 语义步骤与 non-mem/store-readiness 半模型
+### 3. 打通 ROB 语义步骤与 non-mem/store-readiness 半模型
 
 本条目记录一次围绕 ROB/backend 主动控制面的补强：把 `BackendSendPlan` 从“enqueue/issue/commit 脚本”扩展为“既能编排 backend 请求，也能编排 ROB 语义步骤”的统一脚本容器，同时落地 `non-mem blocker` 与 `store commit readiness` 两项 ROB 半模型能力。
 
@@ -89,7 +112,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_rob_coverage.py -k 'smoke_sample or samples_new_rob_frontier_points'`
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py -k 'backend_non_mem_blocker_controls_rob or backend_mark_store_commit_ready_updates_rob or backend_note_store_allocated_updates_state or backend_note_load_completed_advances_pending_ptr'`
 
-### 3. 补入 cross-page store-misalign 回归并确认当前 DUT 卡死点
+### 4. 补入 cross-page store-misalign 回归并确认当前 DUT 卡死点
 
 本条目记录在独立 `store-misalign` 测试文件中继续推进 cross-page 标量 store-misalign。该轮工作没有通过放宽 assert 来“做绿”，而是把真实失败收敛成可重复的 xfail 触发器，并明确区分 testcase 设计、环境能力与 DUT 行为。
 
@@ -126,7 +149,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'misaligned or partial or burst'`
   - 结果：`7 passed, 2 deselected`
 
-### 4. 新增独立 store-misalign 测试文件并修复 cross-16B 环境建模
+### 5. 新增独立 store-misalign 测试文件并修复 cross-16B 环境建模
 
 本条目记录一次围绕 `StoreMisalignBuffer` 的专项补强：新增独立的 cross-16B store-misalign directed testcase，同时根据这些 testcase 暴露出来的真实失败，修复环境对 split store retire 与 sbuffer drain pair 的建模缺口。
 
