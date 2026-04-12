@@ -118,7 +118,15 @@ class BackendFacade:
                     ),
                 )
             )
-            return result.resolve_sq_ptr(store_ref)
+            allocated_sq_ptr = result.resolve_sq_ptr(store_ref)
+            if hasattr(self.env.memory, "note_store_request"):
+                self.env.memory.note_store_request(
+                    sq_idx=allocated_sq_ptr.value,
+                    addr=request.addr,
+                    data=request.data,
+                    mask=request.mask,
+                )
+            return allocated_sq_ptr
         raise TypeError(f"unsupported backend send request: {type(request)!r}")
 
     def send_many(self, requests):

@@ -81,6 +81,9 @@ class PendingStore:
     mem_back_type_mm: bool = False
     has_exception: bool = False
     retired: bool = False
+    request_addr: int | None = None
+    request_data: int | None = None
+    request_mask: int | None = None
 
     @property
     def ready_for_retire(self) -> bool:
@@ -188,6 +191,13 @@ class Scoreboard:
         store = self.pending_stores.setdefault(sq_idx_value, PendingStore(sq_idx=sq_idx_value))
         store.allocated = True
         store.rob_idx = RobIndex(flag=rob_idx_flag, value=rob_idx_value)
+
+    def note_store_request(self, *, sq_idx: int, addr: int, data: int, mask: int) -> None:
+        store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+        store.allocated = True
+        store.request_addr = int(addr)
+        store.request_data = int(data)
+        store.request_mask = int(mask) & 0xFF
 
     def note_load_commits(self, commit_count: int) -> None:
         for _ in range(max(0, int(commit_count))):
@@ -382,7 +392,7 @@ class Scoreboard:
 
         drained_memory = {}
         touched_addresses = set()
-        for event in self.drain_log:
+        for event in self._normalized_drain_events():
             self._apply_masked_write_to_dict(
                 drained_memory,
                 event["addr"],
@@ -487,6 +497,9 @@ class Scoreboard:
             store.retired = True
 
     def _retire_store(self, store: PendingStore) -> None:
+        if store.request_addr is not None and store.request_data is not None and store.request_mask is not None:
+            self.ref_memory.apply_store(store.request_addr, store.request_data, store.request_mask)
+            return
         normalized = _normalized_store_window(store.addr, store.mask, store.width_bytes)
         if normalized is None:
             return
@@ -499,6 +512,61 @@ class Scoreboard:
             effective_mask,
             store.width_bytes,
         )
+
+    def _normalized_drain_events(self) -> list[dict]:
+        normalized = []
+        idx = 0
+        while idx < len(self.drain_log):
+            if idx + 1 < len(self.drain_log):
+                paired = self._normalize_cross_16b_sbuffer_pair(self.drain_log[idx], self.drain_log[idx + 1])
+                if paired is not None:
+                    normalized.extend(paired)
+                    idx += 2
+                    continue
+            normalized.append(dict(self.drain_log[idx]))
+            idx += 1
+        return normalized
+
+    def _normalize_cross_16b_sbuffer_pair(self, first: dict, second: dict) -> list[dict] | None:
+        width_bits = STORE_DATA_WIDTH_BYTES
+        if first.get("channel") != "sbuffer" or second.get("channel") != "sbuffer":
+            return None
+        if first.get("cycle") != second.get("cycle"):
+            return None
+        if int(first.get("addr", 0)) + width_bits != int(second.get("addr", 0)):
+            return None
+        if int(first.get("data", 0)) != int(second.get("data", 0)):
+            return None
+        if int(first.get("mask", 0)) != int(second.get("mask", 0)):
+            return None
+
+        mask = int(first.get("mask", 0))
+        low_part = 0
+        for bit_idx in range(width_bits):
+            if ((mask >> bit_idx) & 0x1) == 0:
+                break
+            low_part |= 1 << bit_idx
+
+        high_part = 0
+        for bit_idx in range(width_bits - 1, -1, -1):
+            if ((mask >> bit_idx) & 0x1) == 0:
+                break
+            high_part |= 1 << bit_idx
+
+        if (
+            low_part == 0
+            or high_part == 0
+            or low_part == mask
+            or high_part == mask
+            or (low_part | high_part) != mask
+        ):
+            return None
+
+        lower = dict(first)
+        upper = dict(second)
+        lower["mask"] = high_part
+        upper["mask"] = low_part
+        return [lower, upper]
 
     def _rob_rank(self, rob_idx: RobIndex | None) -> int:
         if rob_idx is None:

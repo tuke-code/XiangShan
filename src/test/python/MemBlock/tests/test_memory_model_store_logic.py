@@ -356,6 +356,64 @@ def test_memory_model_finalize_ignores_mmio_outer_drain_in_golden_compare():
     assert model.read(0x2000, 8) == 0xAABBCCDDEEFF0011
 
 
+def test_scoreboard_cross_16b_store_request_and_split_drain_pair():
+    refmem = RefMemory()
+    low_window_addr = 0x4008
+    high_window_addr = 0x4010
+    store_addr = 0x400D
+    store_data = 0xA1A2A3A4A5A6A7A8
+
+    refmem.preload_u64(low_window_addr, 0x1111222233334444)
+    refmem.preload_u64(high_window_addr, 0x5555666677778888)
+
+    scoreboard = Scoreboard(refmem, rob_size=64, store_queue_size=16)
+    scoreboard.note_store_allocated(
+        sq_idx_flag=0,
+        sq_idx_value=0,
+        rob_idx_flag=0,
+        rob_idx_value=0,
+    )
+    scoreboard.note_store_request(
+        sq_idx=0,
+        addr=store_addr,
+        data=store_data,
+        mask=0xFF,
+    )
+    scoreboard.observe_store_addr(
+        sq_idx=0,
+        paddr=store_addr,
+        miss=False,
+        mask=0xE000,
+        nc=False,
+    )
+    scoreboard.observe_store_mask(sq_idx=0, mask=0xE000)
+    scoreboard.observe_store_data(sq_idx=0, data=store_data)
+    scoreboard.mark_store_committed(0)
+
+    combined_data = 221522368320484764596627788725951374501
+    combined_mask = 0xE01F
+    scoreboard.observe_sbuffer_write(
+        lane_idx=0,
+        addr=0x4000,
+        data=combined_data,
+        mask=combined_mask,
+        width_bytes=16,
+    )
+    scoreboard.observe_sbuffer_write(
+        lane_idx=1,
+        addr=0x4010,
+        data=combined_data,
+        mask=combined_mask,
+        width_bytes=16,
+    )
+
+    result = scoreboard.finalize_and_check_drain()
+
+    assert result["drain_event_count"] == 2
+    assert refmem.read(low_window_addr, 8) == 0xA6A7A82233334444
+    assert refmem.read(high_window_addr, 8) == 0x555566A1A2A3A4A5
+
+
 def test_ref_memory_masked_write_and_read():
     refmem = RefMemory()
 

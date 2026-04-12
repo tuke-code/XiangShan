@@ -266,6 +266,14 @@ class MemoryModel:
             rob_idx_value=rob_idx_value,
         )
 
+    def note_store_request(self, *, sq_idx: int, addr: int, data: int, mask: int) -> None:
+        self.scoreboard.note_store_request(
+            sq_idx=sq_idx,
+            addr=addr,
+            data=data,
+            mask=mask,
+        )
+
     def note_load_commits(self, commit_count: int) -> None:
         self.scoreboard.note_load_commits(commit_count)
 
