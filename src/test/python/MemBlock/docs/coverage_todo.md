@@ -115,6 +115,12 @@
 #### 当前状态
 
 - 已部分覆盖，下一步重点从“同 16B 窗口 misalign”推进到“跨 16B / 跨 beat”
+- 2026-04-12 已新增独立 `tests/test_MemBlock_store_misalign.py`，补入 5 条 cross-16B scalar store directed case，并同步修复环境对 split retire / sbuffer drain pair 的建模
+- 但完整 coverage 重跑后，`StoreMisalignBuffer.sv` 仍停在 line `58.8%`、branch `37.0%`，说明当前新增 case 主要补上了验证闭环，还没有打到该模块更深层的状态组合
+- 同日继续补入 2 条 cross-page scalar store-misalign case（`SD + 0xFFD`、`SH + 0xFFF`），结果显示：
+  - 当前 env 已足够把请求送入 `StoreMisalignBuffer`，并完成 shadow/load 级观测；
+  - 但 real DUT 会卡在 `flushSb -> sbIsEmpty` 不清空，因此当前只能以 `strict xfail` 形式保留；
+  - 这更像是当前 DUT 的 cross-page unalign 功能缺口，而不是 testcase 断言过严。
 
 ### P0-3 misaligned scalar store/load directed
 
@@ -147,6 +153,15 @@
 #### 当前状态
 
 - 已有基础 directed case，仍保持 `P0`
+- 2026-04-12 的独立 store-misalign 文件已经把 `SD(+0xD/+0xE/+0xF)`、`SW(+0xD)`、`SH(+0xF)` 的 cross-16B 基础矩阵补齐
+- 当前结论从“没有体系化 cross-16B testcase”升级为“已有体系化 directed case，但 `StoreMisalignBuffer` 百分比仍横盘”
+- 因而下一步重点不再是继续堆基础 offset/width 组合，而是优先命中：
+  - cross-page / exception overwrite
+  - 更深的 split 状态停留与 dequeue 组合
+  - 可能受 `pendingPtrNext` 影响的 next-boundary 路径
+- 其中 cross-page normal path 已经有可重复 xfail 复现器，说明下一步可以拆成两条线并行：
+  - 一条线继续追 DUT 修复，使现有 xfail 转正；
+  - 另一条线补环境/观测，为 exception overwrite 与 redirect/cancel 提供更强定位能力。
 
 ### P0-4 store queue backpressure + delayed drain
 

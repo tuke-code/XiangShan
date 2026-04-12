@@ -17,6 +17,54 @@
 - Git commit：`9fab671f59f62f06c5b91ea0739efc69a48babb0`
 - Commit 摘要：`refactor(memblock): remove legacy public clock apis`
 
+### 2.1 2026-04-12 增量快照（store-misalign 独立用例补强后）
+
+在保留本篇 2026-04-11 详细分析主体不变的前提下，补记一轮 2026-04-12 的完整回归 coverage snapshot，便于追踪这次独立 `store-misalign` 补强的真实收益。
+
+- 覆盖率命令：
+
+```bash
+python3 -m pytest -q src/test/python/MemBlock/tests \
+  --toffee-report \
+  --report-dir src/test/python/MemBlock/data/toffee_report_full_serial_20260412_store_misalign_cov \
+  --report-name memblock_full_serial_20260412_store_misalign_cov \
+  --report-dump-json
+```
+
+- 测试结果：`95 PASSED, 1 XFAIL`
+- 报告产物：
+  - `src/test/python/MemBlock/data/toffee_report_full_serial_20260412_store_misalign_cov/toffee_report.json`
+  - `src/test/python/MemBlock/data/toffee_report_full_serial_20260412_store_misalign_cov/line_dat/index.html`
+- 全局代码覆盖率：
+  - line `65.3%`（`193043 / 295581`，相对 2026-04-11 `+71` hit）
+  - branch `57.7%`（`907150 / 1573403`，相对 2026-04-11 `+560` hit）
+- `StoreMisalignBuffer.sv`：
+  - line `58.8%`（`325 / 553`）
+  - branch `37.0%`（`1258 / 3404`）
+
+这说明本轮新增的 cross-16B store-misalign testcase 与配套环境修复，已经把“可验证性”和“路径稳定性”补上；但从模块级百分比看，`StoreMisalignBuffer` 仍未被明显拉升，后续还需要继续命中更深的状态组合，而不是只补基础 offset/width 矩阵。
+
+### 2.2 2026-04-12 focused cross-page 跟进（未重跑 full coverage）
+
+在上述 full coverage snapshot 之后，又补做了一轮 focused cross-page store-misalign 验证，但**尚未**重新执行整套 coverage 回归，因此这里先只记录功能状态，不改写 2.1 的百分比数据。
+
+- 聚焦命令：
+
+```bash
+python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_store_misalign.py
+```
+
+- 聚焦结果：`5 passed, 2 xfailed`
+- 新增状态：
+  - 已新增 2 条 cross-page scalar store-misalign case（`SD + 0xFFD`、`SH + 0xFFF`）
+  - 这两条 case 都能把请求送进 `StoreMisalignBuffer`，并观测到：
+    - store shadow materialize；
+    - 首段 split mask 与页尾低半段字节数一致；
+    - 两侧窗口 load compare 成功。
+  - 但两条 case 最终都卡在 `flushSb` 后 `sbIsEmpty` 不归零，因此当前以 `strict xfail` 形式保留。
+
+这说明当前环境对 **cross-page 正常路径的刺激与基础观测** 已经够用，至少能证明“不是 testcase 完全没打到路径”；但当前 DUT 仍未把 cross-page scalar store-misalign 的 drain/收口走通，所以它还不能被算作一个已经闭环的 coverage 补点。
+
 ## 3. 覆盖率执行命令与产物
 
 ### 3.1 pytest + toffee 报告命令

@@ -1,5 +1,99 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-12
+
+### 1. 补入 cross-page store-misalign 回归并确认当前 DUT 卡死点
+
+本条目记录在独立 `store-misalign` 测试文件中继续推进 cross-page 标量 store-misalign。该轮工作没有通过放宽 assert 来“做绿”，而是把真实失败收敛成可重复的 xfail 触发器，并明确区分 testcase 设计、环境能力与 DUT 行为。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_store_misalign.py`
+  - 在独立 misalign 测试文件中新增 2 条 cross-page directed case：
+    - `SD + 0xFFD`
+    - `SH + 0xFFF`
+  - 新 case 会先检查：
+    - store shadow 已 materialize
+    - 首段 split mask 与页尾低半段字节数一致
+    - 两个跨页窗口上的 younger load 都能按 stimulus-derived golden compare 收敛
+  - 最终继续要求 `flushSb` 完成 drain，并把当前失败以 `strict xfail` 固化为 DUT 回归触发器
+- `docs/coverage_summary.md` / `docs/coverage_todo.md`
+  - 补记当前 cross-page misalign 的最新判断：
+    - 环境已经足够把请求送入 `StoreMisalignBuffer` 并观测到 shadow/load 级现象
+    - 但当前 DUT 在 cross-page scalar store-misalign 上仍会卡在 `flushSb` 后 `sbIsEmpty` 不清空
+
+#### 问题定位结论
+
+- 这次失败不是通过修改 assert 就能合理回避的 testcase 设计问题。
+- 现象链路是：
+  - cross-page misalign store 能 materialize 到 shadow；
+  - 两侧窗口 load 能完成并通过 compare；
+  - 但 `flushSb` 后 sbuffer 无法清空，最终卡死在 drain 阶段。
+- 结合 `src/main/scala/xiangshan/mem/pipeline/StoreUnit.scala` 中两处 `TODO: support cross page unalign feature!`，当前更接近 **DUT 功能缺口 / 已知未打通路径**，而不是 Python env 单边误判。
+- 因此这里不去弱化断言，而是把触发条件精确标成 xfail，供后续 DUT 修复后回归转正。
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_store_misalign.py`
+  - 结果：`5 passed, 2 xfailed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'misaligned or partial or burst'`
+  - 结果：`7 passed, 2 deselected`
+
+### 2. 新增独立 store-misalign 测试文件并修复 cross-16B 环境建模
+
+本条目记录一次围绕 `StoreMisalignBuffer` 的专项补强：新增独立的 cross-16B store-misalign directed testcase，同时根据这些 testcase 暴露出来的真实失败，修复环境对 split store retire 与 sbuffer drain pair 的建模缺口。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_store_misalign.py`
+  - 新增独立 store-misalign 测试文件，不再把新场景混入 `test_MemBlock_scalar_store_pipeline.py`
+  - 新增 5 条 cross-16B scalar store directed case，覆盖：
+    - `SD + 0xD`
+    - `SD + 0xE`
+    - `SD + 0xF`
+    - `SW + 0xD`
+    - `SH + 0xF`
+  - 每条用例都同时检查 committed shadow、overlap load 和 flush/drain 后的最终窗口结果
+- `agents/backend_facade.py`
+  - `send(StoreTxn)` 在拿到实际 `sq_idx` 后，向 MemoryModel 同步原始 `addr/data/mask`
+  - 这样 cross-16B store 在 commit-boundary compare 时，不再只依赖低半段 shadow mask
+- `memory_model.py` / `model/scoreboard.py`
+  - 新增 `note_store_request()`，把原始标量 store 请求语义登记到 scoreboard
+  - `_retire_store()` 优先按原始 scalar store 请求更新 golden memory，修复 cross-16B overlap load 的高窗口 compare
+  - `finalize_and_check_drain()` 增加对 cross-16B sbuffer paired drain event 的归一化处理，避免把同一组 split data/mask 直接按两个 16B 全量事件重复展开
+- `tests/test_memory_model_store_logic.py`
+  - 新增单测，直接覆盖：
+    - cross-16B store request retire
+    - split sbuffer drain pair 归一化
+- `docs/coverage_summary.md` / `docs/coverage_todo.md`
+  - 追加 2026-04-12 coverage snapshot 与后续判断，记录“验证能力已补上，但 `StoreMisalignBuffer` 模块百分比仍未被这轮 case 拉升”
+
+#### 问题定位结论
+
+- 本轮最初失败不是简单的 testcase assert 设计问题，也不是直接可判定的 DUT bug。
+- 真实根因分成两类环境缺口：
+  - commit-boundary compare 只退休了 cross-16B store 的低半段 shadow；
+  - sbuffer drain log 对 paired split 写入口缺少归一化，导致 final drain compare 把同一组 combined `data/mask` 错当成两条完整 16B 写出。
+- 修复后，新 testcase 与原有 store pipeline directed case 都能稳定通过。
+
+#### 验证情况
+
+- `python3 -m py_compile`
+  - `src/test/python/MemBlock/model/scoreboard.py`
+  - `src/test/python/MemBlock/memory_model.py`
+  - `src/test/python/MemBlock/agents/backend_facade.py`
+  - `src/test/python/MemBlock/tests/test_MemBlock_store_misalign.py`
+  - `src/test/python/MemBlock/tests/test_memory_model_store_logic.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_memory_model_store_logic.py -k 'cross_16b_store_request_and_split_drain_pair or finalize_ignores_mmio_outer_drain_in_golden_compare or memory_model_defers_load_compare_until_commit_boundary'`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py -k 'send_store_translates_to_enqueue_and_issue_cycles or send_partial_store_keeps_mask_on_sta_and_std'`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_store_misalign.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'misaligned or partial or burst'`
+- `python3 -m pytest -q src/test/python/MemBlock/tests --toffee-report --report-dir src/test/python/MemBlock/data/toffee_report_full_serial_20260412_store_misalign_cov --report-name memblock_full_serial_20260412_store_misalign_cov --report-dump-json`
+  - 结果：`95 PASSED, 1 XFAIL`
+  - 全局 line coverage：`65.3%`（`193043 / 295581`，相对上一版 `+71` hit）
+  - 全局 branch coverage：`57.7%`（`907150 / 1573403`，相对上一版 `+560` hit）
+  - `StoreMisalignBuffer.sv`：line `58.8%`（`325 / 553`），branch `37.0%`（`1258 / 3404`），本轮仍基本横盘
+
 ## 2026-04-11
 
 ### 8. 修复 MMIO outer drain 与 final golden compare 的环境语义
