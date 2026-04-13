@@ -33,7 +33,6 @@ import xiangshan.backend.ctrlblock.DebugLsInfoBundle
 import xiangshan.backend.fu.NewCSR._
 import xiangshan.backend.fu.util.SdtrigExt
 import xiangshan.backend.exu.ExeUnitParams
-import xiangshan.mem.mdp._
 import xiangshan.mem.Bundles._
 import xiangshan.mem.mdp.NewMdp.{MdpUpdateType,MdpUpdate,MdpPredictStatuses,HasNewMdp}
 import xiangshan.cache._
@@ -1150,13 +1149,8 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
 
   val s2_full_fwd      = Wire(Bool())
   val s2_mem_amb       = {
-    if(HasNewMdp.Enable){
-      s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait && ~s2_in.uop.loadPred.bits.static
-      io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid)
-    }else{
-      s2_in.uop.storeSetHit &&
-      io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid)
-    }
+    s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait && ~s2_in.uop.loadPred.bits.static
+    io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid)
   }
   val s2_tlb_miss      = s2_in.tlbMiss
   val s2_fwd_fail      = io.lsq.forward.dataInvalid && RegNext(io.lsq.forward.valid)

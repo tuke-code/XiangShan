@@ -28,7 +28,6 @@ import xiangshan.backend.decode.{FusionDecodeInfo, ImmUnion, Imm_Z, XSDebugDecod
 import xiangshan.backend.fu.FuType
 import xiangshan.backend.rename.freelist._
 import xiangshan.backend.rob.{RobEnqIO, RobPtr}
-import xiangshan.mem.mdp._
 import xiangshan.ExceptionNO._
 import xiangshan.backend.fu.FuType._
 import xiangshan.mem.{EewLog2, GenUSWholeEmul}
@@ -60,10 +59,6 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     val isFusionVec = Vec(RenameWidth, Input(Bool()))
     val fusionCross2FtqVec = Vec(RenameWidth, Input(Bool()))
     val fusionInfo = Vec(DecodeWidth - 1, Flipped(new FusionDecodeInfo))
-    // ssit read result
-    val ssit = Flipped(Vec(RenameWidth, Output(new SSITEntry)))
-    // waittable read result
-    val waittable = Flipped(Vec(RenameWidth, Output(Bool())))
     // to rename table
     val intReadPorts = Vec(RenameWidth, Vec(2, Input(UInt(PhyRegIdxWidth.W))))
     val fpReadPorts = Vec(RenameWidth, Vec(3, Input(UInt(PhyRegIdxWidth.W))))
@@ -335,13 +330,6 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   for (i <- 0 until RenameWidth) {
     (uops(i): Data).waiveAll :<= (io.in(i).bits: Data).waiveAll
 
-    // update cf according to ssit result
-    uops(i).storeSetHit := io.ssit(i).valid
-    uops(i).loadWaitStrict := io.ssit(i).strict && io.ssit(i).valid
-    uops(i).ssid := io.ssit(i).ssid
-
-    // update cf according to waittable result
-    uops(i).loadWaitBit := io.waittable(i)
     uops(i).crossFtq := false.B
     uops(i).crossFtqCommit := 0.U
     uops(i).ftqLastOffset := io.in(i).bits.ftqOffset

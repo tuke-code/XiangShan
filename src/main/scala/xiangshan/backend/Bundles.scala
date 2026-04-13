@@ -286,10 +286,6 @@ object Bundles {
     // Load wait is needed
     // load inst will not be executed until former store (predicted by mdp) addr calcuated
     val loadWaitBit = Bool()
-    // If (loadWaitBit && loadWaitStrict), strict load wait is needed
-    // load inst will not be executed until ALL former store addr calcuated
-    val loadWaitStrict = Bool()
-    val ssid = UInt(SSIDWidth.W)
     val singleStep = Bool() // debug module
     val numLsElem = NumLsElem()
     val hasException = Bool()
@@ -369,8 +365,6 @@ object Bundles {
     val storeSetHit = Bool()
     val waitForRobIdx = new RobPtr
     val loadWaitBit = Bool()
-    val loadWaitStrict = Bool()
-    val ssid = UInt(SSIDWidth.W)
     val srcState = Vec(numSrc, SrcState())
     val srcStateVl = SrcState()
     val srcLoadDependency = Vec(numSrc, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
@@ -430,8 +424,6 @@ object Bundles {
     val storeSetHit       = Option.when(params.isLdAddrIQ)(Bool())
     val waitForRobIdx     = Option.when(params.isLdAddrIQ)(new RobPtr)
     val loadWaitBit       = Option.when(params.isLdAddrIQ)(Bool())
-    val loadWaitStrict    = Option.when(params.isLdAddrIQ)(Bool())
-    val ssid              = Option.when(params.isLdAddrIQ || params.isStAddrIQ)(UInt(SSIDWidth.W))
     // from dispatch
     val srcState          = Vec(numSrc, SrcState())
     val srcLoadDependency = Vec(numSrc, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
@@ -471,8 +463,6 @@ object Bundles {
     val storeSetHit    = Option.when(params.isLdAddrIQ)(Bool())
     val waitForRobIdx  = Option.when(params.isLdAddrIQ)(new RobPtr)
     val loadWaitBit    = Option.when(params.isLdAddrIQ)(Bool())
-    val loadWaitStrict = Option.when(params.isLdAddrIQ)(Bool())
-    val ssid           = Option.when(params.isLdAddrIQ || params.isStAddrIQ)(UInt(SSIDWidth.W))
     // from dispatch
     val lqIdx = Option.when(params.isLdAddrIQ || params.isVecMemIQ)(new LqPtr)
     val sqIdx = Option.when(params.isStAddrIQ || params.isStdIQ || params.isVecMemIQ || params.isLdAddrIQ)(new SqPtr) // load unit need sqIdx
@@ -514,8 +504,6 @@ object Bundles {
     val storeSetHit       = Option.when(params.isLdAddrIQ)(Bool())
     val waitForRobIdx     = Option.when(params.isLdAddrIQ)(new RobPtr)
     val loadWaitBit       = Option.when(params.isLdAddrIQ)(Bool())
-    val loadWaitStrict    = Option.when(params.isLdAddrIQ)(Bool())
-    val ssid              = Option.when(params.isLdAddrIQ || params.isStAddrIQ)(UInt(SSIDWidth.W))
     // from dispatch
     val srcState          = Vec(numSrc, SrcState())
     val srcLoadDependency = Vec(numSrc, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
@@ -617,10 +605,6 @@ object Bundles {
     // Load wait is needed
     // load inst will not be executed until former store (predicted by mdp) addr calcuated
     val loadWaitBit     = Bool()
-    // If (loadWaitBit && loadWaitStrict), strict load wait is needed
-    // load inst will not be executed until ALL former store addr calcuated
-    val loadWaitStrict  = Bool()
-    val ssid            = UInt(SSIDWidth.W)
     // Todo
     val lqIdx = new LqPtr
     val sqIdx = new SqPtr
@@ -677,12 +661,6 @@ object Bundles {
   trait BundleSource {
     var wakeupSource = "undefined"
     var idx = 0
-  }
-
-  class StoreUnitToLFST(implicit p: Parameters) extends XSBundle {
-    val robIdx = new RobPtr
-    val ssid = UInt(SSIDWidth.W)
-    val storeSetHit = Bool() // inst has been allocated an store set
   }
 
   class MemWakeUpBundle(implicit p: Parameters) extends XSBundle {
@@ -1065,10 +1043,6 @@ object Bundles {
     }) else None
     val loadPred       = OptionWrapper(params.hasLoadExu, Valid(new MdpPredictInfo))
     val loadWaitBit    = OptionWrapper(params.hasLoadExu, Bool())
-    val waitForRobIdx  = OptionWrapper(params.hasLoadExu, new RobPtr) // store set predicted previous store robIdx
-    val storeSetHit    = OptionWrapper(params.hasLoadExu, Bool()) // inst has been allocated an store set
-    val loadWaitStrict = OptionWrapper(params.hasLoadExu, Bool()) // load inst will not be executed until ALL former store addr calcuated
-    val ssid           = OptionWrapper(params.hasLoadExu, UInt(SSIDWidth.W))
     // only vector load store need
     val numLsElem      = OptionWrapper(params.hasVecLsFu, NumLsElem())
     val lqIdx = OptionWrapper(params.hasLoadFu || params.hasVecLsFu, new LqPtr)
@@ -1126,10 +1100,6 @@ object Bundles {
       this.predictInfo   .foreach(_ := source.common.predictInfo.get)
       this.loadPred      .foreach(_ := source.common.loadPred.get)
       this.loadWaitBit   .foreach(_ := source.common.loadWaitBit.get)
-      this.waitForRobIdx .foreach(_ := source.common.waitForRobIdx.get)
-      this.storeSetHit   .foreach(_ := source.common.storeSetHit.get)
-      this.loadWaitStrict.foreach(_ := source.common.loadWaitStrict.get)
-      this.ssid          .foreach(_ := source.common.ssid.get)
       this.lqIdx         .foreach(_ := source.common.lqIdx.get)
       this.sqIdx         .foreach(_ := source.common.sqIdx.get)
       this.numLsElem     .foreach(_ := source.common.numLsElem.get)
@@ -1151,11 +1121,7 @@ object Bundles {
       this.numLsElem     .foreach(_ := source.numLsElem.get)
       this.rasAction     .foreach(_ := source.rasAction.get)
       this.loadPred      .foreach(_ := source.loadPred.get)
-      this.storeSetHit   .foreach(_ := source.storeSetHit.get)
-      this.waitForRobIdx .foreach(_ := source.waitForRobIdx.get)
       this.loadWaitBit   .foreach(_ := source.loadWaitBit.get)
-      this.loadWaitStrict.foreach(_ := source.loadWaitStrict.get)
-      this.ssid          .foreach(_ := source.ssid.get)
       this.lqIdx         .foreach(_ := source.lqIdx.get)
       this.sqIdx         .foreach(_ := source.sqIdx.get)
     }
@@ -1178,10 +1144,6 @@ object Bundles {
       uop.pc             := this.pc.getOrElse(0.U) + (this.ftqOffset.getOrElse(0.U) << instOffsetBits)
       uop.loadPred       := this.loadPred.getOrElse(0.U.asTypeOf(Valid(new MdpPredictInfo)))
       uop.loadWaitBit    := this.loadWaitBit.getOrElse(false.B)
-      uop.waitForRobIdx  := this.waitForRobIdx.getOrElse(0.U.asTypeOf(new RobPtr))
-      uop.storeSetHit    := this.storeSetHit.getOrElse(false.B)
-      uop.loadWaitStrict := this.loadWaitStrict.getOrElse(false.B)
-      uop.ssid           := this.ssid.getOrElse(0.U(SSIDWidth.W))
       uop.lqIdx          := this.lqIdx.getOrElse(0.U.asTypeOf(new LqPtr))
       uop.sqIdx          := this.sqIdx.getOrElse(0.U.asTypeOf(new SqPtr))
       uop.ftqPtr         := this.ftqIdx.getOrElse(0.U.asTypeOf(new FtqPtr))
@@ -1261,10 +1223,6 @@ object Bundles {
     val isFirstIssue   = Bool()                        // Only used by store yet
     val loadPred       = Option.when(params.hasLoadExu)(Valid(new MdpPredictInfo)) //new mdp
     val loadWaitBit    = Option.when(params.hasLoadExu)(Bool())
-    val waitForRobIdx  = Option.when(params.hasLoadExu)(new RobPtr) // store set predicted previous store robIdx
-    val storeSetHit    = Option.when(params.hasLoadExu)(Bool())     // inst has been allocated an store set
-    val loadWaitStrict = Option.when(params.hasLoadExu)(Bool())     // load inst will not be executed until ALL former store addr calcuated
-    val ssid           = Option.when(params.hasLoadExu)(UInt(SSIDWidth.W))
     val numLsElem      = Option.when(params.hasVecLsFu)(NumLsElem())
     val lqIdx          = Option.when(params.hasLoadExu || params.hasVecLsFu)(new LqPtr)
     val sqIdx          = Option.when(params.hasLoadExu || params.hasStoreAddrFu || params.hasStdFu || params.hasVecLsFu)(new SqPtr)

@@ -29,7 +29,6 @@ import xiangshan.backend.fu.fpu._
 import xiangshan.backend.rob.RobLsqIO
 import xiangshan.backend.Bundles.{DynInst, ExuOutput, MemExuOutput}
 import xiangshan.backend.rob.RobPtr
-import xiangshan.mem.mdp._
 import xiangshan.mem.Bundles._
 import xiangshan.cache._
 import xiangshan.cache.mmu._

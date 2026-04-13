@@ -37,7 +37,6 @@ import xiangshan.backend.fu.FuType.FuTypeOrR
 import xiangshan.backend.regcache.{RCTagTableReadPort, RegCacheTagTable}
 import xiangshan.backend.trace.Itype
 import xiangshan.mem.MemCoreTopDownIO
-import xiangshan.mem.mdp._
 import xiangshan.mem._
 
 class CoreDispatchTopDownIO extends Bundle {
@@ -143,9 +142,6 @@ class NewDispatch(implicit p: Parameters) extends XSModule with HasPerfEvents wi
     val redirect = Flipped(ValidIO(new Redirect))
     // singleStep
     val singleStep = Input(Bool())
-    // lfst
-    val lfst = new DispatchLFSTIO
-
     // perf only
     val robHeadFuType = Input(FuType())
     val stallReason = Flipped(new StallReasonIO(RenameWidth))
@@ -790,19 +786,6 @@ class NewDispatch(implicit p: Parameters) extends XSModule with HasPerfEvents wi
     when (fromRename(i).bits.isLUI) {
       updatedUop(i).psrc(0) := 0.U
     }
-    //TODO: vec ls mdp
-    io.lfst.req(i).valid := fromRename(i).fire && updatedUop(i).storeSetHit
-    io.lfst.req(i).bits.isstore := isStore(i)
-    io.lfst.req(i).bits.ssid := updatedUop(i).ssid
-    io.lfst.req(i).bits.robIdx := updatedUop(i).robIdx // speculatively assigned in rename
-
-    // override load delay ctrl signal with store set result
-    if(StoreSetEnable) {
-      updatedUop(i).loadWaitBit := io.lfst.resp(i).bits.shouldWait
-      updatedUop(i).waitForRobIdx := io.lfst.resp(i).bits.robIdx
-    } else {
-      updatedUop(i).loadWaitBit := isLs(i) && !isStore(i) && fromRename(i).bits.loadWaitBit
-    }
     // // update singleStep, singleStep exception only enable in next machine instruction.
     updatedUop(i).singleStep := io.singleStep && (fromRename(i).bits.robIdx =/= robidxCanCommitStepping)
     XSDebug(
@@ -823,19 +806,6 @@ class NewDispatch(implicit p: Parameters) extends XSModule with HasPerfEvents wi
   }
 
   // store set perf count
-  XSPerfAccumulate("waittable_load_wait", PopCount((0 until RenameWidth).map(i =>
-    fromRename(i).fire && fromRename(i).bits.loadWaitBit && !isStore(i) && isLs(i)
-  )))
-  XSPerfAccumulate("storeset_load_wait", PopCount((0 until RenameWidth).map(i =>
-    fromRename(i).fire && updatedUop(i).loadWaitBit && !isStore(i) && isLs(i)
-  )))
-  XSPerfAccumulate("storeset_load_strict_wait", PopCount((0 until RenameWidth).map(i =>
-    fromRename(i).fire && updatedUop(i).loadWaitBit && updatedUop(i).loadWaitStrict && !isStore(i) && isLs(i)
-  )))
-  XSPerfAccumulate("storeset_store_wait", PopCount((0 until RenameWidth).map(i =>
-    fromRename(i).fire && updatedUop(i).loadWaitBit && isStore(i)
-  )))
-
   val allResourceReady = io.enqRob.canAccept
 
   // Instructions should enter issue queues in order.

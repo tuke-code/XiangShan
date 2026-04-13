@@ -152,11 +152,7 @@ class IBufOutEntry(implicit p: Parameters) extends IBufferBundle {
     cf.fixedTaken                                    := fixedTaken
     cf.predTaken                                     := predTaken
     cf.crossPageIPFFix                               := exceptionCrossPage
-    cf.storeSetHit                                   := DontCare
-    cf.waitForRobIdx                                 := DontCare
     cf.loadWaitBit                                   := DontCare
-    cf.loadWaitStrict                                := DontCare
-    cf.ssid                                          := DontCare
     cf.ftqPtr                                        := ftqPtr
     cf.ftqOffset                                     := instrEndOffset
     cf.isLastInFtqEntry                              := isLastInFtqEntry

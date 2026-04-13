@@ -216,7 +216,6 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   assert(ctrlBlock.io.fromWB.wbData.size == wbDataPathToCtrlBlock.size, "ctrlBlock.io.fromWB.wbData.size == wbDataPathToCtrlBlock.size")
   ctrlBlock.io.fromWB.wbData.zip(wbDataPathToCtrlBlock).map(x => x._1 := x._2)
   ctrlBlock.io.fromWB.delayedOldestExuRedirect := intRegion.io.wbDataPathToCtrlBlock.delayedOldestExuRedirect.get
-  ctrlBlock.io.fromMem.stIn <> io.mem.stIn
   ctrlBlock.io.fromMem.violation <> io.mem.memoryViolation
   ctrlBlock.io.fromMem.mdpUpdate <> io.mem.mdpUpdate
   ctrlBlock.io.lqCanAccept := io.mem.lqCanAccept
@@ -475,10 +474,6 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
     //new mdp
     sink.bits.loadPred.foreach(_ := Mux(enableMdp, source.bits.loadPred.get, 0.U.asTypeOf(Valid(new MdpPredictInfo))))
     sink.bits.loadWaitBit.foreach(_ := Mux(enableMdp, source.bits.loadWaitBit.get, false.B))
-    sink.bits.waitForRobIdx.foreach(_ := Mux(enableMdp, source.bits.waitForRobIdx.get, 0.U.asTypeOf(new RobPtr)))
-    sink.bits.storeSetHit.foreach(_ := Mux(enableMdp, source.bits.storeSetHit.get, false.B))
-    sink.bits.loadWaitStrict.foreach(_ := Mux(enableMdp, source.bits.loadWaitStrict.get, false.B))
-    sink.bits.ssid.foreach(_ := Mux(enableMdp, source.bits.ssid.get, 0.U(SSIDWidth.W)))
   }
   io.mem.tlbCsr := csrio.tlb
   io.mem.csrCtrl := csrio.customCtrl
@@ -641,8 +636,6 @@ class BackendMemIO(implicit p: Parameters, params: BackendParams) extends XSBund
     Flipped(intSchdParams.genExuOutputDecoupledBundleMemBlock)
   val vecWriteback: MixedVec[MixedVec[DecoupledIO[ExuOutput]]] =
     Flipped(vecSchdParams.genExuOutputDecoupledBundleMemBlock)
-
-  val stIn = Input(Vec(params.StaExuCnt, ValidIO(new StoreUnitToLFST)))
 
   val memoryViolation = Flipped(ValidIO(new Redirect))
   val mdpUpdate = Flipped(Vec(LoadPipelineWidth + 1, Valid(new MdpUpdate)))

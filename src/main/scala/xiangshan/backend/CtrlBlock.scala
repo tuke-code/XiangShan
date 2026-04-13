@@ -25,7 +25,7 @@ import utils._
 import xiangshan.ExceptionNO._
 import xiangshan._
 import xiangshan.backend.Bundles._
-import xiangshan.backend.ctrlblock.{DebugLSIO, DebugLsInfoBundle, LsTopdownInfo, MemCtrl, RedirectGenerator}
+import xiangshan.backend.ctrlblock.{DebugLSIO, DebugLsInfoBundle, LsTopdownInfo, RedirectGenerator}
 import xiangshan.backend.datapath.DataConfig.{FpData, IntData, V0Data, VAddrData, VecData, VlData}
 import xiangshan.backend.decode.{DecodeStage, FusionDecoder}
 import xiangshan.backend.dispatch.CoreDispatchTopDownIO
@@ -78,7 +78,6 @@ class CtrlBlockImp(
 {
   val pcMemRdIndexes = new NamedIndexes(Seq(
     "redirect"  -> 1,
-    "memPred"   -> 1,
     "robFlush"  -> 1,
     "bjuPc"     -> params.BrhCnt,
     "bjuTarget" -> params.BrhCnt,
@@ -105,7 +104,6 @@ class CtrlBlockImp(
   private def hasRen: Boolean = true
   private val pcMem = Module(new SyncDataModuleTemplate(PrunedAddr(VAddrBits), FtqSize, numPcMemRead, 1, "BackendPC", hasRen = hasRen))
   private val rob = wrapper.rob.module
-  private val memCtrl = Module(new MemCtrl(params))
 
   private val disableFusion = decode.io.csrCtrl.singlestep || !decode.io.csrCtrl.fusion_enable
 
@@ -210,13 +208,6 @@ class CtrlBlockImp(
 
   pcMem.io.ren.get(pcMemRdIndexes("redirect").head) := memViolation.valid
   pcMem.io.raddr(pcMemRdIndexes("redirect").head) := memViolation.bits.ftqIdx.value
-  pcMem.io.ren.get(pcMemRdIndexes("memPred").head) := memViolation.valid
-  pcMem.io.raddr(pcMemRdIndexes("memPred").head) := memViolation.bits.stFtqIdx.value
-  val memPredPCOffset = Reg(UInt(VAddrBits.W))
-  when(memViolation.valid) {
-    memPredPCOffset := memViolation.bits.getPcOffset()
-  }
-  redirectGen.io.memPredPcRead.data := pcMem.io.rdata(pcMemRdIndexes("memPred").head).toUInt + memPredPCOffset
 
   for ((pcMemIdx, i) <- pcMemRdIndexes("bjuPc").zipWithIndex) {
     val ren = io.toDataPath.pcToDataPathIO.fromDataPathValid(i)
@@ -619,28 +610,6 @@ class CtrlBlockImp(
     }
   }
 
-  // memory dependency predict
-  // when decode, send fold pc to mdp
-  private val mdpFlodPcVecVld = Wire(Vec(DecodeWidth, Bool()))
-  private val mdpFlodPcVec = Wire(Vec(DecodeWidth, UInt(MemPredPCWidth.W)))
-  for (i <- 0 until DecodeWidth) {
-    mdpFlodPcVecVld(i) := decode.io.out(i).fire || GatedValidRegNext(decode.io.out(i).fire)
-    mdpFlodPcVec(i) := Mux(
-      decode.io.out(i).fire,
-      decode.io.in(i).bits.foldpc,
-      rename.io.in(i).bits.foldpc
-    )
-  }
-
-  // currently, we only update mdp info when isReplay
-  memCtrl.io.redirect := s1_s3_redirect
-  memCtrl.io.csrCtrl := io.csrCtrl                          // RegNext in memCtrl
-  memCtrl.io.stIn := io.fromMem.stIn                        // RegNext in memCtrl
-  memCtrl.io.memPredUpdate := redirectGen.io.memPredUpdate  // RegNext in memCtrl
-  memCtrl.io.mdpFoldPcVecVld := mdpFlodPcVecVld
-  memCtrl.io.mdpFlodPcVec := mdpFlodPcVec
-  memCtrl.io.dispatchLFSTio <> dispatch.io.lfst
-
   rat.io.hartId := io.fromTop.hartId
   rat.io.redirect := s1_s3_redirect.valid
   rat.io.rabCommits := rob.io.rabCommits
@@ -657,14 +626,6 @@ class CtrlBlockImp(
   rename.io.rabCommits := rob.io.rabCommits
   rename.io.vlCommits := rob.io.vlCommits
   rename.io.singleStep := GatedValidRegNext(io.csrCtrl.singlestep)
-  rename.io.waittable := (memCtrl.io.waitTable2Rename zip decode.io.out).map{ case(waittable2rename, decodeOut) =>
-    RegEnable(waittable2rename, decodeOut.fire)
-  }
-  rename.io.ssit := memCtrl.io.ssit2Rename
-  // disble mdp
-  dispatch.io.lfst.resp := 0.U.asTypeOf(dispatch.io.lfst.resp)
-  rename.io.waittable := 0.U.asTypeOf(rename.io.waittable)
-  rename.io.ssit := 0.U.asTypeOf(rename.io.ssit)
   rename.io.intReadPorts := VecInit(rat.io.intReadPorts.map(x => VecInit(x.map(_.data))))
   rename.io.fpReadPorts := VecInit(rat.io.fpReadPorts.map(x => VecInit(x.map(_.data))))
   rename.io.vecReadPorts := VecInit(rat.io.vecReadPorts.map(x => VecInit(x.map(_.data))))
@@ -948,7 +909,6 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
   }
   val redirect = ValidIO(new Redirect)
   val fromMem = new Bundle {
-    val stIn = Vec(params.StaExuCnt, Flipped(ValidIO(new StoreUnitToLFST))) // use storeSetHit, ssid, robIdx
     val violation = Flipped(ValidIO(new Redirect))
     val mdpUpdate = Flipped(Vec(LoadPipelineWidth + 1, Valid(new MdpUpdate)))
   }

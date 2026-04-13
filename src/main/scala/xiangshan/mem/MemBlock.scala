@@ -204,7 +204,6 @@ class mem_to_ooo(implicit p: Parameters) extends MemBlockBundle {
   // used by VLSU issue queue, the vector store would wait all store before it, and the vector load would wait all load
   val sqDeqPtr = Output(new SqPtr)
   val lqDeqPtr = Output(new LqPtr)
-  val updateLFST = Vec(StAddrCnt, ValidIO(new StoreUnitToLFST))
   val stIssuePtr = Output(new SqPtr())
 
   val memoryViolation = ValidIO(new Redirect)
@@ -1086,10 +1085,6 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
       stu.io.misalign_stin.valid := false.B
       stu.io.misalign_stin.bits := DontCare
     }
-
-    // 1. sync issue info to store set LFST
-    // 2. when store issue, broadcast issued sqPtr to wake up the following insts
-    io.mem_to_ooo.updateLFST(i) := stu.io.updateLFST
 
     stu.io.stout.ready := true.B
 

@@ -28,7 +28,6 @@ import xiangshan.backend.fu.fpu.FPU
 import xiangshan.backend.fu.FuConfig._
 import xiangshan.backend.Bundles.{DynInst, ExuOutput}
 import xiangshan.mem.Bundles._
-import xiangshan.mem.mdp._
 import xiangshan.cache._
 import xiangshan.cache.wpu.ReplayCarry
 import xiangshan.cache.mmu._
@@ -567,7 +566,6 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     replay_req(i).bits.missDbUpdated := s2_missDbUpdated
     replay_req(i).bits.forward_tlDchannel := s2_replayCauses(LoadReplayCauses.C_DM)
     replay_req(i).bits.schedIndex   := s2_oldestSel(i).bits
-    replay_req(i).bits.uop.loadWaitStrict := false.B
     replay_req(i).bits.tlbMiss      := s2_replayCauses(LoadReplayCauses.C_TM)
 
     XSError(replay_req(i).fire && !allocated(s2_oldestSel(i).bits), p"LoadQueueReplay: why replay an invalid entry ${s2_oldestSel(i).bits} ?")
@@ -700,7 +698,6 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
       // special case: st-ld violation
       when (replayInfo.cause(LoadReplayCauses.C_MA)) {
         blockSqIdx(enqIndex) := replayInfo.addr_inv_sq_idx
-        strict(enqIndex) := enq.bits.uop.loadWaitStrict
       }
 
       // special case: data forward fail

@@ -666,11 +666,6 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     val dataValidVec = WireInit(VecInit((0 until StoreQueueSize).map(j => datavalid(j))))
     val allValidVec  = WireInit(VecInit((0 until StoreQueueSize).map(j => addrvalid(j) && datavalid(j) && allocated(j))))
 
-    val lfstEnable = Constantin.createRecord("LFSTEnable", LFSTEnable)
-    val storeSetHitVec = Mux(lfstEnable,
-      WireInit(VecInit((0 until StoreQueueSize).map(j => io.forward(i).uop.loadWaitBit && uop(j).robIdx === io.forward(i).uop.waitForRobIdx))),
-      WireInit(VecInit((0 until StoreQueueSize).map(j => uop(j).storeSetHit && uop(j).ssid === io.forward(i).uop.ssid)))
-    )
     val mdpHitVec = WireInit(VecInit((0 until StoreQueueSize).map(j =>
       io.forward(i).uop.loadPred.bits.loadWait && uop(j).robIdx === io.forward(i).uop.loadPred.bits.getWaitStoreRobIdx(io.forward(i).uop.robIdx)
     )))
@@ -741,11 +736,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     // If SSID match, address not ready, mark it as addrInvalid
     // load_s2: generate addrInvalid
     val mdpFinalHitVec = Wire(Vec(StoreQueueSize,Bool()))
-    if(HasNewMdp.Enable){
-      mdpFinalHitVec := mdpHitVec
-    }else{
-      mdpFinalHitVec := storeSetHitVec
-    }
+    mdpFinalHitVec := mdpHitVec
     val addrInvalidMask1 = (~addrValidVec.asUInt & mdpFinalHitVec.asUInt & forwardMask1.asUInt)
     val addrInvalidMask2 = (~addrValidVec.asUInt & mdpFinalHitVec.asUInt & forwardMask2.asUInt)
     // make chisel happy
@@ -768,49 +759,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     val s2_enqPtrExt = RegNext(enqPtrExt(0))
     val s2_deqPtrExt = RegNext(deqPtrExt(0))
 
-    // addr invalid sq index
-    // make chisel happy
-    val addrInvalidMaskRegWire = Wire(UInt(StoreQueueSize.W))
-    addrInvalidMaskRegWire := addrInvalidMaskReg
-    val addrInvalidFlag = addrInvalidMaskRegWire.orR
-    val hasInvalidAddr = (~addrValidVec.asUInt & needForward).orR
-
-    val addrInvalidSqIdx1 = OHToUInt(Reverse(PriorityEncoderOH(Reverse(addrInvalidMask1Reg))))
-    val addrInvalidSqIdx2 = OHToUInt(Reverse(PriorityEncoderOH(Reverse(addrInvalidMask2Reg))))
-    val addrInvalidSqIdx = Mux(addrInvalidMask2Reg.orR, addrInvalidSqIdx2, addrInvalidSqIdx1)
-
-    // store-set content management
-    //                +-----------------------+
-    //                | Search a SSID for the |
-    //                |    load operation     |
-    //                +-----------------------+
-    //                           |
-    //                           V
-    //                 +-------------------+
-    //                 | load wait strict? |
-    //                 +-------------------+
-    //                           |
-    //                           V
-    //               +----------------------+
-    //            Set|                      |Clean
-    //               V                      V
-    //  +------------------------+   +------------------------------+
-    //  | Waiting for all older  |   | Wait until the corresponding |
-    //  |   stores operations    |   | older store operations       |
-    //  +------------------------+   +------------------------------+
-
-
-
-    when (RegEnable(io.forward(i).uop.loadWaitStrict, io.forward(i).valid)) {
-      io.forward(i).addrInvalidSqIdx := RegEnable((io.forward(i).uop.sqIdx - 1.U), io.forward(i).valid)
-    } .elsewhen (addrInvalidFlag) {
-      io.forward(i).addrInvalidSqIdx.flag := Mux(!s2_differentFlag || addrInvalidSqIdx >= s2_deqPtrExt.value, s2_deqPtrExt.flag, s2_enqPtrExt.flag)
-      io.forward(i).addrInvalidSqIdx.value := addrInvalidSqIdx
-    } .otherwise {
-      // may be store inst has been written to sbuffer already.
-      io.forward(i).addrInvalidSqIdx := RegEnable(io.forward(i).uop.sqIdx, io.forward(i).valid)
-    }
-    io.forward(i).addrInvalid := Mux(RegEnable(io.forward(i).uop.loadWaitStrict, io.forward(i).valid), RegNext(hasInvalidAddr), addrInvalidFlag)
+    io.forward(i).addrInvalidSqIdx := RegEnable(io.forward(i).uop.sqIdx, io.forward(i).valid)
+    io.forward(i).addrInvalid := false.B
 
     // data invalid sq index
     // make chisel happy

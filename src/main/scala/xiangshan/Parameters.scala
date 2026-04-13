@@ -789,14 +789,6 @@ trait HasXSParameter {
   // wait table parameters
   def WaitTableSize = 1024
   def MemPredPCWidth = log2Up(WaitTableSize)
-  def LWTUse2BitCounter = true
-  // store set parameters
-  def SSITSize = WaitTableSize
-  def LFSTSize = 32
-  def SSIDWidth = log2Up(LFSTSize)
-  def LFSTWidth = 4
-  def StoreSetEnable = true // LWT will be disabled if SS is enabled
-  def LFSTEnable = true
 
   def PCntIncrStep: Int = 6
   def numPCntHc: Int = 12
