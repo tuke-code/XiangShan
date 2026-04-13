@@ -265,7 +265,7 @@ class Sbuffer(implicit p: Parameters)
 
   def widthMap[T <: Data](f: Int => T) = (0 until StoreBufferSize) map f
 
-  // sbuffer entry count
+  // sbuffer entry count ?
 
   val plru = new ValidPseudoLRU(StoreBufferSize)
   val accessIdx = Wire(Vec(EnsbufferWidth + 1, Valid(UInt(SbufferIndexWidth.W))))
