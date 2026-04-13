@@ -256,8 +256,7 @@ class LoadUnitS0(param: ExeUnitParams)(
   val needAlignCheckValids = needAlignCheckSources.map(_.valid)
   val alwaysUnalignSources = Seq(unalignTail)
   val alwaysUnalign = Cat(alwaysUnalignSources.map(_.fire)).orR
-  val alwaysAlignSources = Seq(prefetchHiConf, prefetchLoConf)
-  val noAlignCheckSources = alwaysUnalignSources ++ alwaysAlignSources // unalign tail, hardware prefetch
+  val noAlignCheckSources = alwaysUnalignSources  // unalign tail, hardware prefetch
   val noAlignCheck = Cat(noAlignCheckSources.map(_.fire)).orR || isPrefetch // unalign tail, hardware & software prefetch
   val needAlignCheck = !noAlignCheck
 
