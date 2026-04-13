@@ -45,7 +45,7 @@ trait HasAheadBtbParameters extends HasBpuParameters {
   def BankIdxWidth:             Int = log2Ceil(NumBanks)
   def WriteBufferSize:          Int = abtbParameters.WriteBufferSize
   def TakenCounterWidth:        Int = abtbParameters.TakenCounterWidth
-  def WriteStarvationThreshold: Int = 3
+  def WriteStarvationThreshold: Int = 2
 
   def EnableTargetFix: Boolean = abtbParameters.EnableTargetFix
 }

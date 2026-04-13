@@ -319,6 +319,12 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
     }
   }
 
+  replacers.zipWithIndex.foreach { case (r, i) =>
+    r.io.readValid   := t1_fire && t1_bankMask(i)
+    r.io.readSetIdx  := t1_setIdx
+    r.io.readWayMask := t1_hitMaskOH
+  }
+
   replacers.zip(banks).foreach { case (r, b) =>
     r.io.writeValid  := b.io.writeResp.valid
     r.io.writeSetIdx := b.io.writeResp.bits.setIdx
