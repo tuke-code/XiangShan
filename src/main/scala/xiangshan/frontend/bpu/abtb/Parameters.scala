@@ -34,17 +34,18 @@ case class AheadBtbParameters(
 trait HasAheadBtbParameters extends HasBpuParameters {
   def abtbParameters: AheadBtbParameters = bpuParameters.abtbParameters
 
-  def NumEntries:           Int = abtbParameters.NumEntries
-  def NumBanks:             Int = abtbParameters.NumBanks
-  def NumWays:              Int = abtbParameters.NumWays
-  def NumSets:              Int = NumEntries / NumWays / NumBanks
-  def TagWidth:             Int = abtbParameters.TagWidth
-  def TargetLowerBitsWidth: Int = abtbParameters.TargetLowerBitsWidth
-  def SetIdxWidth:          Int = log2Ceil(NumSets)
-  def WayIdxWidth:          Int = log2Ceil(NumWays)
-  def BankIdxWidth:         Int = log2Ceil(NumBanks)
-  def WriteBufferSize:      Int = abtbParameters.WriteBufferSize
-  def TakenCounterWidth:    Int = abtbParameters.TakenCounterWidth
+  def NumEntries:               Int = abtbParameters.NumEntries
+  def NumBanks:                 Int = abtbParameters.NumBanks
+  def NumWays:                  Int = abtbParameters.NumWays
+  def NumSets:                  Int = NumEntries / NumWays / NumBanks
+  def TagWidth:                 Int = abtbParameters.TagWidth
+  def TargetLowerBitsWidth:     Int = abtbParameters.TargetLowerBitsWidth
+  def SetIdxWidth:              Int = log2Ceil(NumSets)
+  def WayIdxWidth:              Int = log2Ceil(NumWays)
+  def BankIdxWidth:             Int = log2Ceil(NumBanks)
+  def WriteBufferSize:          Int = abtbParameters.WriteBufferSize
+  def TakenCounterWidth:        Int = abtbParameters.TakenCounterWidth
+  def WriteStarvationThreshold: Int = 3
 
   def EnableTargetFix: Boolean = abtbParameters.EnableTargetFix
 }
