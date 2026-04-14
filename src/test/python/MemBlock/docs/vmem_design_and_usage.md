@@ -149,6 +149,7 @@ testcase 应把这两类事实分开使用，而不是把 monitor 直接当 mode
   - 用于 prestart / active 分类
 - `mask_bits`
   - 可选；长度至少覆盖 `element_count`
+  - 当 `vm=False` 且未显式覆盖 `src_3` / `vmask` 时，env 会按 `mask_bits` 自动派生真实 DUT 使用的 mask 源
 - `store_data`
   - store 事务使用；长度至少覆盖 `element_count`
 - `enq_port` / `issue_port`

@@ -54,7 +54,7 @@ class VectorIssueAgent:
         issue.write("bits_src_0", txn.issue_src_0)
         issue.write("bits_src_1", txn.issue_src_1)
         issue.write("bits_src_2", txn.src_2)
-        issue.write("bits_src_3", txn.src_3)
+        issue.write("bits_src_3", txn.resolved_mask_source)
         issue.write("bits_vl", txn.vl)
         issue.write("bits_robIdx_flag", txn.rob_idx_flag)
         issue.write("bits_robIdx_value", txn.rob_idx_value)
@@ -70,7 +70,7 @@ class VectorIssueAgent:
         # `vuopIdx` is the vector micro-op index inside one instruction, not the testcase req_id.
         issue.write("bits_vpu_vuopIdx", txn.resolved_vuop_idx)
         issue.write("bits_vpu_lastUop", 1 if txn.last_uop else 0)
-        issue.write("bits_vpu_vmask", txn.vmask)
+        issue.write("bits_vpu_vmask", txn.resolved_vmask)
         issue.write("bits_vpu_nf", txn.nf)
         issue.write("bits_vpu_veew", veew)
         issue.write("bits_vpu_isVleff", 1 if txn.is_vleff else 0)

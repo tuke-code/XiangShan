@@ -101,3 +101,26 @@ def test_api_vector_mem_txn_defaults_vuop_idx_to_zero():
 def test_api_vector_mem_txn_rejects_out_of_range_vuop_idx():
     with pytest.raises(ValueError, match="vuop_idx"):
         _txn(vuop_idx=0x80)
+
+
+def test_api_vector_mem_txn_derived_mask_source_matches_mask_bits():
+    txn = _txn(
+        vm=False,
+        mask_bits=(1, 0, 1, 0, 1, 0, 1, 0),
+        element_count=8,
+        vl=8,
+        sew_bits=16,
+    )
+
+    assert txn.resolved_mask_source == 0x55
+    assert txn.resolved_vmask == 0x55
+
+
+def test_api_vector_mem_txn_explicit_src3_overrides_derived_mask_source():
+    txn = _txn(
+        vm=False,
+        mask_bits=(1, 0, 1, 0, 1, 0, 1, 0),
+        src_3=0xA5,
+    )
+
+    assert txn.resolved_mask_source == 0xA5

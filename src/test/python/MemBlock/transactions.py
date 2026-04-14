@@ -231,6 +231,28 @@ class VectorMemTxn:
         return 0
 
     @property
+    def resolved_mask_source(self) -> int:
+        if self.src_3:
+            return int(self.src_3)
+        if self.vm or self.mask_bits is None:
+            return 0
+        mask = 0
+        for element_idx in range(int(self.element_count)):
+            if int(self.mask_bits[element_idx]):
+                mask |= 1 << element_idx
+        return mask
+
+    @property
+    def resolved_vmask(self) -> int:
+        if self.vmask != (1 << 128) - 1 or self.mask_bits is None:
+            return int(self.vmask)
+        mask = 0
+        for element_idx in range(int(self.element_count)):
+            if int(self.mask_bits[element_idx]):
+                mask |= 1 << element_idx
+        return mask
+
+    @property
     def resolved_vuop_idx(self) -> int:
         return int(self.vuop_idx)
 

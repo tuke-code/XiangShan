@@ -255,6 +255,43 @@ def test_api_MemBlock_vector_unit_stride_load_byte_dense_smoke(env):
     )
 
 
+def test_api_MemBlock_vector_unit_stride_load_checkerboard_mask_smoke(env):
+    """验证 checkerboard mask 的 unit-stride load 会保留被屏蔽 element 的空槽。"""
+
+    state = _reset_env_and_state(env)
+    values = (0x1001, 0x2002, 0x3003, 0x4004, 0x5005, 0x6006, 0x7007, 0x8008)
+    _preload_elements(env, VECTOR_ADDR_BASE, values, size_bytes=2)
+
+    result = VectorLoadSequence(
+        VectorMemTxn(
+            req_id=0x12A,
+            is_load=True,
+            opcode_class="unit_stride",
+            base_addr=VECTOR_ADDR_BASE,
+            lq_ptr=state.next_lq_ptr,
+            sq_ptr=state.sq_ptr,
+            vl=8,
+            element_count=8,
+            sew_bits=16,
+            mask_bits=(1, 0, 1, 0, 1, 0, 1, 0),
+            vm=False,
+            issue_port=0,
+            enq_port=0,
+        )
+    ).run(env)
+
+    expected_slot_image = _pack_expected_element_slots(result.expected)
+    _assert_vector_load_result(
+        env,
+        result,
+        expected_data=expected_slot_image,
+        expected_vl=8,
+        expected_strided=0,
+        expected_address=VECTOR_ADDR_BASE,
+    )
+    assert (_select_vector_data_writeback(result.vector_result)["data"] >> 16) & 0xFFFF == 0
+
+
 def test_api_MemBlock_vector_unit_stride_load_port1_smoke(env):
     """验证第二个 vector enqueue/issue 端口也能打通到 VLMergeBuffer。"""
 
