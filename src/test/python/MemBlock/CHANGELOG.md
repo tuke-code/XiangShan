@@ -2,7 +2,52 @@
 
 ## 2026-04-14
 
-### 1. 增加 vector store real-DUT regression，固定当前已知 DUT 的 zero-data/no-drain 签名
+### 1. 新增 vector load directed case，针对性拉升 `VLMergeBuffer` 覆盖率
+
+本条目记录一次面向 `VLMergeBuffer` 的 testcase 补强：不是继续堆基础 smoke，而是按 merge-buffer 关键路径补入更“刁钻”的真实 DUT vector load directed case，集中覆盖宽 element merge、跨 16B 的 unit-stride merge、第二个 vector issue/enqueue 端口，以及 zero/negative stride 的地址展开。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_vector_unit_stride.py`
+  - 新增：
+    - `test_api_MemBlock_vector_unit_stride_load_wide_smoke`
+    - `test_api_MemBlock_vector_unit_stride_load_cross_16b_unaligned_smoke`
+    - `test_api_MemBlock_vector_unit_stride_load_byte_dense_smoke`
+    - `test_api_MemBlock_vector_unit_stride_load_port1_smoke`
+  - 抽取：
+    - `_preload_elements()`
+    - `_assert_vector_load_result()`
+- `tests/test_MemBlock_vector_stride.py`
+  - 新增：
+    - `test_api_MemBlock_vector_stride_zero_load_smoke`
+    - `test_api_MemBlock_vector_stride_negative_load_smoke`
+  - 抽取：
+    - `_preload_elements()`
+    - `_assert_stride_load_result()`
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py src/test/python/MemBlock/tests/test_MemBlock_vector_stride.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py src/test/python/MemBlock/tests/test_MemBlock_vector_stride.py src/test/python/MemBlock/tests/test_vector_memory_model.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py src/test/python/MemBlock/tests/test_MemBlock_vector_stride.py --toffee-report --report-dir src/test/python/MemBlock/data/toffee_report_vector_merge_cov --report-name memblock_vector_merge_cov --report-dump-json`
+
+#### 覆盖率观察
+
+- `data/toffee_report_vector_merge_cov/line_dat/rtl/VLMergeBufferImp.sv.gcov.html`
+  - line：`49.0%`（`3143 / 6412`）
+  - branch：`54.5%`（`16543 / 30364`）
+- 对比现有 full regression 基线 `data/toffee_report_full/line_dat/rtl/VLMergeBufferImp.sv.gcov.html`
+  - line：`46.5% -> 49.0%`
+  - branch：`52.2% -> 54.5%`
+- 同时确认 `fromSplit_1` 相关端口已不再是“完全未命中”：
+  - `io_fromSplit_1_req_bits_flowNum`
+  - `io_fromSplit_1_req_bits_uop_vecWen`
+
+#### 备注
+
+- 规划中原本想补一条 checkerboard mask load，但实测当前 env 还没有可驱动真实 `v0` mask 源的稳定控制面；`vm=False` 会把整条 load 收敛为全零结果。因此本轮改为一条 `SEW=8, VL=16` 的 byte-dense case，继续稳定命中 `VLMergeBuffer` 的宽 merge 路径。
+
+### 2. 增加 vector store real-DUT regression，固定当前已知 DUT 的 zero-data/no-drain 签名
 
 本条目记录一次针对向量 store 当前已知 DUT 缺口的收口：在确认问题并非 testcase/front-door 小修可解后，新增一条真实 DUT regression，用精确条件 `xfail` 固定当前“completion 已到，但 SQ data 为 0 且 flushSb 永不 drain”的复现签名。这样后续 DUT 修复后，该用例会自动退回硬断言，继续检查最终 memory effect。
 
@@ -29,7 +74,7 @@
 
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_store.py`
 
-### 2. 补入 non-zero `vstart` 的真实 DUT vector load 数据面回归
+### 3. 补入 non-zero `vstart` 的真实 DUT vector load 数据面回归
 
 本条目记录一次针对向量 load 数据面的继续补强：在 unit-stride 基础 smoke 已能严格比对 writeback data 之后，再补一条 non-zero `vstart` 的真实 DUT 场景，验证 prestart 元素会在 `vecWriteback.data` 中保留空洞而不会错误覆盖低位槽位。
 
@@ -51,9 +96,9 @@
 
 #### 备注
 
-- 本轮 load 数据面调试期间也同步复核了 vector store front-door 现状：当前真实 DUT 虽可观测到 completion metadata，但最终 transport / memory-side-effect 闭环仍被 DUT 缺口阻塞；对应的 real-DUT store regression 已在同日第 1 条补入，并以精确条件 `xfail` 固定当前签名。
+- 本轮 load 数据面调试期间也同步复核了 vector store front-door 现状：当前真实 DUT 虽可观测到 completion metadata，但最终 transport / memory-side-effect 闭环仍被 DUT 缺口阻塞；对应的 real-DUT store regression 已在同日第 2 条补入，并以精确条件 `xfail` 固定当前签名。
 
-### 3. 修正 vector issue 默认 `vuopIdx`，打通真实 DUT writeback 数据比对
+### 4. 修正 vector issue 默认 `vuopIdx`，打通真实 DUT writeback 数据比对
 
 本条目记录一次面向真实 DUT 向量 load 数据面调试的收口：定位到 Phase 1 front-door 把 `vecIssue.bits_vpu_vuopIdx` 错误地复用了 testcase `req_id` 低位，导致 unit-stride/stride smoke 在 VLSplit 中被当成非零 uop offset，最终从错误的 128-bit chunk 取数，MSHR forward 数据为 0。现在将 `vuopIdx` 显式建模为向量微操作索引并默认置 0，同时把 real-DUT smoke 收紧到 writeback data 严格比对。
 
@@ -78,7 +123,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py`
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_stride.py`
 
-### 4. 落地向量访存 Phase 1 骨架
+### 5. 落地向量访存 Phase 1 骨架
 
 本条目记录一次面向向量访存 Phase 1 的基础设施落地：把向量事务、`enqLsq + vecIssue` front-door、向量子模型、完成监控与统一收口接入当前 MemBlock Python 验证环境，为后续 unit-stride / stride / non-zero `vstart` 的 testcase 开发提供稳定骨架。
 
@@ -131,7 +176,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_vector_memory_model.py src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py -k 'vector_frontdoor_facades_exist or assert_no_outstanding_includes_vector_expectations or backend_facade_wires_existing_agents or has_core_bundles'`
 
-### 5. 补入真实 DUT vector smoke，并明确当前验收口径
+### 6. 补入真实 DUT vector smoke，并明确当前验收口径
 
 本条目记录 Phase 1 第一批真实 DUT 向量 smoke testcase 落地：在现有 `enqLsq + vecIssue` front-door 已打通的基础上，先验证 unit-stride / stride 两条最小路径都能从请求发送闭环到 transport、completion 与 writeback metadata，而暂不在 Phase 1 smoke 中收紧 writeback data 值比对。
 
@@ -168,7 +213,7 @@
 
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py src/test/python/MemBlock/tests/test_MemBlock_vector_stride.py`
 
-### 6. 补全文档：新增向量访存设计与使用说明
+### 7. 补全文档：新增向量访存设计与使用说明
 
 本条目记录一次文档收口：为当前 Phase 1 向量访存环境新增统一的 design/usage 文档，明确事务对象、facade、sequence、monitor、model 的关系，以及当前 real-DUT smoke 的验收口径与 known gap。
 
