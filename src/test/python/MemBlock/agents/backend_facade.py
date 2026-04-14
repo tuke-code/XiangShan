@@ -20,6 +20,10 @@ from transactions import (
     StoreCommitStep,
     StoreRef,
     StoreTxn,
+    VectorEnqueueStep,
+    VectorIssueStep,
+    VectorMemTxn,
+    VectorWaitStep,
 )
 
 
@@ -30,8 +34,10 @@ class BackendFacade:
         self.env = env
         self.lsq = env.lsq_agent
         self.issue = env.issue_agent
+        self.vector_issue = getattr(env, "vector_issue_agent", None)
         self.rob = env.rob_agent
         self.commit = env.commit_agent
+        self.vector_monitor = getattr(env, "vector_monitor", None)
 
     def wait_load_enq_ready(self, max_cycles: int = 200) -> None:
         self.lsq.wait_load_enq_ready(max_cycles=max_cycles)
@@ -63,7 +69,9 @@ class BackendFacade:
 
     def execute(self, plan: BackendSendPlan) -> BackendSendResult:
         store_ptrs: dict[StoreRef, QueuePtr] = {}
-        result = BackendSendResult(store_ptrs=store_ptrs)
+        vector_sq_ptrs: dict[int, QueuePtr] = {}
+        vector_results = {}
+        result = BackendSendResult(store_ptrs=store_ptrs, vector_results=vector_results)
         for step in plan.steps:
             if isinstance(step, EnqueueLoadStep):
                 self.enqueue_load(
@@ -82,10 +90,19 @@ class BackendFacade:
                 )
                 if step.ref is not None:
                     store_ptrs[step.ref] = allocated_sq_ptr
+            elif isinstance(step, VectorEnqueueStep):
+                allocated_sq_ptr = self.enqueue_vector_mem(step.txn)
+                if allocated_sq_ptr is not None:
+                    vector_sq_ptrs[step.txn.req_id] = allocated_sq_ptr
             elif isinstance(step, IssueCyclePlan):
                 resolved_cycle = self._resolve_issue_cycle(step, result)
                 self.issue.issue_cycle(resolved_cycle)
                 self._note_issue_cycle_store_progress(resolved_cycle)
+            elif isinstance(step, VectorIssueStep):
+                resolved_txn = step.txn
+                if step.txn.req_id in vector_sq_ptrs:
+                    resolved_txn = replace(step.txn, sq_ptr=vector_sq_ptrs[step.txn.req_id])
+                self.issue_vector_mem(resolved_txn, max_cycles=step.max_cycles)
             elif isinstance(step, StoreCommitStep):
                 self.step_commit(count=step.count, cycles=step.cycles)
             elif isinstance(step, NonMemBlockerStep):
@@ -106,6 +123,12 @@ class BackendFacade:
                     sq_idx_value=resolved_sq_ptr.value,
                     ready=step.ready,
                 )
+            elif isinstance(step, VectorWaitStep):
+                vector_results[step.req_id] = self.wait_vector_event(
+                    req_id=step.req_id,
+                    event=step.event,
+                    max_cycles=step.max_cycles,
+                )
             else:
                 raise TypeError(f"unsupported backend send step: {type(step)!r}")
         return result
@@ -113,6 +136,10 @@ class BackendFacade:
     def send(self, request):
         if isinstance(request, BackendSendPlan):
             return self.execute(request)
+        if isinstance(request, VectorMemTxn):
+            if not hasattr(self.env, "vector_backend"):
+                raise RuntimeError("vector backend facade is not attached to env")
+            return self.env.vector_backend.send(request)
         if isinstance(request, LoadTxn):
             self.execute(
                 BackendSendPlan.from_steps(
@@ -309,6 +336,25 @@ class BackendFacade:
 
     def send_load(self, txn: LoadTxn) -> None:
         self.send(txn)
+
+    def enqueue_vector_mem(self, txn: VectorMemTxn):
+        return self.lsq.enqueue_vector_mem(txn)
+
+    def issue_vector_mem(self, txn: VectorMemTxn, max_cycles: int = 50) -> None:
+        if self.vector_issue is None:
+            raise RuntimeError("vector issue agent is not attached to env")
+        self.vector_issue.issue(txn, max_cycles=max_cycles)
+
+    def wait_vector_event(self, *, req_id: int, event: str = "complete_or_trap", max_cycles: int = 200):
+        if self.vector_monitor is None:
+            raise RuntimeError("vector monitor is not attached to env")
+        return self.env._run_async(
+            self.vector_monitor.wait_event_async(
+                req_id=req_id,
+                event=event,
+                max_cycles=max_cycles,
+            )
+        )
 
     def send_load_batch_same_cycle(self, txns, max_cycles: int = 50) -> None:
         txns = tuple(txns)

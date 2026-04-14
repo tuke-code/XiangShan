@@ -18,6 +18,18 @@ SCALAR_STORE_SIZE_BYTES_TO_FU_OP_TYPE = {
     4: 0x2,
     8: 0x3,
 }
+VECTOR_OPCODE_CLASS_TO_LOAD_FU_OP_TYPE = {
+    "unit_stride": 0b01_00_00000,
+    "stride": 0b01_10_00000,
+}
+VECTOR_OPCODE_CLASS_TO_STORE_FU_OP_TYPE = {
+    "unit_stride": 0b10_00_00000,
+    "stride": 0b10_10_00000,
+}
+
+# Match the one-hot ordering in `backend/fu/FuType.scala`.
+FU_TYPE_VLDU = 1 << 31
+FU_TYPE_VSTU = 1 << 32
 
 
 def scalar_store_size_bytes_from_mask(mask: int) -> int:
@@ -35,6 +47,21 @@ def scalar_store_size_bytes_from_mask(mask: int) -> int:
 
 def scalar_store_fu_op_type_from_mask(mask: int) -> int:
     return SCALAR_STORE_SIZE_BYTES_TO_FU_OP_TYPE[scalar_store_size_bytes_from_mask(mask)]
+
+
+def vector_fu_op_type(*, is_load: bool, opcode_class: str) -> int:
+    if is_load:
+        mapping = VECTOR_OPCODE_CLASS_TO_LOAD_FU_OP_TYPE
+    else:
+        mapping = VECTOR_OPCODE_CLASS_TO_STORE_FU_OP_TYPE
+    try:
+        return mapping[opcode_class]
+    except KeyError as exc:
+        raise ValueError(f"unsupported vector opcode class: {opcode_class}") from exc
+
+
+def vector_fu_type(*, is_load: bool) -> int:
+    return FU_TYPE_VLDU if is_load else FU_TYPE_VSTU
 
 
 @dataclass(frozen=True)
@@ -105,6 +132,100 @@ class StoreTxn:
     @property
     def fu_op_type(self) -> int:
         return scalar_store_fu_op_type_from_mask(self.mask)
+
+
+@dataclass(frozen=True)
+class VectorMemTxn:
+    """Vector memory transaction carried through enqueue + vecIssue."""
+
+    req_id: int
+    is_load: bool
+    opcode_class: str
+    base_addr: int
+    lq_ptr: QueuePtr
+    sq_ptr: QueuePtr
+    vl: int
+    element_count: int
+    sew_bits: int = 32
+    stride: int = 0
+    vstart: int = 0
+    mask_bits: tuple[int, ...] | None = None
+    store_data: tuple[int, ...] | None = None
+    enq_port: int = 0
+    issue_port: int = 0
+    num_ls_elem: int | None = None
+    pdest: int | None = None
+    pdest_vl: int = 0
+    lmul: int = 0
+    vmask: int = (1 << 128) - 1
+    nf: int = 0
+    veew: int = 0
+    vm: bool = True
+    last_uop: bool = True
+    is_vleff: bool = False
+    src_0: int | None = None
+    src_1: int | None = None
+    src_2: int = 0
+    src_3: int = 0
+    expected_exception: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.opcode_class not in {"unit_stride", "stride"}:
+            raise ValueError(f"unsupported vector opcode class: {self.opcode_class}")
+        if self.sew_bits not in {8, 16, 32, 64}:
+            raise ValueError(f"unsupported vector SEW: {self.sew_bits}")
+        if self.vl < 0 or self.vstart < 0 or self.element_count <= 0:
+            raise ValueError("vl/vstart/element_count must be non-negative and element_count > 0")
+        if self.vstart > self.element_count:
+            raise ValueError("vstart must not exceed element_count")
+        if self.mask_bits is not None and len(self.mask_bits) < self.element_count:
+            raise ValueError("mask_bits must cover all modeled elements")
+        if self.store_data is not None and len(self.store_data) < self.element_count:
+            raise ValueError("store_data must cover all modeled elements")
+        if not self.is_load and self.store_data is None:
+            raise ValueError("vector stores require `store_data`")
+
+    @property
+    def rob_idx_flag(self) -> int:
+        return (self.req_id >> 9) & 0x1
+
+    @property
+    def rob_idx_value(self) -> int:
+        return self.req_id & 0x1FF
+
+    @property
+    def resolved_pdest(self) -> int:
+        return self.req_id % 128 if self.pdest is None else int(self.pdest)
+
+    @property
+    def size_bytes(self) -> int:
+        return self.sew_bits // 8
+
+    @property
+    def resolved_num_ls_elem(self) -> int:
+        if self.num_ls_elem is not None:
+            return int(self.num_ls_elem)
+        return int(self.element_count)
+
+    @property
+    def fu_type(self) -> int:
+        return vector_fu_type(is_load=self.is_load)
+
+    @property
+    def fu_op_type(self) -> int:
+        return vector_fu_op_type(is_load=self.is_load, opcode_class=self.opcode_class)
+
+    @property
+    def issue_src_0(self) -> int:
+        return int(self.base_addr if self.src_0 is None else self.src_0)
+
+    @property
+    def issue_src_1(self) -> int:
+        if self.src_1 is not None:
+            return int(self.src_1)
+        if self.opcode_class == "stride":
+            return int(self.stride)
+        return 0
 
 
 @dataclass(frozen=True)
@@ -184,6 +305,17 @@ class EnqueueStoreStep:
             enq_port=txn.enq_port,
             ref=ref,
         )
+
+
+@dataclass(frozen=True)
+class VectorEnqueueStep:
+    """One vector enqueue action inside a backend send plan."""
+
+    txn: VectorMemTxn
+
+    @classmethod
+    def from_txn(cls, txn: VectorMemTxn) -> "VectorEnqueueStep":
+        return cls(txn=txn)
 
 
 @dataclass(frozen=True)
@@ -325,6 +457,61 @@ class StoreCommitReadyStep:
 
 
 @dataclass(frozen=True)
+class VectorIssueStep:
+    """One vector issue action inside a backend send plan."""
+
+    txn: VectorMemTxn
+    max_cycles: int = 50
+
+    @classmethod
+    def from_txn(cls, txn: VectorMemTxn, max_cycles: int = 50) -> "VectorIssueStep":
+        return cls(txn=txn, max_cycles=max_cycles)
+
+
+@dataclass(frozen=True)
+class VectorWaitStep:
+    """Wait for a vector request to complete or trap."""
+
+    req_id: int
+    event: str = "complete_or_trap"
+    max_cycles: int = 200
+
+    def __post_init__(self) -> None:
+        if self.event not in {"complete", "trap", "complete_or_trap"}:
+            raise ValueError(f"unsupported vector wait event: {self.event}")
+
+
+@dataclass(frozen=True)
+class VectorElementAccess:
+    """Element-level reference access generated from a vector memory op."""
+
+    element_idx: int
+    active: bool
+    is_tail: bool
+    is_prestart: bool
+    addr: int
+    size_bytes: int
+    expected_load_data: int | None = None
+    store_data: int | None = None
+    should_access_memory: bool = False
+    field_idx: int = 0
+
+
+@dataclass(frozen=True)
+class VectorMemResult:
+    """Observed completion summary for a vector memory request."""
+
+    req_id: int
+    completed: bool
+    trapped: bool
+    observed_vl: int | None = None
+    observed_vstart: int | None = None
+    observed_requests: tuple[dict, ...] = ()
+    observed_writebacks: tuple[dict, ...] = ()
+    observed_exception: dict | None = None
+
+
+@dataclass(frozen=True)
 class BackendSendPlan:
     """Ordered enqueue/issue/commit script executed by BackendFacade."""
 
@@ -340,10 +527,13 @@ class BackendSendPlan:
                     EnqueueLoadStep,
                     EnqueueLoadCyclePlan,
                     EnqueueStoreStep,
+                    VectorEnqueueStep,
                     IssueCyclePlan,
+                    VectorIssueStep,
                     StoreCommitStep,
                     NonMemBlockerStep,
                     StoreCommitReadyStep,
+                    VectorWaitStep,
                 ),
             ):
                 raise TypeError(f"unsupported backend send step: {type(step)!r}")
@@ -358,8 +548,14 @@ class BackendSendResult:
     """Execution-time products created while running a backend send plan."""
 
     store_ptrs: dict[StoreRef, QueuePtr]
+    vector_results: dict[int, VectorMemResult] | None = None
 
     def resolve_sq_ptr(self, sq_ptr: QueuePtr | StoreRef) -> QueuePtr:
         if isinstance(sq_ptr, QueuePtr):
             return sq_ptr
         return self.store_ptrs[sq_ptr]
+
+    def get_vector_result(self, req_id: int) -> VectorMemResult:
+        if self.vector_results is None:
+            raise KeyError(req_id)
+        return self.vector_results[req_id]

@@ -3,7 +3,7 @@
 LSQ enqueue active agent.
 """
 
-from transactions import EnqueueLoadCyclePlan, QueuePtr
+from transactions import EnqueueLoadCyclePlan, QueuePtr, VectorMemTxn
 
 
 FU_TYPE_LDU = 1 << 16
@@ -160,3 +160,45 @@ class LsqAgent:
                 enq_port=enq_port,
             )
         )
+
+    async def _enqueue_vector_mem_async(self, txn: VectorMemTxn) -> QueuePtr | None:
+        if txn.is_load:
+            await self._wait_load_enq_ready_async()
+            need_alloc = 1
+        else:
+            await self._wait_store_enq_ready_async()
+            need_alloc = 2
+
+        req = self.env.lsq_enq_req[int(txn.enq_port)]
+        self.env.lsq_enq_meta.need_alloc[int(txn.enq_port)].value = need_alloc
+        req.valid.value = 1
+        req.bits_fuType.value = txn.fu_type
+        req.bits_uopIdx.value = txn.req_id & 0x7F
+        req.bits_robIdx_flag.value = txn.rob_idx_flag
+        req.bits_robIdx_value.value = txn.rob_idx_value
+        req.bits_lqIdx_flag.value = txn.lq_ptr.flag
+        req.bits_lqIdx_value.value = txn.lq_ptr.value
+        req.bits_sqIdx_flag.value = txn.sq_ptr.flag
+        req.bits_sqIdx_value.value = txn.sq_ptr.value
+        req.bits_numLsElem.value = txn.resolved_num_ls_elem
+
+        await self.env._step_async(1)
+        if txn.is_load:
+            self.env.idle_inputs()
+            return None
+
+        allocated_sq_ptr = QueuePtr(
+            flag=int(self.env.lsq_enq_resp[int(txn.enq_port)].sqIdx_flag.value),
+            value=int(self.env.lsq_enq_resp[int(txn.enq_port)].sqIdx_value.value),
+        )
+        self.env.backend.note_store_allocated(
+            sq_idx_flag=allocated_sq_ptr.flag,
+            sq_idx_value=allocated_sq_ptr.value,
+            rob_idx_flag=txn.rob_idx_flag,
+            rob_idx_value=txn.rob_idx_value,
+        )
+        self.env.idle_inputs()
+        return allocated_sq_ptr
+
+    def enqueue_vector_mem(self, txn: VectorMemTxn) -> QueuePtr | None:
+        return self.env._run_async(self._enqueue_vector_mem_async(txn))

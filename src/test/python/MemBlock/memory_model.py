@@ -21,6 +21,7 @@ from model.scoreboard import (
     Scoreboard,
 )
 from model.transport_responder import TransportResponder
+from model.vector_memory_model import VectorMemoryModel
 
 
 TL_A_PUT_FULL = 0
@@ -134,6 +135,7 @@ class MemoryModel:
             delay_seed=delay_seed,
         )
         self.scoreboard.strict_writeback_check = bool(strict_writeback_check)
+        self.vector = VectorMemoryModel(self.ref_memory)
 
         self.drive_idle()
 
@@ -187,6 +189,7 @@ class MemoryModel:
         self.transport.reset_runtime_state()
         self.scoreboard.reset_runtime_state()
         self.store_monitor.reset_runtime_state()
+        self.vector.reset_runtime_state()
         self.drive_idle()
 
     def reset(self) -> None:
@@ -279,7 +282,7 @@ class MemoryModel:
 
     @property
     def outstanding_expected_count(self) -> int:
-        return self.scoreboard.outstanding_expected_count
+        return self.scoreboard.outstanding_expected_count + self.vector.outstanding_expected_count
 
     @property
     def outstanding_transaction_count(self) -> int:
@@ -290,6 +293,8 @@ class MemoryModel:
         return {
             **self.transport.stats,
             **self.scoreboard.stats,
+            "vector_outstanding_expected_count": self.vector.outstanding_expected_count,
+            "outstanding_expected_count": self.outstanding_expected_count,
         }
 
     @property

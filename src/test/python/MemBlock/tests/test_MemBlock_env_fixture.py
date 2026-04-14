@@ -8,6 +8,7 @@ MemBlockEnv 冒烟测试。
 
 import pytest
 import MemBlock_api
+from transactions import QueuePtr, VectorMemTxn
 
 def test_api_MemBlock_env_create(env):
     """验证 env、dut 和 MemoryModel 能正常创建。"""
@@ -34,6 +35,7 @@ def test_api_MemBlock_env_backend_facade_wires_existing_agents(env):
 
     assert env.backend.lsq is env.lsq_agent
     assert env.backend.issue is env.issue_agent
+    assert env.backend.vector_issue is env.vector_issue_agent
     assert env.backend.rob is env.rob_agent
     assert env.backend.commit is env.commit_agent
 
@@ -48,7 +50,9 @@ def test_api_MemBlock_env_has_core_bundles(env):
     assert hasattr(env, "lsq_enq_req")
     assert hasattr(env, "lsq_enq_resp")
     assert hasattr(env, "issue")
+    assert hasattr(env, "vector_issue")
     assert hasattr(env, "writeback")
+    assert hasattr(env, "vector_writeback")
     assert hasattr(env, "store_data_inputs")
     assert hasattr(env, "store_addr_inputs")
     assert hasattr(env, "store_mask_inputs")
@@ -67,7 +71,9 @@ def test_api_MemBlock_env_has_core_bundles(env):
     assert len(env.lsq_enq_req) == env.config.lsq_enq_ports
     assert len(env.lsq_enq_resp) == env.config.lsq_enq_ports
     assert len(env.issue) == env.config.int_issue_ports
+    assert len(env.vector_issue) == 2
     assert len(env.writeback) == env.config.int_writeback_ports
+    assert len(env.vector_writeback) == 2
     assert len(env.store_data_inputs) == env.config.store_pipeline_width
     assert len(env.store_addr_inputs) == env.config.store_pipeline_width
     assert len(env.store_mask_inputs) == env.config.store_pipeline_width
@@ -281,6 +287,37 @@ def test_api_MemBlock_env_facade_counter_access(env):
     env.advance_cycles(1)
     assert env.get_counter("outer_request_count") >= 0
     assert env.get_completed_load_count() == 0
+
+
+def test_api_MemBlock_env_vector_frontdoor_facades_exist(env):
+    """验证向量 Phase 1 front-door 组件已挂到 env。"""
+
+    assert env.vector_issue_agent is not None
+    assert env.vector_backend is not None
+    assert env.vector_monitor is not None
+    assert env.memory.vector is not None
+
+
+def test_api_MemBlock_env_assert_no_outstanding_includes_vector_expectations(env):
+    """验证 `env.assert_no_outstanding()` 会检查 vector outstanding。"""
+
+    txn = VectorMemTxn(
+        req_id=0x81,
+        is_load=True,
+        opcode_class="unit_stride",
+        base_addr=0x1000,
+        lq_ptr=QueuePtr(flag=0, value=1),
+        sq_ptr=QueuePtr(flag=0, value=2),
+        vl=2,
+        element_count=2,
+    )
+    env.memory.vector.expect_load(txn)
+
+    with pytest.raises(AssertionError):
+        env.assert_no_outstanding()
+
+    env.memory.vector.mark_completed(txn.req_id)
+    env.assert_no_outstanding()
 
 
 def test_api_MemBlock_env_idle_inputs_restores_default(env):

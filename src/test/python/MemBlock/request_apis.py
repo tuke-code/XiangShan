@@ -12,6 +12,7 @@ from transactions import (
     LoadTxn,
     QueuePtr,
     StoreTxn,
+    VectorMemTxn,
 )
 
 
@@ -176,6 +177,22 @@ def send_store(env, txn: StoreTxn) -> QueuePtr:
     """兼容入口：按标准时序发送一笔标量 store。"""
 
     return env.backend.send(txn)
+
+
+def send_vector_load(env, txn: VectorMemTxn):
+    """兼容入口：按标准时序发送一笔向量 load。"""
+
+    if not txn.is_load:
+        raise ValueError("send_vector_load requires a vector load transaction")
+    return env.vector_backend.send(txn)
+
+
+def send_vector_store(env, txn: VectorMemTxn):
+    """兼容入口：按标准时序发送一笔向量 store。"""
+
+    if txn.is_load:
+        raise ValueError("send_vector_store requires a vector store transaction")
+    return env.vector_backend.send(txn)
 
 
 def _issue_until_fire(env, lane: int, drive_inputs, max_cycles: int = 50) -> None:

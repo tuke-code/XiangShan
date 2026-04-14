@@ -56,10 +56,13 @@ from agents.commit_agent import CommitAgent
 from agents.csr_agent import CsrAgent
 from agents.issue_agent import IssueAgent
 from agents.lsq_agent import LsqAgent
+from agents.vector_backend_facade import VectorBackendFacade
+from agents.vector_issue_agent import VectorIssueAgent
 from env_config import DEFAULT_ENV_CONFIG, EnvConfig
 from memory_model import MemoryModel
 from model.rob_coverage import RobCoverageCollector
 from monitors.mem_status_monitor import MemStatusMonitor
+from monitors.vector_mem_monitor import VectorMemMonitor
 
 
 LOAD_PIPELINE_WIDTH = DEFAULT_ENV_CONFIG.load_pipeline_width
@@ -70,6 +73,8 @@ STORE_PIPELINE_WIDTH = DEFAULT_ENV_CONFIG.store_pipeline_width
 SBUFFER_WRITE_PORTS = DEFAULT_ENV_CONFIG.sbuffer_write_ports
 STORE_QUEUE_SIZE = DEFAULT_ENV_CONFIG.store_queue_size
 ROB_SIZE = DEFAULT_ENV_CONFIG.rob_size
+VEC_ISSUE_PORTS = 2
+VEC_WRITEBACK_PORTS = 2
 LOAD_REPLAY_CAUSE_LABELS = [
     "UNCACHE",
     "SMF",
@@ -388,6 +393,94 @@ class OptionalSignalBundle:
         if signal is None:
             return default
         return int(signal.value)
+
+
+class VecIssueBundle(OptionalSignalBundle):
+    SIGNAL_MAP = {
+        "ready": "ready",
+        "valid": "valid",
+        "bits_fuType": "bits_fuType",
+        "bits_fuOpType": "bits_fuOpType",
+        "bits_src_0": "bits_src_0",
+        "bits_src_1": "bits_src_1",
+        "bits_src_2": "bits_src_2",
+        "bits_src_3": "bits_src_3",
+        "bits_vl": "bits_vl",
+        "bits_robIdx_flag": "bits_robIdx_flag",
+        "bits_robIdx_value": "bits_robIdx_value",
+        "bits_pdest": "bits_pdest",
+        "bits_pdestVl": "bits_pdestVl",
+        "bits_vecWen": "bits_vecWen",
+        "bits_v0Wen": "bits_v0Wen",
+        "bits_vlWen": "bits_vlWen",
+        "bits_vpu_vsew": "bits_vpu_vsew",
+        "bits_vpu_vlmul": "bits_vpu_vlmul",
+        "bits_vpu_vm": "bits_vpu_vm",
+        "bits_vpu_vstart": "bits_vpu_vstart",
+        "bits_vpu_vuopIdx": "bits_vpu_vuopIdx",
+        "bits_vpu_lastUop": "bits_vpu_lastUop",
+        "bits_vpu_vmask": "bits_vpu_vmask",
+        "bits_vpu_nf": "bits_vpu_nf",
+        "bits_vpu_veew": "bits_vpu_veew",
+        "bits_vpu_isVleff": "bits_vpu_isVleff",
+        "bits_ftqIdx_flag": "bits_ftqIdx_flag",
+        "bits_ftqIdx_value": "bits_ftqIdx_value",
+        "bits_ftqOffset": "bits_ftqOffset",
+        "bits_numLsElem": "bits_numLsElem",
+        "bits_lqIdx_flag": "bits_lqIdx_flag",
+        "bits_lqIdx_value": "bits_lqIdx_value",
+        "bits_sqIdx_flag": "bits_sqIdx_flag",
+        "bits_sqIdx_value": "bits_sqIdx_value",
+    }
+
+    def write(self, name: str, value: int) -> None:
+        signal = getattr(self, name, None)
+        if signal is not None:
+            signal.value = int(value)
+
+    def drive_idle(self) -> None:
+        for name in self.SIGNAL_MAP:
+            if name == "ready":
+                continue
+            self.write(name, 0)
+
+
+class VecWritebackBundle(OptionalSignalBundle):
+    SIGNAL_MAP = {
+        "ready": "ready",
+        "valid": "valid",
+        "data_0": "bits_data_0",
+        "pdest": "bits_pdest",
+        "pdestVl": "bits_pdestVl",
+        "robIdx_flag": "bits_robIdx_flag",
+        "robIdx_value": "bits_robIdx_value",
+        "vecWen": "bits_vecWen",
+        "v0Wen": "bits_v0Wen",
+        "vlWen": "bits_vlWen",
+        "vls_vpu_vstart": "bits_vls_vpu_vstart",
+        "vls_vpu_vl": "bits_vls_vpu_vl",
+        "vls_vpu_lastUop": "bits_vls_vpu_lastUop",
+        "vls_isStrided": "bits_vls_isStrided",
+        "vls_isVecLoad": "bits_vls_isVecLoad",
+        "debug_isMMIO": "bits_debug_isMMIO",
+        "debug_isNCIO": "bits_debug_isNCIO",
+        "debug_paddr": "bits_debug_paddr",
+        "debug_vaddr": "bits_debug_vaddr",
+    }
+
+    def __init__(self, prefix: str, dut) -> None:
+        super().__init__(prefix, dut)
+        self.bits_exception_vec = [
+            getattr(dut, f"{prefix}bits_exceptionVec_{idx}", None)
+            for idx in range(24)
+        ]
+
+    def set_ready(self, value: int = 1) -> None:
+        if self.ready is not None:
+            self.ready.value = int(value)
+
+    def read_exception_bits(self) -> list[int]:
+        return [0 if signal is None else int(signal.value) for signal in self.bits_exception_vec]
 
 
 class StoreDataInputBundle(OptionalSignalBundle):
@@ -1395,10 +1488,20 @@ class MemBlockEnv:
         for bundle in self.issue:
             bundle.bind(dut)
         self.issue_agent = IssueAgent(self)
+        self.vector_issue = [
+            VecIssueBundle(f"io_ooo_to_mem_vecIssue_{idx}_0_", dut)
+            for idx in range(VEC_ISSUE_PORTS)
+        ]
+        self.vector_issue_agent = VectorIssueAgent(self)
         self.backend = BackendFacade(self)
+        self.vector_backend = VectorBackendFacade(self)
         self.writeback = [
             IntWritebackBundle(f"io_mem_to_ooo_intWriteback_{idx}_0_", dut)
             for idx in range(self.config.int_writeback_ports)
+        ]
+        self.vector_writeback = [
+            VecWritebackBundle(f"io_mem_to_ooo_vecWriteback_{idx}_0_", dut)
+            for idx in range(VEC_WRITEBACK_PORTS)
         ]
         self.store_data_inputs = [
             StoreDataInputBundle(f"MemBlock_inner_lsq_io_std_storeDataIn_{idx}_", dut)
@@ -1481,6 +1584,8 @@ class MemBlockEnv:
         self.mock_outer_buffer = self.memory
         self.mock_dcache_client = self.memory
         self.mem_status_monitor = MemStatusMonitor(self.mem_status, self.memory, self.commit_agent)
+        self.vector_monitor = VectorMemMonitor(self, self.vector_writeback)
+        self.backend.vector_monitor = self.vector_monitor
         self.mmu = MmuFacade(self)
         self._after_step_callbacks = []
         self._last_rar_query_req_by_lane = {}
@@ -1518,6 +1623,8 @@ class MemBlockEnv:
             bundle.drive_idle()
         for bundle in self.issue:
             bundle.drive_idle()
+        for bundle in self.vector_issue:
+            bundle.drive_idle()
         if hasattr(self.dut, "io_ooo_to_mem_flushSb"):
             self.dut.io_ooo_to_mem_flushSb.value = 0
         if hasattr(self.dut, "io_ooo_to_mem_sfence_valid"):
@@ -1530,6 +1637,7 @@ class MemBlockEnv:
             self.dut.io_ooo_to_mem_sfence_bits_hg.value = 0
         self.mmu.reapply_inputs()
         self.memory.drive_idle()
+        self.vector_monitor.drive_ready()
         self.commit_agent.drive()
 
     def _run_async(self, coro):
@@ -1542,8 +1650,10 @@ class MemBlockEnv:
             self.commit_agent.drive()
             await self._clock.step(1)
             self.memory.after_cycle()
+            self.vector_monitor.sample()
             if int(self.dut.reset.value) or int(self.dut.io_reset_backend.value):
                 self.commit_agent.reset()
+                self.vector_monitor.reset_runtime_state()
             else:
                 self.mem_status_monitor.after_cycle()
                 self.commit_agent.advance()
@@ -1586,6 +1696,7 @@ class MemBlockEnv:
     async def _reset_async(self, cycles: int = 10, settle_cycles: int = 5) -> None:
         self.idle_inputs()
         self.memory.reset_runtime_state()
+        self.vector_monitor.reset_runtime_state()
         self.commit_agent.reset()
         self._last_rar_query_req_by_lane = {}
         self.dut.reset.value = 1
@@ -1759,6 +1870,28 @@ class MemBlockEnv:
                 max_cycles=max_cycles,
             )
         )
+
+    def wait_vector_event(
+        self,
+        *,
+        req_id: int,
+        event: str = "complete_or_trap",
+        max_cycles: int = 200,
+    ):
+        """等待某条向量请求完成或 trap。"""
+
+        return self._run_async(
+            self.vector_monitor.wait_event_async(
+                req_id=req_id,
+                event=event,
+                max_cycles=max_cycles,
+            )
+        )
+
+    def get_vector_result(self, req_id: int):
+        """读取最近一次采集到的向量完成结果。"""
+
+        return self.vector_monitor.get_result(req_id)
 
     def get_transport_stats(self) -> dict[str, int]:
         """返回当前传输与 compare 统计的快照。"""

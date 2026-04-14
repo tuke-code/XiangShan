@@ -32,6 +32,11 @@ from .mmu_sequences import (
     TranslatedU64MemoryPreload,
     U64MemoryPreload,
 )
+from .vector_mem_sequences import (
+    VectorLoadSequence,
+    VectorSequenceResult,
+    VectorStoreSequence,
+)
 from .violation_sequences import (
     ScalarBankConflictSqDataInvalidNukeSequence,
     ScalarBankConflictSqDataInvalidNukeSequenceResult,

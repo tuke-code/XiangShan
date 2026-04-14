@@ -81,6 +81,7 @@ class TransportResponder:
         self.dcache_e_request_count = 0
         self.dcache_b_response_count = 0
         self.dcache_d_response_count = 0
+        self.last_dcache_a_request = None
 
         self.reset_runtime_state()
 
@@ -107,6 +108,18 @@ class TransportResponder:
             "dcache_e_request_count": self.dcache_e_request_count,
             "dcache_b_response_count": self.dcache_b_response_count,
             "dcache_d_response_count": self.dcache_d_response_count,
+            "last_dcache_a_address": -1
+            if self.last_dcache_a_request is None
+            else int(self.last_dcache_a_request["address"]),
+            "last_dcache_a_block_address": -1
+            if self.last_dcache_a_request is None
+            else int(self.last_dcache_a_request["block_addr"]),
+            "last_dcache_a_source": -1
+            if self.last_dcache_a_request is None
+            else int(self.last_dcache_a_request["source"]),
+            "last_dcache_a_is_keyword": -1
+            if self.last_dcache_a_request is None
+            else int(self.last_dcache_a_request["is_keyword"]),
             "pending_outer_d_count": len(self._pending_outer_d),
             "pending_b_count": len(self._pending_b),
             "pending_d_count": len(self._pending_d),
@@ -136,6 +149,7 @@ class TransportResponder:
         self.dcache_e_request_count = 0
         self.dcache_b_response_count = 0
         self.dcache_d_response_count = 0
+        self.last_dcache_a_request = None
         self.reset_runtime_state()
 
     def drive_idle(self) -> None:
@@ -333,10 +347,17 @@ class TransportResponder:
         if opcode != TL_A_ACQUIRE_BLOCK:
             raise AssertionError(f"load-only 场景仅支持 AcquireBlock，观测到 A.opcode={opcode}")
 
-        block_addr = int(self.dcache_a.bits_address.value) & ~(DEFAULT_CACHELINE_BYTES - 1)
+        raw_addr = int(self.dcache_a.bits_address.value)
+        block_addr = raw_addr & ~(DEFAULT_CACHELINE_BYTES - 1)
         size = int(self.dcache_a.bits_size.value)
         source = int(self.dcache_a.bits_source.value)
         is_keyword = int(self.dcache_a.bits_echo_isKeyword.value)
+        self.last_dcache_a_request = {
+            "address": raw_addr,
+            "block_addr": block_addr,
+            "source": source,
+            "is_keyword": is_keyword,
+        }
         line = self.ref_memory.read_cacheline(block_addr, DEFAULT_CACHELINE_BYTES)
         beats = [
             int.from_bytes(line[idx: idx + DEFAULT_DCACHE_BEAT_BYTES], "little")

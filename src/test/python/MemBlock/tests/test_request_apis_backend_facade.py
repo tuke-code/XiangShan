@@ -19,6 +19,11 @@ from transactions import (
     StoreCommitReadyStep,
     StoreRef,
     StoreTxn,
+    VectorEnqueueStep,
+    VectorIssueStep,
+    VectorMemResult,
+    VectorMemTxn,
+    VectorWaitStep,
     scalar_store_fu_op_type_from_mask,
 )
 
@@ -30,6 +35,8 @@ from request_apis import (
     issue_scalar_std,
     send_load,
     send_store,
+    send_vector_load,
+    send_vector_store,
     wait_lsq_load_enq_ready,
     wait_lsq_store_enq_ready,
 )
@@ -76,6 +83,15 @@ class _FakeBackend:
         self.calls.append(("execute", plan))
 
 
+class _FakeVectorBackend:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def send(self, txn):
+        self.calls.append(("send", txn))
+        return "vector-result"
+
+
 class _FakeLsqAgent:
     def __init__(self) -> None:
         self.calls = []
@@ -97,6 +113,12 @@ class _FakeLsqAgent:
         self.calls.append(("enqueue_scalar_store", req_id, sq_ptr, enq_port, allocated))
         return allocated
 
+    def enqueue_vector_mem(self, txn):
+        self.calls.append(("enqueue_vector_mem", txn))
+        if txn.is_load:
+            return None
+        return QueuePtr(flag=txn.sq_ptr.flag ^ 1, value=txn.sq_ptr.value + 1)
+
 
 class _FakeIssueAgent:
     def __init__(self) -> None:
@@ -104,6 +126,14 @@ class _FakeIssueAgent:
 
     def issue_cycle(self, plan) -> None:
         self.calls.append(("issue_cycle", plan))
+
+
+class _FakeVectorIssueAgent:
+    def __init__(self) -> None:
+        self.calls = []
+
+    def issue(self, txn, max_cycles: int = 50) -> None:
+        self.calls.append(("issue", txn, max_cycles))
 
 
 class _FakeCommitAgent:
@@ -148,6 +178,7 @@ class _FakeCommitAgent:
 class _FakeMemory:
     def __init__(self) -> None:
         self.calls = []
+        self.vector = object()
 
     def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         self.calls.append(("note_load_issued", rob_idx_flag, rob_idx_value))
@@ -167,13 +198,16 @@ class _FakeFacadeEnv:
     def __init__(self) -> None:
         self.lsq_agent = _FakeLsqAgent()
         self.issue_agent = _FakeIssueAgent()
+        self.vector_issue_agent = _FakeVectorIssueAgent()
         self.rob_agent = object()
         self.commit_agent = _FakeCommitAgent()
         self.memory = _FakeMemory()
+        self.vector_monitor = _FakeVectorMonitor()
         self.run_async_calls = []
 
-    def _run_async(self, marker) -> None:
+    def _run_async(self, marker):
         self.run_async_calls.append(marker)
+        return marker
 
     async def _await_cycles(self, cycles: int):
         return cycles
@@ -185,6 +219,17 @@ class _FakeFacadeEnv:
 class _FakeEnv:
     def __init__(self) -> None:
         self.backend = _FakeBackend()
+        self.vector_backend = _FakeVectorBackend()
+
+
+class _FakeVectorMonitor:
+    def wait_event_async(self, req_id: int, *, event: str = "complete_or_trap", max_cycles: int = 200):
+        del max_cycles
+        return VectorMemResult(
+            req_id=req_id,
+            completed=event != "trap",
+            trapped=event == "trap",
+        )
 
 
 def test_api_request_apis_enqueue_and_issue_delegate_to_backend():
@@ -231,6 +276,36 @@ def test_api_request_apis_send_txns_delegate_to_backend():
     assert env.backend.calls[0] == ("send", load_txn)
     assert env.backend.calls[1] == ("send", store_txn)
     assert result == QueuePtr(flag=1, value=11)
+
+
+def test_api_request_apis_send_vector_txns_delegate_to_vector_backend():
+    env = _FakeEnv()
+    load_txn = VectorMemTxn(
+        req_id=0x41,
+        is_load=True,
+        opcode_class="unit_stride",
+        base_addr=0x3000,
+        lq_ptr=QueuePtr(flag=0, value=1),
+        sq_ptr=QueuePtr(flag=0, value=2),
+        vl=2,
+        element_count=2,
+    )
+    store_txn = VectorMemTxn(
+        req_id=0x42,
+        is_load=False,
+        opcode_class="stride",
+        base_addr=0x4000,
+        stride=16,
+        lq_ptr=QueuePtr(flag=0, value=1),
+        sq_ptr=QueuePtr(flag=0, value=2),
+        vl=2,
+        element_count=2,
+        store_data=(1, 2),
+    )
+
+    assert send_vector_load(env, load_txn) == "vector-result"
+    assert send_vector_store(env, store_txn) == "vector-result"
+    assert env.vector_backend.calls == [("send", load_txn), ("send", store_txn)]
 
 
 def test_api_request_apis_batch_wrappers_delegate_to_backend_execute():
@@ -411,6 +486,33 @@ def test_api_backend_facade_execute_resolves_store_ref_for_commit_ready_step():
     )
 
     assert ("mark_store_commit_ready", 1, 3, True) in env.commit_agent.calls
+
+
+def test_api_backend_facade_vector_execute_uses_shared_plan_runtime():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+    txn = VectorMemTxn(
+        req_id=0x61,
+        is_load=True,
+        opcode_class="unit_stride",
+        base_addr=0x8000,
+        lq_ptr=QueuePtr(flag=0, value=3),
+        sq_ptr=QueuePtr(flag=0, value=4),
+        vl=2,
+        element_count=2,
+    )
+
+    result = backend.execute(
+        BackendSendPlan.from_steps(
+            VectorEnqueueStep.from_txn(txn),
+            VectorIssueStep.from_txn(txn, max_cycles=33),
+            VectorWaitStep(req_id=txn.req_id, event="complete_or_trap", max_cycles=77),
+        )
+    )
+
+    assert env.lsq_agent.calls == [("enqueue_vector_mem", txn)]
+    assert env.vector_issue_agent.calls == [("issue", txn, 33)]
+    assert result.get_vector_result(txn.req_id).req_id == txn.req_id
 
 
 def test_api_issue_cycle_plan_rejects_duplicate_lanes():
