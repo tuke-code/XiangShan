@@ -67,7 +67,8 @@ class VectorIssueAgent:
         issue.write("bits_vpu_vlmul", txn.lmul)
         issue.write("bits_vpu_vm", 1 if txn.vm else 0)
         issue.write("bits_vpu_vstart", txn.vstart)
-        issue.write("bits_vpu_vuopIdx", txn.req_id & 0x7F)
+        # `vuopIdx` is the vector micro-op index inside one instruction, not the testcase req_id.
+        issue.write("bits_vpu_vuopIdx", txn.resolved_vuop_idx)
         issue.write("bits_vpu_lastUop", 1 if txn.last_uop else 0)
         issue.write("bits_vpu_vmask", txn.vmask)
         issue.write("bits_vpu_nf", txn.nf)

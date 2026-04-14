@@ -3,6 +3,8 @@
 VectorMemoryModel pure-Python tests.
 """
 
+import pytest
+
 from model.ref_memory import RefMemory
 from model.vector_memory_model import VectorMemoryModel
 from transactions import QueuePtr, VectorMemTxn
@@ -88,3 +90,14 @@ def test_api_vector_memory_model_predict_store_updates_refmem_and_outstanding():
     assert predicted.read(0x3004, 2) == 0xBEEF
     model.mark_completed(txn.req_id)
     assert model.outstanding_expected_count == 0
+
+
+def test_api_vector_mem_txn_defaults_vuop_idx_to_zero():
+    txn = _txn(req_id=0x7F)
+
+    assert txn.resolved_vuop_idx == 0
+
+
+def test_api_vector_mem_txn_rejects_out_of_range_vuop_idx():
+    with pytest.raises(ValueError, match="vuop_idx"):
+        _txn(vuop_idx=0x80)

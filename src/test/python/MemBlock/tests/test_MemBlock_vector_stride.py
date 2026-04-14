@@ -61,12 +61,14 @@ def test_api_MemBlock_vector_stride_load_smoke(env):
     vector_result = result.vector_result
     data_writeback = _select_vector_data_writeback(vector_result)
     transport_stats = env.get_transport_stats()
+    expected_low_bits = _pack_expected_low_bits(result.expected)
 
     assert vector_result.completed and not vector_result.trapped
     assert data_writeback["vec_wen"] == 1, f"未观测到 vec data writeback: {vector_result.observed_writebacks!r}"
     assert data_writeback["is_vec_load"] == 1
     assert data_writeback["is_strided"] == 1
     assert vector_result.observed_vl == 2
+    assert data_writeback["data"] == expected_low_bits
     assert transport_stats["dcache_a_request_count"] >= 1
     assert transport_stats["dcache_d_response_count"] >= 2
     assert transport_stats["last_dcache_a_block_address"] in {VECTOR_ADDR_BASE, VECTOR_ADDR_BASE + 64}

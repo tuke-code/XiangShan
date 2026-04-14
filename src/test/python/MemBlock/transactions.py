@@ -161,6 +161,7 @@ class VectorMemTxn:
     nf: int = 0
     veew: int = 0
     vm: bool = True
+    vuop_idx: int = 0
     last_uop: bool = True
     is_vleff: bool = False
     src_0: int | None = None
@@ -178,6 +179,8 @@ class VectorMemTxn:
             raise ValueError("vl/vstart/element_count must be non-negative and element_count > 0")
         if self.vstart > self.element_count:
             raise ValueError("vstart must not exceed element_count")
+        if self.vuop_idx < 0 or self.vuop_idx > 0x7F:
+            raise ValueError("vuop_idx must be in range [0, 127]")
         if self.mask_bits is not None and len(self.mask_bits) < self.element_count:
             raise ValueError("mask_bits must cover all modeled elements")
         if self.store_data is not None and len(self.store_data) < self.element_count:
@@ -226,6 +229,10 @@ class VectorMemTxn:
         if self.opcode_class == "stride":
             return int(self.stride)
         return 0
+
+    @property
+    def resolved_vuop_idx(self) -> int:
+        return int(self.vuop_idx)
 
 
 @dataclass(frozen=True)
