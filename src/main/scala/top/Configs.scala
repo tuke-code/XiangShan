@@ -347,6 +347,7 @@ case class L2CacheConfig
         name = "L2",
         ways = ways,
         sets = l2sets,
+        mshrs = 8,
         clientCaches = Seq(L1Param(
           "dcache",
           sets = 2 * p.dcacheParametersOpt.get.nSets / banks,
@@ -617,7 +618,7 @@ class WithCHI extends Config((_, _, _) => {
 })
 
 class CHIConfig(n: Int = 1) extends Config(
-  L2CacheConfig("2MB", inclusive = true, banks = 4, tp = false)
+  L2CacheConfig("2MB", inclusive = true, banks = 8, tp = false)
     ++ new TLConfig(n)
     ++ new WithCHI
 )
