@@ -7,6 +7,43 @@
   - `git log -1 --format=%H -- src/main`
   - `git log -1 --format='%H %ci %s' -- src/main`
 
+## DUTBUG-vector-store-data-path-disconnected
+
+- 状态：open
+- 当前 pytest 处置：精确条件 `xfail`
+- DUT `src/main/` commit hash：`03bc924c72cb055ccb8146a2eecd750ead0b4d7b`
+- DUT `src/main/` commit 摘要：`03bc924c72cb055ccb8146a2eecd750ead0b4d7b 2026-03-31 13:50:09 +0800 top: make MemBlockTop wrapper for memblock only`
+- 关联 testcase：`src/test/python/MemBlock/tests/test_MemBlock_vector_store.py`
+- 关联 RTL 位置：
+  - `src/main/scala/xiangshan/mem/MemBlock.scala`
+  - `src/main/scala/xiangshan/mem/vector/VSplit.scala`
+
+问题描述：
+
+- 当前 unit-stride vector store 已能走到 vector completion metadata。
+- 但顶层 `MemBlock.scala` 仍把 `vsSplit(i).io.vstd.get` 直接置为 `DontCare`，导致 `VSSplitBuffer` 生成的 store data 没有真正送入 SQ。
+- 已稳定观测到的故障签名是：
+  - SQ 条目地址正常，但 `data=0`
+  - 没有新的 `dcache A/D` transport
+  - `flushSb` 一直等不到 `sbIsEmpty`
+  - `drain_log` 保持为空
+
+验证口径：
+
+- testcase 不做整例无条件 `xfail`。
+- 只有当真实 DUT 同时表现出：
+  - completion metadata 已到；
+  - SQ 零数据条目可见；
+  - `flushSb` 超时且没有 drain；
+  - `dcache A/D` transport 仍为 0；
+  才调用 `pytest.xfail(...)`。
+- 如果后续 DUT 修复了这条路径，该用例会自动退回硬断言，继续检查 drain 与最终 memory effect。
+
+后续动作：
+
+- DUT 侧需要把 vector store data 路径真正接到 SQ/store pipeline。
+- 修复后移除 testcase 中对应的 `xfail` 分支，恢复为普通 real-DUT regression。
+
 ## DUTBUG-matchinvalid-redirect-replay-dual-path
 
 - 状态：open

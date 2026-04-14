@@ -26,23 +26,25 @@
 - 已提供 `VectorLoadSequence` / `VectorStoreSequence` 作为 testcase 侧的最小 sequence 壳层。
 - 已提供 `env.memory.vector`，可对 unit-stride / stride、`mask_bits`、`vstart` 做 element-level 展开。
 - 已提供 `VectorMemMonitor`，可观测 vector writeback / completion / trap 事实。
-- 已在真实 DUT 上跑通最小 load smoke：
+- 已在真实 DUT 上跑通并收紧数据面断言的 load regression：
   - unit-stride load
   - positive stride load
+  - non-zero `vstart` 的 unit-stride load（保留 prestart 空洞）
+- 已有一条 real-DUT vector store regression，可稳定复现当前已知 DUT 缺口。
 
 同时也要明确当前边界：
 
-- 当前 real-DUT smoke 主要证明：
-  - front-door 已打通
-  - dcache transport 已发生
+- 当前 real-DUT 已明确证明：
+  - load front-door 已打通
+  - load dcache transport 已发生
   - vector completion / writeback metadata 可稳定观测
+  - unit-stride / stride / non-zero `vstart` 三条 load 数据面可做严格 compare
 - 当前尚未在 smoke 中收紧：
-  - writeback `data` 数值 compare
-  - merge / oldVd / partial-write 相关真实数据面语义
+  - merge / oldVd / partial-write 相关更复杂 load 数据面语义
   - vector store 的真实 DUT 最终 memory-effect 回归
   - vector coverage collector
 
-换句话说，当前环境已经从 scalar-only 推进到 vector-capable，但 Phase 1 仍是“先证明请求面和完成面闭环”，而不是“所有 RVV 数据面语义都已经稳定建模完毕”。
+换句话说，当前环境已经从 scalar-only 推进到 vector-capable；其中 load 已不再只是“请求面/完成面闭环”，而是已经证明了第一批真实数据面 compare。尚未闭环的主要缺口集中在 vector store 最终 drain / memory effect，以及更复杂的 RVV merge 类语义。
 
 ## 3. 总体设计
 
@@ -420,9 +422,13 @@ vector_result = result.get_vector_result(txn.req_id)
 - `last_dcache_a_address` 或 `last_dcache_a_block_address` 落在预期范围
 - `env.assert_no_outstanding()`
 
-当前不建议在通用 smoke 中默认收紧：
+对于已经有专题证明点的 load 场景，允许直接收紧：
 
 - writeback `data` 精确值 compare
+- non-zero `vstart` 的 element-slot 图像 compare
+
+当前仍不建议在通用 smoke 中默认收紧：
+
 - vector store 最终 memory effect compare
 - request split / merge 的精确顺序 compare
 
@@ -463,18 +469,32 @@ vector_result = result.get_vector_result(txn.req_id)
 
 因此 testcase 一般不需要自己再去 patch 这些细节。
 
-## 7.3 completion 已到，但 writeback `data` 为 0
+## 7.3 vector load writeback `data` 异常
 
-这属于当前已知现象，不应第一时间判断为 testcase 写错。当前更合理的解释是：
+当前 unit-stride / stride / non-zero `vstart` load 已经有真实 DUT 的严格 data compare regression，因此如果又看到 load writeback `data` 异常，优先排查：
 
-- 请求面已经打通
-- transport 已经发生
-- vector completion metadata 已经回到 `vecWriteback`
-- 但 merge / oldVd / partial-write 等真实数据面语义尚未在当前验证口径里完全澄清
+1. `txn.vuop_idx` 是否被错误覆盖；当前默认值应为 `0`
+2. `vstart` / `mask_bits` / `element_count` 是否与期望图像一致
+3. testcase 读的是不是 `vec_wen=1` 的那条 writeback
 
-所以 Phase 1 smoke 当前先看 metadata 和 transport，而不是默认拿 `data_0` 做最终真值。
+也就是说，load 数据面现在已经不是“默认不比对”的探索态；出现 `data=0` 更应该先怀疑 front-door 参数或新的环境/RTL 回归。
 
-## 7.4 如何看当前请求是否真的打到了 cacheable 路径
+## 7.4 vector store completion 已到，但 flush/drain 一直不结束
+
+这属于当前已确认的 DUT 缺口。典型观测签名是：
+
+- vector completion metadata 已到；
+- `env.get_store_view(...)` 可看到地址正确的 SQ 条目；
+- 但 `store_view.data == 0`；
+- `env.get_transport_stats()` 里的 `dcache_a_request_count` / `dcache_d_response_count` 仍为 0；
+- `env.flush_store_buffers_and_wait()` 最终超时，且 `env.memory.drain_log` 为空。
+
+如果看到了这一组组合，不要去放宽 testcase 断言；应直接参考：
+
+- `src/test/python/MemBlock/tests/test_MemBlock_vector_store.py`
+- `src/test/python/MemBlock/docs/BUGS.md`
+
+## 7.5 如何看当前请求是否真的打到了 cacheable 路径
 
 优先看：
 
@@ -497,16 +517,16 @@ vector_result = result.get_vector_result(txn.req_id)
 - `VectorLoadSequence` / `VectorStoreSequence` 基础壳层
 - `VectorMemoryModel.expand()` 对 unit-stride / stride / mask / `vstart` 的纯 Python 展开
 - real-DUT:
-  - unit-stride load smoke
-  - positive stride load smoke
+  - unit-stride load strict data compare
+  - positive stride load strict data compare
+  - non-zero `vstart` unit-stride load strict slot-image compare
+  - unit-stride vector store known-gap regression（当前用于稳定复现 DUT bug 签名）
 
 ## 8.2 尚未验证或尚未收紧
 
-- vector store real-DUT smoke
+- vector store real-DUT 最终 memory effect compare
 - zero-stride / negative-stride real-DUT directed case
-- non-zero `vstart` real-DUT directed case
 - masked store / masked load real-DUT directed case
-- writeback `data` 数值 compare
 - vector coverage collector
 - indexed / FOF / segment / MMIO / NC / mixed-path
 
@@ -543,6 +563,7 @@ vector_result = result.get_vector_result(txn.req_id)
 - `src/test/python/MemBlock/sequences/vector_mem_sequences.py`
 - `src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py`
 - `src/test/python/MemBlock/tests/test_MemBlock_vector_stride.py`
+- `src/test/python/MemBlock/tests/test_MemBlock_vector_store.py`
 
 ## 11. 结论
 
