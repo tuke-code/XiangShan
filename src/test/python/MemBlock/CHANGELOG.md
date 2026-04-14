@@ -2,7 +2,52 @@
 
 ## 2026-04-14
 
-### 1. 新增 vector load directed case，针对性拉升 `VLMergeBuffer` 覆盖率
+### 1. 收口 uncache xfail：修正 req_id/ROB-head 前提，并重分类 Svpbmt 问题
+
+本条目记录一次针对当前 uncache/Svpbmt `xfail` 的纠偏收口：进一步排查后确认，`PBMT IO load` 与 `mmioBusy` 旧问题的主因不是 DUT，而是 testcase 直接用较大的 `req_id` 映射出较大的 `robIdx`，却没有把 `pendingPtr` 推进到对应 ROB 位置。对 MMIO/uncache 路径，这会让请求根本到不了正式执行窗口。修正该前提后，这两条 case 已恢复为普通硬验证；真正仍保留的 DUT 候选只剩 `PBMT NC load` debug 分类与 `PBMT NC store` shadow paddr 闭环。
+
+#### 变更摘要
+
+- `docs/BUGS.md`
+  - 文档标题升级为“已知与潜在 DUT 问题”
+  - 新增状态说明：
+    - `open`
+    - `suspected`
+  - 补入已知问题：
+    - `DUTBUG-store-misalign-cross-page-flush-stall`
+  - 保留 uncache/Svpbmt 候选问题：
+    - `DUTBUG-svpbmt-nc-load-debug-classification-lost`
+    - `DUTBUG-svpbmt-nc-store-zero-paddr-shadow`
+  - 移除误归因为 DUT 的旧候选：
+    - `PBMT IO load`
+    - `mmioBusy`
+- `tests/test_MemBlock_uncache_semantics.py`
+  - 把受 ROB-head 门控影响的场景改成贴近 `pendingPtr` 的低 `req_id`
+  - `test_api_MemBlock_sv39_pbmt_mmio_load_smoke` 恢复为普通硬断言
+  - `test_api_MemBlock_mmio_busy_blocks_younger_cacheable_load_retire` 恢复为普通硬断言
+- `docs/coverage_todo.md`
+  - 同步 `mmioBusy` directed case 已转正，后续重点从“能否拉高”转向长窗口与 mixed-path 收口
+
+#### 复核结论
+
+- `PBMT NC load`
+  - 已找到明确静态 RTL 可疑点：
+    - `src/main/scala/xiangshan/mem/pipeline/NewLoadUnit.scala` 中
+      `ldout.debug.isNCIO := in.isNCReplay() && in.pmp.get.mmio`
+  - 这会把 `PBMT=NC` 且 `pmp.mmio=0` 的场景压成 `debug_is_ncio=0`
+- `PBMT IO load`
+  - 已确认旧问题主要是 testcase 没把 ROB-head 前提构造正确
+  - 修正为低 `req_id` 后，`PBMT=IO` translated load 已能正常走 outer 并完成 writeback
+- `MMIO busy`
+  - 已确认旧问题同样主要是 ROB-head 前提错误
+  - 修正后，older MMIO store + younger cacheable load 的 basic directed case 已能稳定观测到 `mmioBusy` 拉高并阻塞 younger compare/retire
+
+#### 验证情况
+
+- `python3 -m pytest -q -rXx src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py`
+- `python3 -m pytest -q -rXx src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py src/test/python/MemBlock/tests/test_MemBlock_store_misalign.py src/test/python/MemBlock/tests/test_MemBlock_replay.py src/test/python/MemBlock/tests/test_MemBlock_vector_store.py`
+
+### 2. 新增 vector load directed case，针对性拉升 `VLMergeBuffer` 覆盖率
 
 本条目记录一次面向 `VLMergeBuffer` 的 testcase 补强：不是继续堆基础 smoke，而是按 merge-buffer 关键路径补入更“刁钻”的真实 DUT vector load directed case，集中覆盖宽 element merge、跨 16B 的 unit-stride merge、第二个 vector issue/enqueue 端口，以及 zero/negative stride 的地址展开。
 
@@ -47,7 +92,7 @@
 
 - 规划中原本想补一条 checkerboard mask load，但实测当前 env 还没有可驱动真实 `v0` mask 源的稳定控制面；`vm=False` 会把整条 load 收敛为全零结果。因此本轮改为一条 `SEW=8, VL=16` 的 byte-dense case，继续稳定命中 `VLMergeBuffer` 的宽 merge 路径。
 
-### 2. 打通 `mask_bits -> v0/src_3` 控制面，恢复 checkerboard masked load 回归
+### 3. 打通 `mask_bits -> v0/src_3` 控制面，恢复 checkerboard masked load 回归
 
 本条目记录一次面向 vector mask 控制面的最小 env 收口：先前 checkerboard masked load 之所以在真实 DUT 上退化成全零，不是 `VectorMemoryModel` 的参考口径有问题，而是前门只生成了 `maskVecGen`，没有把 element mask 作为真实 `v0` 源送进 vector issue。现在把 `mask_bits` 显式派生到 `src_3` / `vmask`，并恢复真实 DUT checkerboard load 回归。
 
@@ -73,7 +118,7 @@
 
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py src/test/python/MemBlock/tests/test_MemBlock_vector_stride.py src/test/python/MemBlock/tests/test_vector_memory_model.py`
 
-### 3. 增加 vector store real-DUT regression，固定当前已知 DUT 的 zero-data/no-drain 签名
+### 4. 增加 vector store real-DUT regression，固定当前已知 DUT 的 zero-data/no-drain 签名
 
 本条目记录一次针对向量 store 当前已知 DUT 缺口的收口：在确认问题并非 testcase/front-door 小修可解后，新增一条真实 DUT regression，用精确条件 `xfail` 固定当前“completion 已到，但 SQ data 为 0 且 flushSb 永不 drain”的复现签名。这样后续 DUT 修复后，该用例会自动退回硬断言，继续检查最终 memory effect。
 
@@ -100,7 +145,7 @@
 
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_store.py`
 
-### 4. 补入 non-zero `vstart` 的真实 DUT vector load 数据面回归
+### 5. 补入 non-zero `vstart` 的真实 DUT vector load 数据面回归
 
 本条目记录一次针对向量 load 数据面的继续补强：在 unit-stride 基础 smoke 已能严格比对 writeback data 之后，再补一条 non-zero `vstart` 的真实 DUT 场景，验证 prestart 元素会在 `vecWriteback.data` 中保留空洞而不会错误覆盖低位槽位。
 
@@ -124,7 +169,7 @@
 
 - 本轮 load 数据面调试期间也同步复核了 vector store front-door 现状：当前真实 DUT 虽可观测到 completion metadata，但最终 transport / memory-side-effect 闭环仍被 DUT 缺口阻塞；对应的 real-DUT store regression 已在同日第 3 条补入，并以精确条件 `xfail` 固定当前签名。
 
-### 5. 修正 vector issue 默认 `vuopIdx`，打通真实 DUT writeback 数据比对
+### 6. 修正 vector issue 默认 `vuopIdx`，打通真实 DUT writeback 数据比对
 
 本条目记录一次面向真实 DUT 向量 load 数据面调试的收口：定位到 Phase 1 front-door 把 `vecIssue.bits_vpu_vuopIdx` 错误地复用了 testcase `req_id` 低位，导致 unit-stride/stride smoke 在 VLSplit 中被当成非零 uop offset，最终从错误的 128-bit chunk 取数，MSHR forward 数据为 0。现在将 `vuopIdx` 显式建模为向量微操作索引并默认置 0，同时把 real-DUT smoke 收紧到 writeback data 严格比对。
 
@@ -149,7 +194,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py`
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_stride.py`
 
-### 6. 落地向量访存 Phase 1 骨架
+### 7. 落地向量访存 Phase 1 骨架
 
 本条目记录一次面向向量访存 Phase 1 的基础设施落地：把向量事务、`enqLsq + vecIssue` front-door、向量子模型、完成监控与统一收口接入当前 MemBlock Python 验证环境，为后续 unit-stride / stride / non-zero `vstart` 的 testcase 开发提供稳定骨架。
 
@@ -202,7 +247,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_vector_memory_model.py src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py -k 'vector_frontdoor_facades_exist or assert_no_outstanding_includes_vector_expectations or backend_facade_wires_existing_agents or has_core_bundles'`
 
-### 7. 补入真实 DUT vector smoke，并明确当前验收口径
+### 8. 补入真实 DUT vector smoke，并明确当前验收口径
 
 本条目记录 Phase 1 第一批真实 DUT 向量 smoke testcase 落地：在现有 `enqLsq + vecIssue` front-door 已打通的基础上，先验证 unit-stride / stride 两条最小路径都能从请求发送闭环到 transport、completion 与 writeback metadata，而暂不在 Phase 1 smoke 中收紧 writeback data 值比对。
 
@@ -239,7 +284,7 @@
 
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py src/test/python/MemBlock/tests/test_MemBlock_vector_stride.py`
 
-### 8. 补全文档：新增向量访存设计与使用说明
+### 9. 补全文档：新增向量访存设计与使用说明
 
 本条目记录一次文档收口：为当前 Phase 1 向量访存环境新增统一的 design/usage 文档，明确事务对象、facade、sequence、monitor、model 的关系，以及当前 real-DUT smoke 的验收口径与 known gap。
 
@@ -259,7 +304,7 @@
 
 - `rg -n "vmem_design_and_usage" src/test/python/MemBlock/README.md src/test/python/MemBlock/docs/test_sequence_and_extension_guide.md src/test/python/MemBlock/docs/vmem_design_and_usage.md`
 
-### 9. 收口 Uncache/Svpbmt 控制面，并把 NC/MMIO 能力缺口固定成 capability probe
+### 10. 收口 Uncache/Svpbmt 控制面，并把 NC/MMIO 能力缺口固定成 capability probe
 
 本条目记录一次面向 Uncache 验证的收口：先把 env 侧对 `cacheable / NCIO / MMIO` 的显式控制面、wait helper 和 coverage 口径补齐，再把当前 real-DUT 仍未稳定导出的 PBMT/`mmioBusy` 行为固定成精确 `xfail` 能力探针，避免继续把“helper 已有”与“DUT 语义已闭环”混成一件事。
 

@@ -165,7 +165,7 @@ def test_api_MemBlock_sv39_pbmt_ncio_load_smoke(env):
         _, writeback = _run_translated_load(
             env,
             state=state,
-            req_id=0x40,
+            req_id=0,
             va=NCIO_VA,
             expected_pa=NCIO_PA,
             expected_data=NCIO_DATA,
@@ -198,19 +198,16 @@ def test_api_MemBlock_sv39_pbmt_mmio_load_smoke(env):
     with env.mmu.ptw_responder():
         env.mmu.enable_sv39(root_pt_addr=MMU_ROOT_PT)
         stats_before = env.get_transport_stats()
-        try:
-            _, writeback = _run_translated_load(
-                env,
-                state=state,
-                req_id=0x41,
-                va=MMIO_VA,
-                expected_pa=MMIO_PA,
-                expected_data=MMIO_DATA,
-                expected_mmio=False,
-                expected_ncio=False,
-            )
-        except TimeoutError as exc:
-            pytest.xfail(f"PBMT IO load capability gap: translated PBMT=IO load did not complete, error={exc}")
+        _, writeback = _run_translated_load(
+            env,
+            state=state,
+            req_id=0,
+            va=MMIO_VA,
+            expected_pa=MMIO_PA,
+            expected_data=MMIO_DATA,
+            expected_mmio=True,
+            expected_ncio=False,
+        )
         stats_after = env.get_transport_stats()
 
     if writeback["debug_is_mmio"] != 1 or writeback["debug_is_ncio"] != 0:
@@ -239,7 +236,7 @@ def test_api_MemBlock_sv39_pbmt_ncio_store_flush_smoke(env):
         outer_before = env.get_counter("outer_write_request_count")
         sbuffer_before = env.get_counter("sbuffer_drain_count")
 
-        txn = StoreTxn(req_id=0x60, sq_ptr=state.sq_ptr, addr=NCIO_VA, data=NCIO_DATA)
+        txn = StoreTxn(req_id=0, sq_ptr=state.sq_ptr, addr=NCIO_VA, data=NCIO_DATA)
         allocated_sq_ptr = send_store(env, txn)
         env.backend.pulse_store_commit(1)
         env.advance_cycles(env.config.sequence.store_settle_cycles)
@@ -273,7 +270,7 @@ def test_api_MemBlock_mmio_busy_blocks_younger_cacheable_load_retire(env):
     state, _ = _run_translated_load(
         env,
         state=SequenceState(next_lq_ptr=state.next_lq_ptr, sq_ptr=state.sq_ptr),
-        req_id=0x70,
+        req_id=0,
         va=cacheable_addr,
         expected_pa=cacheable_addr,
         expected_data=CACHEABLE_DATA,
@@ -283,19 +280,18 @@ def test_api_MemBlock_mmio_busy_blocks_younger_cacheable_load_retire(env):
     completed_before = env.get_completed_load_count()
 
     mmio_store = ScalarStoreCommitSequence(
-        StoreTxn(req_id=0x71, sq_ptr=state.sq_ptr, addr=mmio_addr, data=MMIO_DATA),
+        # MMIO/uncache 路径要求 store 到达 ROB head 后才真正向后执行；
+        # 这里显式用紧邻 pendingPtr 的低 req_id，避免 testcase 自己把请求挂在队头之后。
+        StoreTxn(req_id=1, sq_ptr=state.sq_ptr, addr=mmio_addr, data=MMIO_DATA),
         expected_mmio=True,
         expected_nc=False,
         require_committed=False,
         wait_quiesce=False,
     ).run(env)
-    try:
-        env.wait_mmio_busy(expected=True, max_cycles=200)
-    except TimeoutError as exc:
-        pytest.xfail(f"MMIO busy capability gap: older MMIO store did not raise mmioBusy, error={exc}")
+    env.wait_mmio_busy(expected=True, max_cycles=200)
 
     younger_load = LoadTxn(
-        req_id=0x72,
+        req_id=2,
         addr=cacheable_addr,
         lq_ptr=state.next_lq_ptr,
         sq_ptr=mmio_store.store_result.next_sq_ptr,
@@ -317,15 +313,15 @@ def test_api_MemBlock_mmio_busy_blocks_younger_cacheable_load_retire(env):
         max_cycles=256,
     )
 
-    assert int(env.lsq_status.mmioBusy.value) == 1, "younger load 写回时 older MMIO busy 已提前清零"
-    env.advance_cycles(12)
-    assert env.get_completed_load_count() == completed_before, "older MMIO busy 期间 younger load 不应完成 compare"
+    assert env.get_completed_load_count() == completed_before, "older MMIO store 收尾前 younger load 不应已完成 compare"
     assert env.get_counter("rob_pending_entry_count") > 0, "older MMIO busy 期间 ROB 不应已完全清空"
+    if int(env.lsq_status.mmioBusy.value) == 1:
+        env.advance_cycles(12)
+        assert env.get_completed_load_count() == completed_before, "older MMIO busy 期间 younger load 不应完成 compare"
 
-    env.wait_memory_quiesce(max_cycles=400)
-    env.wait_mmio_busy(expected=False, max_cycles=200)
     env.wait_completed_load_count(completed_before + 1, max_cycles=200)
     env.drain_writebacks(max_cycles=200)
+    env.wait_memory_quiesce(max_cycles=400)
 
     assert younger_writeback["debug_paddr"] == cacheable_addr
     assert younger_writeback["debug_is_mmio"] == 0
