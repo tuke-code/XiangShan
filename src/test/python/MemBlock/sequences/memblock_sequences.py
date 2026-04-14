@@ -595,13 +595,17 @@ class ScalarStoreSequence:
         self,
         txn,
         *,
+        expected_addr: int | None = None,
         expected_mmio: bool | None = None,
+        expected_nc: bool | None = None,
         require_committed: bool = False,
         materialize_cycles: int | None = None,
         store_queue_size: int | None = None,
     ) -> None:
         self.txn = txn
+        self.expected_addr = expected_addr
         self.expected_mmio = expected_mmio
+        self.expected_nc = expected_nc
         self.require_committed = require_committed
         self.materialize_cycles = materialize_cycles
         self.store_queue_size = store_queue_size
@@ -613,12 +617,14 @@ class ScalarStoreSequence:
             else self.materialize_cycles
         )
         store_queue_size = env.config.sequence.store_queue_size if self.store_queue_size is None else self.store_queue_size
+        expected_addr = self.txn.addr if self.expected_addr is None else int(self.expected_addr)
         allocated_sq_ptr = send_store(env, self.txn)
         store_view = env.wait_store_materialized(
             allocated_sq_ptr.value,
-            expected_addr=self.txn.addr,
+            expected_addr=expected_addr,
             expected_data=self.txn.data,
             expected_mmio=self.expected_mmio,
+            expected_nc=self.expected_nc,
             require_committed=self.require_committed,
             max_cycles=materialize_cycles,
         )
@@ -635,7 +641,9 @@ class ScalarStoreCommitSequence:
         self,
         txn,
         *,
+        expected_addr: int | None = None,
         expected_mmio: bool | None = None,
+        expected_nc: bool | None = None,
         require_committed: bool = False,
         materialize_cycles: int | None = None,
         settle_cycles: int | None = None,
@@ -643,7 +651,9 @@ class ScalarStoreCommitSequence:
         quiesce_cycles: int = 300,
     ) -> None:
         self.txn = txn
+        self.expected_addr = expected_addr
         self.expected_mmio = expected_mmio
+        self.expected_nc = expected_nc
         self.require_committed = require_committed
         self.materialize_cycles = materialize_cycles
         self.settle_cycles = settle_cycles
@@ -656,7 +666,9 @@ class ScalarStoreCommitSequence:
         settle_cycles = env.config.sequence.store_settle_cycles if self.settle_cycles is None else self.settle_cycles
         store_result = ScalarStoreSequence(
             self.txn,
+            expected_addr=self.expected_addr,
             expected_mmio=self.expected_mmio,
+            expected_nc=self.expected_nc,
             require_committed=False,
             materialize_cycles=self.materialize_cycles,
         ).run(env)
@@ -664,11 +676,13 @@ class ScalarStoreCommitSequence:
         if settle_cycles > 0:
             env.advance_cycles(settle_cycles)
         if self.require_committed:
+            expected_addr = self.txn.addr if self.expected_addr is None else int(self.expected_addr)
             env.wait_store_materialized(
                 store_result.allocated_sq_ptr.value,
-                expected_addr=self.txn.addr,
+                expected_addr=expected_addr,
                 expected_data=self.txn.data,
                 expected_mmio=self.expected_mmio,
+                expected_nc=self.expected_nc,
                 require_committed=True,
                 max_cycles=(
                     env.config.sequence.store_materialize_cycles

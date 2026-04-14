@@ -84,8 +84,10 @@ class RobCoverageCollector:
         self._seen_load_writeback_keys = set()
         self._seen_retired_store_keys = set()
         self._retired_store_records: list[_RetiredStoreRecord] = []
+        self._nc_store_records: list[_RetiredStoreRecord] = []
         self._mmio_store_records: list[_RetiredStoreRecord] = []
         self._drain_touched_bytes = set()
+        self._nc_drain_overlap_observed = False
         self._mmio_drain_overlap_observed = False
         self._prev_lq_deq_ptr = None
         self._prev_sq_deq_ptr = None
@@ -335,9 +337,13 @@ class RobCoverageCollector:
         self._sample_rob_agent()
         if self._box("flushsb_command_observed").value and self._box("sbuffer_drain_observed").value:
             self._latch("cacheable_store_flush_drain_observed")
-        if self._box("flushsb_command_observed").value and self._box("outer_drain_observed").value:
+        if self._box("flushsb_command_observed").value and self._nc_drain_overlap_observed:
             self._latch("nc_store_flush_drain_observed")
-        if self._box("mmio_store_shadow_observed").value and not self._mmio_drain_overlap_observed:
+        if (
+            self._box("flushsb_command_observed").value
+            and self._box("mmio_store_shadow_observed").value
+            and not self._mmio_drain_overlap_observed
+        ):
             self._latch("mmio_store_excluded_from_drain_observed")
         for group in self._groups:
             group.sample()
@@ -407,6 +413,8 @@ class RobCoverageCollector:
             )
             self._retired_store_records.append(record)
             self._seen_retired_store_keys.add(store_key)
+            if record.nc and not record.mmio and record not in self._nc_store_records:
+                self._nc_store_records.append(record)
             if record.mmio:
                 self._mmio_store_records.append(record)
 
@@ -443,7 +451,7 @@ class RobCoverageCollector:
         if _read_signal(self.env.mem_status.sbIsEmpty, 0) and self._box("flushsb_command_observed").value:
             if self._box("sbuffer_drain_observed").value:
                 self._latch("cacheable_store_flush_drain_observed")
-            if self._box("outer_drain_observed").value:
+            if self._nc_drain_overlap_observed:
                 self._latch("nc_store_flush_drain_observed")
 
         if _read_signal(self.env.mem_status.memoryViolation_valid, 0):
@@ -521,6 +529,10 @@ class RobCoverageCollector:
             if normalized is not None:
                 _, _, touched_bytes = normalized
                 self._drain_touched_bytes.update(touched_bytes)
+                for record in self._nc_store_records:
+                    if record.touched_bytes & touched_bytes:
+                        self._nc_drain_overlap_observed = True
+                        break
                 for record in self._mmio_store_records:
                     if record.touched_bytes & touched_bytes:
                         self._mmio_drain_overlap_observed = True
@@ -531,7 +543,7 @@ class RobCoverageCollector:
                     self._latch("cacheable_store_flush_drain_observed")
             if event.get("channel") == "outer":
                 self._latch("outer_drain_observed")
-                if self._box("flushsb_command_observed").value:
+                if self._box("flushsb_command_observed").value and self._nc_drain_overlap_observed:
                     self._latch("nc_store_flush_drain_observed")
 
     def _sample_replay_related(self) -> None:

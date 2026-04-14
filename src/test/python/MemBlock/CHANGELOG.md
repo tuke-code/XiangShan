@@ -259,6 +259,58 @@
 
 - `rg -n "vmem_design_and_usage" src/test/python/MemBlock/README.md src/test/python/MemBlock/docs/test_sequence_and_extension_guide.md src/test/python/MemBlock/docs/vmem_design_and_usage.md`
 
+### 9. 收口 Uncache/Svpbmt 控制面，并把 NC/MMIO 能力缺口固定成 capability probe
+
+本条目记录一次面向 Uncache 验证的收口：先把 env 侧对 `cacheable / NCIO / MMIO` 的显式控制面、wait helper 和 coverage 口径补齐，再把当前 real-DUT 仍未稳定导出的 PBMT/`mmioBusy` 行为固定成精确 `xfail` 能力探针，避免继续把“helper 已有”与“DUT 语义已闭环”混成一件事。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - `MmuFacade` 新增：
+    - `enable_svpbmt()`
+    - `disable_svpbmt()`
+    - `install_sv39_gigapage_mapping(..., pbmt=...)`
+  - `wait_load_writeback_observed()` 现在会带出：
+    - `debug_paddr`
+    - `debug_vaddr`
+    - `debug_is_mmio`
+    - `debug_is_ncio`
+  - 新增 `wait_mmio_busy(expected=...)`
+  - `wait_store_materialized()` 新增 `expected_nc`
+- `sequences/memblock_sequences.py`
+  - `ScalarStoreSequence` / `ScalarStoreCommitSequence` 新增：
+    - `expected_nc`
+    - `expected_addr`
+  - 便于 translated store 按物理地址和 NC/MMIO 属性做判定
+- `model/rob_coverage.py`
+  - `nc_store_flush_drain_observed` 口径收紧为：
+    - 必须有 `flushSb`
+    - 必须有真实 `store.nc && !store.mmio` 窗口
+    - 必须有 outer drain 与该窗口重叠
+  - `mmio_store_excluded_from_drain_observed` 口径收紧为：
+    - 必须有 `flushSb`
+    - 必须存在 MMIO store shadow
+    - 最终 drain 不覆盖该 MMIO touched-byte 窗口
+- 新增 `tests/test_MemBlock_uncache_semantics.py`
+  - 硬通过：
+    - `test_api_MemBlock_env_mmu_idle_inputs_preserve_svpbmt_state`
+  - capability probe / 精确 `xfail`：
+    - `test_api_MemBlock_sv39_pbmt_ncio_load_smoke`
+    - `test_api_MemBlock_sv39_pbmt_mmio_load_smoke`
+    - `test_api_MemBlock_sv39_pbmt_ncio_store_flush_smoke`
+    - `test_api_MemBlock_mmio_busy_blocks_younger_cacheable_load_retire`
+- `docs/mmu_env_design_and_usage.md`
+  - 同步新增 Svpbmt/PBMT 控制面说明
+- `docs/rob_coverage_plan.md`
+  - 同步 `nc_store_flush_drain_observed` / `mmio_store_excluded_from_drain_observed` 的最新 collector 口径
+- `docs/coverage_todo.md`
+  - 补记当前 helper 已落地、但 real-DUT 仍存在 capability gap 的状态
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/MemBlock_env.py src/test/python/MemBlock/sequences/memblock_sequences.py src/test/python/MemBlock/model/rob_coverage.py src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py src/test/python/MemBlock/tests/test_MemBlock_rob_coverage.py`
+
 ## 2026-04-12
 
 ### 1. 为随机 load 补入 non-mem blocker 回归

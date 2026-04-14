@@ -68,9 +68,13 @@
 - `cacheable_store_flush_drain_observed`
   - 观测到 `flushSb` 且后续出现 sbuffer drain。
 - `nc_store_flush_drain_observed`
-  - 观测到 `flushSb` 且后续出现 outer Put drain。
+  - 观测到 `flushSb`。
+  - 至少存在一条 `store.nc == True && !store.mmio` 的 retired store。
+  - 后续 outer drain 与该 NC store 的 touched-byte 窗口发生重叠。
 - `mmio_store_excluded_from_drain_observed`
-  - 观测到 MMIO store，但 drain log 未覆盖该 MMIO store 地址窗口。
+  - 观测到 `flushSb`。
+  - 至少存在一条 MMIO store shadow。
+  - 最终 drain log 未覆盖该 MMIO store 的 touched-byte 窗口。
 
 ### 2.3 `MemBlock.ROB.GapObserved`
 

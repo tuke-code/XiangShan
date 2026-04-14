@@ -100,6 +100,10 @@ SV39_PTE_R = 1 << 1
 SV39_PTE_W = 1 << 2
 SV39_PTE_A = 1 << 6
 SV39_PTE_D = 1 << 7
+SV39_PTE_PBMT_SHIFT = 61
+SV39_PBMT_CACHEABLE = 0
+SV39_PBMT_NC = 1
+SV39_PBMT_IO = 2
 PTW_BEAT_BYTES = 32
 PMP_CFG_RWX_NAPOT = 0x1F
 PMP_CFG_CSR_BASE = 0x3A0
@@ -985,6 +989,9 @@ class _PtwTileLinkResponder:
 class _ActiveSv39State:
     root_pt_addr: int
     asid: int
+    pbmte_enabled: bool = False
+    pmm_menvcfg: int = 0
+    pmm_henvcfg: int = 0
 
 
 class MmuFacade:
@@ -996,6 +1003,9 @@ class MmuFacade:
         self._persistent_csr_writes = {}
         self._pmp_cfg_words = {}
         self._ptw_responder = None
+        self._svpbmt_enabled = False
+        self._pmm_menvcfg = 0
+        self._pmm_henvcfg = 0
 
     def reapply_inputs(self) -> None:
         if self._active_sv39 is None:
@@ -1004,6 +1014,11 @@ class MmuFacade:
             root_pt_addr=self._active_sv39.root_pt_addr,
             asid=self._active_sv39.asid,
             satp_changed=0,
+        )
+        self._drive_svpbmt_state(
+            enabled=self._active_sv39.pbmte_enabled,
+            pmm_menvcfg=self._active_sv39.pmm_menvcfg,
+            pmm_henvcfg=self._active_sv39.pmm_henvcfg,
         )
 
     async def reapply_after_reset_async(self) -> None:
@@ -1045,9 +1060,42 @@ class MmuFacade:
         self.env.tlb_csr.satp_ppn.value = int(root_pt_addr) >> 12
         self.env.tlb_csr.satp_changed.value = int(satp_changed)
 
+    def _drive_svpbmt_state(self, *, enabled: bool, pmm_menvcfg: int = 0, pmm_henvcfg: int = 0) -> None:
+        self.env.tlb_csr.mPBMTE.value = int(bool(enabled))
+        self.env.tlb_csr.hPBMTE.value = int(bool(enabled))
+        self.env.tlb_csr.pmm_menvcfg.value = int(pmm_menvcfg) & 0x3
+        self.env.tlb_csr.pmm_henvcfg.value = int(pmm_henvcfg) & 0x3
+
+    def enable_svpbmt(self, *, pmm_menvcfg: int = 0, pmm_henvcfg: int = 0) -> None:
+        self._svpbmt_enabled = True
+        self._pmm_menvcfg = int(pmm_menvcfg) & 0x3
+        self._pmm_henvcfg = int(pmm_henvcfg) & 0x3
+        self._drive_svpbmt_state(
+            enabled=True,
+            pmm_menvcfg=self._pmm_menvcfg,
+            pmm_henvcfg=self._pmm_henvcfg,
+        )
+
+    def disable_svpbmt(self) -> None:
+        self._svpbmt_enabled = False
+        self._pmm_menvcfg = 0
+        self._pmm_henvcfg = 0
+        self._drive_svpbmt_state(enabled=False, pmm_menvcfg=0, pmm_henvcfg=0)
+
     async def enable_sv39_async(self, *, root_pt_addr: int, asid: int = 0, settle_cycles: int = 4) -> None:
-        self._active_sv39 = _ActiveSv39State(root_pt_addr=int(root_pt_addr), asid=int(asid))
+        self._active_sv39 = _ActiveSv39State(
+            root_pt_addr=int(root_pt_addr),
+            asid=int(asid),
+            pbmte_enabled=self._svpbmt_enabled,
+            pmm_menvcfg=self._pmm_menvcfg,
+            pmm_henvcfg=self._pmm_henvcfg,
+        )
         self._drive_sv39_root(root_pt_addr=root_pt_addr, asid=asid, satp_changed=1)
+        self._drive_svpbmt_state(
+            enabled=self._active_sv39.pbmte_enabled,
+            pmm_menvcfg=self._active_sv39.pmm_menvcfg,
+            pmm_henvcfg=self._active_sv39.pmm_henvcfg,
+        )
         await self.env._step_async(1)
         self.reapply_inputs()
         await self.pulse_sfence_async()
@@ -1084,6 +1132,7 @@ class MmuFacade:
         self.env.tlb_csr.priv_virt_changed.value = 0
         self.env.tlb_csr.priv_imode.value = self.env.csr_agent.MODE_M
         self.env.tlb_csr.priv_dmode.value = self.env.csr_agent.MODE_M
+        self._drive_svpbmt_state(enabled=False, pmm_menvcfg=0, pmm_henvcfg=0)
 
     async def pulse_sfence_async(self) -> None:
         if not hasattr(self.env.dut, "io_ooo_to_mem_sfence_valid"):
@@ -1101,11 +1150,33 @@ class MmuFacade:
     def pulse_sfence(self) -> None:
         self.env._run_async(self.pulse_sfence_async())
 
-    def sv39_gigapage_leaf_pte(self, pa_base: int) -> int:
+    @staticmethod
+    def _sv39_pbmt_bits(pbmt: str | int) -> int:
+        if isinstance(pbmt, str):
+            normalized = pbmt.strip().lower()
+            mapping = {
+                "cacheable": SV39_PBMT_CACHEABLE,
+                "default": SV39_PBMT_CACHEABLE,
+                "nc": SV39_PBMT_NC,
+                "ncio": SV39_PBMT_NC,
+                "io": SV39_PBMT_IO,
+                "mmio": SV39_PBMT_IO,
+            }
+            if normalized not in mapping:
+                raise ValueError(f"unsupported Svpbmt kind: {pbmt}")
+            return mapping[normalized]
+        value = int(pbmt)
+        if value not in {SV39_PBMT_CACHEABLE, SV39_PBMT_NC, SV39_PBMT_IO}:
+            raise ValueError(f"unsupported Svpbmt value: {pbmt}")
+        return value
+
+    def sv39_gigapage_leaf_pte(self, pa_base: int, *, pbmt: str | int = "cacheable") -> int:
         if int(pa_base) & ((1 << 30) - 1):
             raise ValueError(f"SV39 1GiB leaf PTE 需要 1GiB 对齐物理地址: 0x{int(pa_base):x}")
+        pbmt_bits = self._sv39_pbmt_bits(pbmt)
         return (
             ((int(pa_base) >> 12) << 10)
+            | (pbmt_bits << SV39_PTE_PBMT_SHIFT)
             | SV39_PTE_V
             | SV39_PTE_R
             | SV39_PTE_W
@@ -1113,10 +1184,17 @@ class MmuFacade:
             | SV39_PTE_D
         )
 
-    def install_sv39_gigapage_mapping(self, *, root_pt_addr: int, va: int, pa_base: int) -> int:
+    def install_sv39_gigapage_mapping(
+        self,
+        *,
+        root_pt_addr: int,
+        va: int,
+        pa_base: int,
+        pbmt: str | int = "cacheable",
+    ) -> int:
         vpn2 = (int(va) >> 30) & 0x1FF
         pte_addr = int(root_pt_addr) + vpn2 * 8
-        self.env.preload_u64(pte_addr, self.sv39_gigapage_leaf_pte(pa_base))
+        self.env.preload_u64(pte_addr, self.sv39_gigapage_leaf_pte(pa_base, pbmt=pbmt))
         return pte_addr
 
     def program_pmp_entry(self, *, index: int, cfg: int, addr: int, persistent: bool = True) -> None:
@@ -1810,6 +1888,8 @@ class MemBlockEnv:
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         data: int | None = None,
+        expected_mmio: bool | None = None,
+        expected_ncio: bool | None = None,
         max_cycles: int = 200,
     ) -> dict:
         """等待某条 load writeback 在 intWriteback 口被观测到。"""
@@ -1835,6 +1915,11 @@ class MemBlockEnv:
                     "pdest": bundle.read("pdest", 0),
                     "data": bundle.read("data_0", 0),
                     "int_wen": bundle.read("intWen", 0),
+                    "debug_vaddr": bundle.read("debug_vaddr", 0) if bundle.connected("debug_vaddr") else None,
+                    "debug_paddr": bundle.read("debug_paddr", 0) if bundle.connected("debug_paddr") else None,
+                    "debug_is_mmio": bundle.read("debug_isMMIO", 0) if bundle.connected("debug_isMMIO") else None,
+                    "debug_is_ncio": bundle.read("debug_isNCIO", 0) if bundle.connected("debug_isNCIO") else None,
+                    "exception_bits": bundle.read_exception_bits() if hasattr(bundle, "read_exception_bits") else None,
                 }
                 if event["int_wen"] == 0:
                     continue
@@ -1844,12 +1929,17 @@ class MemBlockEnv:
                     continue
                 if data is not None and event["data"] != int(data):
                     continue
+                if expected_mmio is not None and bool(event["debug_is_mmio"]) != bool(expected_mmio):
+                    continue
+                if expected_ncio is not None and bool(event["debug_is_ncio"]) != bool(expected_ncio):
+                    continue
                 return event
             await self._step_async(1)
 
         raise TimeoutError(
             "等待 load writeback 观测超时: "
-            f"rob=({rob_idx_flag},{rob_idx_value}), data={data}"
+            f"rob=({rob_idx_flag},{rob_idx_value}), data={data}, "
+            f"expected_mmio={expected_mmio}, expected_ncio={expected_ncio}"
         )
 
     def wait_load_writeback_observed(
@@ -1858,6 +1948,8 @@ class MemBlockEnv:
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         data: int | None = None,
+        expected_mmio: bool | None = None,
+        expected_ncio: bool | None = None,
         max_cycles: int = 200,
     ) -> dict:
         """等待某条 load writeback 在 intWriteback 口被观测到。"""
@@ -1867,6 +1959,8 @@ class MemBlockEnv:
                 rob_idx_flag=rob_idx_flag,
                 rob_idx_value=rob_idx_value,
                 data=data,
+                expected_mmio=expected_mmio,
+                expected_ncio=expected_ncio,
                 max_cycles=max_cycles,
             )
         )
@@ -1929,6 +2023,23 @@ class MemBlockEnv:
         if counter_name in stats:
             return int(stats[counter_name])
         raise AttributeError(f"未知计数器 `{counter_name}`")
+
+    def wait_mmio_busy(self, expected: bool = True, max_cycles: int = 200) -> int:
+        """等待 `lsq_status.mmioBusy` 收敛到目标值。"""
+
+        target = int(bool(expected))
+
+        def _mmio_busy_matches():
+            current = int(self.lsq_status.mmioBusy.value)
+            if current == target:
+                return current
+            return None
+
+        return self.wait_until(
+            _mmio_busy_matches,
+            max_cycles=max_cycles,
+            timeout_message=f"等待 mmioBusy={target} 超时",
+        )
 
     def _current_cycle(self) -> int:
         return int(getattr(self.memory, "_cycle", 0))
@@ -2607,6 +2718,7 @@ class MemBlockEnv:
         expected_addr: int,
         expected_data: int,
         expected_mmio: bool | None = None,
+        expected_nc: bool | None = None,
         require_committed: bool = False,
         max_cycles: int = 200,
     ) -> StoreView:
@@ -2622,6 +2734,7 @@ class MemBlockEnv:
                 and (store.data & ((1 << 64) - 1)) == (expected_data & ((1 << 64) - 1))
                 and store.mask != 0
                 and (expected_mmio is None or store.mmio == expected_mmio)
+                and (expected_nc is None or store.nc == expected_nc)
                 and (not require_committed or store.committed)
             ):
                 return store
@@ -2640,6 +2753,7 @@ class MemBlockEnv:
         expected_addr: int,
         expected_data: int,
         expected_mmio: bool | None = None,
+        expected_nc: bool | None = None,
         require_committed: bool = False,
         max_cycles: int = 200,
     ) -> StoreView:
@@ -2651,6 +2765,7 @@ class MemBlockEnv:
                 expected_addr=expected_addr,
                 expected_data=expected_data,
                 expected_mmio=expected_mmio,
+                expected_nc=expected_nc,
                 require_committed=require_committed,
                 max_cycles=max_cycles,
             )

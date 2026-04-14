@@ -59,7 +59,9 @@ flowchart LR
 
 - `enable_sv39(root_pt_addr=..., asid=..., settle_cycles=...)`
 - `disable_translation()`
-- `install_sv39_gigapage_mapping(root_pt_addr=..., va=..., pa_base=...)`
+- `enable_svpbmt(pmm_menvcfg=..., pmm_henvcfg=...)`
+- `disable_svpbmt()`
+- `install_sv39_gigapage_mapping(root_pt_addr=..., va=..., pa_base=..., pbmt=...)`
 - `pulse_sfence()`
 - `write_distributed_csr(addr=..., data=..., persistent=...)`
 - `program_pmp_entry(index=..., cfg=..., addr=..., persistent=...)`
@@ -75,6 +77,7 @@ flowchart LR
 3. 在 DUT reset 之后重放持久化的 PMP CSR 写入。
 4. 为 PTW TileLink A 请求返回完整的多拍 D 响应。
 5. 提供 testcase 可直接复用的 page-table helper。
+6. 为 Svpbmt/uncache testcase 提供稳定的 PBMT 控制面。
 
 ### 4.2 不由 `env.mmu` 负责的事情
 
@@ -123,6 +126,33 @@ env.mmu.allow_all_smode_access()
 ```
 
 它会通过 `csrCtrl.distribute_csr_w_*` 编程一个覆盖全物理地址空间的 RWX NAPOT PMP entry。默认建议把这类 CSR 写入设为 `persistent=True`，这样 reset 后也会自动重放。
+
+### 5.4 Svpbmt / PBMT 分类控制
+
+当前 env 已新增最小 Svpbmt 控制面，便于 testcase 显式安装：
+
+- `pbmt="cacheable"`
+- `pbmt="ncio"` / `pbmt="nc"`
+- `pbmt="mmio"` / `pbmt="io"`
+
+推荐写法：
+
+```python
+env.mmu.enable_svpbmt()
+env.mmu.install_sv39_gigapage_mapping(
+    root_pt_addr=root_pt,
+    va=uncache_va,
+    pa_base=uncache_pa_base,
+    pbmt="ncio",
+)
+```
+
+需要注意：
+
+1. `enable_svpbmt()` 先解决的是 env 侧控制面稳定性，而不是直接宣告 real DUT 已经把所有 translated NCIO/MMIO 细节都完整导出到现有 debug/monitor。
+2. 因此当前相关 testcase 采用“helper + capability probe”双轨：
+   - helper 已固定，可重复复用；
+   - 若 real DUT 仍未稳定给出预期分类或提交语义，testcase 会用精确条件 `xfail` 记录 gap，而不是 silently 降级成普通 smoke。
 
 ## 6. 推荐使用流程
 
