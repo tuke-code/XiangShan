@@ -1,5 +1,117 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-14
+
+### 1. 落地向量访存 Phase 1 骨架
+
+本条目记录一次面向向量访存 Phase 1 的基础设施落地：把向量事务、`enqLsq + vecIssue` front-door、向量子模型、完成监控与统一收口接入当前 MemBlock Python 验证环境，为后续 unit-stride / stride / non-zero `vstart` 的 testcase 开发提供稳定骨架。
+
+#### 变更摘要
+
+- `transactions.py`
+  - 新增：
+    - `VectorMemTxn`
+    - `VectorElementAccess`
+    - `VectorMemResult`
+    - `VectorEnqueueStep`
+    - `VectorIssueStep`
+    - `VectorWaitStep`
+  - `BackendSendPlan` / `BackendSendResult` 扩展到可承载 vector step 与结果
+- `memory_model.py` / `model/vector_memory_model.py`
+  - `MemoryModel` 新增 `env.memory.vector`
+  - 向量参考模型提供：
+    - `expand(txn)`
+    - `expect_load(txn)`
+    - `predict_store(txn)`
+    - outstanding 跟踪
+  - `outstanding_expected_count` 统一并入 scalar + vector
+- `MemBlock_env.py`
+  - 新增 `vector_issue_agent`、`vector_backend`、`vector_monitor`
+  - 绑定真实 DUT 的 `vecIssue` / `vecWriteback` 前门与完成观测
+  - `env.assert_no_outstanding()` 现在会覆盖 `env.memory.vector` outstanding
+- `agents/`
+  - 新增：
+    - `vector_issue_agent.py`
+    - `vector_backend_facade.py`
+  - `backend_facade.py` / `lsq_agent.py` 扩展 vector enqueue / issue / wait 路径
+- `request_apis.py`
+  - 新增：
+    - `send_vector_load`
+    - `send_vector_store`
+- `sequences/vector_mem_sequences.py`
+  - 新增最小向量 sequence 骨架
+- `tests/`
+  - 新增 `test_vector_memory_model.py`
+  - 补强 `test_request_apis_backend_facade.py` 的 vector plan / wrapper 覆盖
+  - 补强 `test_MemBlock_env_fixture.py` 的 vector env 接线与 unified outstanding 覆盖
+- `docs/vector_mem_plan.md` / `docs/vector_mem_phase1_plan*.md`
+  - 文档口径同步到当前实现：
+    - Phase 1 front-door 为 `enqLsq + vecIssue`
+    - Phase 1 主范围不含 `vlm/vsm` packed mask memory
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/transactions.py src/test/python/MemBlock/model/vector_memory_model.py src/test/python/MemBlock/monitors/vector_mem_monitor.py src/test/python/MemBlock/agents/vector_backend_facade.py src/test/python/MemBlock/agents/vector_issue_agent.py src/test/python/MemBlock/agents/backend_facade.py src/test/python/MemBlock/agents/lsq_agent.py src/test/python/MemBlock/memory_model.py src/test/python/MemBlock/MemBlock_env.py src/test/python/MemBlock/request_apis.py src/test/python/MemBlock/sequences/vector_mem_sequences.py src/test/python/MemBlock/tests/test_vector_memory_model.py src/test/python/MemBlock/tests/test_request_apis_backend_facade.py src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_vector_memory_model.py src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py -k 'vector_frontdoor_facades_exist or assert_no_outstanding_includes_vector_expectations or backend_facade_wires_existing_agents or has_core_bundles'`
+
+### 2. 补入真实 DUT vector smoke，并明确当前验收口径
+
+本条目记录 Phase 1 第一批真实 DUT 向量 smoke testcase 落地：在现有 `enqLsq + vecIssue` front-door 已打通的基础上，先验证 unit-stride / stride 两条最小路径都能从请求发送闭环到 transport、completion 与 writeback metadata，而暂不在 Phase 1 smoke 中收紧 writeback data 值比对。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_vector_unit_stride.py`
+  - 新增 unit-stride real-DUT smoke
+  - 断言完成、无 trap、`vec_wen=1`、`is_vec_load=1`、`is_strided=0`
+  - 断言至少观测到一次 dcache A 请求与两个 dcache D beat
+- `tests/test_MemBlock_vector_stride.py`
+  - 新增 stride real-DUT smoke
+  - 断言完成、无 trap、`vec_wen=1`、`is_vec_load=1`、`is_strided=1`
+  - 断言 dcache block address 落在预期 cacheline 集合内
+- `agents/vector_issue_agent.py`
+  - 从固定端口等待改为逐端口主动 drive + 握手
+  - 补齐 `vpu` 相关 optional 字段驱动与 `maskVecGen` 生成
+- `MemBlock_env.py`
+  - 修正 `backend.vector_monitor` 的接线时序，确保 backend wait helper 能看到真实 monitor
+- `model/transport_responder.py` / `monitors/vector_mem_monitor.py`
+  - 增补 dcache request 与 vector completion 诊断字段，便于 testcase 直接做 front-door / transport / metadata 级断言
+
+#### 当前口径
+
+- 当前 smoke 已证明：
+  - `enqLsq + vecIssue` 可以驱动真实 DUT 发起向量 load 请求
+  - dcache A / D transport 路径与向量 completion metadata 可以被稳定观测
+  - unit-stride 与 stride 路径能在真实 DUT 上被区分
+- 当前 smoke 尚未收紧：
+  - vector writeback `data` 值比对
+  - merge / oldVd / partial-write 相关真实数据面语义
+- 因此，Phase 1 现阶段的真实 DUT 验收以 front-door、transport、completion 与 metadata 闭环为主；更严格的数据面正确性留待后续专题补强
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py src/test/python/MemBlock/tests/test_MemBlock_vector_stride.py`
+
+### 3. 补全文档：新增向量访存设计与使用说明
+
+本条目记录一次文档收口：为当前 Phase 1 向量访存环境新增统一的 design/usage 文档，明确事务对象、facade、sequence、monitor、model 的关系，以及当前 real-DUT smoke 的验收口径与 known gap。
+
+#### 变更摘要
+
+- 新增 `docs/vmem_design_and_usage.md`
+  - 说明 `VectorMemTxn`、`env.vector_backend`、`VectorLoadSequence` / `VectorStoreSequence` 的职责与推荐用法
+  - 说明 `enqLsq + vecIssue` front-door 为何继续收敛到统一 `BackendSendPlan`
+  - 说明当前 real-DUT smoke 主要验证 front-door、transport、completion、metadata 闭环
+  - 显式列出 writeback `data` compare、vector store real-DUT 回归、vector coverage collector 等未完成项
+- `README.md`
+  - 将 `docs/vmem_design_and_usage.md` 纳入 docs 列表与推荐阅读顺序
+- `docs/test_sequence_and_extension_guide.md`
+  - 增加向量访存入口说明，提醒 testcase 不要把标量骨架直接改写成 pin-level `vecIssue` 脚本
+
+#### 验证情况
+
+- `rg -n "vmem_design_and_usage" src/test/python/MemBlock/README.md src/test/python/MemBlock/docs/test_sequence_and_extension_guide.md src/test/python/MemBlock/docs/vmem_design_and_usage.md`
+
 ## 2026-04-12
 
 ### 1. 为随机 load 补入 non-mem blocker 回归

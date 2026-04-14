@@ -117,6 +117,16 @@ env.backend.execute(
 
 旧的 `send_load_batch_same_cycle()` / `send_load_batch_with_sta_same_cycle()` 仍保留作兼容包装，但不再作为后续扩接口的方向。
 
+如果你要写的是向量访存场景，而不是标量 load/store，请不要直接把这一节的标量骨架硬改成 `vecIssue` 脚本；应优先改用：
+
+- `VectorMemTxn`
+- `env.vector_backend`
+- `VectorLoadSequence` / `VectorStoreSequence`
+
+更完整的设计背景、当前 smoke 口径和使用示例见：
+
+- `src/test/python/MemBlock/docs/vmem_design_and_usage.md`
+
 ### 4.1 什么时候写 plan，什么时候写 sequence
 
 可以用一个很实用的判断标准：

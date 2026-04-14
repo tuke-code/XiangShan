@@ -78,6 +78,8 @@
   - backend 主动控制请求模型专项说明，重点覆盖 `env.backend.send(...)`、`env.backend.execute(...)`、`IssueCyclePlan`、`BackendSendPlan`、`StoreTxn.mask -> SB/SH/SW/SD` 映射与兼容层收敛策略。
 - `backend_rob_cookbook.md`
   - 面向 testcase / sequence 作者的 backend/ROB cookbook，集中给出 `BackendSendPlan`、`NonMemBlockerStep`、`StoreCommitReadyStep` 的常见脚本模板。
+- `vmem_design_and_usage.md`
+  - 向量访存环境设计与使用说明，集中说明 `VectorMemTxn`、`env.vector_backend`、`VectorLoadSequence`、当前 real-DUT smoke 口径与 known gap。
 - `misalign.md`
   - 面向 scalar load/store misalign 的专题分析，集中说明 DUT 中 misalign 的当前设计形态、验证功能点、推荐验证方案，以及当前环境与 testcase 的满足情况。
 - `clock_control_and_migration_guide.md`
@@ -110,16 +112,17 @@
 3. `docs/verification_env_design.md`
 4. `docs/backend_request_model_design.md`
 5. `docs/backend_rob_cookbook.md`
-6. `docs/clock_control_and_migration_guide.md`
-7. `docs/memory_model_design.md`
-8. `docs/rob_model.md`
-9. `docs/coverage_summary.md`
-10. `docs/coverage_todo.md`
-11. `docs/vp_pipeline_plan.md`
-12. `tests/test_MemBlock_scalar_load_pipeline.py`
-13. `tests/test_MemBlock_scalar_store_pipeline.py`
-14. `tests/test_MemBlock_scalar_ordering.py`
-15. `tests/test_MemBlock_replay.py`
+6. `docs/vmem_design_and_usage.md`
+7. `docs/clock_control_and_migration_guide.md`
+8. `docs/memory_model_design.md`
+9. `docs/rob_model.md`
+10. `docs/coverage_summary.md`
+11. `docs/coverage_todo.md`
+12. `docs/vp_pipeline_plan.md`
+13. `tests/test_MemBlock_scalar_load_pipeline.py`
+14. `tests/test_MemBlock_scalar_store_pipeline.py`
+15. `tests/test_MemBlock_scalar_ordering.py`
+16. `tests/test_MemBlock_replay.py`
 
 ## 当前测试与报告入口
 
