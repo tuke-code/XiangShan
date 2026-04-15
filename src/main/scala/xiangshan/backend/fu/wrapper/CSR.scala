@@ -412,7 +412,7 @@ class CSRInput(implicit p: Parameters) extends XSBundle with HasSoCParameter {
   })
 }
 
-class CSRToDecode(implicit p: Parameters) extends XSBundle {
+class CSRToDecode extends Bundle {
   val illegalInst = new Bundle {
     /**
      * illegal sfence.vma, sinval.vma
