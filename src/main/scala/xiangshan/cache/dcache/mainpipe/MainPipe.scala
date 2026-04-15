@@ -877,7 +877,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   //                                      (1) real hit       (2) store miss and accepted by mshr
   io.store_hit_resp.valid := s3_valid && s3_store_can_go || mshr_handled_store_miss_s3
   io.store_hit_resp.bits.data := DontCare
-  io.store_hit_resp.bits.miss := { if (env.EnableDifftest) mshr_handled_store_miss_s3 else false.B }
+  io.store_hit_resp.bits.miss := mshr_handled_store_miss_s3
   io.store_hit_resp.bits.replay := false.B
   io.store_hit_resp.bits.id := Mux(mshr_handled_store_miss_s3, mshr_handled_store_miss_id_s3, s3_req.id)
 
