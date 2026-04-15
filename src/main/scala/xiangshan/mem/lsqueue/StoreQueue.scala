@@ -759,8 +759,25 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     val s2_enqPtrExt = RegNext(enqPtrExt(0))
     val s2_deqPtrExt = RegNext(deqPtrExt(0))
 
-    io.forward(i).addrInvalidSqIdx := RegEnable(io.forward(i).uop.sqIdx, io.forward(i).valid)
-    io.forward(i).addrInvalid := false.B
+    // addr invalid sq index
+    // make chisel happy
+    val addrInvalidMaskRegWire = Wire(UInt(StoreQueueSize.W))
+    addrInvalidMaskRegWire := addrInvalidMaskReg
+    val addrInvalidFlag = addrInvalidMaskRegWire.orR
+    val hasInvalidAddr = (~addrValidVec.asUInt & needForward).orR
+
+    val addrInvalidSqIdx1 = OHToUInt(Reverse(PriorityEncoderOH(Reverse(addrInvalidMask1Reg))))
+    val addrInvalidSqIdx2 = OHToUInt(Reverse(PriorityEncoderOH(Reverse(addrInvalidMask2Reg))))
+    val addrInvalidSqIdx = Mux(addrInvalidMask2Reg.orR, addrInvalidSqIdx2, addrInvalidSqIdx1)
+
+    when (addrInvalidFlag) {
+      io.forward(i).addrInvalidSqIdx.flag := Mux(!s2_differentFlag || addrInvalidSqIdx >= s2_deqPtrExt.value, s2_deqPtrExt.flag, s2_enqPtrExt.flag)
+      io.forward(i).addrInvalidSqIdx.value := addrInvalidSqIdx
+    } .otherwise {
+      // may be store inst has been written to sbuffer already.
+      io.forward(i).addrInvalidSqIdx := RegEnable(io.forward(i).uop.sqIdx, io.forward(i).valid)
+    }
+    io.forward(i).addrInvalid := addrInvalidFlag
 
     // data invalid sq index
     // make chisel happy

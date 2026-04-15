@@ -1148,10 +1148,8 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
     Mux(Pbmt.isUncache(s2_pbmt), s2_in.mmio, s2_tlb_hit && s2_pmp.mmio)
 
   val s2_full_fwd      = Wire(Bool())
-  val s2_mem_amb       = {
-    s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait && ~s2_in.uop.loadPred.bits.static
-    io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid)
-  }
+  val s2_mem_amb       = (s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait && ~s2_in.uop.loadPred.bits.static &&
+                          io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid))
   val s2_tlb_miss      = s2_in.tlbMiss
   val s2_fwd_fail      = io.lsq.forward.dataInvalid && RegNext(io.lsq.forward.valid)
   val s2_dcache_miss   = io.dcache.resp.bits.miss &&
