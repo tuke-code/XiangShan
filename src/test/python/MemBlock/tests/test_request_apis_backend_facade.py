@@ -16,6 +16,8 @@ from transactions import (
     LoadTxn,
     NonMemBlockerStep,
     QueuePtr,
+    RobIndex,
+    RobRef,
     StoreCommitReadyStep,
     StoreRef,
     StoreTxn,
@@ -52,21 +54,36 @@ class _FakeBackend:
     def wait_store_enq_ready(self, max_cycles: int = 200) -> None:
         self.calls.append(("wait_store_enq_ready", max_cycles))
 
-    def enqueue_scalar_load(self, req_id, lq_ptr, sq_ptr, enq_port: int = 0) -> None:
-        self.calls.append(("enqueue_scalar_load", req_id, lq_ptr, sq_ptr, enq_port))
+    def enqueue_scalar_load(
+        self,
+        req_id,
+        lq_ptr,
+        sq_ptr,
+        enq_port: int = 0,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+    ) -> None:
+        self.calls.append(("enqueue_scalar_load", req_id, lq_ptr, sq_ptr, enq_port, rob_idx_flag, rob_idx_value))
 
-    def enqueue_scalar_store(self, req_id, sq_ptr, enq_port: int = 0):
-        self.calls.append(("enqueue_scalar_store", req_id, sq_ptr, enq_port))
+    def enqueue_scalar_store(
+        self,
+        req_id,
+        sq_ptr,
+        enq_port: int = 0,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+    ):
+        self.calls.append(("enqueue_scalar_store", req_id, sq_ptr, enq_port, rob_idx_flag, rob_idx_value))
         return QueuePtr(flag=sq_ptr.flag ^ 1, value=sq_ptr.value + 1)
 
     def issue_scalar_load(self, req_id, addr, lq_ptr, sq_ptr, **kwargs) -> None:
         self.calls.append(("issue_scalar_load", req_id, addr, lq_ptr, sq_ptr, kwargs))
 
-    def issue_scalar_std(self, req_id, sq_ptr, data, lane: int = 5, mask: int = 0xFF) -> None:
-        self.calls.append(("issue_scalar_std", req_id, sq_ptr, data, lane, mask))
+    def issue_scalar_std(self, req_id, sq_ptr, data, lane: int = 5, mask: int = 0xFF, **kwargs) -> None:
+        self.calls.append(("issue_scalar_std", req_id, sq_ptr, data, lane, mask, kwargs))
 
-    def issue_scalar_sta(self, req_id, sq_ptr, addr, lane: int = 3, mask: int = 0xFF) -> None:
-        self.calls.append(("issue_scalar_sta", req_id, sq_ptr, addr, lane, mask))
+    def issue_scalar_sta(self, req_id, sq_ptr, addr, lane: int = 3, mask: int = 0xFF, **kwargs) -> None:
+        self.calls.append(("issue_scalar_sta", req_id, sq_ptr, addr, lane, mask, kwargs))
 
     def send_load(self, txn) -> None:
         self.calls.append(("send_load", txn))
@@ -108,9 +125,18 @@ class _FakeLsqAgent:
     def enqueue_load_cycle(self, plan) -> None:
         self.calls.append(("enqueue_load_cycle", plan))
 
-    def enqueue_scalar_store(self, req_id, sq_ptr, enq_port: int = 0):
+    def enqueue_scalar_store(
+        self,
+        req_id,
+        sq_ptr,
+        enq_port: int = 0,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+    ):
         allocated = QueuePtr(flag=sq_ptr.flag ^ 1, value=sq_ptr.value + 1)
-        self.calls.append(("enqueue_scalar_store", req_id, sq_ptr, enq_port, allocated))
+        self.calls.append(
+            ("enqueue_scalar_store", req_id, sq_ptr, enq_port, allocated, rob_idx_flag, rob_idx_value)
+        )
         return allocated
 
     def enqueue_vector_mem(self, txn):
@@ -203,6 +229,7 @@ class _FakeFacadeEnv:
         self.commit_agent = _FakeCommitAgent()
         self.memory = _FakeMemory()
         self.vector_monitor = _FakeVectorMonitor()
+        self.config = type("Config", (), {"rob_size": 512})()
         self.run_async_calls = []
 
     def _run_async(self, marker):
@@ -223,6 +250,12 @@ class _FakeEnv:
 
 
 class _FakeVectorMonitor:
+    def __init__(self) -> None:
+        self.registrations = []
+
+    def register_req(self, req_id: int, rob_idx_flag: int, rob_idx_value: int) -> None:
+        self.registrations.append((req_id, rob_idx_flag, rob_idx_value))
+
     def wait_event_async(self, req_id: int, *, event: str = "complete_or_trap", max_cycles: int = 200):
         del max_cycles
         return VectorMemResult(
@@ -251,8 +284,34 @@ def test_api_request_apis_enqueue_and_issue_delegate_to_backend():
     assert env.backend.calls[2][0] == "enqueue_scalar_load"
     assert env.backend.calls[3][0] == "enqueue_scalar_store"
     assert env.backend.calls[4][0] == "issue_scalar_load"
-    assert env.backend.calls[5] == ("issue_scalar_std", 8, sq_ptr, 0x55, 6, 0x0F)
-    assert env.backend.calls[6] == ("issue_scalar_sta", 9, sq_ptr, 0x2000, 3, 0x03)
+    assert env.backend.calls[5] == (
+        "issue_scalar_std",
+        8,
+        sq_ptr,
+        0x55,
+        6,
+        0x0F,
+        {
+            "rob_idx_flag": None,
+            "rob_idx_value": None,
+            "ftq_idx_flag": None,
+            "ftq_idx_value": None,
+        },
+    )
+    assert env.backend.calls[6] == (
+        "issue_scalar_sta",
+        9,
+        sq_ptr,
+        0x2000,
+        3,
+        0x03,
+        {
+            "rob_idx_flag": None,
+            "rob_idx_value": None,
+            "ftq_idx_flag": None,
+            "ftq_idx_value": None,
+        },
+    )
 
 
 def test_api_request_apis_send_txns_delegate_to_backend():
@@ -462,8 +521,8 @@ def test_api_backend_facade_execute_routes_non_mem_blocker_steps():
 
     backend.execute(
         BackendSendPlan.from_steps(
-            NonMemBlockerStep.insert(rob_idx_flag=0, rob_idx_value=9),
-            NonMemBlockerStep.release(rob_idx_flag=0, rob_idx_value=9),
+            NonMemBlockerStep.insert(rob_idx=RobIndex(flag=0, value=9)),
+            NonMemBlockerStep.release(rob_idx=RobIndex(flag=0, value=9)),
         )
     )
 
@@ -471,6 +530,63 @@ def test_api_backend_facade_execute_routes_non_mem_blocker_steps():
         ("note_non_mem_issued", 0, 9),
         ("release_non_mem", 0, 9),
     ]
+
+
+def test_api_backend_facade_prepare_binds_load_txn_before_send():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+    txn = LoadTxn(
+        req_id=0x51,
+        addr=0x1234,
+        lq_ptr=QueuePtr(flag=0, value=1),
+        sq_ptr=QueuePtr(flag=0, value=2),
+    )
+
+    prepared = backend.prepare(txn)
+
+    assert txn.rob_idx == RobIndex(flag=0, value=0)
+    assert txn.resolved_pdest == 0
+    assert prepared.rob_idx_of(txn) == prepared.rob_idx_of(txn.req_id)
+
+
+def test_api_backend_facade_prepare_resolves_wait_for_rob_ref():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+    lead_ref = RobRef("lead")
+    lead = LoadTxn(
+        req_id=1,
+        addr=0x1000,
+        lq_ptr=QueuePtr(flag=0, value=1),
+        sq_ptr=QueuePtr(flag=0, value=2),
+        rob_ref=lead_ref,
+    )
+    follower = LoadTxn(
+        req_id=2,
+        addr=0x2000,
+        lq_ptr=QueuePtr(flag=0, value=2),
+        sq_ptr=QueuePtr(flag=0, value=2),
+        issue_lane=1,
+        wait_for_rob=lead_ref,
+    )
+
+    prepared = backend.prepare(
+        BackendSendPlan.from_steps(
+            EnqueueLoadCyclePlan.from_steps(
+                EnqueueLoadStep.from_txn(lead),
+                EnqueueLoadStep(
+                    req_id=follower.req_id,
+                    lq_ptr=follower.lq_ptr,
+                    sq_ptr=follower.sq_ptr,
+                    enq_port=1,
+                    txn=follower,
+                ),
+            ),
+            IssueCyclePlan.from_ops(IssueOp.load_from_txn(lead), IssueOp.load_from_txn(follower)),
+        )
+    )
+
+    issue_cycle = prepared.resolved_plan.steps[1]
+    assert issue_cycle.ops[1].wait_for_rob_idx == lead.rob_idx
 
 
 def test_api_backend_facade_execute_resolves_store_ref_for_commit_ready_step():
@@ -512,6 +628,7 @@ def test_api_backend_facade_vector_execute_uses_shared_plan_runtime():
 
     assert env.lsq_agent.calls == [("enqueue_vector_mem", txn)]
     assert env.vector_issue_agent.calls == [("issue", txn, 33)]
+    assert env.vector_monitor.registrations == [(txn.req_id, txn.rob_idx.flag, txn.rob_idx.value)]
     assert result.get_vector_result(txn.req_id).req_id == txn.req_id
 
 

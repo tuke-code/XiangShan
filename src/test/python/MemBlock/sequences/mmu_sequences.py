@@ -5,7 +5,8 @@ MemBlock MMU-oriented reusable sequences.
 
 from dataclasses import dataclass
 
-from request_apis import LoadTxn, ptr_inc, send_load
+from transactions import LoadTxn, ptr_inc
+from request_apis import send_load
 
 from .memblock_sequences import SequenceState, _resolve_replay_drain_cycles, _wait_completed_load_count
 
@@ -142,8 +143,9 @@ class MmuSv39ActivateSequence:
                 lq_ptr=next_lq_ptr,
                 sq_ptr=self.initial_state.sq_ptr,
             )
+            env.backend.prepare(txn)
             env.expect_scalar_load(
-                req_id=txn.req_id,
+                rob_idx=txn.rob_idx,
                 pdest=txn.resolved_pdest,
                 addr=spec.expected_pa,
                 size=txn.size,
@@ -151,8 +153,7 @@ class MmuSv39ActivateSequence:
             )
             send_load(env, txn)
             writeback = env.wait_load_writeback_observed(
-                rob_idx_flag=txn.rob_idx_flag,
-                rob_idx_value=txn.rob_idx_value,
+                rob_idx=txn.rob_idx,
                 data=spec.expected_data,
                 max_cycles=_resolve_replay_drain_cycles(env, None),
             )

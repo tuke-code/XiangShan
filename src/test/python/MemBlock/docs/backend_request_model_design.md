@@ -17,6 +17,8 @@
 - 项目入口与用法概览：`src/test/python/MemBlock/README.md`
 - 常见脚本模板：`src/test/python/MemBlock/docs/backend_rob_cookbook.md`
 
+> 2026-04-15 更新：`robIdx` 默认已改为由 env 在 `prepare()` / `execute()` / `send()` 流程中统一分配。本文档中较早期那些“直接手填 `rob_idx_flag/value`”的片段，现应优先理解为兼容层示意；新的 testcase/sequence 建议改用 `RobIndex`、`RobRef`、`wait_for_rob` 与 `prepare(...)`，只在最靠近 DUT 端口的边界再拆成 flag/value。
+
 ## 2. 背景：旧接口为什么会越来越臃肿
 
 在早期版本里，主动控制路径的主问题并不是“功能不够”，而是“扩展方式不收敛”。一开始只有单条 load/store，于是自然会写出：
@@ -339,6 +341,7 @@ from transactions import (
     IssueCyclePlan,
     IssueOp,
     NonMemBlockerStep,
+    RobIndex,
     StoreCommitStep,
     StoreRef,
 )
@@ -348,10 +351,7 @@ younger_store = StoreRef("younger_store")
 env.backend.execute(
     BackendSendPlan.from_steps(
         EnqueueLoadStep.from_txn(load0),
-        NonMemBlockerStep.insert(
-            rob_idx_flag=0,
-            rob_idx_value=load0.req_id + 1,
-        ),
+        NonMemBlockerStep.insert(rob_idx=RobIndex(flag=0, value=1)),
         EnqueueStoreStep.from_txn(store1, ref=younger_store),
         IssueCyclePlan.from_ops(IssueOp.load_from_txn(load0)),
         IssueCyclePlan.from_ops(
@@ -361,10 +361,7 @@ env.backend.execute(
             IssueOp.sta(req_id=store1.req_id, sq_ptr=younger_store, addr=store1.addr, mask=store1.mask)
         ),
         StoreCommitStep(count=1),
-        NonMemBlockerStep.release(
-            rob_idx_flag=0,
-            rob_idx_value=load0.req_id + 1,
-        ),
+        NonMemBlockerStep.release(rob_idx=RobIndex(flag=0, value=1)),
         StoreCommitStep(count=1),
     )
 )
@@ -517,12 +514,13 @@ store_result = ScalarStoreCommitSequence(
 
 1. `request_apis.py` 仍保留旧名字；
 2. 但旧名字内部已经不再拥有独立实现，而是把请求翻译成新的 `send()` / `execute()` 模型；
-3. 新增复杂场景时，不再继续往 `request_apis.py` 里堆新的特化 helper。
+3. 公共数据模型统一收敛到 `transactions.py`；
+4. 新增复杂场景时，不再继续往 `request_apis.py` 里堆新的特化 helper，而是优先上提到 `sequences/`。
 
 这意味着：
 
 - 旧 testcase 仍然能跑；
-- 新 testcase 不必背历史包袱；
+- 新 testcase 可以直接消费 `transactions.py` + `sequences/`，不必背历史兼容层包袱；
 - 后续如果要做接口收敛，可以在迁移完成后有计划地削减兼容层，而不是继续让兼容层扩张。
 
 ## 9. 扩展规则：以后应该怎么继续演进

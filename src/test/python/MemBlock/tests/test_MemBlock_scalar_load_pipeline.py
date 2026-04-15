@@ -3,7 +3,7 @@
 MemBlock 标量 load pipeline 的定向真实 DUT 用例。
 """
 
-from request_apis import QueuePtr
+from transactions import QueuePtr
 from sequences import (
     ResetEnvSequence,
     ScalarLoadBurstSequence,

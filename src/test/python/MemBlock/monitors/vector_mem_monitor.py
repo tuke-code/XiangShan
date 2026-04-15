@@ -5,7 +5,7 @@ Vector memory writeback/completion monitor.
 
 from __future__ import annotations
 
-from transactions import VectorMemResult
+from transactions import RobIndex, VectorMemResult, make_rob_index
 
 
 def _req_id_from_rob(rob_idx_flag: int, rob_idx_value: int) -> int:
@@ -21,6 +21,7 @@ class VectorMemMonitor:
         self._seen_events: set[tuple] = set()
         self._writebacks_by_req: dict[int, list[dict]] = {}
         self._results_by_req: dict[int, VectorMemResult] = {}
+        self._req_by_rob: dict[RobIndex, int] = {}
 
     def drive_ready(self) -> None:
         for bundle in self.writebacks:
@@ -31,7 +32,24 @@ class VectorMemMonitor:
         self._seen_events.clear()
         self._writebacks_by_req.clear()
         self._results_by_req.clear()
+        self._req_by_rob.clear()
         self.drive_ready()
+
+    def register_req(
+        self,
+        req_id: int,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+    ) -> None:
+        normalized_rob_idx = make_rob_index(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+        if normalized_rob_idx is None:
+            raise ValueError("register_req requires a rob_idx")
+        self._req_by_rob[normalized_rob_idx] = int(req_id)
 
     def sample(self) -> None:
         self.drive_ready()
@@ -42,7 +60,10 @@ class VectorMemMonitor:
                 continue
             rob_idx_flag = bundle.read("robIdx_flag", 0)
             rob_idx_value = bundle.read("robIdx_value", 0)
-            req_id = _req_id_from_rob(rob_idx_flag, rob_idx_value)
+            req_id = self._req_by_rob.get(
+                RobIndex(flag=int(rob_idx_flag), value=int(rob_idx_value)),
+                _req_id_from_rob(rob_idx_flag, rob_idx_value),
+            )
             exception_bits = bundle.read_exception_bits()
             event = {
                 "lane": lane,

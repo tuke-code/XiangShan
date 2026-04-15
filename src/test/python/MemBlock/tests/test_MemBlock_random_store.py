@@ -12,11 +12,7 @@ MemBlock 真实 DUT store 冒烟测试。
 
 import random
 
-from request_apis import (
-    QueuePtr,
-    StoreTxn,
-    ptr_inc,
-)
+from transactions import ptr_inc, QueuePtr, StoreTxn
 from sequences import (
     FlushStoreBuffersSequence,
     ResetEnvSequence,

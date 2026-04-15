@@ -180,11 +180,11 @@ with env.mmu.ptw_responder():
         lq_ptr=state.next_lq_ptr,
         sq_ptr=state.sq_ptr,
     )
-    env.expect_scalar_load(req_id=txn.req_id, addr=main_pa)
+    env.backend.prepare(txn)
+    env.expect_scalar_load(rob_idx=txn.rob_idx, pdest=txn.resolved_pdest, addr=main_pa)
     send_load(env, txn)
     env.wait_load_writeback_observed(
-        rob_idx_flag=txn.rob_idx_flag,
-        rob_idx_value=txn.rob_idx_value,
+        rob_idx=txn.rob_idx,
         data=expected_data,
     )
 ```

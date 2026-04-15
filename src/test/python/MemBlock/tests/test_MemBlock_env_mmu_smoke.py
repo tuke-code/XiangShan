@@ -3,7 +3,8 @@
 MemBlockEnv MMU/PTW/DTLB smoke。
 """
 
-from request_apis import LoadTxn, send_load
+from transactions import LoadTxn
+from request_apis import send_load
 from sequences import ResetEnvSequence
 
 
@@ -62,8 +63,9 @@ def test_api_MemBlock_env_mmu_sv39_ptw_smoke(env):
             lq_ptr=state.next_lq_ptr,
             sq_ptr=state.sq_ptr,
         )
+        env.backend.prepare(txn)
         env.expect_scalar_load(
-            req_id=txn.req_id,
+            rob_idx=txn.rob_idx,
             pdest=txn.resolved_pdest,
             addr=translated_pa,
             size=txn.size,
@@ -71,8 +73,7 @@ def test_api_MemBlock_env_mmu_sv39_ptw_smoke(env):
         )
         send_load(env, txn)
         writeback = env.wait_load_writeback_observed(
-            rob_idx_flag=txn.rob_idx_flag,
-            rob_idx_value=txn.rob_idx_value,
+            rob_idx=txn.rob_idx,
             data=MMU_DATA,
             max_cycles=512,
         )

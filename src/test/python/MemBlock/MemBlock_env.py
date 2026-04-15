@@ -63,6 +63,7 @@ from memory_model import MemoryModel
 from model.rob_coverage import RobCoverageCollector
 from monitors.mem_status_monitor import MemStatusMonitor
 from monitors.vector_mem_monitor import VectorMemMonitor
+from transactions import RobIndex, make_rob_index
 
 
 LOAD_PIPELINE_WIDTH = DEFAULT_ENV_CONFIG.load_pipeline_width
@@ -116,14 +117,6 @@ def _read_signal_int(signal, default: int = 0) -> int:
         return int(signal.value)
     except Exception:
         return int(default)
-
-
-@dataclass(frozen=True)
-class RobIndex:
-    """ROB 指针。"""
-
-    flag: int
-    value: int
 
 
 @dataclass(frozen=True)
@@ -1732,6 +1725,7 @@ class MemBlockEnv:
             if int(self.dut.reset.value) or int(self.dut.io_reset_backend.value):
                 self.commit_agent.reset()
                 self.vector_monitor.reset_runtime_state()
+                self.backend.reset_runtime_state()
             else:
                 self.mem_status_monitor.after_cycle()
                 self.commit_agent.advance()
@@ -1776,6 +1770,7 @@ class MemBlockEnv:
         self.memory.reset_runtime_state()
         self.vector_monitor.reset_runtime_state()
         self.commit_agent.reset()
+        self.backend.reset_runtime_state()
         self._last_rar_query_req_by_lane = {}
         self.dut.reset.value = 1
         await self._step_async(cycles)
@@ -1861,21 +1856,33 @@ class MemBlockEnv:
         size: int = 8,
         mask: int = 0xFF,
         req_id: int | None = None,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
     ):
         """登记一笔标量 load 的期望结果。"""
 
         if req_id is not None:
-            rob_idx_flag = (req_id >> 9) & 0x1
-            rob_idx_value = req_id & 0x1FF
+            rob_idx = self._normalize_rob_idx_filter(
+                rob_idx=rob_idx,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+            )
+            if rob_idx is None:
+                rob_idx = RobIndex(flag=(req_id >> 9) & 0x1, value=req_id & 0x1FF)
             if pdest is None:
                 pdest = req_id % 64
-        if rob_idx_flag is None or rob_idx_value is None or pdest is None:
-            raise ValueError("expect_scalar_load 需要 `req_id`，或同时提供 `rob_idx_flag/rob_idx_value/pdest`")
+        else:
+            rob_idx = self._normalize_rob_idx_filter(
+                rob_idx=rob_idx,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+            )
+        if rob_idx is None or pdest is None:
+            raise ValueError("expect_scalar_load 需要 `req_id`，或同时提供 `rob_idx/pdest`")
         return self.memory.expect_load(
-            rob_idx_flag=rob_idx_flag,
-            rob_idx_value=rob_idx_value,
+            rob_idx_flag=rob_idx.flag,
+            rob_idx_value=rob_idx.value,
             pdest=pdest,
             addr=addr,
             size=size,
@@ -1885,6 +1892,7 @@ class MemBlockEnv:
     async def _wait_load_writeback_observed_async(
         self,
         *,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         data: int | None = None,
@@ -1893,6 +1901,12 @@ class MemBlockEnv:
         max_cycles: int = 200,
     ) -> dict:
         """等待某条 load writeback 在 intWriteback 口被观测到。"""
+
+        normalized_rob_idx = self._normalize_rob_idx_filter(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
 
         for _ in range(max_cycles):
             for lane, bundle in enumerate(self.writeback):
@@ -1923,9 +1937,7 @@ class MemBlockEnv:
                 }
                 if event["int_wen"] == 0:
                     continue
-                if rob_idx_flag is not None and event["rob_idx_flag"] != int(rob_idx_flag):
-                    continue
-                if rob_idx_value is not None and event["rob_idx_value"] != int(rob_idx_value):
+                if not self._event_matches_rob_idx(event, normalized_rob_idx):
                     continue
                 if data is not None and event["data"] != int(data):
                     continue
@@ -1938,13 +1950,14 @@ class MemBlockEnv:
 
         raise TimeoutError(
             "等待 load writeback 观测超时: "
-            f"rob=({rob_idx_flag},{rob_idx_value}), data={data}, "
+            f"rob={self._format_rob_idx(normalized_rob_idx)}, data={data}, "
             f"expected_mmio={expected_mmio}, expected_ncio={expected_ncio}"
         )
 
     def wait_load_writeback_observed(
         self,
         *,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         data: int | None = None,
@@ -1956,6 +1969,7 @@ class MemBlockEnv:
 
         return self._run_async(
             self._wait_load_writeback_observed_async(
+                rob_idx=rob_idx,
                 rob_idx_flag=rob_idx_flag,
                 rob_idx_value=rob_idx_value,
                 data=data,
@@ -2044,6 +2058,32 @@ class MemBlockEnv:
     def _current_cycle(self) -> int:
         return int(getattr(self.memory, "_cycle", 0))
 
+    def _normalize_rob_idx_filter(
+        self,
+        *,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+    ) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+
+    def _event_matches_rob_idx(self, event: dict, rob_idx: RobIndex | None) -> bool:
+        if rob_idx is None:
+            return True
+        return (
+            event.get("rob_idx_flag") == int(rob_idx.flag)
+            and event.get("rob_idx_value") == int(rob_idx.value)
+        )
+
+    def _format_rob_idx(self, rob_idx: RobIndex | None) -> str:
+        if rob_idx is None:
+            return "(None,None)"
+        return f"({int(rob_idx.flag)},{int(rob_idx.value)})"
+
     def _read_optional_dut_signal(self, signal_name: str, default: int = 0) -> int:
         return _read_signal_int(getattr(self.dut, signal_name, None), default)
 
@@ -2070,19 +2110,23 @@ class MemBlockEnv:
         *,
         cause: str | None = None,
         source: str | tuple[str, ...] | None = None,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         sq_idx: int | None = None,
     ) -> bool:
+        normalized_rob_idx = self._normalize_rob_idx_filter(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
         if cause is not None and self._normalize_replay_cause(event.get("cause")) != self._normalize_replay_cause(cause):
             return False
         if source is not None:
             sources = (source,) if isinstance(source, str) else tuple(source)
             if event.get("source") not in sources:
                 return False
-        if rob_idx_flag is not None and event.get("rob_idx_flag") != int(rob_idx_flag):
-            return False
-        if rob_idx_value is not None and event.get("rob_idx_value") != int(rob_idx_value):
+        if not self._event_matches_rob_idx(event, normalized_rob_idx):
             return False
         if sq_idx is not None and event.get("sq_idx_value") != int(sq_idx):
             return False
@@ -2371,12 +2415,19 @@ class MemBlockEnv:
         *,
         cause: str | None = None,
         source: str | tuple[str, ...] | None = None,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         sq_idx: int | None = None,
         max_cycles: int = 200,
     ) -> dict:
         """等待一条匹配过滤条件的 replay 观测事件。"""
+
+        normalized_rob_idx = self._normalize_rob_idx_filter(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
 
         for _ in range(max_cycles):
             replay_state = self.sample_replay_state()
@@ -2385,15 +2436,14 @@ class MemBlockEnv:
                     event,
                     cause=cause,
                     source=source,
-                    rob_idx_flag=rob_idx_flag,
-                    rob_idx_value=rob_idx_value,
+                    rob_idx=normalized_rob_idx,
                     sq_idx=sq_idx,
                 ):
                     return event
             await self._step_async(1)
         raise TimeoutError(
             "等待 replay 事件超时: "
-            f"cause={cause}, source={source}, rob=({rob_idx_flag},{rob_idx_value}), sq_idx={sq_idx}"
+            f"cause={cause}, source={source}, rob={self._format_rob_idx(normalized_rob_idx)}, sq_idx={sq_idx}"
         )
 
     def wait_replay_event(
@@ -2401,6 +2451,7 @@ class MemBlockEnv:
         *,
         cause: str | None = None,
         source: str | tuple[str, ...] | None = None,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         sq_idx: int | None = None,
@@ -2412,6 +2463,7 @@ class MemBlockEnv:
             self._wait_replay_event_async(
                 cause=cause,
                 source=source,
+                rob_idx=rob_idx,
                 rob_idx_flag=rob_idx_flag,
                 rob_idx_value=rob_idx_value,
                 sq_idx=sq_idx,
@@ -2422,6 +2474,7 @@ class MemBlockEnv:
     def wait_nc_replay_or_nc_out(
         self,
         *,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         max_cycles: int = 200,
@@ -2430,6 +2483,7 @@ class MemBlockEnv:
 
         return self.wait_replay_event(
             cause="NC",
+            rob_idx=rob_idx,
             rob_idx_flag=rob_idx_flag,
             rob_idx_value=rob_idx_value,
             max_cycles=max_cycles,
@@ -2494,6 +2548,7 @@ class MemBlockEnv:
         self,
         *,
         kind: str,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         sq_idx: int | None = None,
@@ -2504,6 +2559,11 @@ class MemBlockEnv:
         normalized_kind = str(kind).strip().lower()
         if normalized_kind not in {"raw", "rar"}:
             raise ValueError(f"unsupported nuke query kind: {kind}")
+        normalized_rob_idx = self._normalize_rob_idx_filter(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
 
         for _ in range(max_cycles):
             query_state = self.sample_nuke_query_state()
@@ -2511,9 +2571,7 @@ class MemBlockEnv:
             for event in queries:
                 if not event["valid"] or event["ready"]:
                     continue
-                if rob_idx_flag is not None and event["rob_idx_flag"] != int(rob_idx_flag):
-                    continue
-                if rob_idx_value is not None and event["rob_idx_value"] != int(rob_idx_value):
+                if not self._event_matches_rob_idx(event, normalized_rob_idx):
                     continue
                 if sq_idx is not None and event["sq_idx_value"] != int(sq_idx):
                     continue
@@ -2522,13 +2580,14 @@ class MemBlockEnv:
 
         raise TimeoutError(
             "等待 nuke query backpressure 超时: "
-            f"kind={normalized_kind}, rob=({rob_idx_flag},{rob_idx_value}), sq_idx={sq_idx}"
+            f"kind={normalized_kind}, rob={self._format_rob_idx(normalized_rob_idx)}, sq_idx={sq_idx}"
         )
 
     def wait_nuke_query_backpressure(
         self,
         *,
         kind: str,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         sq_idx: int | None = None,
@@ -2539,6 +2598,7 @@ class MemBlockEnv:
         return self._run_async(
             self._wait_nuke_query_backpressure_async(
                 kind=kind,
+                rob_idx=rob_idx,
                 rob_idx_flag=rob_idx_flag,
                 rob_idx_value=rob_idx_value,
                 sq_idx=sq_idx,
@@ -2549,6 +2609,7 @@ class MemBlockEnv:
     async def _wait_rar_nuke_response_async(
         self,
         *,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         lq_idx_flag: int | None = None,
@@ -2556,6 +2617,12 @@ class MemBlockEnv:
         max_cycles: int = 200,
     ) -> dict:
         """等待一条 RAR nuke response，并回填最近一次同 lane req 元信息。"""
+
+        normalized_rob_idx = self._normalize_rob_idx_filter(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
 
         for _ in range(max_cycles):
             query_state = self.sample_nuke_query_state()
@@ -2567,9 +2634,7 @@ class MemBlockEnv:
                 event.update(self._last_rar_query_req_by_lane.get(resp["lane"], {}))
                 event["resp_valid"] = resp["resp_valid"]
                 event["nuke"] = resp["nuke"]
-                if rob_idx_flag is not None and event.get("rob_idx_flag") != int(rob_idx_flag):
-                    continue
-                if rob_idx_value is not None and event.get("rob_idx_value") != int(rob_idx_value):
+                if not self._event_matches_rob_idx(event, normalized_rob_idx):
                     continue
                 if lq_idx_flag is not None and event.get("lq_idx_flag") != int(lq_idx_flag):
                     continue
@@ -2580,12 +2645,13 @@ class MemBlockEnv:
 
         raise TimeoutError(
             "等待 RAR nuke response 超时: "
-            f"rob=({rob_idx_flag},{rob_idx_value}), lq=({lq_idx_flag},{lq_idx_value})"
+            f"rob={self._format_rob_idx(normalized_rob_idx)}, lq=({lq_idx_flag},{lq_idx_value})"
         )
 
     def wait_rar_nuke_response(
         self,
         *,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         lq_idx_flag: int | None = None,
@@ -2596,6 +2662,7 @@ class MemBlockEnv:
 
         return self._run_async(
             self._wait_rar_nuke_response_async(
+                rob_idx=rob_idx,
                 rob_idx_flag=rob_idx_flag,
                 rob_idx_value=rob_idx_value,
                 lq_idx_flag=lq_idx_flag,
@@ -2610,12 +2677,18 @@ class MemBlockEnv:
         *,
         cause: str | None = None,
         source: str | tuple[str, ...] | None = None,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         sq_idx: int | None = None,
     ) -> list[dict]:
         """在一个时间窗口内收集 replay 观测事件。"""
 
+        normalized_rob_idx = self._normalize_rob_idx_filter(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
         events = []
         seen = set()
         for step_idx in range(max(0, int(cycles))):
@@ -2625,8 +2698,7 @@ class MemBlockEnv:
                     event,
                     cause=cause,
                     source=source,
-                    rob_idx_flag=rob_idx_flag,
-                    rob_idx_value=rob_idx_value,
+                    rob_idx=normalized_rob_idx,
                     sq_idx=sq_idx,
                 ):
                     continue
@@ -2654,6 +2726,7 @@ class MemBlockEnv:
         *,
         cause: str | None = None,
         source: str | tuple[str, ...] | None = None,
+        rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         sq_idx: int | None = None,
@@ -2665,6 +2738,7 @@ class MemBlockEnv:
                 cycles=cycles,
                 cause=cause,
                 source=source,
+                rob_idx=rob_idx,
                 rob_idx_flag=rob_idx_flag,
                 rob_idx_value=rob_idx_value,
                 sq_idx=sq_idx,

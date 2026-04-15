@@ -14,7 +14,7 @@ MemBlock 随机 load 流量测试。
 
 import random
 
-from request_apis import (
+from transactions import (
     BackendSendPlan,
     EnqueueLoadCyclePlan,
     EnqueueLoadStep,
@@ -22,9 +22,11 @@ from request_apis import (
     IssueOp,
     LoadTxn,
     ptr_inc,
+    RobIndex,
 )
 from sequences import (
     ResetEnvSequence,
+    ScalarLoadBatchSameCycleSequence,
     ScalarLoadBurstSequence,
     ScalarLoadSequence,
     SequenceState,
@@ -214,12 +216,78 @@ def test_api_MemBlock_three_random_mem_loads_same_cycle_via_plan(env):
             ),
         )
     )
-    env.expect_scalar_load(req_id=load0.req_id, addr=load0.addr)
-    env.expect_scalar_load(req_id=load1.req_id, addr=load1.addr)
-    env.expect_scalar_load(req_id=load2.req_id, addr=load2.addr)
+    env.expect_scalar_load(rob_idx=load0.rob_idx, pdest=load0.resolved_pdest, addr=load0.addr)
+    env.expect_scalar_load(rob_idx=load1.rob_idx, pdest=load1.resolved_pdest, addr=load1.addr)
+    env.expect_scalar_load(rob_idx=load2.rob_idx, pdest=load2.resolved_pdest, addr=load2.addr)
     env.wait_completed_load_count(3, max_cycles=400)
     env.drain_writebacks(max_cycles=400)
     assert env.get_completed_load_count() == 3, "plan 同拍三 load 未全部完成 compare"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_three_random_mem_loads_same_cycle_via_sequence(env):
+    """
+    使用 `ScalarLoadBatchSameCycleSequence` 表达同拍三条 cacheable load 场景。
+
+    检查点：
+      - testcase 不再依赖 `request_apis` 的 batch helper
+      - sequence 能正确组织同拍 enqueue + issue
+      - 三条 load 都能按预加载值写回并完成 compare
+    """
+
+    rng = random.Random(RANDOM_SEED ^ 0x66AA)
+    load0_addr = _random_addr(rng, MEM_ADDR_BASE)
+    load1_addr = _random_addr(rng, MEM_ADDR_BASE)
+    load2_addr = _random_addr(rng, MEM_ADDR_BASE)
+    expected0 = rng.getrandbits(64)
+    expected1 = rng.getrandbits(64)
+    expected2 = rng.getrandbits(64)
+
+    stream_state = _reset_env_and_state(env)
+    env.preload_u64(load0_addr, expected0)
+    env.preload_u64(load1_addr, expected1)
+    env.preload_u64(load2_addr, expected2)
+
+    load0 = LoadTxn(
+        req_id=0x51,
+        addr=load0_addr,
+        lq_ptr=stream_state.next_lq_ptr,
+        sq_ptr=stream_state.sq_ptr,
+        size=8,
+        mask=0xFF,
+        enq_port=0,
+        issue_lane=0,
+    )
+    load1 = LoadTxn(
+        req_id=0x52,
+        addr=load1_addr,
+        lq_ptr=ptr_inc(stream_state.next_lq_ptr, env.config.sequence.load_queue_size),
+        sq_ptr=stream_state.sq_ptr,
+        size=8,
+        mask=0xFF,
+        enq_port=1,
+        issue_lane=1,
+    )
+    load2 = LoadTxn(
+        req_id=0x53,
+        addr=load2_addr,
+        lq_ptr=ptr_inc(stream_state.next_lq_ptr, env.config.sequence.load_queue_size, step=2),
+        sq_ptr=stream_state.sq_ptr,
+        size=8,
+        mask=0xFF,
+        enq_port=2,
+        issue_lane=2,
+    )
+
+    result = ScalarLoadBatchSameCycleSequence((load0, load1, load2)).run(env)
+    env.expect_scalar_load(rob_idx=load0.rob_idx, pdest=load0.resolved_pdest, addr=load0.addr)
+    env.expect_scalar_load(rob_idx=load1.rob_idx, pdest=load1.resolved_pdest, addr=load1.addr)
+    env.expect_scalar_load(rob_idx=load2.rob_idx, pdest=load2.resolved_pdest, addr=load2.addr)
+
+    env.wait_completed_load_count(3, max_cycles=400)
+    env.drain_writebacks(max_cycles=400)
+    assert result.final_state.next_lq_ptr == ptr_inc(stream_state.next_lq_ptr, env.config.sequence.load_queue_size, step=3)
+    assert env.get_completed_load_count() == 3, "sequence 同拍三 load 未全部完成 compare"
     env.assert_no_outstanding()
 
 
@@ -272,7 +340,7 @@ def test_api_MemBlock_random_mem_load_non_mem_blocker_delays_compare(env):
 
     stream_state = _reset_env_and_state(env)
     env.preload_u64(load_addr, expected_data)
-    env.backend.insert_non_mem_blocker(rob_idx_flag=0, rob_idx_value=0)
+    env.backend.insert_non_mem_blocker(rob_idx=RobIndex(flag=0, value=0))
 
     txn = LoadTxn(
         req_id=req_id,
@@ -283,11 +351,14 @@ def test_api_MemBlock_random_mem_load_non_mem_blocker_delays_compare(env):
         mask=0xFF,
     )
     env.backend.send(txn)
-    env.expect_scalar_load(req_id=txn.req_id, addr=txn.addr)
+    env.expect_scalar_load(
+        rob_idx=txn.rob_idx,
+        pdest=txn.resolved_pdest,
+        addr=txn.addr,
+    )
 
     writeback = env.wait_load_writeback_observed(
-        rob_idx_flag=txn.rob_idx_flag,
-        rob_idx_value=txn.rob_idx_value,
+        rob_idx=txn.rob_idx,
         data=expected_data,
         max_cycles=400,
     )
@@ -301,7 +372,7 @@ def test_api_MemBlock_random_mem_load_non_mem_blocker_delays_compare(env):
         "non-mem blocker 未 release 前，younger load 不应从 ROB 队列移除"
     )
 
-    env.backend.release_non_mem_blocker(rob_idx_flag=0, rob_idx_value=0)
+    env.backend.release_non_mem_blocker(rob_idx=RobIndex(flag=0, value=0))
     env.advance_cycles(12)
     env.drain_writebacks(max_cycles=400)
     assert env.rob_agent.stats["rob_non_mem_resume_count"] > 0, (

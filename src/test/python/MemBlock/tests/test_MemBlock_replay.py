@@ -12,7 +12,8 @@ MemBlock 真实 DUT replay 场景测试。
 
 import pytest
 
-from request_apis import LoadTxn, StoreTxn, ptr_inc, send_load
+from transactions import LoadTxn, ptr_inc, RobIndex, StoreTxn
+from request_apis import send_load
 from sequences import (
     FlushStoreBuffersSequence,
     MmuSv39AddressSpaceConfig,
@@ -90,8 +91,9 @@ def _warm_cacheable_load(env, *, state: SequenceState, req_id: int, addr: int, d
         lq_ptr=state.next_lq_ptr,
         sq_ptr=state.sq_ptr,
     )
+    env.backend.prepare(warmup_load)
     env.expect_scalar_load(
-        req_id=warmup_load.req_id,
+        rob_idx=warmup_load.rob_idx,
         pdest=warmup_load.resolved_pdest,
         addr=addr,
         size=warmup_load.size,
@@ -99,8 +101,7 @@ def _warm_cacheable_load(env, *, state: SequenceState, req_id: int, addr: int, d
     )
     send_load(env, warmup_load)
     warmup_writeback = env.wait_load_writeback_observed(
-        rob_idx_flag=warmup_load.rob_idx_flag,
-        rob_idx_value=warmup_load.rob_idx_value,
+        rob_idx=warmup_load.rob_idx,
         data=data,
         max_cycles=512,
     )
@@ -244,6 +245,17 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
     younger_sq_ptr = ptr_inc(initial_state.sq_ptr, env.config.sequence.store_queue_size)
     younger_lq_ptr = ptr_inc(initial_state.next_lq_ptr, env.config.sequence.load_queue_size)
 
+    older_load = LoadTxn(
+        req_id=1,
+        addr=RAR_ADDR,
+        lq_ptr=initial_state.next_lq_ptr,
+        sq_ptr=younger_sq_ptr,
+        load_wait_bit=1,
+        load_wait_strict=0,
+        store_set_hit=1,
+    )
+    older_load.wait_for_rob_idx = RobIndex(flag=0, value=0)
+
     result = ScalarRarViolationSequence(
         fake_store_txn=StoreTxn(
             req_id=0,
@@ -251,17 +263,7 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
             addr=RAR_OLDER_STORE_ADDR,
             data=RAR_OLDER_STORE_DATA,
         ),
-        older_load_txn=LoadTxn(
-            req_id=1,
-            addr=RAR_ADDR,
-            lq_ptr=initial_state.next_lq_ptr,
-            sq_ptr=younger_sq_ptr,
-            load_wait_bit=1,
-            load_wait_strict=0,
-            store_set_hit=1,
-            wait_for_rob_idx_flag=0,
-            wait_for_rob_idx_value=0,
-        ),
+        older_load_txn=older_load,
         younger_load_txn=LoadTxn(
             req_id=2,
             addr=RAR_ADDR,

@@ -7,19 +7,17 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 
+from transactions import LoadTxn, ptr_inc, QueuePtr
 from request_apis import (
-    LoadTxn,
-    QueuePtr,
     enqueue_scalar_store,
     expect_load,
     issue_scalar_sta,
     issue_scalar_std,
-    ptr_inc,
     send_load,
-    send_load_batch_same_cycle,
 )
 
 from .memblock_sequences import (
+    ScalarLoadBatchSameCycleSequence,
     SequenceState,
     _capture_load_debug_trace,
     _capture_writeback_trace,
@@ -114,8 +112,7 @@ class ScalarBankConflictSqDataInvalidNukeSequenceResult:
 def _capture_replay_events(
     env,
     *,
-    rob_idx_flag: int,
-    rob_idx_value: int,
+    rob_idx,
     max_events: int = 64,
 ):
     trace = deque(maxlen=max(1, int(max_events)))
@@ -124,7 +121,7 @@ def _capture_replay_events(
     def _sample() -> None:
         replay_state = env.sample_replay_state()
         for event in replay_state["events"]:
-            if event.get("rob_idx_flag") != int(rob_idx_flag) or event.get("rob_idx_value") != int(rob_idx_value):
+            if event.get("rob_idx_flag") != int(rob_idx.flag) or event.get("rob_idx_value") != int(rob_idx.value):
                 continue
             event_key = (
                 event.get("cycle"),
@@ -236,11 +233,13 @@ class ScalarRawReplaySequence:
         store_queue_size = env.config.sequence.store_queue_size
         load_queue_size = env.config.sequence.load_queue_size
 
+        env.backend.prepare(self.store_txn)
         store_sq_ptr = enqueue_scalar_store(
             env,
             req_id=self.store_txn.req_id,
             sq_ptr=self.store_txn.sq_ptr,
             enq_port=self.store_txn.enq_port,
+            rob_idx=self.store_txn.rob_idx,
         )
         younger_sq_ptr = ptr_inc(self.store_txn.sq_ptr, store_queue_size)
 
@@ -277,6 +276,9 @@ class ScalarRawReplaySequence:
             sq_ptr=store_sq_ptr,
             data=self.store_txn.data,
             lane=self.store_txn.std_lane,
+            rob_idx=self.store_txn.rob_idx,
+            ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
+            ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
         )
         issue_scalar_sta(
             env,
@@ -284,6 +286,9 @@ class ScalarRawReplaySequence:
             sq_ptr=store_sq_ptr,
             addr=self.store_txn.addr,
             lane=self.store_txn.sta_lane,
+            rob_idx=self.store_txn.rob_idx,
+            ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
+            ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
         )
         env.backend.pulse_store_commit(1)
         committed_store_view = env.wait_store_materialized(
@@ -351,11 +356,13 @@ class ScalarRarViolationSequence:
         previous_strict = env.memory.strict_writeback_check
         env.memory.strict_writeback_check = False
         try:
+            env.backend.prepare(self.fake_store_txn)
             fake_store_sq_ptr = enqueue_scalar_store(
                 env,
                 req_id=self.fake_store_txn.req_id,
                 sq_ptr=self.fake_store_txn.sq_ptr,
                 enq_port=self.fake_store_txn.enq_port,
+                rob_idx=self.fake_store_txn.rob_idx,
             )
             issue_scalar_std(
                 env,
@@ -363,21 +370,22 @@ class ScalarRarViolationSequence:
                 sq_ptr=fake_store_sq_ptr,
                 data=self.fake_store_txn.data,
                 lane=self.fake_store_txn.std_lane,
+                rob_idx=self.fake_store_txn.rob_idx,
+                ftq_idx_flag=self.fake_store_txn.resolved_ftq_idx_flag,
+                ftq_idx_value=self.fake_store_txn.resolved_ftq_idx_value,
             )
 
             send_load(env, self.older_load_txn)
             expect_load(env, self.older_load_txn)
             env.wait_replay_event(
                 cause="MA",
-                rob_idx_flag=self.older_load_txn.rob_idx_flag,
-                rob_idx_value=self.older_load_txn.rob_idx_value,
+                rob_idx=self.older_load_txn.rob_idx,
                 max_cycles=self.replay_wait_cycles,
             )
 
             send_load(env, self.younger_load_txn)
             younger_writeback = env.wait_load_writeback_observed(
-                rob_idx_flag=self.younger_load_txn.rob_idx_flag,
-                rob_idx_value=self.younger_load_txn.rob_idx_value,
+                rob_idx=self.younger_load_txn.rob_idx,
                 data=env.memory.read(self.younger_load_txn.addr, self.younger_load_txn.size),
                 max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
             )
@@ -395,6 +403,9 @@ class ScalarRarViolationSequence:
                 sq_ptr=fake_store_sq_ptr,
                 addr=self.fake_store_txn.addr,
                 lane=self.fake_store_txn.sta_lane,
+                rob_idx=self.fake_store_txn.rob_idx,
+                ftq_idx_flag=self.fake_store_txn.resolved_ftq_idx_flag,
+                ftq_idx_value=self.fake_store_txn.resolved_ftq_idx_value,
             )
             env.backend.pulse_store_commit(1)
             fake_store_view = env.wait_store_materialized(
@@ -407,23 +418,20 @@ class ScalarRarViolationSequence:
             )
 
             rar_nuke_response = env.wait_rar_nuke_response(
-                rob_idx_flag=self.older_load_txn.rob_idx_flag,
-                rob_idx_value=self.older_load_txn.rob_idx_value,
+                rob_idx=self.older_load_txn.rob_idx,
                 lq_idx_flag=self.older_load_txn.lq_ptr.flag,
                 lq_idx_value=self.older_load_txn.lq_ptr.value,
                 max_cycles=self.violation_wait_cycles,
             )
             older_writeback = env.wait_load_writeback_observed(
-                rob_idx_flag=self.older_load_txn.rob_idx_flag,
-                rob_idx_value=self.older_load_txn.rob_idx_value,
+                rob_idx=self.older_load_txn.rob_idx,
                 data=self.release_new_value,
                 max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
             )
             violation_candidates = env.collect_replay_window(
                 min(16, self.violation_wait_cycles),
                 source="memory_violation",
-                rob_idx_flag=self.older_load_txn.rob_idx_flag,
-                rob_idx_value=self.older_load_txn.rob_idx_value,
+                rob_idx=self.older_load_txn.rob_idx,
             )
             violation_event = violation_candidates[0] if violation_candidates else None
 
@@ -479,11 +487,13 @@ class ScalarPipelineStldNukeSequence:
 
     def run(self, env) -> ScalarPipelineStldNukeSequenceResult:
         completed_before = env.get_completed_load_count()
+        env.backend.prepare(self.store_txn)
         store_sq_ptr = enqueue_scalar_store(
             env,
             req_id=self.store_txn.req_id,
             sq_ptr=self.store_txn.sq_ptr,
             enq_port=self.store_txn.enq_port,
+            rob_idx=self.store_txn.rob_idx,
         )
         issue_scalar_std(
             env,
@@ -491,6 +501,9 @@ class ScalarPipelineStldNukeSequence:
             sq_ptr=store_sq_ptr,
             data=self.store_txn.data,
             lane=self.store_txn.std_lane,
+            rob_idx=self.store_txn.rob_idx,
+            ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
+            ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
         )
 
         main_load = LoadTxn(
@@ -506,8 +519,7 @@ class ScalarPipelineStldNukeSequence:
             _capture_load_debug_trace(env, max_events=96) as load_debug_trace,
             _capture_replay_events(
                 env,
-                rob_idx_flag=main_load.rob_idx_flag,
-                rob_idx_value=main_load.rob_idx_value,
+                rob_idx=main_load.rob_idx,
                 max_events=64,
             ) as replay_trace,
             _capture_nuke_query_trace(env, max_events=64) as nuke_query_trace,
@@ -519,6 +531,9 @@ class ScalarPipelineStldNukeSequence:
                 sq_ptr=store_sq_ptr,
                 addr=self.store_txn.addr,
                 lane=self.store_txn.sta_lane,
+                rob_idx=self.store_txn.rob_idx,
+                ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
+                ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
             )
             load_debug_event = _wait_load_debug_event(
                 env,
@@ -531,8 +546,7 @@ class ScalarPipelineStldNukeSequence:
             env.backend.pulse_store_commit(1)
             main_expected.expected_data = self.store_txn.data
             main_writeback = env.wait_load_writeback_observed(
-                rob_idx_flag=main_load.rob_idx_flag,
-                rob_idx_value=main_load.rob_idx_value,
+                rob_idx=main_load.rob_idx,
                 data=self.store_txn.data,
                 max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
             )
@@ -607,11 +621,13 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
 
     def run(self, env) -> ScalarBankConflictSqDataInvalidNukeSequenceResult:
         completed_before = env.get_completed_load_count()
+        env.backend.prepare(self.store_txn)
         store_sq_ptr = enqueue_scalar_store(
             env,
             req_id=self.store_txn.req_id,
             sq_ptr=self.store_txn.sq_ptr,
             enq_port=self.store_txn.enq_port,
+            rob_idx=self.store_txn.rob_idx,
         )
         younger_sq_ptr = ptr_inc(self.store_txn.sq_ptr, env.config.sequence.store_queue_size)
         lead_addr = self.store_txn.addr + 0x40 if self.lead_addr is None else self.lead_addr
@@ -637,29 +653,31 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
             _capture_load_debug_trace(env, max_events=128) as load_debug_trace,
             _capture_replay_events(
                 env,
-                rob_idx_flag=victim_load.rob_idx_flag,
-                rob_idx_value=victim_load.rob_idx_value,
+                rob_idx=victim_load.rob_idx,
                 max_events=64,
             ) as replay_trace,
             _capture_nuke_query_trace(env, max_events=64) as nuke_query_trace,
             _capture_writeback_trace(env, max_events=64) as writeback_trace,
         ):
-            def _match_writeback(event, *, rob_idx_flag, rob_idx_value, data):
+            def _match_writeback(event, *, rob_idx, data):
                 if event.get("int_wen") != 1:
                     return False
-                if event.get("rob_idx_flag") != rob_idx_flag or event.get("rob_idx_value") != rob_idx_value:
+                if event.get("rob_idx_flag") != rob_idx.flag or event.get("rob_idx_value") != rob_idx.value:
                     return False
                 if data is not None and event.get("data") != data:
                     return False
                 return True
 
-            send_load_batch_same_cycle(env, (lead_load, victim_load))
+            ScalarLoadBatchSameCycleSequence((lead_load, victim_load)).run(env)
             issue_scalar_sta(
                 env,
                 req_id=self.store_txn.req_id,
                 sq_ptr=store_sq_ptr,
                 addr=self.store_txn.addr,
                 lane=self.store_txn.sta_lane,
+                rob_idx=self.store_txn.rob_idx,
+                ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
+                ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
             )
             sq_forward_event = _wait_sq_forward_event(
                 env,
@@ -691,6 +709,9 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
                 sq_ptr=store_sq_ptr,
                 data=self.store_txn.data,
                 lane=self.store_txn.std_lane,
+                rob_idx=self.store_txn.rob_idx,
+                ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
+                ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
             )
             env.backend.pulse_store_commit(1)
             victim_expected.expected_data = self.store_txn.data
@@ -705,8 +726,7 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
                     for event in writeback_trace
                     if _match_writeback(
                         event,
-                        rob_idx_flag=lead_load.rob_idx_flag,
-                        rob_idx_value=lead_load.rob_idx_value,
+                        rob_idx=lead_load.rob_idx,
                         data=lead_expected.expected_data,
                     )
                 ),
@@ -718,8 +738,7 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
                     for event in writeback_trace
                     if _match_writeback(
                         event,
-                        rob_idx_flag=victim_load.rob_idx_flag,
-                        rob_idx_value=victim_load.rob_idx_value,
+                        rob_idx=victim_load.rob_idx,
                         data=self.store_txn.data,
                     )
                 ),
@@ -825,11 +844,13 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
         load_queue_size = env.config.sequence.load_queue_size
         completed_before_main = env.get_completed_load_count()
 
+        env.backend.prepare(self.store_txn)
         store_sq_ptr = enqueue_scalar_store(
             env,
             req_id=self.store_txn.req_id,
             sq_ptr=self.store_txn.sq_ptr,
             enq_port=self.store_txn.enq_port,
+            rob_idx=self.store_txn.rob_idx,
         )
         issue_scalar_sta(
             env,
@@ -837,6 +858,9 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
             sq_ptr=store_sq_ptr,
             addr=self.store_txn.addr,
             lane=self.store_txn.sta_lane,
+            rob_idx=self.store_txn.rob_idx,
+            ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
+            ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
         )
         _wait_store_addr_observed(
             env,
@@ -858,8 +882,9 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
                 lq_ptr=next_lq_ptr,
                 sq_ptr=younger_sq_ptr,
             )
+            env.backend.prepare(tlb_prime_load)
             env.expect_scalar_load(
-                req_id=tlb_prime_load.req_id,
+                rob_idx=tlb_prime_load.rob_idx,
                 pdest=tlb_prime_load.resolved_pdest,
                 addr=self.tlb_prime_pa,
                 size=tlb_prime_load.size,
@@ -867,8 +892,7 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
             )
             send_load(env, tlb_prime_load)
             tlb_prime_writeback = env.wait_load_writeback_observed(
-                rob_idx_flag=tlb_prime_load.rob_idx_flag,
-                rob_idx_value=tlb_prime_load.rob_idx_value,
+                rob_idx=tlb_prime_load.rob_idx,
                 data=self.tlb_prime_data,
                 max_cycles=_resolve_replay_drain_cycles(env, None),
             )
@@ -885,13 +909,13 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
             lq_ptr=next_lq_ptr,
             sq_ptr=younger_sq_ptr,
         )
+        env.backend.prepare(main_load)
         transport_stats_before_main = _snapshot_transport_stats(env)
         with (
             _capture_writeback_trace(env, max_events=32) as main_writeback_trace,
             _capture_replay_events(
                 env,
-                rob_idx_flag=main_load.rob_idx_flag,
-                rob_idx_value=main_load.rob_idx_value,
+                rob_idx=main_load.rob_idx,
                 max_events=64,
             ) as replay_trace,
         ):
@@ -900,8 +924,7 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
                 env,
                 lane=main_load.issue_lane,
                 expected_sq_idx=store_sq_ptr.value,
-                rob_idx_flag=main_load.rob_idx_flag,
-                rob_idx_value=main_load.rob_idx_value,
+                rob_idx=main_load.rob_idx,
                 max_cycles=self.observation_cycles,
             )
             if self.post_violation_cycles > 0:
@@ -913,10 +936,13 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
                 sq_ptr=store_sq_ptr,
                 data=self.store_txn.data,
                 lane=self.store_txn.std_lane,
+                rob_idx=self.store_txn.rob_idx,
+                ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
+                ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
             )
             env.backend.pulse_store_commit(1)
             replay_expected = env.expect_scalar_load(
-                req_id=main_load.req_id,
+                rob_idx=main_load.rob_idx,
                 pdest=main_load.resolved_pdest,
                 addr=self.main_pa,
                 size=main_load.size,
@@ -924,8 +950,7 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
             )
             replay_expected.expected_data = self.store_txn.data
             env.wait_load_writeback_observed(
-                rob_idx_flag=main_load.rob_idx_flag,
-                rob_idx_value=main_load.rob_idx_value,
+                rob_idx=main_load.rob_idx,
                 data=self.store_txn.data,
                 max_cycles=_resolve_replay_drain_cycles(env, None),
             )

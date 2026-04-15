@@ -9,7 +9,8 @@ MemBlock real-DUT uncache / MMIO semantic regression.
 
 import pytest
 
-from request_apis import LoadTxn, StoreTxn, ptr_inc, send_load, send_store
+from transactions import LoadTxn, ptr_inc, StoreTxn
+from request_apis import send_load, send_store
 from sequences import FlushStoreBuffersSequence, ResetEnvSequence, ScalarStoreCommitSequence, SequenceState
 
 
@@ -88,8 +89,9 @@ def _run_translated_load(
         lq_ptr=state.next_lq_ptr,
         sq_ptr=state.sq_ptr,
     )
+    env.backend.prepare(txn)
     env.expect_scalar_load(
-        req_id=txn.req_id,
+        rob_idx=txn.rob_idx,
         pdest=txn.resolved_pdest,
         addr=expected_pa,
         size=txn.size,
@@ -97,8 +99,7 @@ def _run_translated_load(
     )
     send_load(env, txn)
     writeback = env.wait_load_writeback_observed(
-        rob_idx_flag=txn.rob_idx_flag,
-        rob_idx_value=txn.rob_idx_value,
+        rob_idx=txn.rob_idx,
         data=expected_data,
         expected_mmio=expected_mmio,
         expected_ncio=expected_ncio,
@@ -296,8 +297,9 @@ def test_api_MemBlock_mmio_busy_blocks_younger_cacheable_load_retire(env):
         lq_ptr=state.next_lq_ptr,
         sq_ptr=mmio_store.store_result.next_sq_ptr,
     )
+    env.backend.prepare(younger_load)
     env.expect_scalar_load(
-        req_id=younger_load.req_id,
+        rob_idx=younger_load.rob_idx,
         pdest=younger_load.resolved_pdest,
         addr=cacheable_addr,
         size=younger_load.size,
@@ -305,8 +307,7 @@ def test_api_MemBlock_mmio_busy_blocks_younger_cacheable_load_retire(env):
     )
     send_load(env, younger_load)
     younger_writeback = env.wait_load_writeback_observed(
-        rob_idx_flag=younger_load.rob_idx_flag,
-        rob_idx_value=younger_load.rob_idx_value,
+        rob_idx=younger_load.rob_idx,
         data=CACHEABLE_DATA,
         expected_mmio=False,
         expected_ncio=False,

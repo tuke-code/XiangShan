@@ -1,5 +1,166 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-15
+
+### 1. 重整 `request_apis.py` 与 `sequences/` 分层：公共模型进 `transactions.py`，场景模板上提到 sequence
+
+本条目记录一次围绕 testcase 作者入口的接口收口：此前虽然 env 已接管 `robIdx`，但 `request_apis.py` 仍同时承担了三种职责，包括公共事务类型导出、primitive helper，以及部分场景级 batch helper。这会让 testcase/sequence 作者继续把 `request_apis.py` 当成“什么都能放”的入口。本轮将边界重新划清：`transactions.py` 负责公共事务/plan 模型，`sequences/` 负责可复用场景模板，`request_apis.py` 退回 backend primitive adapter / compatibility shim。
+
+#### 变更摘要
+
+- `request_apis.py`
+  - 模块定位改为 `backend primitive adapter / compatibility shim`
+  - `send_load_batch_same_cycle()` / `send_load_batch_with_sta_same_cycle()` docstring 明确标为兼容包装
+  - 新增显式 `__all__`，把公开范围收敛到 primitive/helper 级别
+  - `ptr_inc()` 改为从 `transactions.py` 复用并继续兼容导出，不再由兼容层独占实现
+- `sequences/memblock_sequences.py`
+  - 新增：
+    - `ScalarLoadBatchSameCycleSequence`
+    - `ScalarLoadBatchWithStaSequence`
+    - 对应 result dataclass
+  - `ScalarBankConflictReplaySequence` 内部不再直接依赖旧 batch helper，而是改用新的 sequence surface
+- `sequences/violation_sequences.py` / `sequences/mmu_sequences.py`
+  - 类型导入切到 `transactions.py`
+  - 违反/重放场景内的同拍多 load 发送改为复用 `ScalarLoadBatchSameCycleSequence`
+- `sequences/__init__.py`
+  - 导出新的 same-cycle batch sequence
+- `tests/`
+  - 大部分 testcase 的 `LoadTxn` / `StoreTxn` / `QueuePtr` / `BackendSendPlan` 等导入改为直接来自 `transactions.py`
+  - 剩余需要队列指针推进的 testcase / sequence 改为直接从 `transactions.py` 导入 `ptr_inc()`
+  - `test_MemBlock_random_load.py` 新增一个代表性 same-cycle batch sequence 用例
+- `README.md` / `docs/test_sequence_and_extension_guide.md` / `docs/backend_request_model_design.md`
+  - 同步公开口径：新 testcase 应优先写 `transactions.py` + `sequences/`，而不是继续扩 `request_apis.py`
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/request_apis.py src/test/python/MemBlock/sequences/__init__.py src/test/python/MemBlock/sequences/memblock_sequences.py src/test/python/MemBlock/sequences/mmu_sequences.py src/test/python/MemBlock/sequences/violation_sequences.py src/test/python/MemBlock/tests/test_MemBlock_random_load.py`
+- 定向 `pytest`
+  - 见本次提交后的测试记录
+  - 后续补充复查：`python3 -m pytest -q -rXx src/test/python/MemBlock/tests/test_request_apis_backend_facade.py src/test/python/MemBlock/tests/test_MemBlock_random_load.py src/test/python/MemBlock/tests/test_MemBlock_replay.py src/test/python/MemBlock/tests/test_MemBlock_scalar_ordering.py src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py src/test/python/MemBlock/tests/test_MemBlock_random_store.py src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py`
+
+### 2. 同步文档 cookbook 示例，统一改写为 `RobIndex` 优先用法
+
+本条目记录一次围绕文档入口与 cookbook 的口径收尾：在代码层已经完成 `RobIndex` 一等语义收口后，若文档仍保留大量 `rob_idx_flag/rob_idx_value` 示例，读者会继续沿用旧写法。因此本轮把 README 之外尚残留的 cookbook/usage 片段统一迁成 `rob_idx=...` / `RobIndex(...)` 风格，并保留“只有 DUT 边界才需要 split-field”的说明。
+
+#### 变更摘要
+
+- `docs/mmu_env_design_and_usage.md`
+  - MMU translation load 示例改为先 `prepare(txn)`，再用 `rob_idx=txn.rob_idx` 做 expect / wait
+- `docs/verification_env_design.md`
+  - `NonMemBlockerStep` 示例改为显式传 `RobIndex(...)`
+- `docs/test_sequence_and_extension_guide.md`
+  - ROB blocker cookbook 改为 `RobIndex(...)` 风格
+- `docs/backend_rob_cookbook.md`
+  - non-mem blocker 模板改为 `rob_idx=RobIndex(...)`
+- `docs/vector_mem_phase1_plan_backend_api.md`
+  - vector + ROB blocker 混排示例改为直接基于 `txn.rob_idx` 构造 blocker
+
+#### 复查情况
+
+- `rg -n "rob_idx_flag=|rob_idx_value=|wait_for_rob_idx_flag=|wait_for_rob_idx_value=|\\.rob_idx_flag\\b|\\.rob_idx_value\\b" src/test/python/MemBlock/docs src/test/python/MemBlock/README.md`
+  - 结果为空，说明当前 README/docs 示例已无残留 split-field 公开用法
+
+### 3. 收口 `RobIndex` 一等语义，减少 facade/env/testcase 间的显式 `rob_idx_value` 传递
+
+本条目记录一次针对 env 托管 `robIdx` 后续尾巴的抽象收口：上一轮虽然把 `robIdx` 的分配权收回到了 env，但事务对象、facade helper、env wait/filter API 之间仍残留大量 `(rob_idx_flag, rob_idx_value)` 形式的透传与赋值，导致 testcase/sequence 继续背负 split-field 细节。这次改造把 `RobIndex` 提升为公共语义层的一等输入，split 字段只保留在 DUT bundle 边界与兼容层。
+
+#### 变更摘要
+
+- `transactions.py`
+  - 新增 `make_rob_index(...)`
+  - 为 `LoadTxn` / `StoreTxn` / `VectorMemTxn` 增补：
+    - `rob_idx`
+    - `assigned_rob_idx`
+    - `rob_idx_override`
+  - 为 `LoadTxn` / `IssueOp` 增补 `wait_for_rob_idx`
+  - `IssueOp` / `EnqueueLoadStep` / `EnqueueStoreStep` / `NonMemBlockerStep` 现在都支持围绕 `RobIndex` 做语义访问，split 字段退化为兼容表示
+- `agents/backend_facade.py`
+  - facade public helpers 新增 `rob_idx=` / `wait_for_rob_idx=` 入口
+  - runtime bind 统一写 `assigned_rob_idx`
+  - 对旧式 positional / split-field 调用保留兼容，避免打碎现有 issue/commit agent 和旧 testcase
+- `MemBlock_env.py`
+  - `expect_scalar_load(...)`
+  - `wait_load_writeback_observed(...)`
+  - `wait_replay_event(...)`
+  - `wait_nc_replay_or_nc_out(...)`
+  - `wait_nuke_query_backpressure(...)`
+  - `wait_rar_nuke_response(...)`
+  - `collect_replay_window(...)`
+  - 上述接口都支持直接传 `rob_idx=RobIndex(...)`，内部过滤逻辑统一在 env 边界做 normalize
+- `request_apis.py` / `monitors/vector_mem_monitor.py`
+  - request API 优先透传 `RobIndex`
+  - 对旧 fake backend / fake monitor 继续自动回退到 split-field 调用，保持测试兼容
+- `README.md` / `docs/backend_request_model_design.md` / `docs/rob_model.md`
+  - 同步文档口径：新 testcase/sequence 应优先显式传 `RobIndex`
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/transactions.py src/test/python/MemBlock/agents/backend_facade.py src/test/python/MemBlock/request_apis.py src/test/python/MemBlock/MemBlock_env.py src/test/python/MemBlock/monitors/vector_mem_monitor.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py -q`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_replay.py -q`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_store.py -q`
+
+### 4. env 托管 `robIdx`，补上 prepare/bind 路径并拆掉关键 `req_id -> robIdx` 耦合
+
+本条目记录一次针对 MemBlock backend/ROB 控制面的重构：先前 `LoadTxn` / `StoreTxn` / `VectorMemTxn` 默认把 `req_id` 直接编码成 `robIdx`，这既让 testcase 作者误以为 `robIdx` 只是标签，也会在 uncache / MMIO / replay 等真实 DUT 语义路径里把错误的 ROB 程序序偷偷带进来。现在改为由 env 在 `prepare()` / `execute()` / `send()` 流程中统一分配 `robIdx`，并为需要 pre-issue `robIdx` 的场景补上显式准备阶段。
+
+#### 变更摘要
+
+- `transactions.py`
+  - 新增：
+    - `RobIndex`
+    - `RobRef`
+    - `BackendPreparedPlan`
+  - `LoadTxn` / `StoreTxn` / `VectorMemTxn` 新增 env runtime binding 字段，`robIdx` 默认优先取 env 分配结果
+  - `IssueOp` / `EnqueueLoadStep` / `EnqueueStoreStep` / `NonMemBlockerStep` 扩展到可携带符号化 ROB 引用与 resolved `robIdx`
+- `agents/backend_facade.py`
+  - 新增 `prepare(...)`
+  - `send(...)` / `execute(...)` 默认先做 prepare，再执行 resolved plan
+  - 新增 env-owned ROB allocator，按程序序分配并支持 `RobRef` / `wait_for_rob`
+- `agents/issue_agent.py` / `agents/lsq_agent.py` / `agents/vector_issue_agent.py`
+  - issue / enqueue 不再只从 `req_id` 硬拆 `robIdx`
+  - scalar/vector 默认 `pdest` / `ftqIdx` / `pc` 改为优先吃 prepare 阶段绑定结果
+- `monitors/vector_mem_monitor.py`
+  - 向量完成归因改为优先使用 env 注册的 `robIdx -> req_id` 映射，不再强依赖 `req_id == encoded robIdx`
+- `request_apis.py`
+  - `expect_load(env, txn)` 会在需要时自动 prepare 事务，再按 resolved `robIdx` 登记 scoreboard 期望
+- `tests/`
+  - 新增 backend facade prepare / `RobRef` / vector registration 单测
+  - 把受影响的 MMU / replay / uncache / random-load 用例改成按 resolved `robIdx` 登记期望与观测
+- `README.md` / `docs/rob_model.md`
+  - 同步 public API 口径：默认由 env 管 `robIdx`，需要 pre-issue `robIdx` 时先 `prepare(...)`
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/transactions.py src/test/python/MemBlock/agents/backend_facade.py src/test/python/MemBlock/agents/issue_agent.py src/test/python/MemBlock/agents/lsq_agent.py src/test/python/MemBlock/agents/vector_issue_agent.py src/test/python/MemBlock/monitors/vector_mem_monitor.py src/test/python/MemBlock/request_apis.py src/test/python/MemBlock/MemBlock_env.py src/test/python/MemBlock/sequences/mmu_sequences.py src/test/python/MemBlock/sequences/violation_sequences.py src/test/python/MemBlock/tests/test_request_apis_backend_facade.py src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py src/test/python/MemBlock/tests/test_MemBlock_replay.py src/test/python/MemBlock/tests/test_MemBlock_random_load.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py -k 'backend or mmu or create or wires_existing_agents'`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py -k 'pbmt_mmio_load_smoke or mmio_busy_blocks_younger_cacheable_load_retire'`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_random_load.py -k 'plan_same_cycle or non_mem_blocker_delays_compare'`
+
+### 5. 新增 store TODO 规划文档，收口标量 store 覆盖率讨论与补强矩阵
+
+本条目记录一次面向标量 store 覆盖率的文档收口：将当前基于 `toffee_report_full` 的讨论结论整理为独立 TODO 文档，集中记录 store 主路径现状、`NewStoreQueue/SbufferData/StoreMisalignBuffer/Uncache` 等短板区、以及按 testcase 文件组织的后续补强建议，方便后续围绕真实 DUT 回归逐项推进。
+
+#### 变更摘要
+
+- `docs/store_todo.md`
+  - 新增独立 store TODO 规划文档
+  - 总结当前标量 store 相关 testcase 分布与模块覆盖率现状
+  - 明确当前已覆盖能力：
+    - cacheable scalar store materialize / commit / flush-drain 基础闭环
+    - same-addr / overwrite / 部分 partial-store directed case
+    - cross-16B scalar store misalign 基础矩阵
+  - 明确主要短板：
+    - `NewStoreQueue.sv` 深状态与分支组合
+    - `SbufferData.sv` partial merge / drain 数据组织
+    - `StoreMisalignBuffer.sv` cross-page / deeper split 状态
+    - `Uncache.sv` 上的 NC/MMIO store flush-drain 闭环
+  - 收敛后续优先级：
+    - `P0`：partial-mask store、queue depth、misalign split/drain
+    - `P1`：NC store flush/drain、MMIO exclusion、delayed drain
+    - `P2`：更外围的 DCache store 相关复杂组合
+
 ## 2026-04-14
 
 ### 1. 收口 uncache xfail：修正 req_id/ROB-head 前提，并重分类 Svpbmt 问题

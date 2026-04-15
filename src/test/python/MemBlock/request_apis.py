@@ -1,6 +1,13 @@
 # coding=utf-8
 """
-MemBlock 真实 DUT 请求发送公共 API。
+MemBlock backend primitive adapter / compatibility shim.
+
+This module is intentionally narrow:
+  1. thin backend-facing primitives used by reusable sequences
+  2. reset/sync helpers that operate below scenario level
+  3. transition wrappers kept for backward compatibility
+
+New testcase authoring should prefer `sequences/` over composing flows here.
 """
 
 from transactions import (
@@ -10,7 +17,9 @@ from transactions import (
     IssueCyclePlan,
     IssueOp,
     LoadTxn,
+    ptr_inc,
     QueuePtr,
+    RobIndex,
     StoreTxn,
     VectorMemTxn,
 )
@@ -28,23 +37,47 @@ DEFAULT_LOAD_ISSUE_LANE = 0
 DEFAULT_STA_LANE = 3
 DEFAULT_STD_LANE = 5
 
+__all__ = [
+    "BackendSendPlan",
+    "EnqueueLoadCyclePlan",
+    "EnqueueLoadStep",
+    "IssueCyclePlan",
+    "IssueOp",
+    "LoadTxn",
+    "ptr_inc",
+    "QueuePtr",
+    "RobIndex",
+    "StoreTxn",
+    "VectorMemTxn",
+    "wait_backend_reset_deassert",
+    "reset_env_and_wait_backend",
+    "wait_lsq_load_enq_ready",
+    "wait_lsq_store_enq_ready",
+    "enqueue_scalar_load",
+    "enqueue_scalar_store",
+    "send_load",
+    "send_load_batch_same_cycle",
+    "send_load_batch_with_sta_same_cycle",
+    "expect_load",
+    "send_store",
+    "send_vector_load",
+    "send_vector_store",
+    "issue_scalar_load",
+    "issue_scalar_std",
+    "issue_scalar_sta",
+]
+
+
+def _split_rob_idx(rob_idx: RobIndex | None, rob_idx_flag: int | None, rob_idx_value: int | None) -> tuple[int | None, int | None]:
+    if rob_idx is not None:
+        return int(rob_idx.flag), int(rob_idx.value)
+    return rob_idx_flag, rob_idx_value
+
 
 def _set_optional_signal(dut, signal_name: str, value: int) -> None:
     signal = getattr(dut, signal_name, None)
     if signal is not None:
         signal.value = value
-
-
-def ptr_inc(ptr: QueuePtr, size: int, step: int = 1) -> QueuePtr:
-    flag = ptr.flag
-    value = ptr.value
-    for _ in range(step):
-        value += 1
-        if value == size:
-            value = 0
-            flag ^= 0x1
-    return QueuePtr(flag=flag, value=value)
-
 
 def wait_backend_reset_deassert(
     env,
@@ -93,8 +126,32 @@ def enqueue_scalar_load(
     lq_ptr: QueuePtr,
     sq_ptr: QueuePtr,
     enq_port: int = DEFAULT_STORE_ENQ_PORT,
+    rob_idx: RobIndex | None = None,
+    rob_idx_flag: int | None = None,
+    rob_idx_value: int | None = None,
 ) -> None:
-    env.backend.enqueue_scalar_load(req_id, lq_ptr, sq_ptr, enq_port=enq_port)
+    normalized_flag, normalized_value = _split_rob_idx(rob_idx, rob_idx_flag, rob_idx_value)
+    try:
+        kwargs = {"enq_port": enq_port, "rob_idx_flag": rob_idx_flag, "rob_idx_value": rob_idx_value}
+        if rob_idx is not None:
+            kwargs["rob_idx"] = rob_idx
+        env.backend.enqueue_scalar_load(
+            req_id,
+            lq_ptr,
+            sq_ptr,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "rob_idx" not in str(exc):
+            raise
+        env.backend.enqueue_scalar_load(
+            req_id,
+            lq_ptr,
+            sq_ptr,
+            enq_port=enq_port,
+            rob_idx_flag=normalized_flag,
+            rob_idx_value=normalized_value,
+        )
 
 
 def enqueue_scalar_store(
@@ -102,8 +159,30 @@ def enqueue_scalar_store(
     req_id: int,
     sq_ptr: QueuePtr,
     enq_port: int = DEFAULT_STORE_ENQ_PORT,
+    rob_idx: RobIndex | None = None,
+    rob_idx_flag: int | None = None,
+    rob_idx_value: int | None = None,
 ) -> QueuePtr:
-    return env.backend.enqueue_scalar_store(req_id, sq_ptr, enq_port=enq_port)
+    normalized_flag, normalized_value = _split_rob_idx(rob_idx, rob_idx_flag, rob_idx_value)
+    try:
+        kwargs = {"enq_port": enq_port, "rob_idx_flag": rob_idx_flag, "rob_idx_value": rob_idx_value}
+        if rob_idx is not None:
+            kwargs["rob_idx"] = rob_idx
+        return env.backend.enqueue_scalar_store(
+            req_id,
+            sq_ptr,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "rob_idx" not in str(exc):
+            raise
+        return env.backend.enqueue_scalar_store(
+            req_id,
+            sq_ptr,
+            enq_port=enq_port,
+            rob_idx_flag=normalized_flag,
+            rob_idx_value=normalized_value,
+        )
 
 
 def send_load(env, txn: LoadTxn) -> None:
@@ -113,7 +192,10 @@ def send_load(env, txn: LoadTxn) -> None:
 
 
 def send_load_batch_same_cycle(env, txns, max_cycles: int = 50) -> None:
-    """兼容入口：enqueue 多笔标量 load，并在同一拍完成 issue。"""
+    """兼容入口：enqueue 多笔标量 load，并在同一拍完成 issue。
+
+    Prefer `sequences.ScalarLoadBatchSameCycleSequence` for new testcase authoring.
+    """
 
     txns = tuple(txns)
     env.backend.execute(
@@ -138,7 +220,10 @@ def send_load_batch_with_sta_same_cycle(
     sta_mask: int = 0xFF,
     max_cycles: int = 50,
 ) -> None:
-    """兼容入口：enqueue 多笔标量 load，并与一条 `STA` 在同一拍完成 issue。"""
+    """兼容入口：enqueue 多笔标量 load，并与一条 `STA` 在同一拍完成 issue。
+
+    Prefer `sequences.ScalarLoadBatchWithStaSequence` for new testcase authoring.
+    """
 
     txns = tuple(txns)
     env.backend.execute(
@@ -164,8 +249,10 @@ def send_load_batch_with_sta_same_cycle(
 def expect_load(env, txn: LoadTxn):
     """登记一笔 load 事务的期望结果。"""
 
+    if txn.assigned_rob_idx is None:
+        env.backend.prepare(txn)
     return env.expect_scalar_load(
-        req_id=txn.req_id,
+        rob_idx=txn.rob_idx,
         pdest=txn.resolved_pdest,
         addr=txn.addr,
         size=txn.size,
@@ -210,21 +297,66 @@ def issue_scalar_load(
     store_set_hit: int = 0,
     load_wait_bit: int = 0,
     load_wait_strict: int = 0,
+    wait_for_rob_idx: RobIndex | None = None,
     wait_for_rob_idx_flag: int | None = None,
     wait_for_rob_idx_value: int | None = None,
+    rob_idx: RobIndex | None = None,
+    rob_idx_flag: int | None = None,
+    rob_idx_value: int | None = None,
+    pdest: int | None = None,
+    ftq_idx_flag: int | None = None,
+    ftq_idx_value: int | None = None,
+    pc: int | None = None,
 ) -> None:
-    env.backend.issue_scalar_load(
-        req_id,
-        addr,
-        lq_ptr,
-        sq_ptr,
-        lane=lane,
-        store_set_hit=store_set_hit,
-        load_wait_bit=load_wait_bit,
-        load_wait_strict=load_wait_strict,
-        wait_for_rob_idx_flag=wait_for_rob_idx_flag,
-        wait_for_rob_idx_value=wait_for_rob_idx_value,
-    )
+    normalized_flag, normalized_value = _split_rob_idx(rob_idx, rob_idx_flag, rob_idx_value)
+    wait_flag, wait_value = _split_rob_idx(wait_for_rob_idx, wait_for_rob_idx_flag, wait_for_rob_idx_value)
+    try:
+        kwargs = {
+            "lane": lane,
+            "store_set_hit": store_set_hit,
+            "load_wait_bit": load_wait_bit,
+            "load_wait_strict": load_wait_strict,
+            "wait_for_rob_idx_flag": wait_for_rob_idx_flag,
+            "wait_for_rob_idx_value": wait_for_rob_idx_value,
+            "rob_idx_flag": rob_idx_flag,
+            "rob_idx_value": rob_idx_value,
+            "pdest": pdest,
+            "ftq_idx_flag": ftq_idx_flag,
+            "ftq_idx_value": ftq_idx_value,
+            "pc": pc,
+        }
+        if wait_for_rob_idx is not None:
+            kwargs["wait_for_rob_idx"] = wait_for_rob_idx
+        if rob_idx is not None:
+            kwargs["rob_idx"] = rob_idx
+        env.backend.issue_scalar_load(
+            req_id,
+            addr,
+            lq_ptr,
+            sq_ptr,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "rob_idx" not in str(exc):
+            raise
+        env.backend.issue_scalar_load(
+            req_id,
+            addr,
+            lq_ptr,
+            sq_ptr,
+            lane=lane,
+            store_set_hit=store_set_hit,
+            load_wait_bit=load_wait_bit,
+            load_wait_strict=load_wait_strict,
+            wait_for_rob_idx_flag=wait_flag,
+            wait_for_rob_idx_value=wait_value,
+            rob_idx_flag=normalized_flag,
+            rob_idx_value=normalized_value,
+            pdest=pdest,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+            pc=pc,
+        )
 
 
 def issue_scalar_std(
@@ -234,8 +366,44 @@ def issue_scalar_std(
     data: int,
     lane: int = DEFAULT_STD_LANE,
     mask: int = 0xFF,
+    rob_idx: RobIndex | None = None,
+    rob_idx_flag: int | None = None,
+    rob_idx_value: int | None = None,
+    ftq_idx_flag: int | None = None,
+    ftq_idx_value: int | None = None,
 ) -> None:
-    env.backend.issue_scalar_std(req_id, sq_ptr, data, lane=lane, mask=mask)
+    normalized_flag, normalized_value = _split_rob_idx(rob_idx, rob_idx_flag, rob_idx_value)
+    try:
+        kwargs = {
+            "lane": lane,
+            "mask": mask,
+            "rob_idx_flag": rob_idx_flag,
+            "rob_idx_value": rob_idx_value,
+            "ftq_idx_flag": ftq_idx_flag,
+            "ftq_idx_value": ftq_idx_value,
+        }
+        if rob_idx is not None:
+            kwargs["rob_idx"] = rob_idx
+        env.backend.issue_scalar_std(
+            req_id,
+            sq_ptr,
+            data,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "rob_idx" not in str(exc):
+            raise
+        env.backend.issue_scalar_std(
+            req_id,
+            sq_ptr,
+            data,
+            lane=lane,
+            mask=mask,
+            rob_idx_flag=normalized_flag,
+            rob_idx_value=normalized_value,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+        )
 
 
 def issue_scalar_sta(
@@ -245,5 +413,41 @@ def issue_scalar_sta(
     addr: int,
     lane: int = DEFAULT_STA_LANE,
     mask: int = 0xFF,
+    rob_idx: RobIndex | None = None,
+    rob_idx_flag: int | None = None,
+    rob_idx_value: int | None = None,
+    ftq_idx_flag: int | None = None,
+    ftq_idx_value: int | None = None,
 ) -> None:
-    env.backend.issue_scalar_sta(req_id, sq_ptr, addr, lane=lane, mask=mask)
+    normalized_flag, normalized_value = _split_rob_idx(rob_idx, rob_idx_flag, rob_idx_value)
+    try:
+        kwargs = {
+            "lane": lane,
+            "mask": mask,
+            "rob_idx_flag": rob_idx_flag,
+            "rob_idx_value": rob_idx_value,
+            "ftq_idx_flag": ftq_idx_flag,
+            "ftq_idx_value": ftq_idx_value,
+        }
+        if rob_idx is not None:
+            kwargs["rob_idx"] = rob_idx
+        env.backend.issue_scalar_sta(
+            req_id,
+            sq_ptr,
+            addr,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "rob_idx" not in str(exc):
+            raise
+        env.backend.issue_scalar_sta(
+            req_id,
+            sq_ptr,
+            addr,
+            lane=lane,
+            mask=mask,
+            rob_idx_flag=normalized_flag,
+            rob_idx_value=normalized_value,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+        )

@@ -24,7 +24,7 @@ class IssueAgent:
     def _drive_scalar_std(
         self,
         *,
-        req_id: int,
+        op: IssueOp,
         sq_ptr,
         data: int,
         lane: int,
@@ -34,15 +34,15 @@ class IssueAgent:
         issue.valid.value = 1
         issue.bits_fuOpType.value = scalar_store_fu_op_type_from_mask(mask)
         issue.bits_src_0.value = data
-        issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        issue.bits_robIdx_value.value = req_id & 0x1FF
+        issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
+        issue.bits_robIdx_value.value = op.resolved_rob_idx_value
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
 
     def _drive_issue_op(self, op: IssueOp) -> None:
         if op.kind == "load":
             self._drive_scalar_load(
-                req_id=op.req_id,
+                op=op,
                 addr=op.addr,
                 lq_ptr=op.lq_ptr,
                 sq_ptr=op.sq_ptr,
@@ -56,7 +56,7 @@ class IssueAgent:
             return
         if op.kind == "sta":
             self._drive_scalar_sta(
-                req_id=op.req_id,
+                op=op,
                 sq_ptr=op.sq_ptr,
                 addr=op.addr,
                 lane=int(op.lane),
@@ -65,7 +65,7 @@ class IssueAgent:
             return
         if op.kind == "std":
             self._drive_scalar_std(
-                req_id=op.req_id,
+                op=op,
                 sq_ptr=op.sq_ptr,
                 data=op.data,
                 lane=int(op.lane),
@@ -77,7 +77,7 @@ class IssueAgent:
     def _drive_scalar_load(
         self,
         *,
-        req_id: int,
+        op: IssueOp,
         addr: int,
         lq_ptr,
         sq_ptr,
@@ -93,17 +93,17 @@ class IssueAgent:
         issue.valid.value = 1
         issue.bits_fuOpType.value = LSU_OP_LD
         issue.bits_src_0.value = addr
-        issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        issue.bits_robIdx_value.value = req_id & 0x1FF
+        issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
+        issue.bits_robIdx_value.value = op.resolved_rob_idx_value
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
 
         _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
-        _set_optional_signal(self.env.dut, f"{prefix}pdest", req_id % 64)
+        _set_optional_signal(self.env.dut, f"{prefix}pdest", op.resolved_pdest)
         _set_optional_signal(self.env.dut, f"{prefix}rfWen", 1)
-        _set_optional_signal(self.env.dut, f"{prefix}pc", 0x80000000 + req_id * 4)
-        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_flag", 0)
-        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_value", req_id & 0x3F)
+        _set_optional_signal(self.env.dut, f"{prefix}pc", op.resolved_pc)
+        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_flag", op.resolved_ftq_idx_flag)
+        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_value", op.resolved_ftq_idx_value)
         _set_optional_signal(self.env.dut, f"{prefix}ftqOffset", 0)
         _set_optional_signal(self.env.dut, f"{prefix}loadWaitBit", int(load_wait_bit))
         _set_optional_signal(
@@ -125,7 +125,7 @@ class IssueAgent:
     def _drive_scalar_sta(
         self,
         *,
-        req_id: int,
+        op: IssueOp,
         sq_ptr,
         addr: int,
         lane: int,
@@ -136,8 +136,8 @@ class IssueAgent:
         issue.valid.value = 1
         issue.bits_fuOpType.value = scalar_store_fu_op_type_from_mask(mask)
         issue.bits_src_0.value = addr
-        issue.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        issue.bits_robIdx_value.value = req_id & 0x1FF
+        issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
+        issue.bits_robIdx_value.value = op.resolved_rob_idx_value
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
 
@@ -146,8 +146,8 @@ class IssueAgent:
         _set_optional_signal(self.env.dut, f"{prefix}pdest", 0)
         _set_optional_signal(self.env.dut, f"{prefix}rfWen", 0)
         _set_optional_signal(self.env.dut, f"{prefix}isRVC", 0)
-        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_flag", 0)
-        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_value", req_id & 0x3F)
+        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_flag", op.resolved_ftq_idx_flag)
+        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_value", op.resolved_ftq_idx_value)
         _set_optional_signal(self.env.dut, f"{prefix}ftqOffset", 0)
         _set_optional_signal(self.env.dut, f"{prefix}storeSetHit", 0)
         _set_optional_signal(self.env.dut, f"{prefix}ssid", 0)
@@ -185,6 +185,12 @@ class IssueAgent:
         load_wait_strict: int = 0,
         wait_for_rob_idx_flag: int | None = None,
         wait_for_rob_idx_value: int | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        pdest: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+        pc: int | None = None,
     ) -> None:
         self.issue_cycle(
             IssueCyclePlan.from_ops(
@@ -200,6 +206,12 @@ class IssueAgent:
                     load_wait_strict=load_wait_strict,
                     wait_for_rob_idx_flag=wait_for_rob_idx_flag,
                     wait_for_rob_idx_value=wait_for_rob_idx_value,
+                    rob_idx_flag=rob_idx_flag,
+                    rob_idx_value=rob_idx_value,
+                    pdest=pdest,
+                    ftq_idx_flag=ftq_idx_flag,
+                    ftq_idx_value=ftq_idx_value,
+                    pc=pc,
                 )
             )
         )
@@ -241,17 +253,59 @@ class IssueAgent:
             )
         )
 
-    def issue_scalar_std(self, req_id: int, sq_ptr, data: int, lane: int = 5, mask: int = 0xFF) -> None:
+    def issue_scalar_std(
+        self,
+        req_id: int,
+        sq_ptr,
+        data: int,
+        lane: int = 5,
+        mask: int = 0xFF,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+    ) -> None:
         self.issue_cycle(
             IssueCyclePlan.from_ops(
-                IssueOp.std(req_id=req_id, sq_ptr=sq_ptr, data=data, lane=lane, mask=mask)
+                IssueOp.std(
+                    req_id=req_id,
+                    sq_ptr=sq_ptr,
+                    data=data,
+                    lane=lane,
+                    mask=mask,
+                    rob_idx_flag=rob_idx_flag,
+                    rob_idx_value=rob_idx_value,
+                    ftq_idx_flag=ftq_idx_flag,
+                    ftq_idx_value=ftq_idx_value,
+                )
             )
         )
 
-    def issue_scalar_sta(self, req_id: int, sq_ptr, addr: int, lane: int = 3, mask: int = 0xFF) -> None:
+    def issue_scalar_sta(
+        self,
+        req_id: int,
+        sq_ptr,
+        addr: int,
+        lane: int = 3,
+        mask: int = 0xFF,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+    ) -> None:
         self.issue_cycle(
             IssueCyclePlan.from_ops(
-                IssueOp.sta(req_id=req_id, sq_ptr=sq_ptr, addr=addr, lane=lane, mask=mask)
+                IssueOp.sta(
+                    req_id=req_id,
+                    sq_ptr=sq_ptr,
+                    addr=addr,
+                    lane=lane,
+                    mask=mask,
+                    rob_idx_flag=rob_idx_flag,
+                    rob_idx_value=rob_idx_value,
+                    ftq_idx_flag=ftq_idx_flag,
+                    ftq_idx_value=ftq_idx_value,
+                )
             )
         )
 
@@ -259,7 +313,7 @@ class IssueAgent:
         self.env._run_async(self._issue_cycle_async(plan))
         for op in plan.ops:
             if op.kind == "load":
-                self.env.backend.note_load_issued((op.req_id >> 9) & 0x1, op.req_id & 0x1FF)
+                self.env.backend.note_load_issued(op.resolved_rob_idx_flag, op.resolved_rob_idx_value)
 
     def issue_script(self, plans) -> None:
         for plan in plans:

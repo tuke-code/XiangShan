@@ -544,13 +544,11 @@ plan = BackendSendPlan.from_steps(
     VectorContextConfigStep.from_txn(txn),
     VectorIssueStep.from_txn(txn),
     NonMemBlockerStep.insert(
-        rob_idx_flag=txn.rob_idx_flag,
-        rob_idx_value=txn.rob_idx_value - 1,
+        rob_idx=RobIndex(flag=txn.rob_idx.flag, value=txn.rob_idx.value - 1),
     ),
     VectorWaitStep(req_id=txn.req_id, event="complete_or_trap"),
     NonMemBlockerStep.release(
-        rob_idx_flag=txn.rob_idx_flag,
-        rob_idx_value=txn.rob_idx_value - 1,
+        rob_idx=RobIndex(flag=txn.rob_idx.flag, value=txn.rob_idx.value - 1),
     ),
 )
 result = env.backend.execute(plan)

@@ -7,18 +7,24 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 
-from request_apis import (
+from transactions import (
+    BackendSendPlan,
+    EnqueueLoadCyclePlan,
+    IssueCyclePlan,
+    IssueOp,
     LoadTxn,
+    ptr_inc,
     QueuePtr,
     StoreTxn,
+)
+
+from request_apis import (
     enqueue_scalar_store,
     expect_load,
     issue_scalar_sta,
     issue_scalar_std,
-    ptr_inc,
     reset_env_and_wait_backend,
     send_load,
-    send_load_batch_same_cycle,
     send_store,
 )
 
@@ -50,6 +56,20 @@ class ScalarLoadBurstSequenceResult:
     completed_load_count: int
     transport_stats_before: dict[str, int]
     transport_stats_after: dict[str, int]
+
+
+@dataclass(frozen=True)
+class ScalarLoadBatchSameCycleSequenceResult:
+    issued_loads: tuple[LoadTxn, ...]
+    final_state: SequenceState
+    completed_load_count: int
+
+
+@dataclass(frozen=True)
+class ScalarLoadBatchWithStaSequenceResult:
+    issued_loads: tuple[LoadTxn, ...]
+    final_state: SequenceState
+    completed_load_count: int
 
 
 @dataclass(frozen=True)
@@ -413,8 +433,7 @@ def _wait_sq_matchinvalid_and_violation(
     *,
     lane: int,
     expected_sq_idx: int,
-    rob_idx_flag: int,
-    rob_idx_value: int,
+    rob_idx,
     max_cycles: int = 200,
 ):
     sq_event = None
@@ -433,14 +452,14 @@ def _wait_sq_matchinvalid_and_violation(
 
         replay_state = env.sample_replay_state()
         for event in replay_state["events"]:
-            if event.get("rob_idx_flag") == int(rob_idx_flag) and event.get("rob_idx_value") == int(rob_idx_value):
+            if event.get("rob_idx_flag") == int(rob_idx.flag) and event.get("rob_idx_value") == int(rob_idx.value):
                 replay_events.append(dict(event))
 
         memory_violation = replay_state["memory_violation"]
         if (
             memory_violation["valid"]
-            and memory_violation["rob_idx_flag"] == int(rob_idx_flag)
-            and memory_violation["rob_idx_value"] == int(rob_idx_value)
+            and memory_violation["rob_idx_flag"] == int(rob_idx.flag)
+            and memory_violation["rob_idx_value"] == int(rob_idx.value)
         ):
             violation_event = dict(memory_violation)
 
@@ -587,6 +606,103 @@ class ScalarLoadBurstSequence:
             completed_load_count=env.get_completed_load_count(),
             transport_stats_before=stats_before,
             transport_stats_after=_snapshot_transport_stats(env),
+        )
+
+
+class ScalarLoadBatchSameCycleSequence:
+    """Scenario-level wrapper for a same-cycle multi-load backend plan."""
+
+    def __init__(
+        self,
+        txns,
+        *,
+        max_cycles: int = 50,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.txns = tuple(txns)
+        self.max_cycles = int(max_cycles)
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarLoadBatchSameCycleSequenceResult:
+        if not self.txns:
+            raise ValueError("same-cycle load batch requires at least one transaction")
+
+        env.backend.execute(
+            BackendSendPlan.from_steps(
+                EnqueueLoadCyclePlan.from_txns(*self.txns),
+                IssueCyclePlan(
+                    ops=tuple(IssueOp.load_from_txn(txn) for txn in self.txns),
+                    max_cycles=self.max_cycles,
+                ),
+            )
+        )
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+        return ScalarLoadBatchSameCycleSequenceResult(
+            issued_loads=self.txns,
+            final_state=SequenceState(
+                next_lq_ptr=ptr_inc(self.txns[-1].lq_ptr, env.config.sequence.load_queue_size),
+                sq_ptr=self.txns[-1].sq_ptr,
+            ),
+            completed_load_count=env.get_completed_load_count(),
+        )
+
+
+class ScalarLoadBatchWithStaSequence:
+    """Scenario-level wrapper for same-cycle multi-load plus one STA."""
+
+    def __init__(
+        self,
+        txns,
+        *,
+        sta_req_id: int,
+        sta_sq_ptr,
+        sta_addr: int,
+        sta_lane: int = 3,
+        sta_mask: int = 0xFF,
+        max_cycles: int = 50,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.txns = tuple(txns)
+        self.sta_req_id = int(sta_req_id)
+        self.sta_sq_ptr = sta_sq_ptr
+        self.sta_addr = int(sta_addr)
+        self.sta_lane = int(sta_lane)
+        self.sta_mask = int(sta_mask)
+        self.max_cycles = int(max_cycles)
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarLoadBatchWithStaSequenceResult:
+        if not self.txns:
+            raise ValueError("same-cycle load+STA batch requires at least one load transaction")
+
+        env.backend.execute(
+            BackendSendPlan.from_steps(
+                EnqueueLoadCyclePlan.from_txns(*self.txns),
+                IssueCyclePlan(
+                    ops=tuple(IssueOp.load_from_txn(txn) for txn in self.txns)
+                    + (
+                        IssueOp.sta(
+                            req_id=self.sta_req_id,
+                            sq_ptr=self.sta_sq_ptr,
+                            addr=self.sta_addr,
+                            lane=self.sta_lane,
+                            mask=self.sta_mask,
+                        ),
+                    ),
+                    max_cycles=self.max_cycles,
+                ),
+            )
+        )
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+        return ScalarLoadBatchWithStaSequenceResult(
+            issued_loads=self.txns,
+            final_state=SequenceState(
+                next_lq_ptr=ptr_inc(self.txns[-1].lq_ptr, env.config.sequence.load_queue_size),
+                sq_ptr=self.txns[-1].sq_ptr,
+            ),
+            completed_load_count=env.get_completed_load_count(),
         )
 
 
@@ -1093,11 +1209,13 @@ class ScalarForwardFailReplaySequence:
 
     def run(self, env) -> ScalarForwardFailReplaySequenceResult:
         completed_before = env.get_completed_load_count()
+        env.backend.prepare(self.store_txn)
         store_sq_ptr = enqueue_scalar_store(
             env,
             req_id=self.store_txn.req_id,
             sq_ptr=self.store_txn.sq_ptr,
             enq_port=self.store_txn.enq_port,
+            rob_idx=self.store_txn.rob_idx,
         )
         issue_scalar_sta(
             env,
@@ -1105,6 +1223,9 @@ class ScalarForwardFailReplaySequence:
             sq_ptr=store_sq_ptr,
             addr=self.store_txn.addr,
             lane=self.store_txn.sta_lane,
+            rob_idx=self.store_txn.rob_idx,
+            ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
+            ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
         )
         _wait_store_addr_observed(env, store_sq_ptr.value, self.store_txn.addr, max_cycles=self.materialize_cycles)
 
@@ -1131,8 +1252,7 @@ class ScalarForwardFailReplaySequence:
             )
             replay_event = env.wait_replay_event(
                 cause="FF",
-                rob_idx_flag=load_txn.rob_idx_flag,
-                rob_idx_value=load_txn.rob_idx_value,
+                rob_idx=load_txn.rob_idx,
                 max_cycles=self.replay_wait_cycles,
             )
 
@@ -1142,6 +1262,9 @@ class ScalarForwardFailReplaySequence:
             sq_ptr=store_sq_ptr,
             data=self.store_txn.data,
             lane=self.store_txn.std_lane,
+            rob_idx=self.store_txn.rob_idx,
+            ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
+            ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
         )
         env.backend.pulse_store_commit(1)
         committed_store_view = env.wait_store_materialized(
@@ -1210,7 +1333,7 @@ class ScalarBankConflictReplaySequence:
         victim_expected = expect_load(env, self.victim_load_txn)
 
         with _capture_load_debug_trace(env, max_events=96) as load_debug_trace:
-            send_load_batch_same_cycle(env, (self.lead_load_txn, self.victim_load_txn))
+            ScalarLoadBatchSameCycleSequence((self.lead_load_txn, self.victim_load_txn)).run(env)
             load_debug_event = _wait_load_debug_event(
                 env,
                 rob_idx_value=self.victim_load_txn.rob_idx_value,
@@ -1219,20 +1342,17 @@ class ScalarBankConflictReplaySequence:
                 max_cycles=self.replay_wait_cycles,
             )
             replay_event = env.wait_replay_event(
-                rob_idx_flag=self.victim_load_txn.rob_idx_flag,
-                rob_idx_value=self.victim_load_txn.rob_idx_value,
+                rob_idx=self.victim_load_txn.rob_idx,
                 max_cycles=self.replay_wait_cycles,
             )
 
             env.wait_load_writeback_observed(
-                rob_idx_flag=self.lead_load_txn.rob_idx_flag,
-                rob_idx_value=self.lead_load_txn.rob_idx_value,
+                rob_idx=self.lead_load_txn.rob_idx,
                 data=lead_expected.expected_data,
                 max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
             )
             env.wait_load_writeback_observed(
-                rob_idx_flag=self.victim_load_txn.rob_idx_flag,
-                rob_idx_value=self.victim_load_txn.rob_idx_value,
+                rob_idx=self.victim_load_txn.rob_idx,
                 data=victim_expected.expected_data,
                 max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
             )
@@ -1289,8 +1409,7 @@ class ScalarCacheMissReplaySequence:
         expect_load(env, self.txn)
         replay_event = env.wait_replay_event(
             cause="DM",
-            rob_idx_flag=self.txn.rob_idx_flag,
-            rob_idx_value=self.txn.rob_idx_value,
+            rob_idx=self.txn.rob_idx,
             max_cycles=self.replay_wait_cycles,
         )
         env.drain_writebacks(max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles))
@@ -1338,8 +1457,7 @@ class ScalarNcReplaySequence:
         send_load(env, self.txn)
         expect_load(env, self.txn)
         replay_event = env.wait_nc_replay_or_nc_out(
-            rob_idx_flag=self.txn.rob_idx_flag,
-            rob_idx_value=self.txn.rob_idx_value,
+            rob_idx=self.txn.rob_idx,
             max_cycles=self.replay_wait_cycles,
         )
         env.drain_writebacks(max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles))

@@ -54,6 +54,8 @@ load compare 则仍然主要靠 MemBlock 对外导出的 `lqDeq` 做提交预算
 - 推荐控制面
   - 普通单笔 load/store 继续优先用 `env.backend.send(...)`
   - 需要控制拍级排列、non-mem blocker、store readiness 时，优先用 `env.backend.execute(BackendSendPlan(...))`
+  - 如需在 issue 前读取已分配 `robIdx`，先调用 `env.backend.prepare(...)`
+  - testcase / sequence 对 ROB 的显式依赖优先传 `RobIndex`，`rob_idx_flag/value` 仅保留给靠近 DUT 端口的兼容层
   - testcase 不应直接改 `env.rob_agent` 内部状态
 
 一个最小示意例如下：
@@ -61,7 +63,7 @@ load compare 则仍然主要靠 MemBlock 对外导出的 `lqDeq` 做提交预算
 ```python
 env.backend.execute(
     BackendSendPlan.from_steps(
-        NonMemBlockerStep.insert(rob_idx_flag=0, rob_idx_value=0x21),
+        NonMemBlockerStep.insert(rob_ref=RobRef("older_non_mem")),
         EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
         IssueCyclePlan.from_ops(
             IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data, mask=store_txn.mask)
@@ -70,7 +72,7 @@ env.backend.execute(
             IssueOp.sta(req_id=store_txn.req_id, sq_ptr=store_ref, addr=store_txn.addr, mask=store_txn.mask)
         ),
         StoreCommitStep(count=1),  # younger store 仍会被 non-mem blocker 卡住
-        NonMemBlockerStep.release(rob_idx_flag=0, rob_idx_value=0x21),
+        NonMemBlockerStep.release(rob_ref=RobRef("older_non_mem")),
         StoreCommitStep(count=1),
     )
 )

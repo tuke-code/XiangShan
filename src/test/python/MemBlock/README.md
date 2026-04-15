@@ -41,9 +41,9 @@
 - `env_config.py`
   - 环境统一配置入口，收敛 queue 深度、transport 延迟、默认 sequence 时序和 strict check 策略。
 - `request_apis.py`
-  - 基于 `env.backend` 的公共驱动 helper 和事务薄封装。
+  - 基于 `env.backend` 的 primitive helper / 兼容层；新 testcase/sequence 不应继续把类型定义或新场景模板堆在这里。
 - `transactions.py`
-  - `QueuePtr`、`LoadTxn`、`StoreTxn` 等事务对象。
+  - `QueuePtr`、`LoadTxn`、`StoreTxn`、`BackendSendPlan` 等公共事务与拍级计划对象。
 - `memory_model.py`
   - compare / store shadow / drain 校验的顶层编排层。
 - `README.md`
@@ -62,7 +62,7 @@
 - `model/`
   - 已从 `MemoryModel` 中拆出的公共组件，例如 `RefMemory`、`TransportResponder`、`Scoreboard`、ROB function coverage collector。
 - `sequences/`
-  - 可复用场景模板，例如 reset、scalar load/store、flush store buffer、replay/order 场景。
+  - testcase 首选的可复用场景模板层，例如 reset、scalar load/store、same-cycle load batch、flush store buffer、replay/order 场景。
 - `tests/`
   - 环境冒烟、模型单测和真实 DUT 场景用例。
 - `docs/`
@@ -150,9 +150,18 @@ env.expect_scalar_load(req_id=txn.req_id, addr=txn.addr)
 env.drain_writebacks()
 ```
 
-如果场景已经能被高层 sequence 表达，仍然优先复用 sequence；只有在编写新的 primitive 场景或 debug 时，才直接调用 `env.backend`。
+如果场景已经能被高层 sequence 表达，优先直接复用 `sequences/`；只有在编写新的 primitive 场景或 debug 拍级结构时，才直接调用 `env.backend`。`transactions.py` 负责承载公共数据模型，`request_apis.py` 只负责薄兼容/primitive helper。
 
-如果需要在同一拍发多条 `load`，或组合 `load + sta/std`，推荐直接构造脚本化计划：
+如果 testcase 只是要表达稳定的“多条 `load` 同拍”业务场景，优先直接复用 `ScalarLoadBatchSameCycleSequence` / `ScalarLoadBatchWithStaSequence`；只有在需要精确控制拍级结构时，再直接构造脚本化 plan：
+
+```python
+from sequences import ScalarLoadBatchSameCycleSequence
+
+result = ScalarLoadBatchSameCycleSequence((load0, load1)).run(env)
+assert result.final_state.next_lq_ptr.value == 2
+```
+
+更底层的 plan 写法仍保留给 debug 与 backend/ROB 拍级脚本：
 
 ```python
 from transactions import BackendSendPlan, EnqueueLoadCyclePlan, IssueCyclePlan, IssueOp
@@ -168,6 +177,22 @@ env.backend.execute(
 )
 ```
 
+从 `2026-04-15` 开始，`robIdx` 默认由 env 在 `prepare()/execute()/send()` 流程中统一分配，不再建议让 testcase 直接把 `req_id` 当成 `robIdx` 编码使用。`req_id` 继续保留为 testcase 标签；如果场景需要在 issue 前拿到已分配的 `robIdx`，先显式调用一次 `prepare(...)`：
+
+```python
+prepared = env.backend.prepare(load0)
+assert prepared.rob_idx_of(load0) == load0.rob_idx
+```
+
+如果 testcase / sequence 需要显式传 ROB 过滤条件，优先直接传一个 `RobIndex`；只有在最靠近 DUT bundle 的 driver / monitor 边界，再拆成 `rob_idx_flag/rob_idx_value`：
+
+```python
+prepared = env.backend.prepare(load0)
+env.expect_scalar_load(rob_idx=load0.rob_idx, pdest=load0.resolved_pdest, addr=load0.addr)
+env.wait_load_writeback_observed(rob_idx=load0.rob_idx)
+env.backend.insert_non_mem_blocker(rob_idx=prepared.rob_idx_of(blocker_ref))
+```
+
 如果场景还需要显式操控 ROB 侧阻塞/放行语义，也继续在同一个 `BackendSendPlan` 中补充 ROB 语义步骤，例如 `NonMemBlockerStep`、`StoreCommitReadyStep`，而不是直接操作 `env.rob_agent` 内部队列。
 
 例如，下面这类场景适合直接写在同一个 plan 里：
@@ -179,16 +204,18 @@ from transactions import (
     IssueCyclePlan,
     IssueOp,
     NonMemBlockerStep,
+    RobRef,
     StoreCommitReadyStep,
     StoreCommitStep,
     StoreRef,
 )
 
 store_ref = StoreRef("younger_store")
+blocker_ref = RobRef("older_non_mem")
 
 env.backend.execute(
     BackendSendPlan.from_steps(
-        NonMemBlockerStep.insert(rob_idx_flag=0, rob_idx_value=0x22),
+        NonMemBlockerStep.insert(rob_ref=blocker_ref),
         EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
         IssueCyclePlan.from_ops(
             IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data, mask=store_txn.mask)
@@ -198,7 +225,7 @@ env.backend.execute(
         ),
         StoreCommitReadyStep(sq_ptr=store_ref, ready=True),
         StoreCommitStep(count=1),  # 这里仍会被 older non-mem blocker 卡住
-        NonMemBlockerStep.release(rob_idx_flag=0, rob_idx_value=0x22),
+        NonMemBlockerStep.release(rob_ref=blocker_ref),
         StoreCommitStep(count=1),
     )
 )

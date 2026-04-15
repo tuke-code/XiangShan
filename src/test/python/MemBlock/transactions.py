@@ -3,7 +3,7 @@
 MemBlock 事务对象定义。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 SCALAR_STORE_MASK_TO_SIZE_BYTES = {
@@ -64,6 +64,26 @@ def vector_fu_type(*, is_load: bool) -> int:
     return FU_TYPE_VLDU if is_load else FU_TYPE_VSTU
 
 
+def legacy_rob_idx_flag(req_id: int) -> int:
+    return (int(req_id) >> 9) & 0x1
+
+
+def legacy_rob_idx_value(req_id: int) -> int:
+    return int(req_id) & 0x1FF
+
+
+def legacy_pdest(req_id: int, modulo: int) -> int:
+    return int(req_id) % int(modulo)
+
+
+def legacy_ftq_idx_value(req_id: int) -> int:
+    return int(req_id) & 0x3F
+
+
+def legacy_pc(req_id: int) -> int:
+    return 0x80000000 + int(req_id) * 4
+
+
 @dataclass(frozen=True)
 class QueuePtr:
     """环形队列指针。"""
@@ -72,7 +92,63 @@ class QueuePtr:
     value: int
 
 
+def ptr_inc(ptr: QueuePtr, size: int, step: int = 1) -> QueuePtr:
+    """Advance a ring-buffer queue pointer by `step` positions."""
+
+    flag = ptr.flag
+    value = ptr.value
+    for _ in range(int(step)):
+        value += 1
+        if value == int(size):
+            value = 0
+            flag ^= 0x1
+    return QueuePtr(flag=flag, value=value)
+
+
 @dataclass(frozen=True)
+class RobIndex:
+    """ROB index used by env-managed allocation/runtime lookup."""
+
+    flag: int
+    value: int
+
+
+@dataclass(frozen=True)
+class RobRef:
+    """Symbolic handle for a ROB entry allocated during plan preparation."""
+
+    name: str
+
+
+def make_rob_index(
+    *,
+    rob_idx: RobIndex | None = None,
+    rob_idx_flag: int | None = None,
+    rob_idx_value: int | None = None,
+) -> RobIndex | None:
+    """Normalize legacy `(flag, value)` pairs into the canonical `RobIndex`."""
+
+    if rob_idx is not None:
+        if isinstance(rob_idx, int):
+            if rob_idx_flag is not None:
+                raise ValueError("legacy positional rob_idx flag conflicts with keyword rob_idx_flag")
+            if rob_idx_value is None:
+                raise ValueError("legacy positional rob_idx flag requires rob_idx_value")
+            return RobIndex(flag=int(rob_idx), value=int(rob_idx_value))
+        normalized = RobIndex(flag=int(rob_idx.flag), value=int(rob_idx.value))
+        if rob_idx_flag is not None and int(rob_idx_flag) != normalized.flag:
+            raise ValueError(f"conflicting rob_idx_flag: {rob_idx_flag} vs {normalized.flag}")
+        if rob_idx_value is not None and int(rob_idx_value) != normalized.value:
+            raise ValueError(f"conflicting rob_idx_value: {rob_idx_value} vs {normalized.value}")
+        return normalized
+    if rob_idx_flag is None and rob_idx_value is None:
+        return None
+    if rob_idx_flag is None or rob_idx_value is None:
+        raise ValueError("rob_idx requires both flag and value when provided as split fields")
+    return RobIndex(flag=int(rob_idx_flag), value=int(rob_idx_value))
+
+
+@dataclass
 class LoadTxn:
     """标量 load 事务。"""
 
@@ -90,21 +166,109 @@ class LoadTxn:
     load_wait_strict: int = 0
     wait_for_rob_idx_flag: int | None = None
     wait_for_rob_idx_value: int | None = None
+    wait_for_rob: object | None = None
+    rob_ref: RobRef | None = None
+    rob_idx_override_flag: int | None = None
+    rob_idx_override_value: int | None = None
+    ftq_idx_flag: int | None = None
+    ftq_idx_value: int | None = None
+    pc: int | None = None
+    assigned_rob_idx_flag: int | None = field(default=None, repr=False, compare=False)
+    assigned_rob_idx_value: int | None = field(default=None, repr=False, compare=False)
+    assigned_pdest: int | None = field(default=None, repr=False, compare=False)
+    assigned_ftq_idx_flag: int | None = field(default=None, repr=False, compare=False)
+    assigned_ftq_idx_value: int | None = field(default=None, repr=False, compare=False)
+    assigned_pc: int | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def wait_for_rob_idx(self) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx_flag=self.wait_for_rob_idx_flag,
+            rob_idx_value=self.wait_for_rob_idx_value,
+        )
+
+    @wait_for_rob_idx.setter
+    def wait_for_rob_idx(self, rob_idx: RobIndex | None) -> None:
+        normalized = make_rob_index(rob_idx=rob_idx)
+        self.wait_for_rob_idx_flag = None if normalized is None else int(normalized.flag)
+        self.wait_for_rob_idx_value = None if normalized is None else int(normalized.value)
+
+    @property
+    def rob_idx_override(self) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx_flag=self.rob_idx_override_flag,
+            rob_idx_value=self.rob_idx_override_value,
+        )
+
+    @rob_idx_override.setter
+    def rob_idx_override(self, rob_idx: RobIndex | None) -> None:
+        normalized = make_rob_index(rob_idx=rob_idx)
+        self.rob_idx_override_flag = None if normalized is None else int(normalized.flag)
+        self.rob_idx_override_value = None if normalized is None else int(normalized.value)
+
+    @property
+    def assigned_rob_idx(self) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx_flag=self.assigned_rob_idx_flag,
+            rob_idx_value=self.assigned_rob_idx_value,
+        )
+
+    @assigned_rob_idx.setter
+    def assigned_rob_idx(self, rob_idx: RobIndex | None) -> None:
+        normalized = make_rob_index(rob_idx=rob_idx)
+        self.assigned_rob_idx_flag = None if normalized is None else int(normalized.flag)
+        self.assigned_rob_idx_value = None if normalized is None else int(normalized.value)
+
+    @property
+    def rob_idx(self) -> RobIndex:
+        assigned = self.assigned_rob_idx
+        if assigned is not None:
+            return assigned
+        override = self.rob_idx_override
+        if override is not None:
+            return override
+        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
 
     @property
     def rob_idx_flag(self) -> int:
-        return (self.req_id >> 9) & 0x1
+        return int(self.rob_idx.flag)
 
     @property
     def rob_idx_value(self) -> int:
-        return self.req_id & 0x1FF
+        return int(self.rob_idx.value)
 
     @property
     def resolved_pdest(self) -> int:
-        return self.req_id % 64 if self.pdest is None else int(self.pdest)
+        if self.assigned_pdest is not None:
+            return int(self.assigned_pdest)
+        return legacy_pdest(self.req_id, 64) if self.pdest is None else int(self.pdest)
+
+    @property
+    def resolved_ftq_idx_flag(self) -> int:
+        if self.assigned_ftq_idx_flag is not None:
+            return int(self.assigned_ftq_idx_flag)
+        if self.ftq_idx_flag is not None:
+            return int(self.ftq_idx_flag)
+        return 0
+
+    @property
+    def resolved_ftq_idx_value(self) -> int:
+        if self.assigned_ftq_idx_value is not None:
+            return int(self.assigned_ftq_idx_value)
+        if self.ftq_idx_value is not None:
+            return int(self.ftq_idx_value)
+        return legacy_ftq_idx_value(self.req_id)
+
+    @property
+    def resolved_pc(self) -> int:
+        if self.assigned_pc is not None:
+            return int(self.assigned_pc)
+        if self.pc is not None:
+            return int(self.pc)
+        return legacy_pc(self.req_id)
 
 
-@dataclass(frozen=True)
+@dataclass
 class StoreTxn:
     """标量 store 事务。"""
 
@@ -116,14 +280,75 @@ class StoreTxn:
     enq_port: int = 0
     sta_lane: int = 3
     std_lane: int = 5
+    rob_ref: RobRef | None = None
+    rob_idx_override_flag: int | None = None
+    rob_idx_override_value: int | None = None
+    ftq_idx_flag: int | None = None
+    ftq_idx_value: int | None = None
+    assigned_rob_idx_flag: int | None = field(default=None, repr=False, compare=False)
+    assigned_rob_idx_value: int | None = field(default=None, repr=False, compare=False)
+    assigned_ftq_idx_flag: int | None = field(default=None, repr=False, compare=False)
+    assigned_ftq_idx_value: int | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def rob_idx_override(self) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx_flag=self.rob_idx_override_flag,
+            rob_idx_value=self.rob_idx_override_value,
+        )
+
+    @rob_idx_override.setter
+    def rob_idx_override(self, rob_idx: RobIndex | None) -> None:
+        normalized = make_rob_index(rob_idx=rob_idx)
+        self.rob_idx_override_flag = None if normalized is None else int(normalized.flag)
+        self.rob_idx_override_value = None if normalized is None else int(normalized.value)
+
+    @property
+    def assigned_rob_idx(self) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx_flag=self.assigned_rob_idx_flag,
+            rob_idx_value=self.assigned_rob_idx_value,
+        )
+
+    @assigned_rob_idx.setter
+    def assigned_rob_idx(self, rob_idx: RobIndex | None) -> None:
+        normalized = make_rob_index(rob_idx=rob_idx)
+        self.assigned_rob_idx_flag = None if normalized is None else int(normalized.flag)
+        self.assigned_rob_idx_value = None if normalized is None else int(normalized.value)
+
+    @property
+    def rob_idx(self) -> RobIndex:
+        assigned = self.assigned_rob_idx
+        if assigned is not None:
+            return assigned
+        override = self.rob_idx_override
+        if override is not None:
+            return override
+        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
 
     @property
     def rob_idx_flag(self) -> int:
-        return (self.req_id >> 9) & 0x1
+        return int(self.rob_idx.flag)
 
     @property
     def rob_idx_value(self) -> int:
-        return self.req_id & 0x1FF
+        return int(self.rob_idx.value)
+
+    @property
+    def resolved_ftq_idx_flag(self) -> int:
+        if self.assigned_ftq_idx_flag is not None:
+            return int(self.assigned_ftq_idx_flag)
+        if self.ftq_idx_flag is not None:
+            return int(self.ftq_idx_flag)
+        return 0
+
+    @property
+    def resolved_ftq_idx_value(self) -> int:
+        if self.assigned_ftq_idx_value is not None:
+            return int(self.assigned_ftq_idx_value)
+        if self.ftq_idx_value is not None:
+            return int(self.ftq_idx_value)
+        return legacy_ftq_idx_value(self.req_id)
 
     @property
     def size_bytes(self) -> int:
@@ -134,7 +359,7 @@ class StoreTxn:
         return scalar_store_fu_op_type_from_mask(self.mask)
 
 
-@dataclass(frozen=True)
+@dataclass
 class VectorMemTxn:
     """Vector memory transaction carried through enqueue + vecIssue."""
 
@@ -169,6 +394,16 @@ class VectorMemTxn:
     src_2: int = 0
     src_3: int = 0
     expected_exception: str | None = None
+    rob_ref: RobRef | None = None
+    rob_idx_override_flag: int | None = None
+    rob_idx_override_value: int | None = None
+    ftq_idx_flag: int | None = None
+    ftq_idx_value: int | None = None
+    assigned_rob_idx_flag: int | None = field(default=None, repr=False, compare=False)
+    assigned_rob_idx_value: int | None = field(default=None, repr=False, compare=False)
+    assigned_pdest: int | None = field(default=None, repr=False, compare=False)
+    assigned_ftq_idx_flag: int | None = field(default=None, repr=False, compare=False)
+    assigned_ftq_idx_value: int | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.opcode_class not in {"unit_stride", "stride"}:
@@ -189,16 +424,70 @@ class VectorMemTxn:
             raise ValueError("vector stores require `store_data`")
 
     @property
+    def rob_idx_override(self) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx_flag=self.rob_idx_override_flag,
+            rob_idx_value=self.rob_idx_override_value,
+        )
+
+    @rob_idx_override.setter
+    def rob_idx_override(self, rob_idx: RobIndex | None) -> None:
+        normalized = make_rob_index(rob_idx=rob_idx)
+        self.rob_idx_override_flag = None if normalized is None else int(normalized.flag)
+        self.rob_idx_override_value = None if normalized is None else int(normalized.value)
+
+    @property
+    def assigned_rob_idx(self) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx_flag=self.assigned_rob_idx_flag,
+            rob_idx_value=self.assigned_rob_idx_value,
+        )
+
+    @assigned_rob_idx.setter
+    def assigned_rob_idx(self, rob_idx: RobIndex | None) -> None:
+        normalized = make_rob_index(rob_idx=rob_idx)
+        self.assigned_rob_idx_flag = None if normalized is None else int(normalized.flag)
+        self.assigned_rob_idx_value = None if normalized is None else int(normalized.value)
+
+    @property
+    def rob_idx(self) -> RobIndex:
+        assigned = self.assigned_rob_idx
+        if assigned is not None:
+            return assigned
+        override = self.rob_idx_override
+        if override is not None:
+            return override
+        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
+
+    @property
     def rob_idx_flag(self) -> int:
-        return (self.req_id >> 9) & 0x1
+        return int(self.rob_idx.flag)
 
     @property
     def rob_idx_value(self) -> int:
-        return self.req_id & 0x1FF
+        return int(self.rob_idx.value)
 
     @property
     def resolved_pdest(self) -> int:
-        return self.req_id % 128 if self.pdest is None else int(self.pdest)
+        if self.assigned_pdest is not None:
+            return int(self.assigned_pdest)
+        return legacy_pdest(self.req_id, 128) if self.pdest is None else int(self.pdest)
+
+    @property
+    def resolved_ftq_idx_flag(self) -> int:
+        if self.assigned_ftq_idx_flag is not None:
+            return int(self.assigned_ftq_idx_flag)
+        if self.ftq_idx_flag is not None:
+            return int(self.ftq_idx_flag)
+        return 0
+
+    @property
+    def resolved_ftq_idx_value(self) -> int:
+        if self.assigned_ftq_idx_value is not None:
+            return int(self.assigned_ftq_idx_value)
+        if self.ftq_idx_value is not None:
+            return int(self.ftq_idx_value)
+        return legacy_ftq_idx_value(self.req_id)
 
     @property
     def size_bytes(self) -> int:
@@ -272,6 +561,10 @@ class EnqueueLoadStep:
     lq_ptr: QueuePtr
     sq_ptr: QueuePtr
     enq_port: int = 0
+    rob_ref: RobRef | None = None
+    rob_idx_flag: int | None = None
+    rob_idx_value: int | None = None
+    txn: LoadTxn | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_txn(cls, txn: LoadTxn) -> "EnqueueLoadStep":
@@ -280,7 +573,30 @@ class EnqueueLoadStep:
             lq_ptr=txn.lq_ptr,
             sq_ptr=txn.sq_ptr,
             enq_port=txn.enq_port,
+            rob_ref=txn.rob_ref,
+            rob_idx_flag=None if txn.assigned_rob_idx is None else txn.assigned_rob_idx.flag,
+            rob_idx_value=None if txn.assigned_rob_idx is None else txn.assigned_rob_idx.value,
+            txn=txn,
         )
+
+    @property
+    def rob_idx(self) -> RobIndex | None:
+        return make_rob_index(rob_idx_flag=self.rob_idx_flag, rob_idx_value=self.rob_idx_value)
+
+    @property
+    def resolved_rob_idx(self) -> RobIndex:
+        rob_idx = self.rob_idx
+        if rob_idx is not None:
+            return rob_idx
+        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
+
+    @property
+    def resolved_rob_idx_flag(self) -> int:
+        return int(self.resolved_rob_idx.flag)
+
+    @property
+    def resolved_rob_idx_value(self) -> int:
+        return int(self.resolved_rob_idx.value)
 
 
 @dataclass(frozen=True)
@@ -310,6 +626,10 @@ class EnqueueLoadCyclePlan:
                     lq_ptr=txn.lq_ptr,
                     sq_ptr=txn.sq_ptr,
                     enq_port=index,
+                    rob_ref=txn.rob_ref,
+                    rob_idx_flag=None if txn.assigned_rob_idx is None else txn.assigned_rob_idx.flag,
+                    rob_idx_value=None if txn.assigned_rob_idx is None else txn.assigned_rob_idx.value,
+                    txn=txn,
                 )
                 for index, txn in enumerate(txns)
             ),
@@ -325,6 +645,10 @@ class EnqueueStoreStep:
     sq_ptr: QueuePtr
     enq_port: int = 0
     ref: StoreRef | None = None
+    rob_ref: RobRef | None = None
+    rob_idx_flag: int | None = None
+    rob_idx_value: int | None = None
+    txn: StoreTxn | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def from_txn(cls, txn: StoreTxn, *, ref: StoreRef | None = None) -> "EnqueueStoreStep":
@@ -333,7 +657,30 @@ class EnqueueStoreStep:
             sq_ptr=txn.sq_ptr,
             enq_port=txn.enq_port,
             ref=ref,
+            rob_ref=txn.rob_ref,
+            rob_idx_flag=None if txn.assigned_rob_idx is None else txn.assigned_rob_idx.flag,
+            rob_idx_value=None if txn.assigned_rob_idx is None else txn.assigned_rob_idx.value,
+            txn=txn,
         )
+
+    @property
+    def rob_idx(self) -> RobIndex | None:
+        return make_rob_index(rob_idx_flag=self.rob_idx_flag, rob_idx_value=self.rob_idx_value)
+
+    @property
+    def resolved_rob_idx(self) -> RobIndex:
+        rob_idx = self.rob_idx
+        if rob_idx is not None:
+            return rob_idx
+        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
+
+    @property
+    def resolved_rob_idx_flag(self) -> int:
+        return int(self.resolved_rob_idx.flag)
+
+    @property
+    def resolved_rob_idx_value(self) -> int:
+        return int(self.resolved_rob_idx.value)
 
 
 @dataclass(frozen=True)
@@ -364,6 +711,15 @@ class IssueOp:
     load_wait_strict: int = 0
     wait_for_rob_idx_flag: int | None = None
     wait_for_rob_idx_value: int | None = None
+    wait_for_rob: object | None = None
+    rob_ref: RobRef | None = None
+    rob_idx_flag: int | None = None
+    rob_idx_value: int | None = None
+    pdest: int | None = None
+    ftq_idx_flag: int | None = None
+    ftq_idx_value: int | None = None
+    pc: int | None = None
+    txn: LoadTxn | StoreTxn | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.kind not in {"load", "sta", "std"}:
@@ -382,18 +738,24 @@ class IssueOp:
 
     @classmethod
     def load_from_txn(cls, txn: LoadTxn) -> "IssueOp":
-        return cls(
-            kind="load",
+        return cls.load(
             req_id=txn.req_id,
-            lane=txn.issue_lane,
-            sq_ptr=txn.sq_ptr,
             addr=txn.addr,
             lq_ptr=txn.lq_ptr,
+            sq_ptr=txn.sq_ptr,
+            lane=txn.issue_lane,
             store_set_hit=txn.store_set_hit,
             load_wait_bit=txn.load_wait_bit,
             load_wait_strict=txn.load_wait_strict,
-            wait_for_rob_idx_flag=txn.wait_for_rob_idx_flag,
-            wait_for_rob_idx_value=txn.wait_for_rob_idx_value,
+            wait_for_rob_idx=txn.wait_for_rob_idx,
+            wait_for_rob=txn.wait_for_rob,
+            rob_ref=txn.rob_ref,
+            rob_idx=txn.assigned_rob_idx,
+            pdest=txn.assigned_pdest if txn.assigned_pdest is not None else txn.pdest,
+            ftq_idx_flag=txn.assigned_ftq_idx_flag if txn.assigned_ftq_idx_flag is not None else txn.ftq_idx_flag,
+            ftq_idx_value=txn.assigned_ftq_idx_value if txn.assigned_ftq_idx_value is not None else txn.ftq_idx_value,
+            pc=txn.assigned_pc if txn.assigned_pc is not None else txn.pc,
+            txn=txn,
         )
 
     @classmethod
@@ -405,8 +767,33 @@ class IssueOp:
         addr: int,
         lane: int = 3,
         mask: int = 0xFF,
+        rob_ref: RobRef | None = None,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+        txn: StoreTxn | None = None,
     ) -> "IssueOp":
-        return cls(kind="sta", req_id=req_id, lane=lane, sq_ptr=sq_ptr, addr=addr, mask=mask)
+        normalized_rob_idx = make_rob_index(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+        return cls(
+            kind="sta",
+            req_id=req_id,
+            lane=lane,
+            sq_ptr=sq_ptr,
+            addr=addr,
+            mask=mask,
+            rob_ref=rob_ref,
+            rob_idx_flag=None if normalized_rob_idx is None else normalized_rob_idx.flag,
+            rob_idx_value=None if normalized_rob_idx is None else normalized_rob_idx.value,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+            txn=txn,
+        )
 
     @classmethod
     def std(
@@ -417,8 +804,142 @@ class IssueOp:
         data: int,
         lane: int = 5,
         mask: int = 0xFF,
+        rob_ref: RobRef | None = None,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+        txn: StoreTxn | None = None,
     ) -> "IssueOp":
-        return cls(kind="std", req_id=req_id, lane=lane, sq_ptr=sq_ptr, data=data, mask=mask)
+        normalized_rob_idx = make_rob_index(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+        return cls(
+            kind="std",
+            req_id=req_id,
+            lane=lane,
+            sq_ptr=sq_ptr,
+            data=data,
+            mask=mask,
+            rob_ref=rob_ref,
+            rob_idx_flag=None if normalized_rob_idx is None else normalized_rob_idx.flag,
+            rob_idx_value=None if normalized_rob_idx is None else normalized_rob_idx.value,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+            txn=txn,
+        )
+
+    @classmethod
+    def load(
+        cls,
+        *,
+        req_id: int,
+        addr: int,
+        lq_ptr: QueuePtr,
+        sq_ptr: QueuePtr | StoreRef,
+        lane: int = 0,
+        store_set_hit: int = 0,
+        load_wait_bit: int = 0,
+        load_wait_strict: int = 0,
+        wait_for_rob_idx: RobIndex | None = None,
+        wait_for_rob_idx_flag: int | None = None,
+        wait_for_rob_idx_value: int | None = None,
+        wait_for_rob: object | None = None,
+        rob_ref: RobRef | None = None,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        pdest: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+        pc: int | None = None,
+        txn: LoadTxn | None = None,
+    ) -> "IssueOp":
+        normalized_rob_idx = make_rob_index(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+        normalized_wait = make_rob_index(
+            rob_idx=wait_for_rob_idx,
+            rob_idx_flag=wait_for_rob_idx_flag,
+            rob_idx_value=wait_for_rob_idx_value,
+        )
+        return cls(
+            kind="load",
+            req_id=req_id,
+            lane=lane,
+            sq_ptr=sq_ptr,
+            addr=addr,
+            lq_ptr=lq_ptr,
+            store_set_hit=store_set_hit,
+            load_wait_bit=load_wait_bit,
+            load_wait_strict=load_wait_strict,
+            wait_for_rob_idx_flag=None if normalized_wait is None else normalized_wait.flag,
+            wait_for_rob_idx_value=None if normalized_wait is None else normalized_wait.value,
+            wait_for_rob=wait_for_rob,
+            rob_ref=rob_ref,
+            rob_idx_flag=None if normalized_rob_idx is None else normalized_rob_idx.flag,
+            rob_idx_value=None if normalized_rob_idx is None else normalized_rob_idx.value,
+            pdest=pdest,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+            pc=pc,
+            txn=txn,
+        )
+
+    @property
+    def rob_idx(self) -> RobIndex | None:
+        return make_rob_index(rob_idx_flag=self.rob_idx_flag, rob_idx_value=self.rob_idx_value)
+
+    @property
+    def wait_for_rob_idx(self) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx_flag=self.wait_for_rob_idx_flag,
+            rob_idx_value=self.wait_for_rob_idx_value,
+        )
+
+    @property
+    def resolved_rob_idx(self) -> RobIndex:
+        rob_idx = self.rob_idx
+        if rob_idx is not None:
+            return rob_idx
+        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
+
+    @property
+    def resolved_rob_idx_flag(self) -> int:
+        return int(self.resolved_rob_idx.flag)
+
+    @property
+    def resolved_rob_idx_value(self) -> int:
+        return int(self.resolved_rob_idx.value)
+
+    @property
+    def resolved_pdest(self) -> int:
+        if self.pdest is not None:
+            return int(self.pdest)
+        return legacy_pdest(self.req_id, 64)
+
+    @property
+    def resolved_ftq_idx_flag(self) -> int:
+        if self.ftq_idx_flag is not None:
+            return int(self.ftq_idx_flag)
+        return 0
+
+    @property
+    def resolved_ftq_idx_value(self) -> int:
+        if self.ftq_idx_value is not None:
+            return int(self.ftq_idx_value)
+        return legacy_ftq_idx_value(self.req_id)
+
+    @property
+    def resolved_pc(self) -> int:
+        if self.pc is not None:
+            return int(self.pc)
+        return legacy_pc(self.req_id)
 
     @property
     def store_size_bytes(self) -> int:
@@ -461,20 +982,64 @@ class NonMemBlockerStep:
     """Inject or release a ROB-side non-mem blocker inside a backend send plan."""
 
     action: str
-    rob_idx_flag: int
-    rob_idx_value: int
+    rob_idx_flag: int | None
+    rob_idx_value: int | None
+    rob_ref: RobRef | None = None
+    req_id: int | None = None
 
     def __post_init__(self) -> None:
         if self.action not in {"insert", "release"}:
             raise ValueError(f"unsupported non-mem blocker action: {self.action}")
 
     @classmethod
-    def insert(cls, *, rob_idx_flag: int, rob_idx_value: int) -> "NonMemBlockerStep":
-        return cls(action="insert", rob_idx_flag=rob_idx_flag, rob_idx_value=rob_idx_value)
+    def insert(
+        cls,
+        *,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        rob_ref: RobRef | None = None,
+        req_id: int | None = None,
+    ) -> "NonMemBlockerStep":
+        normalized = make_rob_index(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+        return cls(
+            action="insert",
+            rob_idx_flag=None if normalized is None else normalized.flag,
+            rob_idx_value=None if normalized is None else normalized.value,
+            rob_ref=rob_ref,
+            req_id=req_id,
+        )
 
     @classmethod
-    def release(cls, *, rob_idx_flag: int, rob_idx_value: int) -> "NonMemBlockerStep":
-        return cls(action="release", rob_idx_flag=rob_idx_flag, rob_idx_value=rob_idx_value)
+    def release(
+        cls,
+        *,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        rob_ref: RobRef | None = None,
+        req_id: int | None = None,
+    ) -> "NonMemBlockerStep":
+        normalized = make_rob_index(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+        return cls(
+            action="release",
+            rob_idx_flag=None if normalized is None else normalized.flag,
+            rob_idx_value=None if normalized is None else normalized.value,
+            rob_ref=rob_ref,
+            req_id=req_id,
+        )
+
+    @property
+    def rob_idx(self) -> RobIndex | None:
+        return make_rob_index(rob_idx_flag=self.rob_idx_flag, rob_idx_value=self.rob_idx_value)
 
 
 @dataclass(frozen=True)
@@ -588,3 +1153,26 @@ class BackendSendResult:
         if self.vector_results is None:
             raise KeyError(req_id)
         return self.vector_results[req_id]
+
+
+@dataclass(frozen=True)
+class BackendPreparedPlan:
+    """Preparation result with resolved ROB metadata and executable plan."""
+
+    resolved_plan: BackendSendPlan
+    req_id_robs: dict[int, RobIndex]
+    ref_robs: dict[RobRef, RobIndex]
+
+    def rob_idx_of(self, target) -> RobIndex:
+        if isinstance(target, RobRef):
+            return self.ref_robs[target]
+        if hasattr(target, "assigned_rob_idx"):
+            assigned_rob_idx = getattr(target, "assigned_rob_idx")
+            if assigned_rob_idx is not None:
+                return RobIndex(flag=int(assigned_rob_idx.flag), value=int(assigned_rob_idx.value))
+        if isinstance(target, int):
+            return self.req_id_robs[int(target)]
+        req_id = getattr(target, "req_id", None)
+        if req_id is not None and int(req_id) in self.req_id_robs:
+            return self.req_id_robs[int(req_id)]
+        raise KeyError(target)

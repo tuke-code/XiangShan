@@ -46,6 +46,8 @@ class LsqAgent:
         lq_ptr: QueuePtr,
         sq_ptr: QueuePtr,
         enq_port: int = 0,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
     ) -> None:
         await self._wait_load_enq_ready_async()
 
@@ -54,8 +56,8 @@ class LsqAgent:
         req.valid.value = 1
         req.bits_fuType.value = FU_TYPE_LDU
         req.bits_uopIdx.value = req_id & 0x7F
-        req.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        req.bits_robIdx_value.value = req_id & 0x1FF
+        req.bits_robIdx_flag.value = (req_id >> 9) & 0x1 if rob_idx_flag is None else int(rob_idx_flag)
+        req.bits_robIdx_value.value = req_id & 0x1FF if rob_idx_value is None else int(rob_idx_value)
         req.bits_lqIdx_flag.value = lq_ptr.flag
         req.bits_lqIdx_value.value = lq_ptr.value
         req.bits_sqIdx_flag.value = sq_ptr.flag
@@ -70,6 +72,8 @@ class LsqAgent:
         lq_ptr: QueuePtr,
         sq_ptr: QueuePtr,
         enq_port: int = 0,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
     ) -> None:
         self.env._run_async(
             self._enqueue_scalar_load_async(
@@ -77,6 +81,8 @@ class LsqAgent:
                 lq_ptr=lq_ptr,
                 sq_ptr=sq_ptr,
                 enq_port=enq_port,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
             )
         )
 
@@ -95,8 +101,8 @@ class LsqAgent:
                     req.valid.value = 1
                     req.bits_fuType.value = FU_TYPE_LDU
                     req.bits_uopIdx.value = step.req_id & 0x7F
-                    req.bits_robIdx_flag.value = (step.req_id >> 9) & 0x1
-                    req.bits_robIdx_value.value = step.req_id & 0x1FF
+                    req.bits_robIdx_flag.value = step.resolved_rob_idx_flag
+                    req.bits_robIdx_value.value = step.resolved_rob_idx_value
                     req.bits_lqIdx_flag.value = step.lq_ptr.flag
                     req.bits_lqIdx_value.value = step.lq_ptr.value
                     req.bits_sqIdx_flag.value = step.sq_ptr.flag
@@ -117,6 +123,8 @@ class LsqAgent:
         req_id: int,
         sq_ptr: QueuePtr,
         enq_port: int = 0,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
     ) -> QueuePtr:
         await self._wait_store_enq_ready_async()
 
@@ -125,8 +133,10 @@ class LsqAgent:
         req.valid.value = 1
         req.bits_fuType.value = FU_TYPE_STU
         req.bits_uopIdx.value = req_id & 0x7F
-        req.bits_robIdx_flag.value = (req_id >> 9) & 0x1
-        req.bits_robIdx_value.value = req_id & 0x1FF
+        resolved_rob_flag = (req_id >> 9) & 0x1 if rob_idx_flag is None else int(rob_idx_flag)
+        resolved_rob_value = req_id & 0x1FF if rob_idx_value is None else int(rob_idx_value)
+        req.bits_robIdx_flag.value = resolved_rob_flag
+        req.bits_robIdx_value.value = resolved_rob_value
         req.bits_lqIdx_flag.value = 0
         req.bits_lqIdx_value.value = 0
         req.bits_sqIdx_flag.value = sq_ptr.flag
@@ -141,8 +151,8 @@ class LsqAgent:
         self.env.backend.note_store_allocated(
             sq_idx_flag=allocated_sq_ptr.flag,
             sq_idx_value=allocated_sq_ptr.value,
-            rob_idx_flag=(req_id >> 9) & 0x1,
-            rob_idx_value=req_id & 0x1FF,
+            rob_idx_flag=resolved_rob_flag,
+            rob_idx_value=resolved_rob_value,
         )
         self.env.idle_inputs()
         return allocated_sq_ptr
@@ -152,12 +162,16 @@ class LsqAgent:
         req_id: int,
         sq_ptr: QueuePtr,
         enq_port: int = 0,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
     ) -> QueuePtr:
         return self.env._run_async(
             self._enqueue_scalar_store_async(
                 req_id=req_id,
                 sq_ptr=sq_ptr,
                 enq_port=enq_port,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
             )
         )
 

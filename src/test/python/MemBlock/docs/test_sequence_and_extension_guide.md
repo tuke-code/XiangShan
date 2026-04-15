@@ -25,11 +25,21 @@
 1. `MemBlock_api.py`
 2. `MemBlock_env.py`
 3. `sequences/`
-4. `request_apis.py`
-5. `monitors/` / `model/`
-6. `tests/*.py`
+4. `transactions.py`
+5. `request_apis.py`
+6. `monitors/` / `model/`
+7. `tests/*.py`
 
 一般不要跳层。
+
+其中建议明确区分两类职责：
+
+- `transactions.py`
+  - 负责公共事务对象、队列指针工具和拍级计划对象，例如 `LoadTxn` / `StoreTxn` / `ptr_inc()` / `BackendSendPlan` / `IssueOp`
+- `request_apis.py`
+  - 只保留 backend primitive helper 和兼容包装，例如 `send_load()` / `send_store()`
+- `sequences/`
+  - 负责 testcase 作者真正复用的场景模板
 
 ## 3. 标准测试初始化流程
 
@@ -99,7 +109,17 @@ env.drain_writebacks()
 2. load compare 仍通过 `env.expect_scalar_load()` 登记。
 3. primitive 场景结束后仍要显式调用 `drain_writebacks()` 或更强的收敛检查。
 
-如果你需要表达“多条 load 同拍 issue”或“load 与 sta/std 混合同拍 issue”，不要继续扩 `request_apis.py` 的特化 helper；优先改为构造 `BackendSendPlan` / `IssueCyclePlan`：
+如果你需要表达“多条 load 同拍 issue”或“load 与 sta/std 混合同拍 issue”，先问自己这是不是一个稳定业务场景。
+
+如果答案是“是”，优先抽成 sequence，例如：
+
+```python
+from sequences import ScalarLoadBatchSameCycleSequence
+
+ScalarLoadBatchSameCycleSequence((load0, load1, load2)).run(env)
+```
+
+如果答案是“不是，而是我正在验证某个拍级组合是否可达”，再直接构造 `BackendSendPlan` / `IssueCyclePlan`：
 
 ```python
 from transactions import BackendSendPlan, EnqueueLoadCyclePlan, IssueCyclePlan, IssueOp
@@ -115,7 +135,7 @@ env.backend.execute(
 )
 ```
 
-旧的 `send_load_batch_same_cycle()` / `send_load_batch_with_sta_same_cycle()` 仍保留作兼容包装，但不再作为后续扩接口的方向。
+旧的 `send_load_batch_same_cycle()` / `send_load_batch_with_sta_same_cycle()` 仍保留作兼容包装，但不再作为后续扩接口的方向；新的 testcase 应避免再从 `request_apis.py` 导入这类场景级 helper。
 
 如果你要写的是向量访存场景，而不是标量 load/store，请不要直接把这一节的标量骨架硬改成 `vecIssue` 脚本；应优先改用：
 
@@ -191,6 +211,7 @@ from transactions import (
     IssueCyclePlan,
     IssueOp,
     NonMemBlockerStep,
+    RobIndex,
     StoreCommitStep,
     StoreRef,
 )
@@ -199,7 +220,7 @@ store_ref = StoreRef("younger_store")
 
 env.backend.execute(
     BackendSendPlan.from_steps(
-        NonMemBlockerStep.insert(rob_idx_flag=0, rob_idx_value=0x40),
+        NonMemBlockerStep.insert(rob_idx=RobIndex(flag=0, value=0x40)),
         EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
         IssueCyclePlan.from_ops(
             IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data, mask=store_txn.mask)
@@ -208,7 +229,7 @@ env.backend.execute(
             IssueOp.sta(req_id=store_txn.req_id, sq_ptr=store_ref, addr=store_txn.addr, mask=store_txn.mask)
         ),
         StoreCommitStep(count=1),
-        NonMemBlockerStep.release(rob_idx_flag=0, rob_idx_value=0x40),
+        NonMemBlockerStep.release(rob_idx=RobIndex(flag=0, value=0x40)),
         StoreCommitStep(count=1),
     )
 )

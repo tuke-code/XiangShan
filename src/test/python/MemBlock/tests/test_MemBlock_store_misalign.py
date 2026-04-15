@@ -5,7 +5,7 @@ MemBlock store misalign 的定向真实 DUT 用例。
 
 import pytest
 
-from request_apis import LoadTxn, QueuePtr, StoreTxn
+from transactions import LoadTxn, QueuePtr, StoreTxn
 from sequences import (
     FlushStoreBuffersSequence,
     ResetEnvSequence,

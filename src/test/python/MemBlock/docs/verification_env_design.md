@@ -271,6 +271,7 @@ from transactions import (
     IssueCyclePlan,
     IssueOp,
     NonMemBlockerStep,
+    RobIndex,
     StoreCommitStep,
     StoreRef,
 )
@@ -279,7 +280,7 @@ store_ref = StoreRef("younger_store")
 
 env.backend.execute(
     BackendSendPlan.from_steps(
-        NonMemBlockerStep.insert(rob_idx_flag=0, rob_idx_value=0x40),
+        NonMemBlockerStep.insert(rob_idx=RobIndex(flag=0, value=0x40)),
         EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
         IssueCyclePlan.from_ops(
             IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data, mask=store_txn.mask)
@@ -288,7 +289,7 @@ env.backend.execute(
             IssueOp.sta(req_id=store_txn.req_id, sq_ptr=store_ref, addr=store_txn.addr, mask=store_txn.mask)
         ),
         StoreCommitStep(count=1),  # 这拍仍会被 older non-mem blocker 卡住
-        NonMemBlockerStep.release(rob_idx_flag=0, rob_idx_value=0x40),
+        NonMemBlockerStep.release(rob_idx=RobIndex(flag=0, value=0x40)),
         StoreCommitStep(count=1),
     )
 )

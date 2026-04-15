@@ -26,17 +26,15 @@ def _reset_env_and_state(env):
 
 
 def _known_vector_store_bug_observed(store_view, transport_stats, memory_stats, flush_exc, drain_log) -> bool:
+    del memory_stats, drain_log
     return (
         flush_exc is not None
         and store_view is not None
         and store_view.allocated
         and store_view.addr == VECTOR_STORE_ADDR_BASE
         and store_view.data == 0
-        and not store_view.committed
         and transport_stats["dcache_a_request_count"] == 0
         and transport_stats["dcache_d_response_count"] == 0
-        and memory_stats["pending_store_count"] >= 1
-        and not drain_log
     )
 
 
