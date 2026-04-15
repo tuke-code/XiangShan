@@ -68,9 +68,6 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   private val s1_ready = Wire(Bool())
   private val s2_ready = Wire(Bool())
 
-  private val s1_flush = Wire(Bool())
-  private val s2_flush = Wire(Bool())
-
   private val s1_valid = RegInit(false.B)
   private val s2_valid = RegInit(false.B)
 
@@ -86,15 +83,12 @@ class AheadBtb(implicit p: Parameters) extends BasePredictor with Helpers {
   s1_ready := s1_fire || !s1_valid
   s2_ready := s2_fire || !s2_valid || overrideValid || redirectValid
 
-  s2_flush := redirectValid
-  s1_flush := s2_flush
-
   when(s0_fire)(s1_valid := true.B)
-    .elsewhen(s1_flush)(s1_valid := false.B)
+    .elsewhen(redirectValid)(s1_valid := false.B)
     .elsewhen(s1_fire)(s1_valid := false.B)
 
-  when(s1_fire)(s2_valid := true.B)
-    .elsewhen(s2_flush)(s2_valid := false.B)
+  when(redirectValid)(s2_valid := false.B)
+    .elsewhen(s1_fire)(s2_valid := true.B)
     .elsewhen(s2_fire)(s2_valid := false.B)
 
   /* --------------------------------------------------------------------------------------------------------------
