@@ -267,14 +267,14 @@ sequenceDiagram
 - `fuType = FU_TYPE_LDU`
 - `fuOpType = LSU_OP_LD`
 - `src_0 = addr`
-- `robIdx = req_id`
+- `robIdx = prepare/send/execute 后绑定的 runtime rob_idx`
 - `sqIdx = 当前 store 边界`
 - `imm = 0`
-- `pdest = req_id % 64`
+- `pdest = prepare/send/execute 后绑定的 runtime pdest`
 - `rfWen = 1`
-- `pc = 0x80000000 + req_id * 4`
+- `pc = prepare/send/execute 后绑定的 runtime pc`
 - `ftqIdx_flag = 0`
-- `ftqIdx_value = req_id & 0x3F`
+- `ftqIdx_value = prepare/send/execute 后绑定的 runtime ftqIdx`
 - `ftqOffset = 0`
 - `loadWaitBit = 0`
 - `waitForRobIdx_flag = 0`
@@ -291,7 +291,7 @@ sequenceDiagram
 3. `pdest` 会在 writeback compare 时使用。
 4. `sqIdx` 提供当前 load 可见的 store 边界。
 5. `lqIdx` 绑定 enqueue 阶段获得的负载队列位置。
-6. 其他字段给出一个稳定、低噪声、无额外相关性的执行背景。
+6. `req_id` 只保留为 testcase 标签；这些 runtime 字段若未先 prepare/bind，不应再由 helper 静默推导。
 
 ### 6.3 STD issue 的语义
 
@@ -336,7 +336,7 @@ sequenceDiagram
 - `rfWen = 0`
 - `isRVC = 0`
 - `ftqIdx_flag = 0`
-- `ftqIdx_value = req_id & 0x3F`
+- `ftqIdx_value = prepare/send/execute 后绑定的 runtime ftqIdx`
 - `ftqOffset = 0`
 - `storeSetHit = 0`
 - `ssid = 0`

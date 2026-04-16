@@ -15,6 +15,7 @@ from transactions import (
     LoadTxn,
     ptr_inc,
     QueuePtr,
+    RobIndex,
     StoreTxn,
 )
 
@@ -585,12 +586,16 @@ class ResetEnvSequence:
         require_sq_ready: bool = False,
         reset_cycles: int | None = None,
         settle_cycles: int | None = None,
+        seed_wrap_boundary: bool = True,
+        initial_rob_idx: RobIndex | None = None,
     ) -> None:
         self.require_issue_lanes = tuple(require_issue_lanes)
         self.require_lq_ready = require_lq_ready
         self.require_sq_ready = require_sq_ready
         self.reset_cycles = reset_cycles
         self.settle_cycles = settle_cycles
+        self.seed_wrap_boundary = seed_wrap_boundary
+        self.initial_rob_idx = initial_rob_idx
 
     def run(self, env) -> SequenceState:
         reset_cycles = env.config.sequence.reset_cycles if self.reset_cycles is None else self.reset_cycles
@@ -603,6 +608,12 @@ class ResetEnvSequence:
             require_lq_ready=self.require_lq_ready,
             require_sq_ready=self.require_sq_ready,
         )
+        initial_rob_idx = self.initial_rob_idx
+        if initial_rob_idx is None and self.seed_wrap_boundary:
+            initial_rob_idx = RobIndex(flag=0, value=int(env.config.rob_size) - 1)
+        if initial_rob_idx is not None:
+            env.backend.set_next_rob_idx(initial_rob_idx)
+            env.backend.set_commit_frontier(initial_rob_idx)
         return SequenceState(
             next_lq_ptr=QueuePtr(flag=0, value=0),
             sq_ptr=QueuePtr(flag=0, value=0),

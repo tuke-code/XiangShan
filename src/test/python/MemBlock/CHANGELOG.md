@@ -2,7 +2,73 @@
 
 ## 2026-04-16
 
-### 1. 收口 `store_todo` 并补强 store partial/misalign/translated uncache 场景
+### 1. 让 `ResetEnvSequence` 默认以 ROB wrap boundary profile 启动真实 DUT 回归
+
+本条目记录一次围绕“把 ROB wrap 当成常态边界条件而不是单独复制 testcase”的收口。此前虽然已经补上了显式 `set_next_rob_idx()` / `set_commit_frontier()` 接口，但若仍要求每条 real-DUT testcase 再额外写一份 wrap 版本，维护成本过高，也不利于把 wrap 变成所有主回归默认覆盖的基础边界。本轮把该能力上提到 `ResetEnvSequence`：默认 reset 完成后，同时把 allocator 与 commit frontier seed 到 wrap 边界前一项；同时把仍写死绝对 ROB 值的真实 DUT 用例改成基于 runtime 绑定的相对断言。
+
+#### 变更摘要
+
+- `sequences/memblock_sequences.py`
+  - `ResetEnvSequence` 新增 `seed_wrap_boundary` / `initial_rob_idx`
+  - 默认在 reset 后同步调用 `set_next_rob_idx()` 与 `set_commit_frontier()`
+- `tests/test_MemBlock_random_load.py`
+  - non-mem blocker 改为绑定当前 `pending_ptr`，不再写死 `(0,0)`
+- `tests/test_MemBlock_replay.py`
+  - `RAR` 场景把 `wait_for_rob_idx=(0,0)` 改成直接引用已 prepare 的 older store
+  - `FF/RAR/BC` 中写死 `rob_idx_value == 1/2/3` 的断言改为对比 runtime 事务绑定值
+- `README.md`、`docs/test_sequence_and_extension_guide.md`、`docs/backend_request_model_design.md`
+  - 补充 `ResetEnvSequence` 默认 boundary-start profile 的说明
+  - 明确 env/unit test 若要保留 `(0,0)`，应显式关闭该 profile 或直接使用 `env.reset(...)`
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py src/test/python/MemBlock/tests/test_MemBlock_vector_unit_stride.py`
+  - 结果：`17 passed, 1 xfailed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py src/test/python/MemBlock/tests/test_MemBlock_scalar_ordering.py src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py`
+  - 结果：`19 passed, 4 xfailed`
+
+### 2. 去掉 `req_id` 的隐式 runtime 语义，并补上显式 ROB wrap seed 接口
+
+本条目记录一次围绕 backend/ROB 运行时绑定口径的收口。此前虽然 env 已托管 `robIdx` 分配，但 `transactions`、`lsq_agent` 和 `expect_scalar_load()` 等边界仍残留若干 `req_id -> robIdx/pdest/ftq/pc` 的 legacy fallback，这会让 testcase 在未 prepare 的情况下继续“看起来能跑”，也会让 ROB wrap 场景混入大 `req_id` 的副作用。本轮把这些隐式依赖切掉，要求 runtime 字段必须来自 `prepare()/send()/execute()` 或显式赋值，同时补入 allocator/frontier 的显式 seed 接口与对应单测。
+
+#### 变更摘要
+
+- `transactions.py`
+  - `LoadTxn` / `StoreTxn` / `VectorMemTxn` 的 `rob_idx`、`resolved_pdest`、`resolved_ftq_idx_*`、`resolved_pc` 去掉 `req_id` fallback
+  - `EnqueueLoadStep`、`EnqueueStoreStep`、`IssueOp` 的 `resolved_*` 路径改为未绑定即报错
+- `agents/lsq_agent.py`
+  - `enqueue_scalar_load/store` 不再从 `req_id` 静默推导 `robIdx`
+  - 未显式提供 `rob_idx` 时立即报错
+- `agents/backend_facade.py`
+  - 新增 `set_next_rob_idx()` 与 `set_commit_frontier()`
+  - 为 wrap 场景提供显式 allocator/frontier seed 控制
+- `agents/rob_agent.py`
+  - 新增 `set_pending_ptr()`，并限制只能在无 outstanding ROB entry 时调用
+- `MemBlock_env.py`
+  - `expect_scalar_load()` 不再从 `req_id` 推导 `rob_idx/pdest`
+- `tests/test_request_apis_backend_facade.py`
+  - 新增“未 prepare 即访问 runtime 字段报错”单测
+  - 新增 allocator/frontier wrap seed 单测
+- `tests/test_MemBlock_rob_agent.py`
+  - 新增 `pending_ptr` seed 成功/失败单测
+- `README.md`、`docs/backend_request_model_design.md`、`docs/test_sequence_and_extension_guide.md`、`docs/dut_port_behavior.md`
+  - 同步更新 `req_id` 仅作为 identifier 的文档口径
+  - 补入 wrap 场景应使用显式 seed 接口的说明
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：`20 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_rob_agent.py`
+  - 结果：`10 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py`
+  - 结果：`13 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_replay.py`
+  - 结果：`9 passed, 1 xfailed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py`
+  - 结果：`6 passed, 1 xfailed`
+
+### 3. 收口 `store_todo` 并补强 store partial/misalign/translated uncache 场景
 
 本条目记录一次围绕 store 专题实施地图和三组真实 DUT testcase 的收口。此前 `docs/store_todo.md` 同时承担了 coverage 讨论摘录、TODO 列表和实施建议三种职责，已经开始与 `coverage_summary.md` / `coverage_todo.md` 的主状态源口径分叉；同时 `scalar_store_pipeline`、`store_misalign`、`uncache_semantics` 三组用例也还缺少若干直接对应文档计划的场景。本轮一边把 `store_todo` 收敛成专题实施地图，一边把 partial 深矩阵、cross-page `SW` 和 translated NC/MMIO store 语义补进真实 DUT 回归。
 
@@ -29,7 +95,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py src/test/python/MemBlock/tests/test_MemBlock_store_misalign.py src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py`
   - 结果：`19 passed, 8 xfailed`
 
-### 2. 为 load fault / scalar load probe 新增专题文档入口
+### 4. 为 load fault / scalar load probe 新增专题文档入口
 
 本条目记录一次围绕 `00e7578f1b17bc30c718cb099a7bd59d1556f4d6` 新增用例的文档收口。此前 `test_MemBlock_mmu_fault.py` 与 `test_MemBlock_scalar_load_pipeline_probe.py` 已经落地，但对应的设计意图、sequence 边界和推荐阅读入口还没有同步进入文档体系。本轮补齐专题说明，并把入口挂回 README、MMU 文档、pipeline 方案文档与 sequence 指南。
 
@@ -55,7 +121,7 @@
 
 - 文档改动，未单独重跑 pytest
 
-### 3. 将 `scalar_load_pipeline_probe` 中两个 XPASS 用例升级为真实验证
+### 5. 将 `scalar_load_pipeline_probe` 中两个 XPASS 用例升级为真实验证
 
 本条目记录一次对 `test_MemBlock_scalar_load_pipeline_probe.py` 中两个历史 XPASS 用例的验证口径收紧。此前它们虽然“跑绿”，但分别存在 `older store` 只验证 materialize、以及 `nc_replay` 组合只验证 replay queue 落点而未明确证明最终 compare/writeback 收敛的问题。本轮不再依赖宽松断言，而是把 sequence 和 testcase 一起收紧到与测试意图一致的真实行为证明。
 
@@ -80,7 +146,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py`
   - 结果：`10 passed, 1 xfailed`
 
-### 4. 修复 rebase 后 mmu fault / scalar load probe 的 load writeback 登记错位
+### 6. 修复 rebase 后 mmu fault / scalar load probe 的 load writeback 登记错位
 
 本条目记录一次针对主线 `cff44ae39d0cba512943b4d817ab397d9363153f` rebase 后兼容性的收口。该主线改动将 testcase/sequence 对 load 观测的口径切换到 runtime 绑定的 `txn.rob_idx`，而这两条 directed 链路里仍残留若干按旧 `req_id -> legacy robIdx` 登记 `expect_scalar_load` / `wait_load_writeback_observed` 的位置，导致真实 writeback 被 scoreboard 误判为“未登记的 load writeback”。
 

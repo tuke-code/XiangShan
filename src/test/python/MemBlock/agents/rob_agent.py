@@ -156,6 +156,21 @@ class RobAgent:
         self._resume_after_non_mem_block = False
         self._resume_after_store_block = False
 
+    def set_pending_ptr(self, ptr) -> None:
+        if self._entries:
+            raise RuntimeError("cannot reset ROB pending_ptr while outstanding entries exist")
+        flag = int(ptr.flag)
+        value = int(ptr.value)
+        if flag not in (0, 1):
+            raise ValueError(f"ROB pending_ptr flag must be 0 or 1, got {flag}")
+        if value < 0 or value >= self.rob_size:
+            raise ValueError(f"ROB pending_ptr value out of range: {value}, rob_size={self.rob_size}")
+        normalized = RobIndex(flag=flag, value=value)
+        self.pending_ptr = normalized
+        self.pending_ptr_next = normalized
+        self.latest_commit_packet = RobCommitPacket.empty(normalized)
+        self._prepared_for_cycle = False
+
     def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:
         rob_idx = RobIndex(flag=int(rob_idx_flag), value=int(rob_idx_value))
         entry = RobEntry(rob_idx=rob_idx, kind="load")

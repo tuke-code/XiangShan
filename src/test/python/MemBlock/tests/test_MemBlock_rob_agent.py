@@ -3,7 +3,11 @@
 ROB agent unit tests.
 """
 
+import pytest
+
 from agents.rob_agent import RobAgent
+
+
 def test_api_MemBlock_rob_agent_single_load_packet():
     """单条 load 完成后应生成 lcommit packet。"""
 
@@ -154,3 +158,22 @@ def test_api_MemBlock_rob_agent_completion_before_issue_is_buffered():
     packet = agent.latest_commit_packet
     assert packet.commit
     assert packet.lcommit == 1
+
+
+def test_api_MemBlock_rob_agent_can_seed_pending_ptr_at_wrap_boundary():
+    agent = RobAgent(dut=None, rob_size=8)
+
+    agent.set_pending_ptr(type("Ptr", (), {"flag": 1, "value": 7})())
+
+    assert agent.pending_ptr.flag == 1
+    assert agent.pending_ptr.value == 7
+    assert agent.pending_ptr_next == agent.pending_ptr
+    assert agent.latest_commit_packet.pending_ptr_before == agent.pending_ptr
+
+
+def test_api_MemBlock_rob_agent_rejects_pending_ptr_seed_with_outstanding_entries():
+    agent = RobAgent(dut=None, rob_size=8)
+    agent.note_load_issued(0, 1)
+
+    with pytest.raises(RuntimeError, match="outstanding entries exist"):
+        agent.set_pending_ptr(type("Ptr", (), {"flag": 0, "value": 7})())

@@ -155,7 +155,7 @@ txn = LoadTxn(
 )
 
 env.backend.send(txn)
-env.expect_scalar_load(req_id=txn.req_id, addr=txn.addr)
+env.expect_scalar_load(rob_idx=txn.rob_idx, pdest=txn.resolved_pdest, addr=txn.addr)
 env.drain_writebacks()
 ```
 
@@ -186,11 +186,20 @@ env.backend.execute(
 )
 ```
 
-从 `2026-04-15` 开始，`robIdx` 默认由 env 在 `prepare()/execute()/send()` 流程中统一分配，不再建议让 testcase 直接把 `req_id` 当成 `robIdx` 编码使用。`req_id` 继续保留为 testcase 标签；如果场景需要在 issue 前拿到已分配的 `robIdx`，先显式调用一次 `prepare(...)`：
+从 `2026-04-15` 开始，`robIdx` 默认由 env 在 `prepare()/execute()/send()` 流程中统一分配，不再建议让 testcase 直接把 `req_id` 当成 `robIdx` 编码使用。现在 `req_id` 只保留为 testcase 标签；`txn.rob_idx`、`txn.resolved_pdest`、`txn.resolved_ftq_idx_*`、`txn.resolved_pc` 这类 runtime 字段若在 prepare/send 前访问，会直接报错。如果场景需要在 issue 前拿到已分配的 `robIdx`，先显式调用一次 `prepare(...)`：
 
 ```python
 prepared = env.backend.prepare(load0)
 assert prepared.rob_idx_of(load0) == load0.rob_idx
+```
+
+当前 `ResetEnvSequence` 默认会在 reset 后，把 allocator 与 commit frontier 一起 seed 到 wrap 边界前一项。这样大多数真实 DUT 回归都会自然跨过一次 ROB wrap；如果某个 env/unit 场景需要明确保留 `(0,0)` 起点，应显式关闭该 profile。
+
+如果需要专门构造 ROB wrap 场景，不要再通过“大 `req_id`”旁路 legacy 编码；应显式 seed allocator / commit frontier：
+
+```python
+env.backend.set_next_rob_idx(RobIndex(flag=0, value=511))
+env.backend.set_commit_frontier(RobIndex(flag=0, value=511))
 ```
 
 如果 testcase / sequence 需要显式传 ROB 过滤条件，优先直接传一个 `RobIndex`；只有在最靠近 DUT bundle 的 driver / monitor 边界，再拆成 `rob_idx_flag/rob_idx_value`：

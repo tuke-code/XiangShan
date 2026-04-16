@@ -17,7 +17,7 @@
 - 项目入口与用法概览：`src/test/python/MemBlock/README.md`
 - 常见脚本模板：`src/test/python/MemBlock/docs/backend_rob_cookbook.md`
 
-> 2026-04-15 更新：`robIdx` 默认已改为由 env 在 `prepare()` / `execute()` / `send()` 流程中统一分配。本文档中较早期那些“直接手填 `rob_idx_flag/value`”的片段，现应优先理解为兼容层示意；新的 testcase/sequence 建议改用 `RobIndex`、`RobRef`、`wait_for_rob` 与 `prepare(...)`，只在最靠近 DUT 端口的边界再拆成 flag/value。
+> 2026-04-15 更新：`robIdx` 默认已改为由 env 在 `prepare()` / `execute()` / `send()` 流程中统一分配。本文档中较早期那些“直接手填 `rob_idx_flag/value`”的片段，现应优先理解为兼容层示意；新的 testcase/sequence 建议改用 `RobIndex`、`RobRef`、`wait_for_rob` 与 `prepare(...)`，只在最靠近 DUT 端口的边界再拆成 flag/value。`req_id` 现在只作为请求标识符，不再隐式推导 `robIdx/pdest/ftq/pc`；若需要边界场景，应显式使用 `set_next_rob_idx()` / `set_commit_frontier()` 之类的 seed 接口，而不是拿大 `req_id` 旁路编码。
 
 ## 2. 背景：旧接口为什么会越来越臃肿
 
@@ -438,6 +438,8 @@ load_result = ScalarLoadSequence(
     assert_no_outstanding=True,
 ).run(env)
 ```
+
+这里的 `ResetEnvSequence` 默认还会把 allocator 与 commit frontier 一起 seed 到 wrap 边界前一项，使普通 real-DUT 回归天然覆盖一次 ROB wrap。若某个 env/unit 场景必须从 `(0,0)` 起步，应显式传 `seed_wrap_boundary=False`。
 
 这一层和 `env.backend.send(load_txn)` 的关系可以理解为：
 

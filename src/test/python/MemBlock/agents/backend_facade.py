@@ -47,6 +47,15 @@ class BackendFacade:
     def reset_runtime_state(self) -> None:
         self._next_rob_idx = RobIndex(flag=0, value=0)
 
+    def _validate_rob_idx(self, rob_idx: RobIndex, *, field_name: str) -> RobIndex:
+        flag = int(rob_idx.flag)
+        value = int(rob_idx.value)
+        if flag not in (0, 1):
+            raise ValueError(f"{field_name} flag must be 0 or 1, got {flag}")
+        if value < 0 or value >= int(self.env.config.rob_size):
+            raise ValueError(f"{field_name} value out of range: {value}, rob_size={int(self.env.config.rob_size)}")
+        return RobIndex(flag=flag, value=value)
+
     def _inc_rob_idx(self, rob_idx: RobIndex) -> RobIndex:
         value = int(rob_idx.value) + 1
         flag = int(rob_idx.flag)
@@ -91,6 +100,38 @@ class BackendFacade:
             rob_idx_flag=legacy_positional_flag,
             rob_idx_value=legacy_positional_value,
         )
+
+    def set_next_rob_idx(
+        self,
+        rob_idx: RobIndex | None = None,
+        *,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+    ) -> None:
+        normalized_rob_idx = self._normalize_rob_idx_input(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+        if normalized_rob_idx is None:
+            raise ValueError("set_next_rob_idx requires a rob_idx")
+        self._next_rob_idx = self._validate_rob_idx(normalized_rob_idx, field_name="next ROB index")
+
+    def set_commit_frontier(
+        self,
+        rob_idx: RobIndex | None = None,
+        *,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+    ) -> None:
+        normalized_rob_idx = self._normalize_rob_idx_input(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+        if normalized_rob_idx is None:
+            raise ValueError("set_commit_frontier requires a rob_idx")
+        self.rob.set_pending_ptr(self._validate_rob_idx(normalized_rob_idx, field_name="ROB commit frontier"))
 
     def wait_load_enq_ready(self, max_cycles: int = 200) -> None:
         self.lsq.wait_load_enq_ready(max_cycles=max_cycles)
@@ -239,8 +280,10 @@ class BackendFacade:
         override = getattr(owner, "rob_idx_override", None)
         if override is not None:
             return RobIndex(flag=int(override.flag), value=int(override.value))
+        if isinstance(owner, (LoadTxn, StoreTxn, VectorMemTxn)):
+            return None
         return make_rob_index(
-            rob_idx=getattr(owner, "rob_idx", None) if not isinstance(owner, (LoadTxn, StoreTxn, VectorMemTxn)) else None,
+            rob_idx=getattr(owner, "rob_idx", None),
             rob_idx_flag=getattr(owner, "rob_idx_flag", None),
             rob_idx_value=getattr(owner, "rob_idx_value", None),
         )

@@ -84,6 +84,17 @@ def legacy_pc(req_id: int) -> int:
     return 0x80000000 + int(req_id) * 4
 
 
+def _missing_runtime_binding(owner, field: str, *, remedy: str | None = None):
+    owner_type = type(owner).__name__
+    req_id = getattr(owner, "req_id", None)
+    message = f"{owner_type}.{field} requires explicit runtime binding"
+    if req_id is not None:
+        message += f" (req_id={int(req_id)})"
+    if remedy is None:
+        remedy = "call env.backend.prepare()/send()/execute() first, or set the field explicitly"
+    raise RuntimeError(f"{message}; {remedy}")
+
+
 @dataclass(frozen=True)
 class QueuePtr:
     """环形队列指针。"""
@@ -227,7 +238,7 @@ class LoadTxn:
         override = self.rob_idx_override
         if override is not None:
             return override
-        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
+        _missing_runtime_binding(self, "rob_idx", remedy="call env.backend.prepare()/send()/execute(), or set rob_idx_override")
 
     @property
     def rob_idx_flag(self) -> int:
@@ -241,7 +252,9 @@ class LoadTxn:
     def resolved_pdest(self) -> int:
         if self.assigned_pdest is not None:
             return int(self.assigned_pdest)
-        return legacy_pdest(self.req_id, 64) if self.pdest is None else int(self.pdest)
+        if self.pdest is not None:
+            return int(self.pdest)
+        _missing_runtime_binding(self, "resolved_pdest", remedy="call env.backend.prepare()/send()/execute(), or set pdest")
 
     @property
     def resolved_ftq_idx_flag(self) -> int:
@@ -249,7 +262,9 @@ class LoadTxn:
             return int(self.assigned_ftq_idx_flag)
         if self.ftq_idx_flag is not None:
             return int(self.ftq_idx_flag)
-        return 0
+        if self.assigned_ftq_idx_value is not None or self.ftq_idx_value is not None:
+            return 0
+        _missing_runtime_binding(self, "resolved_ftq_idx_flag", remedy="call env.backend.prepare()/send()/execute(), or set ftq_idx_flag/ftq_idx_value")
 
     @property
     def resolved_ftq_idx_value(self) -> int:
@@ -257,7 +272,7 @@ class LoadTxn:
             return int(self.assigned_ftq_idx_value)
         if self.ftq_idx_value is not None:
             return int(self.ftq_idx_value)
-        return legacy_ftq_idx_value(self.req_id)
+        _missing_runtime_binding(self, "resolved_ftq_idx_value", remedy="call env.backend.prepare()/send()/execute(), or set ftq_idx_value")
 
     @property
     def resolved_pc(self) -> int:
@@ -265,7 +280,7 @@ class LoadTxn:
             return int(self.assigned_pc)
         if self.pc is not None:
             return int(self.pc)
-        return legacy_pc(self.req_id)
+        _missing_runtime_binding(self, "resolved_pc", remedy="call env.backend.prepare()/send()/execute(), or set pc")
 
 
 @dataclass
@@ -324,7 +339,7 @@ class StoreTxn:
         override = self.rob_idx_override
         if override is not None:
             return override
-        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
+        _missing_runtime_binding(self, "rob_idx", remedy="call env.backend.prepare()/send()/execute(), or set rob_idx_override")
 
     @property
     def rob_idx_flag(self) -> int:
@@ -340,7 +355,9 @@ class StoreTxn:
             return int(self.assigned_ftq_idx_flag)
         if self.ftq_idx_flag is not None:
             return int(self.ftq_idx_flag)
-        return 0
+        if self.assigned_ftq_idx_value is not None or self.ftq_idx_value is not None:
+            return 0
+        _missing_runtime_binding(self, "resolved_ftq_idx_flag", remedy="call env.backend.prepare()/send()/execute(), or set ftq_idx_flag/ftq_idx_value")
 
     @property
     def resolved_ftq_idx_value(self) -> int:
@@ -348,7 +365,7 @@ class StoreTxn:
             return int(self.assigned_ftq_idx_value)
         if self.ftq_idx_value is not None:
             return int(self.ftq_idx_value)
-        return legacy_ftq_idx_value(self.req_id)
+        _missing_runtime_binding(self, "resolved_ftq_idx_value", remedy="call env.backend.prepare()/send()/execute(), or set ftq_idx_value")
 
     @property
     def size_bytes(self) -> int:
@@ -457,7 +474,7 @@ class VectorMemTxn:
         override = self.rob_idx_override
         if override is not None:
             return override
-        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
+        _missing_runtime_binding(self, "rob_idx", remedy="call env.backend.prepare()/send()/execute(), or set rob_idx_override")
 
     @property
     def rob_idx_flag(self) -> int:
@@ -471,7 +488,9 @@ class VectorMemTxn:
     def resolved_pdest(self) -> int:
         if self.assigned_pdest is not None:
             return int(self.assigned_pdest)
-        return legacy_pdest(self.req_id, 128) if self.pdest is None else int(self.pdest)
+        if self.pdest is not None:
+            return int(self.pdest)
+        _missing_runtime_binding(self, "resolved_pdest", remedy="call env.backend.prepare()/send()/execute(), or set pdest")
 
     @property
     def resolved_ftq_idx_flag(self) -> int:
@@ -479,7 +498,9 @@ class VectorMemTxn:
             return int(self.assigned_ftq_idx_flag)
         if self.ftq_idx_flag is not None:
             return int(self.ftq_idx_flag)
-        return 0
+        if self.assigned_ftq_idx_value is not None or self.ftq_idx_value is not None:
+            return 0
+        _missing_runtime_binding(self, "resolved_ftq_idx_flag", remedy="call env.backend.prepare()/send()/execute(), or set ftq_idx_flag/ftq_idx_value")
 
     @property
     def resolved_ftq_idx_value(self) -> int:
@@ -487,7 +508,7 @@ class VectorMemTxn:
             return int(self.assigned_ftq_idx_value)
         if self.ftq_idx_value is not None:
             return int(self.ftq_idx_value)
-        return legacy_ftq_idx_value(self.req_id)
+        _missing_runtime_binding(self, "resolved_ftq_idx_value", remedy="call env.backend.prepare()/send()/execute(), or set ftq_idx_value")
 
     @property
     def size_bytes(self) -> int:
@@ -588,7 +609,7 @@ class EnqueueLoadStep:
         rob_idx = self.rob_idx
         if rob_idx is not None:
             return rob_idx
-        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
+        _missing_runtime_binding(self, "resolved_rob_idx", remedy="prepare the backend send plan first, or pass rob_idx explicitly")
 
     @property
     def resolved_rob_idx_flag(self) -> int:
@@ -672,7 +693,7 @@ class EnqueueStoreStep:
         rob_idx = self.rob_idx
         if rob_idx is not None:
             return rob_idx
-        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
+        _missing_runtime_binding(self, "resolved_rob_idx", remedy="prepare the backend send plan first, or pass rob_idx explicitly")
 
     @property
     def resolved_rob_idx_flag(self) -> int:
@@ -907,7 +928,7 @@ class IssueOp:
         rob_idx = self.rob_idx
         if rob_idx is not None:
             return rob_idx
-        return RobIndex(flag=legacy_rob_idx_flag(self.req_id), value=legacy_rob_idx_value(self.req_id))
+        _missing_runtime_binding(self, "resolved_rob_idx", remedy="prepare the backend issue op first, or pass rob_idx explicitly")
 
     @property
     def resolved_rob_idx_flag(self) -> int:
@@ -921,25 +942,27 @@ class IssueOp:
     def resolved_pdest(self) -> int:
         if self.pdest is not None:
             return int(self.pdest)
-        return legacy_pdest(self.req_id, 64)
+        _missing_runtime_binding(self, "resolved_pdest", remedy="prepare the backend issue op first, or pass pdest explicitly")
 
     @property
     def resolved_ftq_idx_flag(self) -> int:
         if self.ftq_idx_flag is not None:
             return int(self.ftq_idx_flag)
-        return 0
+        if self.ftq_idx_value is not None:
+            return 0
+        _missing_runtime_binding(self, "resolved_ftq_idx_flag", remedy="prepare the backend issue op first, or pass ftq_idx_flag/ftq_idx_value explicitly")
 
     @property
     def resolved_ftq_idx_value(self) -> int:
         if self.ftq_idx_value is not None:
             return int(self.ftq_idx_value)
-        return legacy_ftq_idx_value(self.req_id)
+        _missing_runtime_binding(self, "resolved_ftq_idx_value", remedy="prepare the backend issue op first, or pass ftq_idx_value explicitly")
 
     @property
     def resolved_pc(self) -> int:
         if self.pc is not None:
             return int(self.pc)
-        return legacy_pc(self.req_id)
+        _missing_runtime_binding(self, "resolved_pc", remedy="prepare the backend issue op first, or pass pc explicitly")
 
     @property
     def store_size_bytes(self) -> int:

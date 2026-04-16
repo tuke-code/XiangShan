@@ -16,6 +16,12 @@ class LsqAgent:
     def __init__(self, env) -> None:
         self.env = env
 
+    @staticmethod
+    def _require_rob_idx(rob_idx_flag: int | None, rob_idx_value: int | None, *, action: str) -> tuple[int, int]:
+        if rob_idx_flag is None or rob_idx_value is None:
+            raise ValueError(f"{action} requires an explicit rob_idx; call env.backend.prepare()/send()/execute() first")
+        return int(rob_idx_flag), int(rob_idx_value)
+
     async def _wait_load_enq_ready_async(self, max_cycles: int = 200) -> None:
         for _ in range(max_cycles):
             if int(self.env.dut.io_reset_backend.value):
@@ -50,14 +56,19 @@ class LsqAgent:
         rob_idx_value: int | None = None,
     ) -> None:
         await self._wait_load_enq_ready_async()
+        resolved_rob_flag, resolved_rob_value = self._require_rob_idx(
+            rob_idx_flag,
+            rob_idx_value,
+            action="enqueue_scalar_load",
+        )
 
         req = self.env.lsq_enq_req[enq_port]
         self.env.lsq_enq_meta.need_alloc[enq_port].value = 1
         req.valid.value = 1
         req.bits_fuType.value = FU_TYPE_LDU
         req.bits_uopIdx.value = req_id & 0x7F
-        req.bits_robIdx_flag.value = (req_id >> 9) & 0x1 if rob_idx_flag is None else int(rob_idx_flag)
-        req.bits_robIdx_value.value = req_id & 0x1FF if rob_idx_value is None else int(rob_idx_value)
+        req.bits_robIdx_flag.value = resolved_rob_flag
+        req.bits_robIdx_value.value = resolved_rob_value
         req.bits_lqIdx_flag.value = lq_ptr.flag
         req.bits_lqIdx_value.value = lq_ptr.value
         req.bits_sqIdx_flag.value = sq_ptr.flag
@@ -127,14 +138,17 @@ class LsqAgent:
         rob_idx_value: int | None = None,
     ) -> QueuePtr:
         await self._wait_store_enq_ready_async()
+        resolved_rob_flag, resolved_rob_value = self._require_rob_idx(
+            rob_idx_flag,
+            rob_idx_value,
+            action="enqueue_scalar_store",
+        )
 
         req = self.env.lsq_enq_req[enq_port]
         self.env.lsq_enq_meta.need_alloc[enq_port].value = 2
         req.valid.value = 1
         req.bits_fuType.value = FU_TYPE_STU
         req.bits_uopIdx.value = req_id & 0x7F
-        resolved_rob_flag = (req_id >> 9) & 0x1 if rob_idx_flag is None else int(rob_idx_flag)
-        resolved_rob_value = req_id & 0x1FF if rob_idx_value is None else int(rob_idx_value)
         req.bits_robIdx_flag.value = resolved_rob_flag
         req.bits_robIdx_value.value = resolved_rob_value
         req.bits_lqIdx_flag.value = 0

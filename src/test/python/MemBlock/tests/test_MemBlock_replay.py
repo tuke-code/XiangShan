@@ -12,7 +12,7 @@ MemBlock 真实 DUT replay 场景测试。
 
 import pytest
 
-from transactions import LoadTxn, ptr_inc, RobIndex, StoreTxn
+from transactions import LoadTxn, ptr_inc, StoreTxn
 from request_apis import send_load
 from sequences import (
     FlushStoreBuffersSequence,
@@ -133,7 +133,7 @@ def test_api_MemBlock_scalar_forward_fail_replay_smoke(env):
 
     assert result.replay_event["cause"] == "FF", "FF replay 原因不匹配"
     assert result.replay_event["source"] in {"replay_queue", "replay_lane", "ldu"}, "FF replay 观测来源异常"
-    assert result.replay_event["rob_idx_value"] == 1, "FF replay 的 load robIdx 不匹配"
+    assert result.replay_event["rob_idx_value"] == result.load_result.txn.rob_idx_value, "FF replay 的 load robIdx 不匹配"
     assert result.sq_forward_event["data_invalid_valid"] == 1, "FF 场景未命中 SQ dataInvalid"
     assert result.sq_forward_event["match_invalid"] == 0, "FF 场景不应退化为 matchInvalid"
     assert result.sq_forward_event["forward_invalid"] == 0, "FF 场景不应退化为 forwardInvalid"
@@ -254,15 +254,16 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
         load_wait_strict=0,
         store_set_hit=1,
     )
-    older_load.wait_for_rob_idx = RobIndex(flag=0, value=0)
+    fake_store_txn = StoreTxn(
+        req_id=0,
+        sq_ptr=initial_state.sq_ptr,
+        addr=RAR_OLDER_STORE_ADDR,
+        data=RAR_OLDER_STORE_DATA,
+    )
+    older_load.wait_for_rob = fake_store_txn
 
     result = ScalarRarViolationSequence(
-        fake_store_txn=StoreTxn(
-            req_id=0,
-            sq_ptr=initial_state.sq_ptr,
-            addr=RAR_OLDER_STORE_ADDR,
-            data=RAR_OLDER_STORE_DATA,
-        ),
+        fake_store_txn=fake_store_txn,
         older_load_txn=older_load,
         younger_load_txn=LoadTxn(
             req_id=2,
@@ -276,15 +277,15 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
 
     assert result.release_event["valid"] == 1, "RAR 场景未观测到 cacheline release"
     assert (int(result.release_event["paddr"]) & ~0x3F) == (RAR_ADDR & ~0x3F), "RAR release cacheline 不匹配"
-    assert result.younger_writeback["rob_idx_value"] == 2, "RAR 场景 younger load 未先完成首次写回"
+    assert result.younger_writeback["rob_idx_value"] == result.younger_load.rob_idx_value, "RAR 场景 younger load 未先完成首次写回"
     assert result.younger_writeback["data"] == RAR_OLD_DATA, "RAR 场景 younger load 首次写回未读到旧值"
     assert result.rar_nuke_response["resp_valid"] == 1 and result.rar_nuke_response["nuke"] == 1, "RAR nuke response 未命中"
-    assert result.rar_nuke_response["rob_idx_value"] == 1, "RAR nuke response 未对应 older load"
-    assert result.older_writeback["rob_idx_value"] == 1, "RAR 场景 older load 未在 release 后写回"
+    assert result.rar_nuke_response["rob_idx_value"] == result.older_load.rob_idx_value, "RAR nuke response 未对应 older load"
+    assert result.older_writeback["rob_idx_value"] == result.older_load.rob_idx_value, "RAR 场景 older load 未在 release 后写回"
     assert result.older_writeback["data"] == RAR_NEW_DATA, "RAR 场景 older load 未读到 probe 后的新值"
     if result.violation_event is not None:
         assert result.violation_event["source"] == "memory_violation", "RAR violation 事件来源异常"
-        assert result.violation_event["rob_idx_value"] == 1, "RAR violation 未对应 older load"
+        assert result.violation_event["rob_idx_value"] == result.older_load.rob_idx_value, "RAR violation 未对应 older load"
     assert result.fake_store_view.committed, "RAR 场景中的依赖 store 未进入 committed"
     assert result.completed_load_count == 1, "RAR 场景应仅完成 older load 的 commit-boundary compare"
 
@@ -334,7 +335,7 @@ def test_api_MemBlock_scalar_bank_conflict_replay_smoke(env):
         assert_no_outstanding=True,
     ).run(env)
 
-    assert result.replay_event["rob_idx_value"] == 3, "bank conflict replay 未对应 victim load"
+    assert result.replay_event["rob_idx_value"] == result.issued_loads[1].rob_idx_value, "bank conflict replay 未对应 victim load"
     assert "BC" in result.load_debug_event["replay_causes"], "load debug 未命中 BC cause"
     assert "FF" not in result.load_debug_event["replay_causes"], "bank conflict 场景不应混入 FF cause"
     assert "NK" not in result.load_debug_event["replay_causes"], "bank conflict 场景不应混入 NK cause"

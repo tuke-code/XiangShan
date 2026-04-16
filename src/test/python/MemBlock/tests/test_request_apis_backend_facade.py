@@ -201,6 +201,15 @@ class _FakeCommitAgent:
         self.calls.append(("queue_store_commit", count))
 
 
+class _FakeRobAgent:
+    def __init__(self) -> None:
+        self.calls = []
+        self._entries = []
+
+    def set_pending_ptr(self, ptr) -> None:
+        self.calls.append(("set_pending_ptr", ptr.flag, ptr.value))
+
+
 class _FakeMemory:
     def __init__(self) -> None:
         self.calls = []
@@ -225,7 +234,7 @@ class _FakeFacadeEnv:
         self.lsq_agent = _FakeLsqAgent()
         self.issue_agent = _FakeIssueAgent()
         self.vector_issue_agent = _FakeVectorIssueAgent()
-        self.rob_agent = object()
+        self.rob_agent = _FakeRobAgent()
         self.commit_agent = _FakeCommitAgent()
         self.memory = _FakeMemory()
         self.vector_monitor = _FakeVectorMonitor()
@@ -547,6 +556,69 @@ def test_api_backend_facade_prepare_binds_load_txn_before_send():
     assert txn.rob_idx == RobIndex(flag=0, value=0)
     assert txn.resolved_pdest == 0
     assert prepared.rob_idx_of(txn) == prepared.rob_idx_of(txn.req_id)
+
+
+def test_api_transactions_require_runtime_binding_before_access():
+    load_txn = LoadTxn(
+        req_id=0x31,
+        addr=0x1234,
+        lq_ptr=QueuePtr(flag=0, value=1),
+        sq_ptr=QueuePtr(flag=0, value=2),
+    )
+    store_txn = StoreTxn(
+        req_id=0x32,
+        sq_ptr=QueuePtr(flag=0, value=3),
+        addr=0x5678,
+        data=0xAA55,
+    )
+    vector_txn = VectorMemTxn(
+        req_id=0x33,
+        is_load=True,
+        opcode_class="unit_stride",
+        base_addr=0x8000,
+        lq_ptr=QueuePtr(flag=0, value=4),
+        sq_ptr=QueuePtr(flag=0, value=5),
+        vl=2,
+        element_count=2,
+    )
+
+    with pytest.raises(RuntimeError, match="LoadTxn\\.rob_idx requires explicit runtime binding"):
+        _ = load_txn.rob_idx
+    with pytest.raises(RuntimeError, match="LoadTxn\\.resolved_pdest requires explicit runtime binding"):
+        _ = load_txn.resolved_pdest
+    with pytest.raises(RuntimeError, match="StoreTxn\\.rob_idx requires explicit runtime binding"):
+        _ = store_txn.rob_idx
+    with pytest.raises(RuntimeError, match="StoreTxn\\.resolved_ftq_idx_value requires explicit runtime binding"):
+        _ = store_txn.resolved_ftq_idx_value
+    with pytest.raises(RuntimeError, match="VectorMemTxn\\.rob_idx requires explicit runtime binding"):
+        _ = vector_txn.rob_idx
+    with pytest.raises(RuntimeError, match="VectorMemTxn\\.resolved_pdest requires explicit runtime binding"):
+        _ = vector_txn.resolved_pdest
+
+
+def test_api_backend_facade_can_seed_allocator_wrap():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+    backend.set_next_rob_idx(RobIndex(flag=0, value=511))
+    first = LoadTxn(req_id=1, addr=0x1000, lq_ptr=QueuePtr(0, 1), sq_ptr=QueuePtr(0, 2))
+    second = LoadTxn(req_id=2, addr=0x2000, lq_ptr=QueuePtr(0, 2), sq_ptr=QueuePtr(0, 2))
+
+    backend.prepare(first)
+    backend.prepare(second)
+
+    assert first.rob_idx == RobIndex(flag=0, value=511)
+    assert second.rob_idx == RobIndex(flag=1, value=0)
+    assert first.resolved_pdest == 63
+    assert second.resolved_pdest == 0
+
+
+def test_api_backend_facade_can_seed_commit_frontier():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+
+    backend.set_commit_frontier(RobIndex(flag=0, value=511))
+
+    assert env.rob_agent.calls == [("set_pending_ptr", 0, 511)]
 
 
 def test_api_backend_facade_prepare_resolves_wait_for_rob_ref():

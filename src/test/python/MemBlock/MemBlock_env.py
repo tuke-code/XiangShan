@@ -1862,24 +1862,16 @@ class MemBlockEnv:
     ):
         """登记一笔标量 load 的期望结果。"""
 
-        if req_id is not None:
-            rob_idx = self._normalize_rob_idx_filter(
-                rob_idx=rob_idx,
-                rob_idx_flag=rob_idx_flag,
-                rob_idx_value=rob_idx_value,
-            )
-            if rob_idx is None:
-                rob_idx = RobIndex(flag=(req_id >> 9) & 0x1, value=req_id & 0x1FF)
-            if pdest is None:
-                pdest = req_id % 64
-        else:
-            rob_idx = self._normalize_rob_idx_filter(
-                rob_idx=rob_idx,
-                rob_idx_flag=rob_idx_flag,
-                rob_idx_value=rob_idx_value,
-            )
+        rob_idx = self._normalize_rob_idx_filter(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
         if rob_idx is None or pdest is None:
-            raise ValueError("expect_scalar_load 需要 `req_id`，或同时提供 `rob_idx/pdest`")
+            detail = ""
+            if req_id is not None:
+                detail = f" (req_id={int(req_id)} is now debug-only and no longer implies rob_idx/pdest)"
+            raise ValueError(f"expect_scalar_load requires explicit rob_idx/pdest{detail}")
         return self.memory.expect_load(
             rob_idx_flag=rob_idx.flag,
             rob_idx_value=rob_idx.value,

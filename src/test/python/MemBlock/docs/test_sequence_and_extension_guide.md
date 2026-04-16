@@ -45,6 +45,13 @@
 
 几乎所有真实 DUT 用例都应从一次完整复位开始。当前更推荐通过 `ResetEnvSequence` 完成，而不是在 testcase 中直接拼 `reset_env_and_wait_backend()`。
 
+当前 `ResetEnvSequence` 默认会在 reset 完成后，把 backend allocator 和 ROB commit frontier 一起 seed 到 wrap 边界前一项。这样大多数真实 DUT 回归都会自然跨过一次 `(0, rob_size-1) -> (1, 0)`，避免为每条 testcase 额外复制一份“wrap 版本”。
+
+如果某类 env/unit test 需要明确保留 `(0,0)` 起点，应：
+
+1. 直接使用 `env.reset(...)`；
+2. 或显式构造 `ResetEnvSequence(seed_wrap_boundary=False)`。
+
 标准过程是：
 
 1. 申请 `env` fixture。
@@ -52,6 +59,7 @@
 3. 检查 `dut.reset == 0`。
 4. 检查 `io_reset_backend == 0`。
 5. 检查需要的 ready 口已恢复。
+6. 若未显式关闭 boundary profile，则 allocator/frontier 已定位到 wrap 边界前一项。
 
 对应时序图如下：
 
@@ -99,15 +107,16 @@ from transactions import LoadTxn
 
 txn = LoadTxn(req_id=req_id, addr=addr, lq_ptr=lq_ptr, sq_ptr=sq_ptr)
 env.backend.send(txn)
-env.expect_scalar_load(req_id=txn.req_id, addr=txn.addr)
+env.expect_scalar_load(rob_idx=txn.rob_idx, pdest=txn.resolved_pdest, addr=txn.addr)
 env.drain_writebacks()
 ```
 
 这里的关键约束是：
 
 1. 主动控制统一走 `env.backend`。
-2. load compare 仍通过 `env.expect_scalar_load()` 登记。
-3. primitive 场景结束后仍要显式调用 `drain_writebacks()` 或更强的收敛检查。
+2. `req_id` 只作为请求标签，不再隐式推导 `rob_idx/pdest/ftq/pc`。
+3. load compare 仍通过 `env.expect_scalar_load()` 登记，但需要使用已经 prepare/send 绑定好的 runtime 字段。
+4. primitive 场景结束后仍要显式调用 `drain_writebacks()` 或更强的收敛检查。
 
 如果你需要表达“多条 load 同拍 issue”或“load 与 sta/std 混合同拍 issue”，先问自己这是不是一个稳定业务场景。
 

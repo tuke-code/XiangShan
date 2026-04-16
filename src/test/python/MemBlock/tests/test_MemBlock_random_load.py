@@ -22,7 +22,6 @@ from transactions import (
     IssueOp,
     LoadTxn,
     ptr_inc,
-    RobIndex,
 )
 from sequences import (
     ResetEnvSequence,
@@ -339,8 +338,9 @@ def test_api_MemBlock_random_mem_load_non_mem_blocker_delays_compare(env):
     expected_data = rng.getrandbits(64)
 
     stream_state = _reset_env_and_state(env)
+    blocker_rob_idx = env.rob_agent.pending_ptr
     env.preload_u64(load_addr, expected_data)
-    env.backend.insert_non_mem_blocker(rob_idx=RobIndex(flag=0, value=0))
+    env.backend.insert_non_mem_blocker(rob_idx=blocker_rob_idx)
 
     txn = LoadTxn(
         req_id=req_id,
@@ -372,7 +372,7 @@ def test_api_MemBlock_random_mem_load_non_mem_blocker_delays_compare(env):
         "non-mem blocker 未 release 前，younger load 不应从 ROB 队列移除"
     )
 
-    env.backend.release_non_mem_blocker(rob_idx=RobIndex(flag=0, value=0))
+    env.backend.release_non_mem_blocker(rob_idx=blocker_rob_idx)
     env.advance_cycles(12)
     env.drain_writebacks(max_cycles=400)
     assert env.rob_agent.stats["rob_non_mem_resume_count"] > 0, (
