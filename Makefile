@@ -303,7 +303,7 @@ $(FRONTEND_PYLIB): $(FRONTEND_TOP_V)
 		--tdir $(FRONTEND_BUILD_DIR)/pylib/Frontend \
 		-w $(FRONTEND_BUILD_DIR)/frontend.fst \
 		--coverage \
-		-V "--output-split;20000;--no-timing"
+		-V "+define+SYNTHESIS;--output-split;20000;--no-timing"
 frontend: $(FRONTEND_PYLIB)
 .PHONY: frontend
 
@@ -336,7 +336,7 @@ $(MEMBLOCK_PYLIB): $(MEMBLOCK_TOP_V) $(MEMBLOCK_INTERNAL_YAML)
 		--tdir $(MEMBLOCK_BUILD_DIR)/pylib/MemBlock \
 		-w $(MEMBLOCK_BUILD_DIR)/memblock.fst \
 		--coverage \
-		-V "--output-split;20000;--no-timing;--threads;8"
+		-V "+define+SYNTHESIS;--output-split;20000;--no-timing;--threads;8"
 	test -f $(MEMBLOCK_BUILD_DIR)/pylib/MemBlock/libUTMemBlock.so
 	cp $(MEMBLOCK_BUILD_DIR)/pylib/MemBlock/libUTMemBlock.so $@
 memblock: $(MEMBLOCK_PYLIB)
