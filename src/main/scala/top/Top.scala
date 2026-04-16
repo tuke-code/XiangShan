@@ -493,9 +493,12 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
 
     val instrCnt_sink = Wire(UInt(64.W))
     val pL3Sets = Wire(UInt(64.W))
+    val pL3Mshrs = Wire(UInt(64.W))
     BoringUtils.addSink(instrCnt_sink, "DSE_INSTRCNT")
     BoringUtils.addSink(pL3Sets, "DSE_L3SETS")
+    BoringUtils.addSink(pL3Mshrs, "DSE_L3MSHRS")
     l3cacheOpt.foreach(_.module.io.sets := pL3Sets)
+    l3cacheOpt.foreach(_.module.io.mshrs := pL3Mshrs)
 
     dseCtrl.module.io.clk := io.clock
     dseCtrl.module.io.rst := io.dse_rst

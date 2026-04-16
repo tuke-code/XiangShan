@@ -57,6 +57,8 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
     val max_epoch = RegInit(0.U(64.W))
     val staticL2Sets = p(L2ParamKey).sets
     val staticL3Sets = p(SoCParamsKey).L3CacheParamsOpt.get.sets
+    val staticL2Mshrs = p(L2ParamKey).mshrs
+    val staticL3Mshrs = p(SoCParamsKey).L3CacheParamsOpt.get.mshrs
 
     val robSize0 = RegInit(RobSize.U(64.W))
     val robSize1 = RegInit(RobSize.U(64.W))
@@ -90,14 +92,14 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
 //    val lsDqSize1 = RegInit(dpParams.LsDqSize.U(64.W))
 //    val lsDqSize = Wire(UInt(64.W))
 //
-//    val l2MSHRs0 = RegInit(L2MSHRs.U(64.W))
-//    val l2MSHRs1 = RegInit(L2MSHRs.U(64.W))
-//    val l2MSHRs = Wire(UInt(64.W))
-//
-//    val l3MSHRs0 = RegInit(L3MSHRs.U(64.W))
-//    val l3MSHRs1 = RegInit(L3MSHRs.U(64.W))
-//    val l3MSHRs = Wire(UInt(64.W))
-//
+    val l2MSHRs0 = RegInit(staticL2Mshrs.U(64.W))
+    val l2MSHRs1 = RegInit(staticL2Mshrs.U(64.W))
+    val l2MSHRs = Wire(UInt(64.W))
+
+    val l3MSHRs0 = RegInit(staticL3Mshrs.U(64.W))
+    val l3MSHRs1 = RegInit(staticL3Mshrs.U(64.W))
+    val l3MSHRs = Wire(UInt(64.W))
+
     val l2Sets0 = RegInit(staticL2Sets.U(64.W))
     val l2Sets1 = RegInit(staticL2Sets.U(64.W))
     val l2Sets = Wire(UInt(64.W))
@@ -154,10 +156,10 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
 //      0x168 -> Seq(RegField(64, fpDqSize1)),
 //      0x170 -> Seq(RegField(64, lsDqSize0)),
 //      0x178 -> Seq(RegField(64, lsDqSize1)),
-//      0x180 -> Seq(RegField(64, l2MSHRs0)),
-//      0x188 -> Seq(RegField(64, l2MSHRs1)),
-//      0x190 -> Seq(RegField(64, l3MSHRs0)),
-//      0x198 -> Seq(RegField(64, l3MSHRs1)),
+      0x180 -> Seq(RegField(64, l2MSHRs0)),
+      0x188 -> Seq(RegField(64, l2MSHRs1)),
+      0x190 -> Seq(RegField(64, l3MSHRs0)),
+      0x198 -> Seq(RegField(64, l3MSHRs1)),
       0x1A0 -> Seq(RegField(64, l2Sets0)),
       0x1A8 -> Seq(RegField(64, l2Sets1)),
       0x1B0 -> Seq(RegField(64, l3Sets0)),
@@ -183,8 +185,8 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
 //    intDqSize := Mux(ctrlSel.orR, intDqSize1, intDqSize0)
 //    fpDqSize := Mux(ctrlSel.orR, fpDqSize1, fpDqSize0)
 //    lsDqSize := Mux(ctrlSel.orR, lsDqSize1, lsDqSize0)
-//    l2MSHRs := Mux(ctrlSel.orR, l2MSHRs1, l2MSHRs0)
-//    l3MSHRs := Mux(ctrlSel.orR, l3MSHRs1, l3MSHRs0)
+    l2MSHRs := Mux(appliedCtrlSel.orR, l2MSHRs1, l2MSHRs0)
+    l3MSHRs := Mux(appliedCtrlSel.orR, l3MSHRs1, l3MSHRs0)
     l2Sets := Mux(appliedCtrlSel.orR, l2Sets1, l2Sets0)
     l3Sets := Mux(appliedCtrlSel.orR, l3Sets1, l3Sets0)
     intPhyRegs := Mux(appliedCtrlSel.orR, intPhyRegs1, intPhyRegs0)
@@ -202,8 +204,8 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
 //    BoringUtils.addSource(intDqSize, "DSE_INTDQSIZE")
 //    BoringUtils.addSource(fpDqSize, "DSE_FPDQSIZE")
 //    BoringUtils.addSource(lsDqSize, "DSE_LSDQSIZE")
-//    BoringUtils.addSource(l2MSHRs, "DSE_L2MSHRS")
-//    BoringUtils.addSource(l3MSHRs, "DSE_L3MSHRS")
+    BoringUtils.addSource(l2MSHRs, "DSE_L2MSHRS")
+    BoringUtils.addSource(l3MSHRs, "DSE_L3MSHRS")
     BoringUtils.addSource(l2Sets, "DSE_L2SETS")
     BoringUtils.addSource(l3Sets, "DSE_L3SETS")
     BoringUtils.addSource(intPhyRegs, "DSE_INTFLSIZE")
@@ -224,8 +226,10 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
 //    assert(intDqSize <= dpParams.IntDqSize.U, "DSE parameter must not exceed IntDqSize")
 //    assert(fpDqSize <= dpParams.FpDqSize.U, "DSE parameter must not exceed FpDqSize")
 //    assert(lsDqSize <= dpParams.LsDqSize.U, "DSE parameter must not exceed LsDqSize")
-//    assert(l2MSHRs <= L2MSHRs.U, "DSE parameter must not exceed L2MSHRs")
-//    assert(l3MSHRs <= L3MSHRs.U, "DSE parameter must not exceed L3MSHRs")
+    assert(l2MSHRs > 0.U, "DSE L2MSHRs must be positive")
+    assert(l2MSHRs <= staticL2Mshrs.U, "DSE parameter must not exceed L2MSHRs")
+    assert(l3MSHRs > 0.U, "DSE L3MSHRs must be positive")
+    assert(l3MSHRs <= staticL3Mshrs.U, "DSE parameter must not exceed L3MSHRs")
     assert(l2Sets <= staticL2Sets.U, "DSE parameter must not exceed L2Sets")
     assert(PopCount(l2Sets) === 1.U, "DSE L2Sets must be power-of-two")
     assert(l3Sets <= staticL3Sets.U, "DSE parameter must not exceed L3Sets")

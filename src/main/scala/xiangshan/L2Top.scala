@@ -284,12 +284,15 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
     io.hartIsInReset.toTile := hartIsInReset
 
     val pL2Sets = Wire(UInt(64.W))
+    val pL2Mshrs = Wire(UInt(64.W))
     BoringUtils.addSink(pL2Sets, "DSE_L2SETS")
+    BoringUtils.addSink(pL2Mshrs, "DSE_L2MSHRS")
 
     if (l2cache.isDefined) {
       val l2 = l2cache.get.module
 
       l2.io.sets := pL2Sets
+      l2.io.mshrs := pL2Mshrs
       l2.io.pfCtrlFromCore := io.pfCtrlFromCore
       l2.io.dft.zip(io.dft).foreach({ case(a, b) => a := b })
       l2.io.dft_reset.zip(io.dft_reset).foreach({ case(a, b) => a := b })
