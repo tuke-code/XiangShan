@@ -715,7 +715,6 @@ class Sbuffer(implicit p: Parameters)
       stateVec(dcache_resp_id).state_inflight := false.B
       stateVec(dcache_resp_id).state_valid := false.B
       assert(!resp.bits.replay)
-      // assert(!resp.bits.miss)
       assert(stateVec(dcache_resp_id).state_inflight === true.B)
     }
 

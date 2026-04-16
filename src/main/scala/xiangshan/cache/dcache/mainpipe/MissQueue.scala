@@ -476,7 +476,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   val req_valid = RegInit(false.B)
   val set = addr_to_dcache_set(req.vaddr)
   val evict_BtoT_way = RegInit(false.B)
-  val alloc_is_store = Reg(Bool())  // The alloc (first) req is a store req
+  val alloc_is_store = RegInit(false.B)  // The alloc (first) req is a store req
   // initial keyword
   val isKeyword = RegInit(false.B)
 
