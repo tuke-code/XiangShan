@@ -11,7 +11,6 @@ import utility._
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.StageCtrl
 import xiangshan.frontend.bpu.SaturateCounter
-import xiangshan.frontend.bpu.tage.PhrToTageIO
 import xiangshan.frontend.bpu.tage.{Tage,UsefulResetCounter}
 
 
@@ -75,10 +74,9 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   val io = IO(new Bundle {
     val stageCtrl = Input(new StageCtrl)
     val startPc   = Input(new PrunedAddr(VAddrBits))
+    val historySnapshot = Input(new MdpHistorySnapshot)
     val train     = Input(new MdpTrain)
     val trainReady= Output(Bool())
-
-    val fromPhr = new PhrToTageIO
     val fromBaseResult = Input(Vec(NumMdpResultEntries, Valid(new BasePrediction)))
 
     val result = Output(Vec(NumMdpResultEntries, Valid(new TagePrediction)))
@@ -129,7 +127,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   private val s0_fire    = io.stageCtrl.s0_fire
   private val s0_startPc = io.startPc
 
-  private val s0_foldedHist = getFoldedHist(io.fromPhr.foldedPathHist)
+  private val s0_foldedHist = getFoldedHist(io.historySnapshot)
   private val s0_setIdx = VecInit((tables zip s0_foldedHist).map { case (table, hist) =>
     table.getSetIndex(s0_startPc, hist.forIdx)
   })
@@ -160,20 +158,25 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   private val s1_readResp = DataHoldBypass(VecInit(tables.map(_.io.predictReadResp)), RegNext(s0_fire))
 
   /* --------------------------------------------------------------------------------------------------------------
-     predict pipeline stage 1
+     predict pipeline stage 2
      - get results from base
-     - get prediction for each branch
+     - get prediction for each load
      -------------------------------------------------------------------------------------------------------------- */
 
-  private val s1_loads = io.fromBaseResult
-  s1_loads.zipWithIndex.foreach { case (load, i) =>
+  private val s2_fire     = io.stageCtrl.s2_fire
+  private val s2_startPc  = RegEnable(s1_startPc, s1_fire)
+  private val s2_rawTag   = RegEnable(s1_rawTag, s1_fire)
+  private val s2_readResp = RegEnable(s1_readResp, s1_fire)
+  dontTouch(s2_startPc)
+
+  io.fromBaseResult.zipWithIndex.foreach { case (load, i) =>
     val position = load.bits.cfiPosition
-    val allTableTagMatchResults = s1_readResp.zipWithIndex.map { case (tableReadResp, tableIdx) =>
-      val tag          = s1_rawTag(tableIdx) ^ position
+    val allTableTagMatchResults = s2_readResp.zipWithIndex.map { case (tableReadResp, tableIdx) =>
+      val tag          = s2_rawTag(tableIdx) ^ position
       val hitWayMask   = tableReadResp.entries.map(entry => entry.valid && entry.tag === tag)
       val hitWayMaskOH = PriorityEncoderOH(hitWayMask)
 
-      val result = Wire(new PredictTagMatchResult).suggestName(s"s1_load_${i}_table_${tableIdx}_result")
+      val result = Wire(new PredictTagMatchResult).suggestName(s"s2_load_${i}_table_${tableIdx}_result")
       result.hit          := hitWayMask.reduce(_ || _)
       result.hitWayMaskOH := hitWayMaskOH.asUInt
       result.usefulCtr    := Mux1H(hitWayMaskOH, tableReadResp.usefulCtrs)
@@ -182,10 +185,10 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     }
     val hitTableMask = allTableTagMatchResults.map(_.hit)
     val hitTable     = hitTableMask.reduce(_ || _)
-    dontTouch(hitTableMask.asUInt.suggestName(s"s1_load_${i}_hitTableMask"))
+    dontTouch(hitTableMask.asUInt.suggestName(s"s2_load_${i}_hitTableMask"))
     val longestHistTableOH  = getLongestHistTableOH(hitTableMask)
     val prediction = Mux1H(longestHistTableOH, allTableTagMatchResults)
-    when(s1_fire) {
+    when(s2_fire) {
       assert(PopCount(longestHistTableOH) <= 1.U, "Multiple tables hit in prediction")
     }
 
@@ -215,7 +218,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   private val t0_needRead = true.B
   private val t0_readBankConflict = t0_hasLoad && t0_needRead && s0_fire && t0_bankIdx === s0_bankIdx
   io.trainReady := !t0_readBankConflict
-  private val t0_foldedHist = getFoldedHist(io.fromPhr.foldedPathHistForTrain)
+  private val t0_foldedHist = getFoldedHist(io.train.meta.historySnapshot)
   private val t0_setIdx     = VecInit((tables zip t0_foldedHist).map { case (table, hist) =>
     table.getSetIndex(t0_startPc, hist.forIdx)
   })
@@ -622,18 +625,18 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     )
   })
 
-  private val s1_tablePredictHitMask = VecInit(TableInfos.indices.map { tableIdx =>
-    s1_loads.map { load =>
+  private val s2_tablePredictHitMask = VecInit(TableInfos.indices.map { tableIdx =>
+    io.fromBaseResult.map { load =>
       val position = load.bits.cfiPosition
-      val tag = s1_rawTag(tableIdx) ^ position
-      load.valid && s1_readResp(tableIdx).entries.map(entry => entry.valid && entry.tag === tag).reduce(_ || _)
+      val tag = s2_rawTag(tableIdx) ^ position
+      load.valid && s2_readResp(tableIdx).entries.map(entry => entry.valid && entry.tag === tag).reduce(_ || _)
     }.reduce(_ || _)
   })
-  private val s1_tableProviderMask = VecInit(TableInfos.indices.map { tableIdx =>
-    s1_loads.map { load =>
+  private val s2_tableProviderMask = VecInit(TableInfos.indices.map { tableIdx =>
+    io.fromBaseResult.map { load =>
       val position = load.bits.cfiPosition
-      val hitTableMask = s1_readResp.zipWithIndex.map { case (tableReadResp, idx) =>
-        val tableTag = s1_rawTag(idx) ^ position
+      val hitTableMask = s2_readResp.zipWithIndex.map { case (tableReadResp, idx) =>
+        val tableTag = s2_rawTag(idx) ^ position
         load.valid && tableReadResp.entries.map(entry => entry.valid && entry.tag === tableTag).reduce(_ || _)
       }
       getLongestHistTableOH(hitTableMask)(tableIdx) && hitTableMask(tableIdx)
@@ -911,8 +914,8 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     }
   }
   TableInfos.indices.foreach { tableIdx =>
-    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_predict_hit", s1_fire && s1_tablePredictHitMask(tableIdx))
-    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_provider_cnt", s1_fire && s1_tableProviderMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_predict_hit", s2_fire && s2_tablePredictHitMask(tableIdx))
+    XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_provider_cnt", s2_fire && s2_tableProviderMask(tableIdx))
     XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_train_hit", t2_fire && t2_tableTrainHitMask(tableIdx))
     XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_has_invalid", t2_fire && t2_tableHasInvalidMask(tableIdx))
     XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_has_zero_useful", t2_fire && t2_tableHasZeroUsefulMask(tableIdx))

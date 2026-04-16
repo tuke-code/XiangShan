@@ -44,8 +44,7 @@ import xiangshan.frontend.icache.ICacheRespBundle
 import xiangshan.frontend.icache.ICacheTopdownInfo
 import xiangshan.frontend.instruncache.InstrUncacheReq
 import xiangshan.frontend.instruncache.InstrUncacheResp
-import xiangshan.frontend.bpu.history.phr.PhrMeta
-import xiangshan.mem.mdp.NewMdp.{MdpUpdate,MdpPrediction,MdpPredictInfo}
+import xiangshan.mem.mdp.NewMdp.{MdpUpdate,MdpPredictInfo,MdpHistorySnapshot,MdpMetaWriteback}
 import xiangshan.XSBundle
 import xiangshan.mem.mdp.NewMdp.MdpTrain
 import xiangshan.mem.mdp.NewMdp.HasMdpParameters
@@ -71,8 +70,6 @@ class FtqToBpuIO(implicit p: Parameters) extends FrontendBundle {
   val commit:          Valid[BpuCommit]      = Valid(new BpuCommit)
   val bpuPtr:          FtqPtr                = Output(new FtqPtr)
   val redirectFromIFU: Bool                  = Output(Bool())
-
-  val mdpTrain:        DecoupledIO[MdpTrain] = Decoupled(new MdpTrain)
 }
 
 // TODO: unify FetchRequestBundle (Ftq->Ifu) with FtqFetchRequest (Ftq->ICache.MainPipe)
@@ -87,7 +84,7 @@ class FetchRequestBundle(implicit p: Parameters) extends FrontendBundle with ICa
   val ftqIdx:         FtqPtr      = new FtqPtr
   val takenCfiOffset: Valid[UInt] = Valid(UInt(CfiPositionWidth.W))
   //
-  val mdpPrediction: Vec[Valid[MdpPrediction]] = Vec(NumMdpResultEntries, Valid(new MdpPrediction))
+  val mdpHistorySnapshot = new MdpHistorySnapshot
 
   def crossCacheline: Bool = super.isCrossLine(this.startVAddr, this.takenCfiOffset.bits)
 
@@ -151,6 +148,7 @@ class FtqToIfuIO(implicit p: Parameters) extends FrontendBundle {
     val topdownInfo: FrontendTopDownBundle   = new FrontendTopDownBundle
   }
   val req:             DecoupledIO[FtqToIfuReq] = Decoupled(new FtqToIfuReq)
+  val mdpTrain:        DecoupledIO[MdpTrain]    = Decoupled(new MdpTrain)
   val redirect:        Valid[Redirect]          = Valid(new Redirect)
   val topdownRedirect: Valid[Redirect]          = Valid(new Redirect) // TODO: what's this for?
   val flushFromBpu:    BpuFlushInfo             = new BpuFlushInfo
@@ -170,6 +168,7 @@ class FrontendRedirect(implicit p: Parameters) extends FrontendBundle {
 class IfuToFtqIO(implicit p: Parameters) extends FrontendBundle {
   val mmioCommitRead: MmioCommitRead          = new MmioCommitRead
   val wbRedirect:     Valid[FrontendRedirect] = Valid(new FrontendRedirect)
+  val mdpMetaWriteback: Valid[MdpMetaWriteback] = Valid(new MdpMetaWriteback)
 }
 
 class MmioCommitRead(implicit p: Parameters) extends FrontendBundle {

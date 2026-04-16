@@ -123,23 +123,35 @@ trait IfuHelper extends HasIfuParameters with HalfAlignHelper with HasMdpParamet
     out.selectBlock    := alignData(indata.selectBlock, shiftNum, false.B)
     out.instrPcLower   := alignData(indata.instrPcLower, shiftNum, 0.U((PcCutPoint + 1).W))
     out.instrEndOffset := alignData(indata.instrEndOffset, shiftNum, 0.U(log2Ceil(FetchBlockInstNum).W))
-    out.instrLoadPred  := alignData(indata.instrLoadPred, shiftNum, 0.U.asTypeOf(Valid(new MdpPredictInfo)))
     out
   }
 
-  def getMdpInfo(startPc: PrunedAddr, mdpPrediction: Vec[Valid[MdpPrediction]]): Vec[Valid[MdpPredictInfo]] = {
-    val ftqOffsetVec = Wire(Vec(NumMdpResultEntries, UInt(CfiPositionWidth.W)))
-    val loadPredVec  = WireDefault(VecInit(Seq.fill(FetchBlockInstNum)(0.U.asTypeOf(Valid(new MdpPredictInfo)))))
-    for (i <- 0 until NumMdpResultEntries) {
-      ftqOffsetVec(i) := getFtqOffset(startPc, mdpPrediction(i).bits.cfiPosition)
-    }
+  def getFinalMdpInfo(
+      firstStartPc:    PrunedAddr,
+      secondStartPc:   PrunedAddr,
+      selectBlock:     Vec[Bool],
+      instrEndOffset:  Vec[UInt],
+      isLoad:          Vec[Bool],
+      mdpPrediction:   Vec[Valid[MdpPrediction]]
+  ): Vec[Valid[MdpPredictInfo]] = {
+    val mdpPredInfo = Wire(Vec(IBufferEnqueueWidth, Valid(new MdpPredictInfo)))
+    for (i <- 0 until IBufferEnqueueWidth) {
+      val startPc = Mux(selectBlock(i), secondStartPc, firstStartPc)
+      val hitVec = VecInit(mdpPrediction.map(pred =>
+        pred.valid && getFtqOffset(startPc, pred.bits.cfiPosition) === instrEndOffset(i)
+      ))
+      val hasHit = hitVec.asUInt.orR
+      val matchedPred = Wire(new MdpPrediction)
+      matchedPred := 0.U.asTypeOf(new MdpPrediction)
+      when(hasHit) {
+        matchedPred := Mux1H(hitVec, mdpPrediction.map(_.bits))
+      }
 
-    for (i <- 0 until NumMdpResultEntries) {
-      loadPredVec(ftqOffsetVec(i)).valid         := mdpPrediction(i).valid
-      loadPredVec(ftqOffsetVec(i)).bits.static   := mdpPrediction(i).bits.static
-      loadPredVec(ftqOffsetVec(i)).bits.loadWait := mdpPrediction(i).bits.loadWait
-      loadPredVec(ftqOffsetVec(i)).bits.distance := mdpPrediction(i).bits.distance
+      mdpPredInfo(i).valid := isLoad(i)
+      mdpPredInfo(i).bits.static := !hasHit
+      mdpPredInfo(i).bits.loadWait := hasHit && matchedPred.loadWait && isLoad(i)
+      mdpPredInfo(i).bits.distance := Mux(hasHit, matchedPred.distance, 0.U)
     }
-    loadPredVec
+    mdpPredInfo
   }
 }

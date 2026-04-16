@@ -28,7 +28,7 @@ import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.frontend.ibuffer.IBufPtr
 import xiangshan.frontend.icache.HasICacheParameters
 import xiangshan.frontend.icache.ICacheRespBundle
-import xiangshan.mem.mdp.NewMdp.{MdpPrediction,MdpPredictInfo,HasMdpParameters}
+import xiangshan.mem.mdp.NewMdp.{MdpHistorySnapshot,MdpPredictInfo,HasMdpParameters}
 /* ***
  * Naming:
  * - I/O:
@@ -64,7 +64,7 @@ class InstrIndexEntry(implicit p: Parameters) extends IfuBundle {
 
 class FetchBlockInfo(implicit p: Parameters) extends IfuBundle with HasMdpParameters{
   val ftqIdx:         FtqPtr      = new FtqPtr
-  val mdpPrediction:  Vec[Valid[MdpPrediction]] = Vec(NumMdpResultEntries, Valid(new MdpPrediction))
+  val mdpHistorySnapshot: MdpHistorySnapshot = new MdpHistorySnapshot
   val doubleline:     Bool        = Bool()
   val predTakenIdx:   Valid[UInt] = Valid(UInt(IfuIdxWidth.W))
   val takenCfiOffset: Valid[UInt] = Valid(UInt(FetchBlockInstOffsetWidth.W))
@@ -106,7 +106,7 @@ class FetchBlockInfo(implicit p: Parameters) extends IfuBundle with HasMdpParame
     pcHighPlus1    := ftqFetch.startVAddr(VAddrBits - 1, PcCutPoint) + 1.U
     fetchSize      := calcFetchSize
     //
-    mdpPrediction  := ftqFetch.mdpPrediction
+    mdpHistorySnapshot.autoConnectFrom(ftqFetch.mdpHistorySnapshot)
     this
   }
 }
@@ -184,5 +184,4 @@ class InstrCompactBundle(width: Int)(implicit p: Parameters) extends IfuBundle{
   val selectBlock:    Vec[Bool]            = Vec(width, Bool())
   val instrPcLower:   Vec[UInt]            = Vec(width, UInt((PcCutPoint + 1).W))
   val instrEndOffset: Vec[UInt]            = Vec(width, UInt(log2Ceil(FetchBlockInstNum).W))
-  val instrLoadPred: Vec[Valid[MdpPredictInfo]] = Vec(width, Valid(new MdpPredictInfo))
 }

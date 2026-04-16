@@ -52,6 +52,7 @@ import xiangshan.frontend.bpu.BpuRedirectMeta
 import xiangshan.frontend.bpu.BpuResolveMeta
 import xiangshan.frontend.bpu.HalfAlignHelper
 import xiangshan.mem.mdp.NewMdp.MdpResolveQueue
+import xiangshan.mem.mdp.NewMdp.MdpFtqMeta
 
 class Ftq(implicit p: Parameters) extends FtqModule
     with HalfAlignHelper
@@ -103,6 +104,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // metaQueue stores information needed to train BPU.
   private val metaQueueResolve = Reg(Vec(FtqSize, new BpuResolveMeta))
   private val metaQueueCommit  = Reg(Vec(FtqSize, new BpuCommitMeta))
+  private val mdpMetaQueue     = RegInit(VecInit(Seq.fill(FtqSize)(0.U.asTypeOf(new MdpFtqMeta))))
 
   // resolveQueue caches branch resolve information from backend.
   private val resolveQueue = Module(new ResolveQueue)
@@ -117,10 +119,29 @@ class Ftq(implicit p: Parameters) extends FtqModule
   private val specTopAddr = metaQueueRedirect(io.fromIfu.wbRedirect.bits.ftqIdx.value).ras.topRetAddr.toUInt
   private val ifuRedirect = receiveIfuRedirect(io.fromIfu.wbRedirect, specTopAddr)
 
+  private def mdpFtqPtrActive(ptr: FtqPtr): Bool = ptr >= commitPtr(0) && ptr < bpuPtr(0)
+  private def mdpMetaValueBetween(value: UInt, start: FtqPtr, end: FtqPtr): Bool = {
+    val idxInRange = value >= start.value && value < end.value
+    val idxWrapRange = value >= start.value || value < end.value
+    Mux(
+      end.flag === start.flag,
+      idxInRange,
+      idxWrapRange
+    )
+  }
+  private def mdpMetaEntryBetween(idx: Int, start: FtqPtr, end: FtqPtr): Bool =
+    mdpMetaValueBetween(idx.U, start, end)
+  private def mdpMetaPtrBetween(ptr: FtqPtr, start: FtqPtr, end: FtqPtr): Bool =
+    mdpMetaValueBetween(ptr.value, start, end)
+
   private val (backendRedirectFtqIdx, backendRedirect) = receiveBackendRedirect(io.fromBackend)
 
   private val redirect     = Mux(backendRedirect.valid, backendRedirect, ifuRedirect)
   private val redirectNext = RegNext(redirect)
+  // Shared lifecycle signals used by both FTQ pointer updates and MDP meta maintenance.
+  private val redirectSurvivorPtr = Wire(new FtqPtr)
+  private val robCommitPtr        = Wire(new FtqPtr)
+  private val commitThisCycle     = Wire(Bool())
 
   // Instruction page fault and instruction access fault are sent from backend with redirect requests.
   // When IPF and IAF are sent, backendPcFaultIfuPtr points to the FTQ entry whose first instruction
@@ -170,6 +191,34 @@ class Ftq(implicit p: Parameters) extends FtqModule
       prediction.bits.s3Override -> io.fromBpu.s3FtqPtr
     )
   )
+  private val mdpMetaOverwritePtr   = predictionPtr
+  private def mdpMetaPtrOverwritten(ptr: FtqPtr): Bool =
+    (prediction.fire || bpuS3Redirect) && !redirect.valid && mdpMetaOverwritePtr === ptr
+  private def mdpMetaPtrCleared(ptr: FtqPtr): Bool = {
+    val commitClear = commitThisCycle && commitPtr(0) === ptr
+    val redirectClear = redirect.valid && mdpMetaPtrBetween(ptr, redirectSurvivorPtr, bpuPtr(0))
+    (commitClear || redirectClear) && !mdpMetaPtrOverwritten(ptr)
+  }
+  private val mdpWritebackValid =
+    io.fromIfu.mdpMetaWriteback.valid && mdpFtqPtrActive(io.fromIfu.mdpMetaWriteback.bits.ftqIdx)
+  private val mdpMetaOverwriteVec = VecInit.tabulate(FtqSize)(idx =>
+    (prediction.fire || bpuS3Redirect) && !redirect.valid && mdpMetaOverwritePtr.value === idx.U
+  )
+  private val mdpMetaClearByCommitVec = VecInit.tabulate(FtqSize)(idx =>
+    !mdpMetaOverwriteVec(idx) && commitThisCycle && commitPtr(0).value === idx.U
+  )
+  private val mdpMetaClearByRedirectVec = VecInit.tabulate(FtqSize)(idx =>
+    !mdpMetaOverwriteVec(idx) && redirect.valid && mdpMetaEntryBetween(idx, redirectSurvivorPtr, bpuPtr(0))
+  )
+  private val mdpWritebackMetaInvalidated =
+    mdpWritebackValid && (
+      mdpMetaPtrCleared(io.fromIfu.mdpMetaWriteback.bits.ftqIdx) ||
+        mdpMetaPtrOverwritten(io.fromIfu.mdpMetaWriteback.bits.ftqIdx)
+    )
+  private val mdpWritebackMetaReady =
+    mdpWritebackValid &&
+      mdpMetaQueue(io.fromIfu.mdpMetaWriteback.bits.ftqIdx.value).snapshotValid &&
+      !mdpWritebackMetaInvalidated
 
   when(prediction.bits.s3Override) {
     bpuPtr := io.fromBpu.s3FtqPtr + 1.U
@@ -180,7 +229,6 @@ class Ftq(implicit p: Parameters) extends FtqModule
   when((prediction.fire || bpuS3Redirect) && !redirect.valid) {
     entryQueue(predictionPtr.value).startPc        := prediction.bits.startPc
     entryQueue(predictionPtr.value).takenCfiOffset := prediction.bits.takenCfiOffset
-    entryQueue(predictionPtr.value).mdpPrediction  := prediction.bits.mdpPrediction
   }
 
   when(io.fromBpu.meta.valid) {
@@ -192,6 +240,29 @@ class Ftq(implicit p: Parameters) extends FtqModule
     perfQueue(s3BpuPtr).bpuPerf := io.fromBpu.perfMeta
     perfQueue(s3BpuPtr).isCfi.foreach(_ := false.B)
     perfQueue(s3BpuPtr).mispredict := false.B
+  }
+
+  mdpMetaQueue.zipWithIndex.foreach { case (meta, idx) =>
+    val overwriteThisIdx = mdpMetaOverwriteVec(idx)
+    val clearThisIdx = mdpMetaClearByCommitVec(idx) || mdpMetaClearByRedirectVec(idx)
+    val writebackThisIdx =
+      mdpWritebackMetaReady &&
+        io.fromIfu.mdpMetaWriteback.bits.ftqIdx.value === idx.U &&
+        !clearThisIdx
+
+    when(overwriteThisIdx) {
+      // A newly written snapshot defines the next lifecycle of this slot, so it wins over any same-cycle clear.
+      meta.snapshotValid := true.B
+      meta.startPc := prediction.bits.startPc
+      meta.historySnapshot := prediction.bits.mdpHistorySnapshot
+      meta.baseMetaValid := false.B
+    }.elsewhen(clearThisIdx) {
+      meta.snapshotValid := false.B
+      meta.baseMetaValid := false.B
+    }.elsewhen(writebackThisIdx) {
+      meta.baseMeta := io.fromIfu.mdpMetaWriteback.bits.baseMeta
+      meta.baseMetaValid := true.B
+    }
   }
 
   resolveQueue.io.bpuEnqueue    := bpuEnqueue
@@ -275,7 +346,17 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toIfu.req.bits.fetch(0).nextCachelineVAddr := io.toIfu.req.bits.fetch(0).startVAddr + (CacheLineSize / 8).U
   io.toIfu.req.bits.fetch(0).ftqIdx             := ifuPtr(0)
   io.toIfu.req.bits.fetch(0).takenCfiOffset     := entryQueue(ifuPtr(0).value).takenCfiOffset
-  io.toIfu.req.bits.fetch(0).mdpPrediction      := entryQueue(ifuPtr(0).value).mdpPrediction
+  io.toIfu.req.bits.fetch(0).mdpHistorySnapshot := mdpMetaQueue(ifuPtr(0).value).historySnapshot
+  when(io.toIfu.req.valid) {
+    assert(
+      mdpMetaQueue(ifuPtr(0).value).snapshotValid,
+      "MDP FTQ meta snapshot must be valid before issuing an IFU request"
+    )
+    assert(
+      mdpMetaQueue(ifuPtr(0).value).startPc === entryQueue(ifuPtr(0).value).startPc,
+      "MDP FTQ meta startPc must stay aligned with FTQ entry startPc"
+    )
+  }
 
   io.toIfu.req.bits.fetch(1) := 0.U.asTypeOf(new FetchRequestBundle)
 
@@ -304,15 +385,15 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // Redirect from backend and IFU
   // --------------------------------------------------------------------------------
 
+  redirectSurvivorPtr := Mux(
+    RedirectLevel.flushItself(redirect.bits.level) &&
+      (redirect.bits.ftqOffset === 0.U || redirect.bits.ftqOffset === 1.U && !redirect.bits.isRVC),
+    redirect.bits.ftqIdx,
+    redirect.bits.ftqIdx + 1.U
+  )
   io.toICache.redirectFlush := redirect.valid
   when(redirect.valid) {
-    val newEntryPtr = Mux(
-      RedirectLevel.flushItself(redirect.bits.level) &&
-        (redirect.bits.ftqOffset === 0.U || redirect.bits.ftqOffset === 1.U && !redirect.bits.isRVC),
-      redirect.bits.ftqIdx,
-      redirect.bits.ftqIdx + 1.U
-    )
-    Seq(bpuPtr, ifuPtr, pfPtr).foreach(_ := newEntryPtr)
+    Seq(bpuPtr, ifuPtr, pfPtr).foreach(_ := redirectSurvivorPtr)
   }
 
   io.toIfu.redirect.valid := backendRedirect.valid
@@ -337,10 +418,13 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // --------------------------------------------------------------------------------
 
   resolveQueue.io.backendResolve := io.fromBackend.resolve
-  mdpResolveQueue.io.toMdpResolveUpdate := io.fromBackend.mdpUpdate
+  mdpResolveQueue.io.toMdpResolveUpdate.zip(io.fromBackend.mdpUpdate).foreach { case (sink, src) =>
+    sink.valid := src.valid && mdpFtqPtrActive(src.bits.ftqIdx)
+    sink.bits := src.bits
+  }
   for(i <- 0 until backendParams.LduCnt + 1){
     val ftqIdx = io.fromBackend.mdpUpdate(i).bits.ftqIdx
-    mdpResolveQueue.io.updateStartPc(i) := entryQueue(ftqIdx.value).startPc
+    mdpResolveQueue.io.updateStartPc(i) := mdpMetaQueue(ftqIdx.value).startPc
   }
 
   io.toBpu.train.valid           := resolveQueue.io.bpuTrain.valid
@@ -350,12 +434,29 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.train.bits.branches   := resolveQueue.io.bpuTrain.bits.branches
   io.toBpu.train.bits.perfMeta   := perfQueue(resolveQueue.io.bpuTrain.bits.ftqIdx.value).bpuPerf
 
-  io.toBpu.mdpTrain.valid := mdpResolveQueue.io.mdpTrain.valid
-  mdpResolveQueue.io.mdpTrain.ready := io.toBpu.mdpTrain.ready
-  io.toBpu.mdpTrain.bits.meta.base  := metaQueueResolve(mdpResolveQueue.io.mdpTrain.bits.ftqIdx.value).mdpBase
-  io.toBpu.mdpTrain.bits.meta.phr   := metaQueueResolve(mdpResolveQueue.io.mdpTrain.bits.ftqIdx.value).phr
-  io.toBpu.mdpTrain.bits.startPc    := mdpResolveQueue.io.mdpTrain.bits.startPc
-  io.toBpu.mdpTrain.bits.loads      := mdpResolveQueue.io.mdpTrain.bits.loads
+  private val mdpTrainFtqActive = mdpFtqPtrActive(mdpResolveQueue.io.mdpTrain.bits.ftqIdx)
+  private val mdpTrainMetaInvalidated =
+    mdpMetaPtrOverwritten(mdpResolveQueue.io.mdpTrain.bits.ftqIdx) ||
+      mdpMetaPtrCleared(mdpResolveQueue.io.mdpTrain.bits.ftqIdx)
+  private val mdpTrainMetaReady =
+    mdpMetaQueue(mdpResolveQueue.io.mdpTrain.bits.ftqIdx.value).snapshotValid &&
+    mdpMetaQueue(mdpResolveQueue.io.mdpTrain.bits.ftqIdx.value).baseMetaValid &&
+    !mdpTrainMetaInvalidated
+  private val mdpTrainWaitMeta =
+    mdpResolveQueue.io.mdpTrain.valid && mdpTrainFtqActive && !mdpTrainMetaReady && !mdpTrainMetaInvalidated
+  private val mdpTrainStaleDrop =
+    mdpResolveQueue.io.mdpTrain.valid && !mdpTrainFtqActive
+  private val mdpTrainDropInvalidated =
+    mdpResolveQueue.io.mdpTrain.valid && mdpTrainFtqActive && mdpTrainMetaInvalidated
+  io.toIfu.mdpTrain.valid := mdpResolveQueue.io.mdpTrain.valid && mdpTrainFtqActive && mdpTrainMetaReady
+  mdpResolveQueue.io.mdpTrain.ready :=
+    mdpTrainStaleDrop || mdpTrainDropInvalidated ||
+      (io.toIfu.mdpTrain.ready && mdpTrainFtqActive && mdpTrainMetaReady)
+  io.toIfu.mdpTrain.bits.meta.base := mdpMetaQueue(mdpResolveQueue.io.mdpTrain.bits.ftqIdx.value).baseMeta
+  io.toIfu.mdpTrain.bits.meta.historySnapshot :=
+    mdpMetaQueue(mdpResolveQueue.io.mdpTrain.bits.ftqIdx.value).historySnapshot
+  io.toIfu.mdpTrain.bits.startPc := mdpResolveQueue.io.mdpTrain.bits.startPc
+  io.toIfu.mdpTrain.bits.loads   := mdpResolveQueue.io.mdpTrain.bits.loads
 
   io.fromBackend.resolve.foreach { branch =>
     val ftqIdx      = branch.bits.ftqIdx.value
@@ -378,13 +479,13 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   // Backend may send commit for on entry multiple times, but the entry is actually committed when it is committed for
   // the first time. The rest of the commits can be ignored.
-  private val robCommitPtr = DataHoldBypass(
+  robCommitPtr := DataHoldBypass(
     io.fromBackend.commit.bits,
     FtqPtr(true.B, (FtqSize - 1).U),
     io.fromBackend.commit.valid
   )
-  private val commit = commitPtr <= robCommitPtr
-  when(commit) {
+  commitThisCycle := commitPtr <= robCommitPtr
+  when(commitThisCycle) {
     commitPtr := commitPtr + 1.U
   }
 
@@ -400,7 +501,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // --------------------------------------------------------------------------------
   private val mmioPtr           = io.fromIfu.mmioCommitRead.mmioFtqPtr
   private val mmioValid         = io.fromIfu.mmioCommitRead.valid
-  private val lastMmioCommitted = commitPtr > mmioPtr || commitPtr === mmioPtr && commit
+  private val lastMmioCommitted = commitPtr > mmioPtr || commitPtr === mmioPtr && commitThisCycle
   io.fromIfu.mmioCommitRead.mmioLastCommit := RegNext(lastMmioCommitted && mmioValid)
 
   // --------------------------------------------------------------------------------
@@ -470,11 +571,20 @@ class Ftq(implicit p: Parameters) extends FtqModule
   XSPerfAccumulate("resolve_redirects", backendRedirect.valid)
   XSPerfAccumulate("resolve_branch_mispredicts", backendRedirect.valid && backendRedirect.bits.isMisPred)
   XSPerfAccumulate("resolve_other_redirects", backendRedirect.valid && !backendRedirect.bits.isMisPred)
+  XSPerfAccumulate("mdp_ftq_snapshot_overwrite", PopCount(mdpMetaOverwriteVec))
+  XSPerfAccumulate("mdp_ftq_meta_clear_by_redirect", PopCount(mdpMetaClearByRedirectVec))
+  XSPerfAccumulate("mdp_ftq_meta_clear_by_commit", PopCount(mdpMetaClearByCommitVec))
+  XSPerfAccumulate("mdp_ftq_writeback_fire", mdpWritebackValid)
+  XSPerfAccumulate("mdp_ftq_writeback_commit", mdpWritebackMetaReady)
+  XSPerfAccumulate("mdp_ftq_writeback_drop_invalidated", mdpWritebackMetaInvalidated)
+  XSPerfAccumulate("mdp_ftq_train_wait_meta", mdpTrainWaitMeta)
+  XSPerfAccumulate("mdp_ftq_train_stale_drop", mdpTrainStaleDrop)
+  XSPerfAccumulate("mdp_ftq_train_meta_invalidated", mdpTrainDropInvalidated)
 
   // Commit-time statistics, should be correct-path only
   XSPerfAccumulate(
     "commit_branch",
-    commit,
+    commitThisCycle,
     Seq(
       ("num", true.B, PopCount(commitPerfMeta.isCfi)),
       ("mispredicts", true.B, commitPerfMeta.mispredict)
@@ -482,7 +592,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   )
   XSPerfAccumulate(
     "commit_branch_type",
-    commit,
+    commitThisCycle,
     Seq(
       ("conditional", commitPerfMeta.mispredictBranchInfo.attribute.isConditional),
       ("direct", commitPerfMeta.mispredictBranchInfo.attribute.isDirect),
@@ -499,32 +609,32 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   XSPerfAccumulate(
     "commit_branch_mispredicts_s1_mispred_s1_source",
-    commit && commitPerfMeta.mispredict && !commitPerfMeta.bpuPerf.bpSource.s3Override,
+    commitThisCycle && commitPerfMeta.mispredict && !commitPerfMeta.bpuPerf.bpSource.s3Override,
     BpuPredictionSource.Stage1.getValidSeq(commitPerfMeta.bpuPerf.bpSource.s1Source)
   )
   XSPerfAccumulate(
     "commit_branch_mispredicts_s1_source",
-    commit && commitPerfMeta.mispredict,
+    commitThisCycle && commitPerfMeta.mispredict,
     BpuPredictionSource.Stage1.getValidSeq(commitPerfMeta.bpuPerf.bpSource.s1Source)
   )
   XSPerfAccumulate(
     "commit_branch_mispredicts_s3_source",
-    commit && commitPerfMeta.mispredict,
+    commitThisCycle && commitPerfMeta.mispredict,
     BpuPredictionSource.Stage3.getValidSeq(commitPerfMeta.bpuPerf.bpSource.s3Source)
   )
   XSPerfAccumulate(
     "commit_branch_mispredicts_reason",
-    commit && commitPerfMeta.mispredict,
+    commitThisCycle && commitPerfMeta.mispredict,
     BlameBpuSource.BlameType.getValidSeq(BlameBpuSource(commitPerfMeta.bpuPerf, commitPerfMeta.mispredictBranchInfo))
   )
   XSPerfAccumulate(
     "commit_conditional_branch_mispredicts_reason",
-    commit && commitPerfMeta.mispredict && commitPerfMeta.mispredictBranchInfo.attribute.isConditional,
+    commitThisCycle && commitPerfMeta.mispredict && commitPerfMeta.mispredictBranchInfo.attribute.isConditional,
     BlameBpuSource.BlameType.getValidSeq(BlameBpuSource(commitPerfMeta.bpuPerf, commitPerfMeta.mispredictBranchInfo))
   )
   XSPerfAccumulate(
     "commit_branch_mispredicts_type",
-    commit && commitPerfMeta.mispredict,
+    commitThisCycle && commitPerfMeta.mispredict,
     Seq(
       ("conditional", commitPerfMeta.mispredictBranchInfo.attribute.isConditional),
       ("direct", commitPerfMeta.mispredictBranchInfo.attribute.isDirect),
@@ -562,6 +672,6 @@ class Ftq(implicit p: Parameters) extends FtqModule
   )
   XSPerfAccumulate(
     "total_commits",
-    commit
+    commitThisCycle
   )
 }

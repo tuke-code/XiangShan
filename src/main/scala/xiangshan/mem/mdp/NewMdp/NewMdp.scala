@@ -36,7 +36,6 @@ import xiangshan.frontend.bpu.StageCtrl
 import xiangshan.frontend.bpu.SaturateCounter 
 import xiangshan.frontend.bpu.HalfAlignHelper
 import xiangshan.frontend.bpu.CompareMatrix
-import xiangshan.frontend.bpu.tage.PhrToTageIO
 
 // 一个支持多端口入队、单端口出队的队列
 class MdpResolveQueue(implicit p: Parameters) extends XSModule with HasMdpParameters  with HalfAlignHelper with HasCircularQueuePtrHelper{
@@ -145,8 +144,7 @@ class MdpResolveQueue(implicit p: Parameters) extends XSModule with HasMdpParame
 class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
   val io = IO(new Bundle {
     val stageCtrl  = Input(new StageCtrl)
-    val fromBpu    = Input(new MdpToBpuIO)
-    val fromPhr    = Input(new PhrToTageIO)
+    val fromIfu    = Input(new MdpToIfuIO)
 
     val meta       = Output(new MdpBaseMeta)
     val basePred   = Output(Vec(NumMdpResultEntries, Valid(new MdpPrediction)))
@@ -171,16 +169,15 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
   //MDP
   //s0 stage
   base.io.stageCtrl := stageCtrl
-  base.io.startPc   := io.fromBpu.startPc
+  base.io.startPc   := io.fromIfu.startPc
   tage.io.stageCtrl := stageCtrl
-  tage.io.startPc   := io.fromBpu.startPc
-  tage.io.fromPhr.foldedPathHist := io.fromPhr.foldedPathHist
-  //s1 stage
-  private val s1_basePrediction = {
+  tage.io.startPc   := io.fromIfu.startPc
+  tage.io.historySnapshot := io.fromIfu.historySnapshot
+  // s2: base response is available and forwarded to tage
+  private val s2_basePrediction = {
     val prediction = Wire(Vec(NumMdpResultEntries, Valid(new MdpPrediction)))
     (base.io.result zip prediction).map{ case (base, pred) =>
       pred.valid := base.valid
-      // pred.bits  := Mux(tage.valid, tage.bits, base.bits)
       pred.bits.cfiPosition := base.bits.cfiPosition
       pred.bits.static      := base.bits.static
       pred.bits.loadWait    := base.bits.loadWait
@@ -189,12 +186,12 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
     prediction
   }
   tage.io.fromBaseResult := base.io.result
-  private val s1_tageResult = tage.io.result
-  io.meta := base.io.meta
-
-  private val s1_finalPrediction = {
+  // s2: tage provider selection is available and merge happens here
+  private val s2_baseMeta = base.io.meta
+  private val s2_tageResult = tage.io.result
+  private val s2_finalPrediction = {
     val prediction = Wire(Vec(NumMdpResultEntries, Valid(new MdpPrediction)))
-    (base.io.result zip s1_tageResult zip prediction).map{ case ((base, tage), pred) =>
+    (s2_basePrediction zip s2_tageResult zip prediction).map{ case ((base, tage), pred) =>
       pred.valid := Mux(tage.valid, true.B   , base.valid)
       pred.bits.cfiPosition := base.bits.cfiPosition
       pred.bits.static   := Mux(tage.valid, tage.bits.static, base.bits.static)
@@ -203,14 +200,14 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
     }
     prediction
   }
-  io.basePred := s1_finalPrediction
-  io.finalPred := s1_finalPrediction
+  io.meta := s2_baseMeta
+  io.basePred := s2_basePrediction
+  io.finalPred := s2_finalPrediction
 
-  private val s1_takenMask = VecInit(s1_basePrediction.zip(s1_tageResult).map{ case(base, tage) =>
+  private val s2_takenMask = VecInit(s2_basePrediction.zip(s2_tageResult).map{ case(base, tage) =>
     (base.valid && base.bits.loadWait) || (tage.valid && tage.bits.loadWait)
   })
-  //s2/s3 side-effect path
-  private val s2_takenMask  = RegEnable(s1_takenMask , stageCtrl.s1_fire)
+  // s3 side-effect path
   private val s3_takenMask  = RegEnable(s2_takenMask , stageCtrl.s2_fire)
   base.io.s3_takenMask := s3_takenMask
 
@@ -225,7 +222,6 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
   train.loads.zipWithIndex.foreach { case (b, i) =>
     b.valid := io.toTrain.bits.loads(i).valid && t0_firstMispredictMask(i)
   }
-  tage.io.fromPhr.foldedPathHistForTrain := io.fromPhr.foldedPathHistForTrain
   base.io.train := train
   tage.io.train := train
 

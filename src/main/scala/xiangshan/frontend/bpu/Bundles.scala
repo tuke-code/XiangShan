@@ -32,8 +32,7 @@ import xiangshan.frontend.bpu.ras.RasRedirectMeta
 import xiangshan.frontend.bpu.sc.ScMeta
 import xiangshan.frontend.bpu.tage.TageMeta
 import xiangshan.frontend.bpu.utage.MicroTageMeta
-import xiangshan.mem.mdp.NewMdp.MdpBaseMeta
-import xiangshan.mem.mdp.NewMdp.MdpPrediction
+import xiangshan.mem.mdp.NewMdp.MdpHistorySnapshot
 import xiangshan.mem.mdp.NewMdp.HasMdpParameters
 
 
@@ -202,7 +201,7 @@ class BpuPrediction(implicit p: Parameters) extends BpuBundle with HasMdpParamet
   // override valid
   val s3Override: Bool = Bool()
   //
-  val mdpPrediction: Vec[Valid[MdpPrediction]] = Vec(NumMdpResultEntries, Valid(new MdpPrediction))
+  val mdpHistorySnapshot = new MdpHistorySnapshot
 
   def fromStage(startPc: PrunedAddr, prediction: Prediction): Unit = {
     this.startPc              := startPc
@@ -287,8 +286,6 @@ class BpuResolveMeta(implicit p: Parameters) extends BpuBundle {
   val sc:     ScMeta      = new ScMeta
   val ittage: IttageMeta  = new IttageMeta
   val phr:    PhrMeta     = new PhrMeta
-
-  val mdpBase: MdpBaseMeta = new MdpBaseMeta
   val debug_utage: Option[MicroTageMeta] = Option.when(!env.FPGAPlatform)(new MicroTageMeta)
 }
 

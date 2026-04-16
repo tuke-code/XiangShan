@@ -11,7 +11,9 @@ import xiangshan.frontend.bpu.StageCtrl
 import xiangshan.frontend.bpu.SaturateCounter 
 import xiangshan.frontend.bpu.WriteReqBundle
 import xiangshan.frontend.bpu.history.phr.PhrMeta
+import xiangshan.frontend.bpu.history.phr.PhrAllFoldedHistories
 import xiangshan.backend.rob.RobPtr
+import xiangshan.XSCoreParamsKey
 
 //ctrlFlow
 class MdpPredictInfo(implicit p: Parameters) extends XSBundle with HasMdpParameters{ 
@@ -25,8 +27,9 @@ class MdpPredictInfo(implicit p: Parameters) extends XSBundle with HasMdpParamet
 
 
 //
-class MdpToBpuIO(implicit p: Parameters) extends XSBundle with HasMdpParameters{
+class MdpToIfuIO(implicit p: Parameters) extends XSBundle with HasMdpParameters{
   val startPc = PrunedAddr(VAddrBits)
+  val historySnapshot = new MdpHistorySnapshot
 }
 
 class Prediction(implicit p: Parameters) extends XSBundle with HasMdpParameters{
@@ -71,9 +74,27 @@ class MdpBaseMeta(implicit p: Parameters) extends XSBundle with HasMdpBaseTableP
   val entries = Vec(BaseNumAlignBanks, Vec(BaseNumWays, new MdpMetaEntry))
 }
 
+class MdpHistorySnapshot(implicit p: Parameters)
+    extends PhrAllFoldedHistories(
+      p(XSCoreParamsKey).frontendParameters.bpuParameters.mdpTageTableParameters.TableInfos
+        .map(_.getFoldedHistoryInfoSet(
+          p(XSCoreParamsKey).frontendParameters.bpuParameters.mdpTageTableParameters.NumBanks,
+          p(XSCoreParamsKey).frontendParameters.bpuParameters.mdpTageTableParameters.TagWidth
+        ))
+        .reduce(_ ++ _)
+    )
+
+class MdpFtqMeta(implicit p: Parameters) extends XSBundle {
+  val snapshotValid = Bool()
+  val startPc = PrunedAddr(VAddrBits)
+  val historySnapshot = new MdpHistorySnapshot
+  val baseMetaValid = Bool()
+  val baseMeta = new MdpBaseMeta
+}
+
 class MdpMeta(implicit p: Parameters) extends XSBundle with HasMdpParameters{
   val base = new MdpBaseMeta
-  val phr  = new PhrMeta
+  val historySnapshot = new MdpHistorySnapshot
 }
 
 class MdpTrain(implicit p: Parameters) extends XSBundle with HasMdpParameters{
@@ -106,6 +127,11 @@ class MdpResolveEntry(implicit p: Parameters) extends XSBundle with HasMdpParame
   val flushed = Bool()
   val startPc = PrunedAddr(VAddrBits)
   val loads = Vec(ResolveEntryLoadNumbers, Valid(new LoadInfo))
+}
+
+class MdpMetaWriteback(implicit p: Parameters) extends XSBundle {
+  val ftqIdx = new FtqPtr
+  val baseMeta = new MdpBaseMeta
 }
   /* --------------------------------------------------------------------------------------------------------------
     TageBaseTable 

@@ -4,7 +4,6 @@ import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import xiangshan.frontend.PrunedAddr
-import xiangshan.mem.mdp.NewMdp.MdpPredictInfo
 
 class InstrCompact(implicit p: Parameters) extends IfuModule {
   class InstrCompactIO extends IfuBundle {
@@ -15,7 +14,6 @@ class InstrCompact(implicit p: Parameters) extends IfuModule {
       val instrCountBeforeCurrent = Vec(FetchBlockInstNum + 1, UInt(log2Ceil(FetchBlockInstNum + 1).W))
       val rawInstrValid           = Vec(FetchBlockInstNum, Bool())
       val rawIsRvc                = Vec(FetchBlockInstNum, Bool())
-      val loadPredVec: Vec[Valid[MdpPredictInfo]] = Vec(FetchBlockInstNum, Valid(new MdpPredictInfo))
     }
     val req:  InstrCompactReq    = Input(new InstrCompactReq)
     val resp: InstrCompactBundle = Output(new InstrCompactBundle(FetchBlockInstNum))
@@ -27,9 +25,6 @@ class InstrCompact(implicit p: Parameters) extends IfuModule {
   private val rawIsRvc                = io.req.rawIsRvc
   private val fetchBlockSelect        = io.req.fetchBlockSelect
   private val twoFetchPcLower         = io.req.twoFetchPcLower
-  private val loadPredVec             = VecInit(
-    io.req.loadPredVec :+ 0.U.asTypeOf(Valid(new MdpPredictInfo))
-  )
   private val twoFetchBlockIndex = VecInit.tabulate(FetchBlockInstNum)(i =>
     twoFetchPcLower(i)(log2Ceil(ICacheLineBytes) - 1, 1)
   )
@@ -44,7 +39,6 @@ class InstrCompact(implicit p: Parameters) extends IfuModule {
   private val instrIsRvc         = WireDefault(VecInit.fill(FetchBlockInstNum)(false.B))
   private val instrEndOffset     = WireDefault(VecInit.fill(FetchBlockInstNum)(0.U(FetchBlockInstOffsetWidth.W)))
   private val instrIndexEntry    = Wire(Vec(FetchBlockInstNum, new InstrIndexEntry))
-  private val instrLoadPred      = Wire(Vec(FetchBlockInstNum, Valid(new MdpPredictInfo)))
 
   // Fetch PC and index info for valid instructions based on their positions.
   instrIndexEntry.zipWithIndex.foreach {
@@ -60,8 +54,6 @@ class InstrCompact(implicit p: Parameters) extends IfuModule {
       val pcLowerResult = instrRange.map(twoFetchPcLower(_))
       val isRvc         = instrRange.map(rawIsRvc(_))
       val instrOffset   = instrRange.map(i => Mux(rawIsRvc(i), twoFetchInstrOffset(i), twoFetchInstrOffset(i + 1)))
-      val finalLoadPredVec = instrRange.map(i => Mux(rawIsRvc(i), loadPredVec(i), loadPredVec(i + 1)))
-      // FIXME: This is wrong when 2-taken is enabled
 
       instrIndex.valid           := validOH.reduce(_ || _)
       instrIndex.value           := Mux1H(validOH, index)
@@ -69,7 +61,6 @@ class InstrCompact(implicit p: Parameters) extends IfuModule {
       instrPcLowerResult(idx)    := Mux1H(validOH, pcLowerResult)
       instrIsRvc(idx)            := Mux1H(validOH, isRvc)
       instrEndOffset(idx)        := Mux1H(validOH, instrOffset)
-      instrLoadPred(idx)         := Mux1H(validOH, finalLoadPredVec)
   }
 
   io.resp.instrIndex     := instrIndexEntry
@@ -77,5 +68,4 @@ class InstrCompact(implicit p: Parameters) extends IfuModule {
   io.resp.selectBlock    := instrSelectFetchBlock
   io.resp.instrPcLower   := instrPcLowerResult
   io.resp.instrEndOffset := instrEndOffset
-  io.resp.instrLoadPred  := instrLoadPred
 }
