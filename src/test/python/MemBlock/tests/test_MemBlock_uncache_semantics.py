@@ -27,6 +27,11 @@ MMIO_PA_BASE = 0x100000000
 CACHEABLE_DATA = 0x1020_3040_5060_7080
 NCIO_DATA = 0x8877_6655_4433_2211
 MMIO_DATA = 0x0BAD_F00D_CAFE_BABE
+NCIO_BURST_DATA = (
+    0x1122_3344_5566_7788,
+    0x99AA_BBCC_DDEE_FF00,
+)
+MMIO_MIXED_CACHEABLE_DATA = 0x2233_4455_6677_8899
 
 
 def _reset_env_state(env) -> SequenceState:
@@ -130,6 +135,34 @@ def _wait_any_store_view(env, sq_idx: int, *, max_cycles: int = 200):
         _store_ready,
         max_cycles=max_cycles,
         timeout_message=f"等待 sqIdx={sq_idx} 的 store view 收敛超时",
+    )
+
+
+def _run_translated_store(
+    env,
+    *,
+    state: SequenceState,
+    req_id: int,
+    va: int,
+    data: int,
+    max_cycles: int = 256,
+) -> tuple[SequenceState, object]:
+    txn = StoreTxn(
+        req_id=req_id,
+        sq_ptr=state.sq_ptr,
+        addr=va,
+        data=data,
+    )
+    allocated_sq_ptr = send_store(env, txn)
+    env.backend.pulse_store_commit(1)
+    env.advance_cycles(env.config.sequence.store_settle_cycles)
+    store = _wait_any_store_view(env, allocated_sq_ptr.value, max_cycles=max_cycles)
+    return (
+        SequenceState(
+            next_lq_ptr=state.next_lq_ptr,
+            sq_ptr=ptr_inc(state.sq_ptr, env.config.sequence.store_queue_size),
+        ),
+        store,
     )
 
 
@@ -257,6 +290,114 @@ def test_api_MemBlock_sv39_pbmt_ncio_store_flush_smoke(env):
     assert env.get_counter("sbuffer_drain_count") == sbuffer_before, "NCIO store 不应走 sbuffer drain"
     assert "outer" in _drain_channels(env), "NCIO store flush 后未记录到 outer drain"
     assert drain_summary["drain_event_count"] >= 1
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_sv39_pbmt_ncio_store_burst_flush_smoke(env):
+    """两条 PBMT=NC 的 translated store 应都形成 NC shadow，并在统一 flush 后闭环到 outer drain。"""
+
+    state = _reset_env_state(env)
+    _install_svpbmt_address_space(env)
+
+    with env.mmu.ptw_responder():
+        env.mmu.enable_sv39(root_pt_addr=MMU_ROOT_PT)
+        outer_before = env.get_counter("outer_write_request_count")
+        sbuffer_before = env.get_counter("sbuffer_drain_count")
+
+        state, first_store = _run_translated_store(
+            env,
+            state=state,
+            req_id=0,
+            va=NCIO_VA,
+            data=NCIO_BURST_DATA[0],
+        )
+        state, second_store = _run_translated_store(
+            env,
+            state=state,
+            req_id=1,
+            va=NCIO_VA + 0x8,
+            data=NCIO_BURST_DATA[1],
+        )
+        if (
+            first_store.addr != NCIO_PA
+            or not first_store.nc
+            or first_store.mmio
+            or second_store.addr != NCIO_PA + 0x8
+            or not second_store.nc
+            or second_store.mmio
+        ):
+            pytest.xfail(
+                "PBMT NC burst capability gap: translated PBMT=NC stores did not surface stable NC shadows; "
+                f"first={first_store}, second={second_store}"
+            )
+        env.wait_memory_quiesce(max_cycles=400)
+        drain_summary = FlushStoreBuffersSequence().run(env)
+
+    assert first_store.addr == NCIO_PA
+    assert second_store.addr == NCIO_PA + 0x8
+    assert first_store.nc and second_store.nc
+    assert not first_store.mmio and not second_store.mmio
+    assert env.get_counter("outer_write_request_count") >= outer_before + 2, "NCIO burst 未形成两笔 outer 写请求"
+    assert env.get_counter("sbuffer_drain_count") == sbuffer_before, "NCIO burst 不应走 sbuffer drain"
+    assert "outer" in _drain_channels(env), "NCIO burst flush 后未记录到 outer drain"
+    assert drain_summary["touched_byte_count"] >= 16, "NCIO burst flush 覆盖字节数不足"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_sv39_pbmt_mmio_then_cacheable_store_flush_excludes_mmio_from_final_compare(env):
+    """translated PBMT=MMIO store 与 translated cacheable store 混合 flush 时，只比较 cacheable/non-MMIO 结果。"""
+
+    state = _reset_env_state(env)
+    _install_svpbmt_address_space(env)
+    cacheable_store_va = CACHEABLE_VA + 0x20
+    cacheable_store_pa = CACHEABLE_PA + 0x20
+    expected_refmem = env.memory.predict_store(cacheable_store_pa, MMIO_MIXED_CACHEABLE_DATA)
+
+    with env.mmu.ptw_responder():
+        env.mmu.enable_sv39(root_pt_addr=MMU_ROOT_PT)
+        outer_before = env.get_counter("outer_write_request_count")
+        sbuffer_before = env.get_counter("sbuffer_drain_count")
+
+        state, mmio_store = _run_translated_store(
+            env,
+            state=state,
+            req_id=0,
+            va=MMIO_VA,
+            data=MMIO_DATA,
+        )
+        state, cacheable_store = _run_translated_store(
+            env,
+            state=state,
+            req_id=1,
+            va=cacheable_store_va,
+            data=MMIO_MIXED_CACHEABLE_DATA,
+        )
+        if (
+            mmio_store.addr != MMIO_PA
+            or not mmio_store.mmio
+            or mmio_store.nc
+            or cacheable_store.addr != cacheable_store_pa
+            or cacheable_store.mmio
+            or cacheable_store.nc
+        ):
+            pytest.xfail(
+                "PBMT IO/Cacheable mixed-store capability gap: translated stores did not surface stable MMIO/cacheable shadows; "
+                f"mmio={mmio_store}, cacheable={cacheable_store}"
+            )
+        env.wait_memory_quiesce(max_cycles=400)
+        drain_summary = FlushStoreBuffersSequence().run(env)
+
+    drain_channels = _drain_channels(env)
+    assert mmio_store.addr == MMIO_PA and mmio_store.mmio and not mmio_store.nc
+    assert cacheable_store.addr == cacheable_store_pa and not cacheable_store.mmio and not cacheable_store.nc
+    assert env.get_counter("outer_write_request_count") > outer_before, "translated MMIO store 未形成 outer 写请求"
+    assert env.get_counter("sbuffer_drain_count") > sbuffer_before, "translated cacheable store 未形成 sbuffer drain"
+    assert "outer" in drain_channels, "mixed translated flush 未记录到 outer drain"
+    assert "sbuffer" in drain_channels, "mixed translated flush 未记录到 sbuffer drain"
+    assert drain_summary["drain_event_count"] >= 1, "mixed translated flush 未记录到 drain"
+    assert env.memory.read(cacheable_store_pa, 8) == expected_refmem.read(
+        cacheable_store_pa, 8
+    ), "mixed translated flush 中的 cacheable store 最终 golden memory 不匹配"
     env.assert_no_outstanding()
 
 

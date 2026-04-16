@@ -2,7 +2,34 @@
 
 ## 2026-04-16
 
-### 1. 为 load fault / scalar load probe 新增专题文档入口
+### 1. 收口 `store_todo` 并补强 store partial/misalign/translated uncache 场景
+
+本条目记录一次围绕 store 专题实施地图和三组真实 DUT testcase 的收口。此前 `docs/store_todo.md` 同时承担了 coverage 讨论摘录、TODO 列表和实施建议三种职责，已经开始与 `coverage_summary.md` / `coverage_todo.md` 的主状态源口径分叉；同时 `scalar_store_pipeline`、`store_misalign`、`uncache_semantics` 三组用例也还缺少若干直接对应文档计划的场景。本轮一边把 `store_todo` 收敛成专题实施地图，一边把 partial 深矩阵、cross-page `SW` 和 translated NC/MMIO store 语义补进真实 DUT 回归。
+
+#### 变更摘要
+
+- `docs/store_todo.md`
+  - 去掉独立 coverage 数字与重复状态描述，改为 store 专题实施地图
+  - 明确 `coverage_summary.md` / `coverage_todo.md` 是 coverage 真源
+  - 明确 `cross-page SB` 在语义上不成立，cross-page 宽度矩阵只围绕 `SH/SW/SD`
+- `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 新增 `4B partial -> 高偏移 1B overwrite -> full load`
+  - 新增按连续 low-byte lane 执行 `1B partial store` 的 merge 场景
+- `tests/test_MemBlock_store_misalign.py`
+  - 新增 `SW + 0xFFD` / `SW + 0xFFE` 两条 cross-page strict `xfail`
+  - 继续保持“shadow/load 可见已成立，但 flush/drain 仍卡在 DUT”这一精确口径
+- `tests/test_MemBlock_uncache_semantics.py`
+  - 新增 translated `PBMT=NC` store burst + flush
+  - 新增 translated `PBMT=MMIO` store + translated cacheable store mixed flush exclusion
+  - 对 translated store shadow 能力不足继续使用精确 capability `xfail`
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py src/test/python/MemBlock/tests/test_MemBlock_store_misalign.py src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py src/test/python/MemBlock/tests/test_MemBlock_store_misalign.py src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py`
+  - 结果：`19 passed, 8 xfailed`
+
+### 2. 为 load fault / scalar load probe 新增专题文档入口
 
 本条目记录一次围绕 `00e7578f1b17bc30c718cb099a7bd59d1556f4d6` 新增用例的文档收口。此前 `test_MemBlock_mmu_fault.py` 与 `test_MemBlock_scalar_load_pipeline_probe.py` 已经落地，但对应的设计意图、sequence 边界和推荐阅读入口还没有同步进入文档体系。本轮补齐专题说明，并把入口挂回 README、MMU 文档、pipeline 方案文档与 sequence 指南。
 
@@ -28,7 +55,7 @@
 
 - 文档改动，未单独重跑 pytest
 
-### 2. 将 `scalar_load_pipeline_probe` 中两个 XPASS 用例升级为真实验证
+### 3. 将 `scalar_load_pipeline_probe` 中两个 XPASS 用例升级为真实验证
 
 本条目记录一次对 `test_MemBlock_scalar_load_pipeline_probe.py` 中两个历史 XPASS 用例的验证口径收紧。此前它们虽然“跑绿”，但分别存在 `older store` 只验证 materialize、以及 `nc_replay` 组合只验证 replay queue 落点而未明确证明最终 compare/writeback 收敛的问题。本轮不再依赖宽松断言，而是把 sequence 和 testcase 一起收紧到与测试意图一致的真实行为证明。
 
@@ -53,7 +80,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py`
   - 结果：`10 passed, 1 xfailed`
 
-### 3. 修复 rebase 后 mmu fault / scalar load probe 的 load writeback 登记错位
+### 4. 修复 rebase 后 mmu fault / scalar load probe 的 load writeback 登记错位
 
 本条目记录一次针对主线 `cff44ae39d0cba512943b4d817ab397d9363153f` rebase 后兼容性的收口。该主线改动将 testcase/sequence 对 load 观测的口径切换到 runtime 绑定的 `txn.rob_idx`，而这两条 directed 链路里仍残留若干按旧 `req_id -> legacy robIdx` 登记 `expect_scalar_load` / `wait_load_writeback_observed` 的位置，导致真实 writeback 被 scoreboard 误判为“未登记的 load writeback”。
 

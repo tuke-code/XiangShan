@@ -405,6 +405,137 @@ def test_api_MemBlock_partial_byte_merge_same_dword_directed(env):
     env.assert_no_outstanding()
 
 
+def test_api_MemBlock_partial_word_then_high_offset_byte_overwrite_directed(env):
+    """
+    先做 4B partial store，再做高偏移 1B overwrite，最后用整 8B load 验证。
+
+    检查点：
+      - 4B partial store 与高偏移 1B overwrite 都能进入 committed
+      - 两条 partial store 的 mask 分别保持为 0x0F / 高偏移单字节
+      - younger full load 能看到链式 merge 后的最终视图
+    """
+
+    initial_word = 0x1020_3040_5060_7080
+    partial_word_data = 0xA1A2_A3A4
+    overwrite_addr = PARTIAL_STORE_WINDOW_BASE + 0x7
+    overwrite_data = 0xEE
+
+    state = _reset_env_and_state(env)
+    env.preload_u64(PARTIAL_STORE_WINDOW_BASE, initial_word)
+    expected_refmem = env.memory.fork_ref_memory()
+
+    first_result, sq_ptr = _commit_scalar_store(
+        env,
+        state.sq_ptr,
+        req_id=0,
+        addr=PARTIAL_STORE_WINDOW_BASE,
+        data=partial_word_data,
+        mask=0x0F,
+    )
+    _apply_store_stimulus_to_ref_memory(
+        expected_refmem,
+        addr=PARTIAL_STORE_WINDOW_BASE,
+        data=partial_word_data,
+        mask=0x0F,
+    )
+    second_result, sq_ptr = _commit_scalar_store(
+        env,
+        sq_ptr,
+        req_id=1,
+        addr=overwrite_addr,
+        data=overwrite_data,
+        mask=0x01,
+    )
+    _apply_store_stimulus_to_ref_memory(
+        expected_refmem,
+        addr=overwrite_addr,
+        data=overwrite_data,
+        mask=0x01,
+    )
+
+    load_result = ScalarLoadSequence(
+        LoadTxn(
+            req_id=2,
+            addr=PARTIAL_STORE_WINDOW_BASE,
+            lq_ptr=state.next_lq_ptr,
+            sq_ptr=sq_ptr,
+        ),
+        expected_completed_loads=1,
+    ).run(env)
+    drain_summary = FlushStoreBuffersSequence(max_cycles=800).run(env)
+
+    assert first_result.committed_store_view.mask == 0x0F, "链式 partial store 的首条 4B mask 异常"
+    assert second_result.committed_store_view.mask == 0x80, "链式 partial store 的高偏移 1B mask 异常"
+    assert load_result.next_lq_ptr == QueuePtr(flag=0, value=1), "链式 partial store 后的 load 未按预期推进 LQ"
+    assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_refmem.read(
+        PARTIAL_STORE_WINDOW_BASE, 8
+    ), "4B partial + 高偏移 1B overwrite 的最终结果不匹配"
+    assert drain_summary["touched_byte_count"] >= 5, "链式 partial store flush 覆盖字节数不足"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_sequential_partial_byte_lanes_same_dword_directed(env):
+    """
+    同一 dword 上按连续 lane 依次执行 1B partial store。
+
+    检查点：
+      - 依次命中低四个 byte lane，对应 mask 为 0x01/0x02/0x04/0x08
+      - younger full load 能看到顺序 merge 后的最终 dword
+      - flush/drain 至少覆盖四个被写字节
+    """
+
+    initial_word = 0x8877_6655_4433_2211
+    byte_updates = [
+        (PARTIAL_STORE_WINDOW_BASE + 0x0, 0xA1),
+        (PARTIAL_STORE_WINDOW_BASE + 0x1, 0xB2),
+        (PARTIAL_STORE_WINDOW_BASE + 0x2, 0xC3),
+        (PARTIAL_STORE_WINDOW_BASE + 0x3, 0xD4),
+    ]
+
+    state = _reset_env_and_state(env)
+    env.preload_u64(PARTIAL_STORE_WINDOW_BASE, initial_word)
+
+    sq_ptr = state.sq_ptr
+    expected_refmem = env.memory.fork_ref_memory()
+    committed_masks = []
+
+    for req_id, (addr, data) in enumerate(byte_updates):
+        commit_result, sq_ptr = _commit_scalar_store(
+            env,
+            sq_ptr,
+            req_id=req_id,
+            addr=addr,
+            data=data,
+            mask=0x01,
+        )
+        committed_masks.append(int(commit_result.committed_store_view.mask))
+        _apply_store_stimulus_to_ref_memory(
+            expected_refmem,
+            addr=addr,
+            data=data,
+            mask=0x01,
+        )
+
+    load_result = ScalarLoadSequence(
+        LoadTxn(
+            req_id=len(byte_updates),
+            addr=PARTIAL_STORE_WINDOW_BASE,
+            lq_ptr=state.next_lq_ptr,
+            sq_ptr=sq_ptr,
+        ),
+        expected_completed_loads=1,
+    ).run(env)
+    drain_summary = FlushStoreBuffersSequence(max_cycles=800).run(env)
+
+    assert committed_masks == [0x01, 0x02, 0x04, 0x08], "连续 byte lane partial store 未落在预期 mask"
+    assert load_result.next_lq_ptr == QueuePtr(flag=0, value=1), "连续 byte lane 场景下 load 未按预期推进 LQ"
+    assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_refmem.read(
+        PARTIAL_STORE_WINDOW_BASE, 8
+    ), "连续 byte lane partial store 后最终 dword 结果不匹配"
+    assert drain_summary["touched_byte_count"] >= len(byte_updates), "连续 byte lane flush 覆盖字节数不足"
+    env.assert_no_outstanding()
+
+
 def test_api_MemBlock_full_store_then_partial_overwrite_directed(env):
     """
     先 full store，再做高偏移 partial overwrite。

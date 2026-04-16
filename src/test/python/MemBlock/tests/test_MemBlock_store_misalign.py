@@ -264,6 +264,36 @@ def test_api_MemBlock_store_misalign_sd_offset_d_cross_page(env):
 
 
 @pytest.mark.xfail(reason=DUTBUG_STORE_MISALIGN_CROSS_PAGE_FLUSH_STALL_XFAIL_REASON, strict=True)
+def test_api_MemBlock_store_misalign_sw_offset_d_cross_page(env):
+    """
+    4B store 落在页尾 +0xFFD，覆盖 3B/1B cross-page split。
+    """
+
+    _run_cross_page_store_misalign_case(
+        env,
+        store_addr=CROSS_PAGE_BASE + 0xFFD,
+        store_data=0x5566_7788,
+        store_mask=0x0F,
+        min_touched_bytes=4,
+    )
+
+
+@pytest.mark.xfail(reason=DUTBUG_STORE_MISALIGN_CROSS_PAGE_FLUSH_STALL_XFAIL_REASON, strict=True)
+def test_api_MemBlock_store_misalign_sw_offset_e_cross_page(env):
+    """
+    4B store 落在页尾 +0xFFE，覆盖 2B/2B cross-page split。
+    """
+
+    _run_cross_page_store_misalign_case(
+        env,
+        store_addr=CROSS_PAGE_BASE + 0xFFE,
+        store_data=0x99AA_BBCC,
+        store_mask=0x0F,
+        min_touched_bytes=4,
+    )
+
+
+@pytest.mark.xfail(reason=DUTBUG_STORE_MISALIGN_CROSS_PAGE_FLUSH_STALL_XFAIL_REASON, strict=True)
 def test_api_MemBlock_store_misalign_sh_offset_f_cross_page(env):
     """
     2B store 落在页尾 +0xFFF，覆盖最小宽度 cross-page split。
