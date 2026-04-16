@@ -754,7 +754,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   def before_data_refill_can_merge(new_req: MissReqWoStoreData): Bool = {
     data_not_refilled && new_req.isFromLoad ||
-    !io.mem_grant.fire && data_not_refilled && new_req.isFromStore && alloc_is_store
+    !io.main_pipe_refill_resp && !w_refill_resp && new_req.isFromStore && alloc_is_store
   }
 
   // Note that late prefetch will be ignored
