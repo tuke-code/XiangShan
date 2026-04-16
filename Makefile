@@ -17,6 +17,8 @@
 
 BUILD_DIR = ./build
 RTL_DIR = $(BUILD_DIR)/rtl
+NOOP_HOME := $(abspath .)
+export NOOP_HOME
 
 # import docker support
 include scripts/Makefile.docker
