@@ -26,12 +26,21 @@ from .memblock_sequences import (
     SequenceState,
 )
 from .mmu_sequences import (
+    LOAD_ACCESS_FAULT_BIT,
+    LOAD_GUEST_PAGE_FAULT_BIT,
+    LOAD_PAGE_FAULT_BIT,
+    MmuFaultingScalarLoadSequence,
+    MmuFaultingScalarLoadSequenceResult,
     MmuPrimeLoadSpec,
     MmuSv39ActivateSequence,
     MmuSv39ActivateSequenceResult,
     MmuSv39AddressSpaceConfig,
     MmuSv39AddressSpaceInstallSequence,
     MmuSv39AddressSpaceInstallSequenceResult,
+    PMP_MODE_ALLOW,
+    PMP_MODE_DENY,
+    PTE_MODE_NORMAL,
+    PTE_MODE_PAGE_FAULT,
     Sv39GigapageMapping,
     TranslatedU64MemoryPreload,
     U64MemoryPreload,
@@ -40,6 +49,18 @@ from .vector_mem_sequences import (
     VectorLoadSequence,
     VectorSequenceResult,
     VectorStoreSequence,
+)
+from .load_pipeline_probe_sequences import (
+    LoadPipelineBankConflictEvent,
+    LoadPipelineFastReplayEvent,
+    LoadPipelineReplayQueueEvent,
+    LoadPipelineWakeupEvent,
+    ScalarBankConflictLoadClusterSequence,
+    ScalarBankConflictLoadClusterSequenceResult,
+    ScalarFastReplayCancelledByReplayHiPrioSequence,
+    ScalarFastReplayCancelledByReplayHiPrioSequenceResult,
+    ScalarLateStaStoreLoadViolationSequence,
+    ScalarLateStaStoreLoadViolationSequenceResult,
 )
 from .violation_sequences import (
     ScalarBankConflictSqDataInvalidNukeSequence,

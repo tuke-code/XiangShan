@@ -1,5 +1,55 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-16
+
+### 1. 将 `scalar_load_pipeline_probe` 中两个 XPASS 用例升级为真实验证
+
+本条目记录一次对 `test_MemBlock_scalar_load_pipeline_probe.py` 中两个历史 XPASS 用例的验证口径收紧。此前它们虽然“跑绿”，但分别存在 `older store` 只验证 materialize、以及 `nc_replay` 组合只验证 replay queue 落点而未明确证明最终 compare/writeback 收敛的问题。本轮不再依赖宽松断言，而是把 sequence 和 testcase 一起收紧到与测试意图一致的真实行为证明。
+
+#### 变更摘要
+
+- `sequences/load_pipeline_probe_sequences.py`
+  - `ScalarLateStaStoreLoadViolationSequence` 改为等待 `wait_store_materialized(..., require_committed=True)`，不再把 `completed/materialize` 误当成 `commit`
+  - `ScalarFastReplayCancelledByReplayHiPrioSequence` 为 hi-prio preemptor + bank-conflict 组合补齐最终 writeback 追踪
+  - 新增对 preemptor load writeback 的 ROB/data 绑定校验，并把该组合的 `expected_completed_load_count` 显式回传给 testcase
+- `tests/test_MemBlock_scalar_load_pipeline_probe.py`
+  - `nc_replay` 抢占用例移除旧 `xfail`，改为显式断言：
+    - preemptor writeback 全收齐
+    - bank-conflict loads 的 final writeback / wakeup 全收齐
+    - 完成 compare 的 load 数与预期完全一致
+  - `late_sta_violation` 用例移除旧 `xfail`，断言从“仅 materialize”升级为“`completed` + `committed`”，并保留后续 drain 收尾检查
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/sequences/load_pipeline_probe_sequences.py src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py`
+- `python3 -m pytest -q -rXx src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py -k 'nc_replay or late_sta_violation'`
+  - 结果：`2 passed, 5 deselected`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py`
+  - 结果：`10 passed, 1 xfailed`
+
+### 2. 修复 rebase 后 mmu fault / scalar load probe 的 load writeback 登记错位
+
+本条目记录一次针对主线 `cff44ae39d0cba512943b4d817ab397d9363153f` rebase 后兼容性的收口。该主线改动将 testcase/sequence 对 load 观测的口径切换到 runtime 绑定的 `txn.rob_idx`，而这两条 directed 链路里仍残留若干按旧 `req_id -> legacy robIdx` 登记 `expect_scalar_load` / `wait_load_writeback_observed` 的位置，导致真实 writeback 被 scoreboard 误判为“未登记的 load writeback”。
+
+#### 变更摘要
+
+- `sequences/mmu_sequences.py`
+  - `MmuFaultingScalarLoadSequence` 在 expect / wait 前先 `backend.prepare(txn)`
+  - 改为按 `txn.rob_idx` 登记与等待 load writeback
+- `sequences/load_pipeline_probe_sequences.py`
+  - `bank-conflict`、cache warmup、hi-prio preemptor 等 load 路径统一改为先 prepare，再按 runtime `rob_idx` expect / wait
+  - 修正 rebase 后 `_capture_replay_events(...)` 仍按旧 `rob_idx_flag/rob_idx_value` 传参的问题
+- `sequences/violation_sequences.py`
+  - 清理 `ScalarSqDataInvalidMatchInvalidTriggerSequence` 中 rebase 后混入的旧/新 store 发射残留，去掉悬空的 `store_result/store_ref` 访问
+- `tests/test_MemBlock_scalar_load_pipeline_probe.py`
+  - 直接 warmup load 改为先 prepare，再按 `warmup_load.rob_idx` 做 expect / wait
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/sequences/mmu_sequences.py src/test/python/MemBlock/sequences/load_pipeline_probe_sequences.py src/test/python/MemBlock/sequences/violation_sequences.py src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py`
+  - 结果：`8 passed, 1 xfailed, 2 xpassed`
+
 ## 2026-04-15
 
 ### 1. 重整 `request_apis.py` 与 `sequences/` 分层：公共模型进 `transactions.py`，场景模板上提到 sequence

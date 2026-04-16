@@ -15,6 +15,15 @@ from request_apis import (
     issue_scalar_std,
     send_load,
 )
+from transactions import (
+    BackendSendPlan,
+    EnqueueLoadStep,
+    EnqueueStoreStep,
+    IssueCyclePlan,
+    IssueOp,
+    StoreCommitStep,
+    StoreRef,
+)
 
 from .memblock_sequences import (
     ScalarLoadBatchSameCycleSequence,
@@ -890,7 +899,12 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
                 size=tlb_prime_load.size,
                 mask=tlb_prime_load.mask,
             )
-            send_load(env, tlb_prime_load)
+            env.backend.execute(
+                BackendSendPlan.from_steps(
+                    EnqueueLoadStep.from_txn(tlb_prime_load),
+                    IssueCyclePlan.from_ops(IssueOp.load_from_txn(tlb_prime_load)),
+                )
+            )
             tlb_prime_writeback = env.wait_load_writeback_observed(
                 rob_idx=tlb_prime_load.rob_idx,
                 data=self.tlb_prime_data,
@@ -919,7 +933,12 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
                 max_events=64,
             ) as replay_trace,
         ):
-            send_load(env, main_load)
+            env.backend.execute(
+                BackendSendPlan.from_steps(
+                    EnqueueLoadStep.from_txn(main_load),
+                    IssueCyclePlan.from_ops(IssueOp.load_from_txn(main_load)),
+                )
+            )
             sq_forward_event, memory_violation, initial_replay_events, dcache_miss_signal = _wait_sq_matchinvalid_and_violation(
                 env,
                 lane=main_load.issue_lane,
@@ -940,7 +959,6 @@ class ScalarSqDataInvalidMatchInvalidTriggerSequence:
                 ftq_idx_flag=self.store_txn.resolved_ftq_idx_flag,
                 ftq_idx_value=self.store_txn.resolved_ftq_idx_value,
             )
-            env.backend.pulse_store_commit(1)
             replay_expected = env.expect_scalar_load(
                 rob_idx=main_load.rob_idx,
                 pdest=main_load.resolved_pdest,
