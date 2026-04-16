@@ -63,7 +63,9 @@ case class DCacheParameters
   // cache alias will happen,
   // we need to avoid this by recoding additional bits in L2 cache
   val setBytes = nSets * blockBytes
-  val aliasBitsOpt = if(setBytes > pageSize) Some(log2Ceil(setBytes / pageSize)) else None
+  // MissQueue exports vaddr(13,12) through AliasKey, so the externally visible alias field
+  // must provide at least 2 bits even when only one extra index bit would be sufficient.
+  val aliasBitsOpt = if(setBytes > pageSize) Some(log2Ceil(setBytes / pageSize) max 2) else None
 
   def tagCode: Code = Code.fromString(tagECC)
 

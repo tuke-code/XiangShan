@@ -315,6 +315,7 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
       val dse_epoch = Output(UInt(64.W))
       val dse_max_instr = Output(UInt(64.W))
     })
+    val io_harden_perf = HardenXSPerfAccumulate.reclaim()
 
     val reset_sync = withClockAndReset(io.clock, io.reset) { ResetGen() }
     // DSECtrl reset signals
@@ -491,7 +492,10 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
     }
 
     val instrCnt_sink = Wire(UInt(64.W))
+    val pL3Sets = Wire(UInt(64.W))
     BoringUtils.addSink(instrCnt_sink, "DSE_INSTRCNT")
+    BoringUtils.addSink(pL3Sets, "DSE_L3SETS")
+    l3cacheOpt.foreach(_.module.io.sets := pL3Sets)
 
     dseCtrl.module.io.clk := io.clock
     dseCtrl.module.io.rst := io.dse_rst

@@ -3,6 +3,7 @@ package xiangshan
 import org.chipsalliance.cde.config.Parameters
 import chisel3._
 import chisel3.util._
+import coupledL2.L2ParamKey
 import freechips.rocketchip.diplomacy.{AddressSet, BundleBridgeSource, LazyModule, LazyModuleImp, LazyRawModuleImp, SimpleDevice}
 import freechips.rocketchip.interrupts.{IntSourceNode, IntSourcePortParameters, IntSourcePortSimple}
 import freechips.rocketchip.regmapper.{RegField, RegFieldDesc, RegFieldGroup, RegWriteFn}
@@ -13,7 +14,7 @@ import system._
 import utility._
 import chisel3.util.experimental.BoringUtils
 
-case class DSEParams(baseAddress: BigInt = 0x39002000L)
+case class DSEParams(baseAddress: BigInt = 0x39020000L)
 {
   def address = AddressSet(baseAddress, 0xfff)
   def beatBytes = 8
@@ -54,6 +55,8 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
     val max_instr_cnt = RegInit(0x1000000.U(64.W))
     val epoch = RegInit(0.U(64.W))
     val max_epoch = RegInit(0.U(64.W))
+    val staticL2Sets = p(L2ParamKey).sets
+    val staticL3Sets = p(SoCParamsKey).L3CacheParamsOpt.get.sets
 
     val robSize0 = RegInit(RobSize.U(64.W))
     val robSize1 = RegInit(RobSize.U(64.W))
@@ -95,14 +98,14 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
 //    val l3MSHRs1 = RegInit(L3MSHRs.U(64.W))
 //    val l3MSHRs = Wire(UInt(64.W))
 //
-//    val l2Sets0 = RegInit(p(XSCoreParamsKey).L2CacheParamsOpt.map(_.sets).getOrElse(0).U(64.W))
-//    val l2Sets1 = RegInit(p(XSCoreParamsKey).L2CacheParamsOpt.map(_.sets).getOrElse(0).U(64.W))
-//    val l2Sets = Wire(UInt(64.W))
-//
-//    val l3Sets0 = RegInit(p(SoCParamsKey).L3CacheParamsOpt.map(_.sets).getOrElse(0).U(64.W))
-//    val l3Sets1 = RegInit(p(SoCParamsKey).L3CacheParamsOpt.map(_.sets).getOrElse(0).U(64.W))
-//    val l3Sets = Wire(UInt(64.W))
-//
+    val l2Sets0 = RegInit(staticL2Sets.U(64.W))
+    val l2Sets1 = RegInit(staticL2Sets.U(64.W))
+    val l2Sets = Wire(UInt(64.W))
+
+    val l3Sets0 = RegInit(staticL3Sets.U(64.W))
+    val l3Sets1 = RegInit(staticL3Sets.U(64.W))
+    val l3Sets = Wire(UInt(64.W))
+
     val intPhyRegs0 = RegInit(IntPhyRegs.U(64.W))
     val intPhyRegs1 = RegInit(IntPhyRegs.U(64.W))
     val intPhyRegs = Wire(UInt(64.W))
@@ -155,10 +158,10 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
 //      0x188 -> Seq(RegField(64, l2MSHRs1)),
 //      0x190 -> Seq(RegField(64, l3MSHRs0)),
 //      0x198 -> Seq(RegField(64, l3MSHRs1)),
-//      0x1A0 -> Seq(RegField(64, l2Sets0)),
-//      0x1A8 -> Seq(RegField(64, l2Sets1)),
-//      0x1B0 -> Seq(RegField(64, l3Sets0)),
-//      0x1B8 -> Seq(RegField(64, l3Sets1)),
+      0x1A0 -> Seq(RegField(64, l2Sets0)),
+      0x1A8 -> Seq(RegField(64, l2Sets1)),
+      0x1B0 -> Seq(RegField(64, l3Sets0)),
+      0x1B8 -> Seq(RegField(64, l3Sets1)),
       0x1C0 -> Seq(RegField(64, intPhyRegs0)),
       0x1C8 -> Seq(RegField(64, intPhyRegs1)),
       0x1D0 -> Seq(RegField(64, fpPhyRegs0)),
@@ -182,8 +185,8 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
 //    lsDqSize := Mux(ctrlSel.orR, lsDqSize1, lsDqSize0)
 //    l2MSHRs := Mux(ctrlSel.orR, l2MSHRs1, l2MSHRs0)
 //    l3MSHRs := Mux(ctrlSel.orR, l3MSHRs1, l3MSHRs0)
-//    l2Sets := Mux(ctrlSel.orR, l2Sets1, l2Sets0)
-//    l3Sets := Mux(ctrlSel.orR, l3Sets1, l3Sets0)
+    l2Sets := Mux(appliedCtrlSel.orR, l2Sets1, l2Sets0)
+    l3Sets := Mux(appliedCtrlSel.orR, l3Sets1, l3Sets0)
     intPhyRegs := Mux(appliedCtrlSel.orR, intPhyRegs1, intPhyRegs0)
     fpPhyRegs := Mux(appliedCtrlSel.orR, fpPhyRegs1, fpPhyRegs0)
 //    rasSize := Mux(ctrlSel.orR, rasSize1, rasSize0)
@@ -201,8 +204,8 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
 //    BoringUtils.addSource(lsDqSize, "DSE_LSDQSIZE")
 //    BoringUtils.addSource(l2MSHRs, "DSE_L2MSHRS")
 //    BoringUtils.addSource(l3MSHRs, "DSE_L3MSHRS")
-//    BoringUtils.addSource(l2Sets, "DSE_L2SETS")
-//    BoringUtils.addSource(l3Sets, "DSE_L3SETS")
+    BoringUtils.addSource(l2Sets, "DSE_L2SETS")
+    BoringUtils.addSource(l3Sets, "DSE_L3SETS")
     BoringUtils.addSource(intPhyRegs, "DSE_INTFLSIZE")
     BoringUtils.addSource(fpPhyRegs, "DSE_FPFLSIZE")
 //    BoringUtils.addSource(rasSize, "DSE_RASSIZE")
@@ -223,8 +226,10 @@ class DSECtrlUnitImp(wrapper: DSECtrlUnit)(implicit p: Parameters) extends LazyR
 //    assert(lsDqSize <= dpParams.LsDqSize.U, "DSE parameter must not exceed LsDqSize")
 //    assert(l2MSHRs <= L2MSHRs.U, "DSE parameter must not exceed L2MSHRs")
 //    assert(l3MSHRs <= L3MSHRs.U, "DSE parameter must not exceed L3MSHRs")
-//    assert(l2Sets <= p(XSCoreParamsKey).L2CacheParamsOpt.map(_.sets).getOrElse(0).U, "DSE parameter must not exceed L2Sets")
-//    assert(l3Sets <= p(SoCParamsKey).L3CacheParamsOpt.map(_.sets).getOrElse(0).U, "DSE parameter must not exceed L3Sets")
+    assert(l2Sets <= staticL2Sets.U, "DSE parameter must not exceed L2Sets")
+    assert(PopCount(l2Sets) === 1.U, "DSE L2Sets must be power-of-two")
+    assert(l3Sets <= staticL3Sets.U, "DSE parameter must not exceed L3Sets")
+    assert(PopCount(l3Sets) === 1.U, "DSE L3Sets must be power-of-two")
     assert(intPhyRegs <= IntPhyRegs.U, "DSE parameter must not exceed IntPhyRegs")
     assert(fpPhyRegs <= (FpPhyRegs - FpLogicRegs).U, "DSE parameter must not exceed FpFreeListSize")
 //    assert(rasSize <= RasSize.U, "DSE parameter must not exceed RasSize")

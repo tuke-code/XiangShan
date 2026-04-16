@@ -18,6 +18,7 @@ package xiangshan
 
 import chisel3._
 import chisel3.util._
+import chisel3.util.experimental.BoringUtils
 import org.chipsalliance.cde.config._
 import chisel3.util.{Valid, ValidIO}
 import freechips.rocketchip.devices.debug.DebugModuleKey
@@ -282,9 +283,13 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
     hartIsInReset := io.hartIsInReset.resetInFrontend
     io.hartIsInReset.toTile := hartIsInReset
 
+    val pL2Sets = Wire(UInt(64.W))
+    BoringUtils.addSink(pL2Sets, "DSE_L2SETS")
+
     if (l2cache.isDefined) {
       val l2 = l2cache.get.module
 
+      l2.io.sets := pL2Sets
       l2.io.pfCtrlFromCore := io.pfCtrlFromCore
       l2.io.dft.zip(io.dft).foreach({ case(a, b) => a := b })
       l2.io.dft_reset.zip(io.dft_reset).foreach({ case(a, b) => a := b })

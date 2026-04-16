@@ -54,8 +54,8 @@ void main() {
         // *(volatile uint64_t *)LSDQSIZE0_REG = *(volatile uint64_t *)LSDQSIZE_ADDR;
         // *(volatile uint64_t *)L2MSHRS0_REG = *(volatile uint64_t *)L2MSHRS_ADDR;
         // *(volatile uint64_t *)L3MSHRS0_REG = *(volatile uint64_t *)L3MSHRS_ADDR;
-        // *(volatile uint64_t *)L2SETS0_REG = *(volatile uint64_t *)L2SETS_ADDR;
-        // *(volatile uint64_t *)L3SETS0_REG = *(volatile uint64_t *)L3SETS_ADDR;
+        *(volatile uint64_t *)L2SETS0_REG = *(volatile uint64_t *)L2SETS_ADDR;
+        *(volatile uint64_t *)L3SETS0_REG = *(volatile uint64_t *)L3SETS_ADDR;
         *(volatile uint64_t *)INTPHYREGS0_REG = *(volatile uint64_t *)INTPHYREGS_ADDR;
         *(volatile uint64_t *)FPPHYREGS0_REG = *(volatile uint64_t *)FPPHYREGS_ADDR;
         // *(volatile uint64_t *)RASSIZE0_REG = *(volatile uint64_t *)RASSIZE_ADDR;
@@ -72,8 +72,8 @@ void main() {
         // *(volatile uint64_t *)LSDQSIZE1_REG = *(volatile uint64_t *)LSDQSIZE_ADDR;
         // *(volatile uint64_t *)L2MSHRS1_REG = *(volatile uint64_t *)L2MSHRS_ADDR;
         // *(volatile uint64_t *)L3MSHRS1_REG = *(volatile uint64_t *)L3MSHRS_ADDR;
-        // *(volatile uint64_t *)L2SETS1_REG = *(volatile uint64_t *)L2SETS_ADDR;
-        // *(volatile uint64_t *)L3SETS1_REG = *(volatile uint64_t *)L3SETS_ADDR;
+        *(volatile uint64_t *)L2SETS1_REG = *(volatile uint64_t *)L2SETS_ADDR;
+        *(volatile uint64_t *)L3SETS1_REG = *(volatile uint64_t *)L3SETS_ADDR;
         *(volatile uint64_t *)INTPHYREGS1_REG = *(volatile uint64_t *)INTPHYREGS_ADDR;
         *(volatile uint64_t *)FPPHYREGS1_REG = *(volatile uint64_t *)FPPHYREGS_ADDR;
         // *(volatile uint64_t *)RASSIZE1_REG = *(volatile uint64_t *)RASSIZE_ADDR;

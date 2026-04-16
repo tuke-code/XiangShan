@@ -1,7 +1,7 @@
 #ifndef __DSE_H
 #define __DSE_H
 
-#define DSE_BASE_ADDR  0x39002000
+#define DSE_BASE_ADDR  0x39020000
 
 #define PINGPONG_REG   (DSE_BASE_ADDR + 0x0000)
 #define CTRLSEL_REG    (DSE_BASE_ADDR + 0x0004)
