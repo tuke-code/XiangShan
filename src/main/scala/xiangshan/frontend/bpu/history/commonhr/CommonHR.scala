@@ -56,17 +56,14 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   private val imli                   = RegInit(0.U(ImliHistoryLength.W))
   private val s0_commonHR            = WireInit(0.U.asTypeOf(new CommonHREntry))
   private val s1_commonHR            = RegEnable(s0_commonHR, 0.U.asTypeOf(new CommonHREntry), s0_fire)
-  private val s2_commonHR            = RegEnable(s1_commonHR, 0.U.asTypeOf(new CommonHREntry), s1_fire)
+  private val s2_commonHR            = RegInit(0.U.asTypeOf(new CommonHREntry))
   private val s3_commonHR            = RegEnable(s2_commonHR, 0.U.asTypeOf(new CommonHREntry), s2_fire)
   private val commonHR               = RegInit(0.U.asTypeOf(new CommonHREntry))
   private val debugCommonHR          = RegInit(0.U.asTypeOf(new CommonHREntry))
   private val s3_commonHRResolveMeta = WireInit(0.U.asTypeOf(new CommonHRResolveMeta))
 
-  private val r2_valid               = RegInit(false.B)
-  private val r2_commonHR            = RegInit(0.U.asTypeOf(new CommonHREntry))
-  private val r3_valid               = RegInit(false.B)
-  private val r3_commonHR            = RegInit(0.U.asTypeOf(new CommonHREntry))
-  private val r3_redirectResolveMeta = WireInit(0.U.asTypeOf(new CommonHRResolveMeta))
+  private val r1_valid    = RegNext(io.redirect.valid, false.B)
+  private val r1_commonHR = WireInit(0.U.asTypeOf(new CommonHREntry))
 
   private val enqPtr     = RegInit(HistPtr(false.B, 0.U))
   private val predPtr    = RegInit(HistPtr(false.B, 0.U))
@@ -77,14 +74,10 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   /*
    * CommonHR train from redirect/s3_prediction
    */
-  s3_commonHRResolveMeta.valid := Mux(
-    r3_valid,
-    r3_redirectResolveMeta.valid,
-    s3_commonHR.valid
-  )
-  s3_commonHRResolveMeta.ghr  := Mux(r3_valid, r3_redirectResolveMeta.ghr, s3_commonHR.ghr)
-  s3_commonHRResolveMeta.bw   := Mux(r3_valid, r3_redirectResolveMeta.bw, s3_commonHR.bw)
-  s3_commonHRResolveMeta.imli := s3_imli
+  s3_commonHRResolveMeta.valid := s3_commonHR.valid
+  s3_commonHRResolveMeta.ghr   := s3_commonHR.ghr
+  s3_commonHRResolveMeta.bw    := s3_commonHR.bw
+  s3_commonHRResolveMeta.imli  := s3_imli
 
   io.s0_imli       := s0_imli
   io.s3ResolveMeta := s3_commonHRResolveMeta
@@ -174,7 +167,6 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   r0_commonHR.ghr             := io.redirect.meta.ghr
   r0_commonHR.bw              := io.redirect.meta.bw
 
-  private val r1_valid        = RegNext(io.redirect.valid, false.B)
   private val r1_redirect     = RegEnable(io.redirect, 0.U.asTypeOf(new CommonHRRedirect), io.redirect.valid)
   private val r1_s0StartPc    = RegEnable(io.s0_startPc.get, 0.U.asTypeOf(PrunedAddr(VAddrBits)), io.redirect.valid)
   private val r1_metaGhr      = r1_redirect.meta.ghr
@@ -192,9 +184,8 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   private val r1_lessThanPc = r1_oldPositions.zip(r1_oldHits).map {
     case (pos, hit) => hit && (pos < r1_takenPosition)
   } // positions less than redirect branch pc
-  private val r1_numLess  = PopCount(r1_lessThanPc)
-  private val r1_numHit   = PopCount(r1_oldHits)
-  private val r1_commonHR = WireInit(0.U.asTypeOf(new CommonHREntry))
+  private val r1_numLess = PopCount(r1_lessThanPc)
+  private val r1_numHit  = PopCount(r1_oldHits)
 
   r1_commonHR.valid           := false.B
   r1_commonHR.predStartPc.get := r1_s0StartPc
@@ -203,42 +194,30 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     BWHistoryLength
   )
 
-  when(s1_fire) {
-    r2_valid    := r1_valid
-    r2_commonHR := r1_commonHR
-  }
-
-  when(s2_fire) {
-    r3_valid    := r2_valid
-    r3_commonHR := r2_commonHR
-
-  }
-
-  r3_redirectResolveMeta.valid := r3_commonHR.valid
-  r3_redirectResolveMeta.ghr   := r3_commonHR.ghr
-  r3_redirectResolveMeta.bw    := r3_commonHR.bw
-  r3_redirectResolveMeta.imli  := s3_imli
-
   dontTouch(r1_valid)
   dontTouch(r1_commonHR)
-  dontTouch(r2_valid)
-  dontTouch(r3_valid)
-  dontTouch(r2_commonHR)
-  dontTouch(r3_commonHR)
 
   // update from redirect or update
+  when(r1_valid) {
+    commonHR := r1_commonHR // TODO: redirect commonHR recovery can delay one/two cycle
+  }.elsewhen(s3_fire) {
+    commonHR := s3_newCommonHR
+  }
+
   when(r0_valid) {
     debugCommonHR := debug_commonHR // TODO: redirect commonHR recovery can delay one/two cycle
-    commonHR      := r0_commonHR
   }.elsewhen(s3_fire) {
     debugCommonHR := s3_newCommonHR
-    commonHR      := s3_newCommonHR
-  }.elsewhen(r1_valid) {
-    commonHR := r1_commonHR
+  }
+
+  when(r1_valid) {
+    s2_commonHR := r1_commonHR
+  }.elsewhen(s1_fire) {
+    s2_commonHR := s1_commonHR
   }
 
   // imli update
-  when(io.redirect.valid) {
+  when(r0_valid) {
     val r0_newImli = Mux(
       r0_taken && r0_bwTaken && r0_isCond,
       Mux(io.redirect.meta.imli.andR, io.redirect.meta.imli, io.redirect.meta.imli + 1.U),
@@ -276,10 +255,11 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   initCommonHR.predStartPc.get := io.s0_startPc.get
 
   when(r0_valid) {
-    enqPtr                    := writePtr + 1.U
-    recoverPtr                := writePtr - 1.U
-    predPtr                   := writePtr - 1.U
-    histQueue(writePtr.value) := initCommonHR // The queue value during redirect is used for diff
+    enqPtr                            := writePtr + 1.U
+    recoverPtr                        := writePtr - 1.U
+    predPtr                           := writePtr - 1.U
+    histQueue(writePtr.value)         := initCommonHR // The queue value during redirect is used for diff
+    histQueue((writePtr - 1.U).value) := r0_commonHR  // The queue value during redirect is used for diff
   }.elsewhen(s3_override) {
     val realRecoverPtr = Mux(hasOverrideHist, recoverPtr + 1.U, recoverPtr)
     histQueue(writePtr.value)         := s3_newCommonHR // update s3_fire block
@@ -289,9 +269,6 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     writePtr                          := writePtr + 1.U
     recoverPtr                        := realRecoverPtr
   }.otherwise {
-    when(r1_valid) {
-      histQueue(recoverPtr.value) := r1_commonHR // The queue value during redirect is used for diff
-    }
     when(enqEnable) {
       histQueue(enqPtr.value) := initCommonHR
       enqPtr                  := enqPtr + 1.U
@@ -302,6 +279,10 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
       writePtr                  := writePtr + 1.U
       recoverPtr                := Mux(recoverInc, recoverPtr + 1.U, recoverPtr)
     }
+  }
+
+  when(r1_valid) {
+    histQueue(recoverPtr.value) := r1_commonHR
   }
 
   // Use distance-based checks for circular pointers to avoid wrap-around ordering ambiguity.
@@ -327,9 +308,10 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     )
   )
 
-  private val diffCommonHR = debugCommonHR.asUInt =/= commonHR.asUInt
+  private val diffCommonHR           = debugCommonHR.asUInt =/= commonHR.asUInt
+  private val diffDebugAndR1CommonHR = debugCommonHR.asUInt =/= r1_commonHR.asUInt
   XSError(
-    debugCommonHR.valid && diffCommonHR,
+    (!r1_valid && diffCommonHR) || (r1_valid && diffDebugAndR1CommonHR),
     "debugCommonHR is not equal commonHR!"
   )
 
@@ -345,8 +327,6 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   if (EnableCommitGHistDiff) {
     val s3_lessThanFirstTakenUInt = s3_lessThanFirstTaken.asUInt
     val r1_lessThanPcUInt         = r1_lessThanPc.asUInt
-    val r3_ghr                    = r3_commonHR.ghr
-    val r3_bw                     = r3_commonHR.bw
     val ghrUInt                   = commonHR.ghr.asUInt
     val bwUInt                    = commonHR.bw.asUInt
     dontTouch(s3_numLess)
@@ -355,8 +335,6 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
     dontTouch(r1_numLess)
     dontTouch(r1_commonHR)
     dontTouch(r1_lessThanPcUInt)
-    dontTouch(r3_ghr)
-    dontTouch(r3_bw)
     dontTouch(ghrUInt)
     dontTouch(bwUInt)
   }
