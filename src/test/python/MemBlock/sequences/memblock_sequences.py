@@ -298,6 +298,47 @@ def _sample_sq_forward_events(env) -> tuple[dict, ...]:
                 "data_invalid_valid": env._read_optional_dut_signal(f"{prefix}_bits_dataInvalid_valid"),
                 "data_invalid_flag": env._read_optional_dut_signal(f"{prefix}_bits_dataInvalid_bits_flag"),
                 "data_invalid_value": env._read_optional_dut_signal(f"{prefix}_bits_dataInvalid_bits_value"),
+                "forward_mask": tuple(
+                    env._read_optional_dut_signal(f"{prefix}_bits_forwardMask_{index}")
+                    for index in range(16)
+                ),
+                "forward_data": tuple(
+                    env._read_optional_dut_signal(f"{prefix}_bits_forwardData_{index}")
+                    for index in range(16)
+                ),
+            }
+        )
+    return tuple(events)
+
+
+def sample_sq_forward_events(env) -> tuple[dict, ...]:
+    """采样当前拍所有有效的 SQ/SBuffer forward 响应。"""
+
+    return _sample_sq_forward_events(env)
+
+
+def sample_sbuffer_forward_events(env) -> tuple[dict, ...]:
+    """采样当前拍所有有效的 Sbuffer forward 响应。"""
+
+    events = []
+    for lane in range(env.config.load_pipeline_width):
+        prefix = f"MemBlock_inner_sbuffer_io_forward_{lane}_s2Resp"
+        if not env._read_optional_dut_signal(f"{prefix}_valid"):
+            continue
+        events.append(
+            {
+                "cycle": env._current_cycle(),
+                "lane": lane,
+                "valid": env._read_optional_dut_signal(f"{prefix}_valid"),
+                "match_invalid": env._read_optional_dut_signal(f"{prefix}_bits_matchInvalid"),
+                "forward_mask": tuple(
+                    env._read_optional_dut_signal(f"{prefix}_bits_forwardMask_{index}")
+                    for index in range(16)
+                ),
+                "forward_data": tuple(
+                    env._read_optional_dut_signal(f"{prefix}_bits_forwardData_{index}")
+                    for index in range(16)
+                ),
             }
         )
     return tuple(events)
@@ -311,6 +352,7 @@ def _wait_sq_forward_event(
     expected_data_invalid_valid: int | None = None,
     expected_match_invalid: int | None = None,
     expected_forward_invalid: int | None = None,
+    require_forward_mask: bool = False,
     max_cycles: int = 200,
 ):
     for _ in range(max_cycles):
@@ -325,13 +367,65 @@ def _wait_sq_forward_event(
                 continue
             if expected_forward_invalid is not None and event["forward_invalid"] != int(expected_forward_invalid):
                 continue
+            if require_forward_mask and not any(int(bit) for bit in event["forward_mask"]):
+                continue
             return event
         env.advance_cycles(1)
 
     raise TimeoutError(
         "等待 SQ forward 事件超时: "
         f"lane={lane}, sqIdx={expected_sq_idx}, dataInvalid={expected_data_invalid_valid}, "
-        f"matchInvalid={expected_match_invalid}, forwardInvalid={expected_forward_invalid}"
+        f"matchInvalid={expected_match_invalid}, forwardInvalid={expected_forward_invalid}, "
+        f"requireForwardMask={int(bool(require_forward_mask))}"
+    )
+
+
+def wait_sbuffer_forward_event(
+    env,
+    *,
+    lane: int | None = None,
+    expected_match_invalid: int | None = None,
+    max_cycles: int = 200,
+):
+    """等待某个 load lane 上的 Sbuffer forward 响应。"""
+
+    for _ in range(max_cycles):
+        for event in sample_sbuffer_forward_events(env):
+            if lane is not None and event["lane"] != int(lane):
+                continue
+            if expected_match_invalid is not None and event["match_invalid"] != int(expected_match_invalid):
+                continue
+            return event
+        env.advance_cycles(1)
+
+    raise TimeoutError(
+        "等待 Sbuffer forward 事件超时: "
+        f"lane={lane}, matchInvalid={expected_match_invalid}"
+    )
+
+
+def wait_sq_forward_event(
+    env,
+    *,
+    lane: int | None = None,
+    expected_sq_idx: int | None = None,
+    expected_data_invalid_valid: int | None = None,
+    expected_match_invalid: int | None = None,
+    expected_forward_invalid: int | None = None,
+    require_forward_mask: bool = False,
+    max_cycles: int = 200,
+):
+    """等待某个 load lane 上的 SQ/SBuffer forward 响应。"""
+
+    return _wait_sq_forward_event(
+        env,
+        lane=lane,
+        expected_sq_idx=expected_sq_idx,
+        expected_data_invalid_valid=expected_data_invalid_valid,
+        expected_match_invalid=expected_match_invalid,
+        expected_forward_invalid=expected_forward_invalid,
+        max_cycles=max_cycles,
+        require_forward_mask=require_forward_mask,
     )
 
 

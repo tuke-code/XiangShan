@@ -3,6 +3,9 @@
 MemBlock 标量 store pipeline 的定向真实 DUT 用例。
 """
 
+import pytest
+
+from request_apis import enqueue_scalar_store, expect_load, issue_scalar_sta, issue_scalar_std, send_load
 from transactions import LoadTxn, ptr_inc, QueuePtr, StoreTxn
 from sequences import (
     FlushStoreBuffersSequence,
@@ -10,6 +13,7 @@ from sequences import (
     ScalarLoadSequence,
     ScalarStoreCommitSequence,
     SequenceState,
+    wait_sq_forward_event,
 )
 
 
@@ -32,8 +36,10 @@ PARTIAL_STORE_WINDOW_ADDRS = [
 ]
 
 
-def _reset_env_and_state(env) -> SequenceState:
+def _reset_env_and_state(env, *, require_issue_lanes=(), require_lq_ready: bool = False) -> SequenceState:
     return ResetEnvSequence(
+        require_issue_lanes=require_issue_lanes,
+        require_lq_ready=require_lq_ready,
         require_sq_ready=True,
     ).run(env)
 
@@ -67,6 +73,18 @@ def _commit_scalar_store(env, sq_ptr: QueuePtr, *, req_id: int, addr: int, data:
         f"store req_id={req_id} 未进入 committed"
     )
     return commit_result, ptr_inc(sq_ptr, env.config.sequence.store_queue_size)
+
+
+def _assert_forward_response_matches_partial_word(event: dict, *, store_data: int) -> None:
+    expected_mask = (1, 1, 1, 1) + (0,) * 12
+    expected_bytes = tuple((int(store_data) >> (8 * index)) & 0xFF for index in range(4))
+
+    assert tuple(int(bit) for bit in event["forward_mask"]) == expected_mask, (
+        f"partial-word forward mask 异常: actual={tuple(int(bit) for bit in event['forward_mask'])}"
+    )
+    assert tuple(int(byte) for byte in event["forward_data"][:4]) == expected_bytes, (
+        f"partial-word forward data 低 4B 异常: actual={tuple(int(byte) for byte in event['forward_data'][:4])}"
+    )
 
 
 def test_api_MemBlock_two_cacheable_stores_flush_directed(env):
@@ -229,20 +247,28 @@ def test_api_MemBlock_misaligned_store_dual_overlap_loads_directed(env):
     env.assert_no_outstanding()
 
 
-def test_api_MemBlock_partial_word_store_then_aligned_load_directed(env):
+@pytest.mark.parametrize("load_issue_lane", (0, 1, 2), ids=("lane0", "lane1", "lane2"))
+def test_api_MemBlock_partial_word_store_then_aligned_load_directed(env, load_issue_lane: int):
     """
-    一条 4B partial store 后接整 8B load。
+    一条 4B partial store 后接整 8B younger load，覆盖 3 个 load lane。
 
     检查点：
       - `StoreTxn.mask=0x0F` 能下沉为真实 partial store
-      - committed store 的 mask 保持为 4B 宽度
-      - younger 8B load 能在 commit-boundary 视图上看到 merge 后结果
+      - older store 在地址/数据都 ready 但尚未退休时保持为 4B store 视图
+      - younger 8B load 在 `lane=0/1/2` 上都能命中真实 forward
+      - forward 响应的 mask/data 与 partial-store 语义一致
+      - younger 8B load 能读到 merge 后结果，且该结果先于 older store 收尾 commit/flush 被验证
     """
 
     initial_word = 0x1122_3344_5566_7788
     store_data = 0xA1A2_A3A4
+    expected_load_data = 0x1122_3344_A1A2_A3A4
 
-    state = _reset_env_and_state(env)
+    state = _reset_env_and_state(
+        env,
+        require_issue_lanes=(0, 1, 2),
+        require_lq_ready=True,
+    )
     env.preload_u64(PARTIAL_STORE_WINDOW_BASE, initial_word)
     expected_refmem = env.memory.predict_store(
         PARTIAL_STORE_WINDOW_BASE,
@@ -250,34 +276,114 @@ def test_api_MemBlock_partial_word_store_then_aligned_load_directed(env):
         mask=0x0F,
     )
 
-    commit_result = ScalarStoreCommitSequence(
-        StoreTxn(
-            req_id=0,
-            sq_ptr=state.sq_ptr,
-            addr=PARTIAL_STORE_WINDOW_BASE,
-            data=store_data,
-            mask=0x0F,
-        ),
+    completed_before = env.get_completed_load_count()
+    store_txn = StoreTxn(
+        req_id=0,
+        sq_ptr=state.sq_ptr,
+        addr=PARTIAL_STORE_WINDOW_BASE,
+        data=store_data,
+        mask=0x0F,
+    )
+    env.backend.prepare(store_txn)
+    store_sq_ptr = enqueue_scalar_store(
+        env,
+        req_id=store_txn.req_id,
+        sq_ptr=store_txn.sq_ptr,
+        enq_port=store_txn.enq_port,
+        rob_idx=store_txn.rob_idx,
+    )
+    issue_scalar_sta(
+        env,
+        req_id=store_txn.req_id,
+        sq_ptr=store_sq_ptr,
+        addr=store_txn.addr,
+        lane=store_txn.sta_lane,
+        mask=store_txn.mask,
+        rob_idx=store_txn.rob_idx,
+        ftq_idx_flag=store_txn.resolved_ftq_idx_flag,
+        ftq_idx_value=store_txn.resolved_ftq_idx_value,
+    )
+    env.wait_store_addr_observed(
+        sq_idx=store_sq_ptr.value,
+        expected_addr=PARTIAL_STORE_WINDOW_BASE,
+        max_cycles=300,
+    )
+    issue_scalar_std(
+        env,
+        req_id=store_txn.req_id,
+        sq_ptr=store_sq_ptr,
+        data=store_txn.data,
+        lane=store_txn.std_lane,
+        mask=store_txn.mask,
+        rob_idx=store_txn.rob_idx,
+        ftq_idx_flag=store_txn.resolved_ftq_idx_flag,
+        ftq_idx_value=store_txn.resolved_ftq_idx_value,
+    )
+    store_view = env.wait_store_materialized(
+        store_sq_ptr.value,
+        expected_addr=PARTIAL_STORE_WINDOW_BASE,
+        expected_data=store_data,
+        expected_mmio=False,
+        require_committed=False,
+        max_cycles=300,
+    )
+    assert store_view is not None, "partial word store 未形成可前递的 store 视图"
+    assert store_view.mask == 0x0F, "partial word store 未保持 4B mask"
+
+    load_txn = LoadTxn(
+        req_id=1,
+        addr=PARTIAL_STORE_WINDOW_BASE,
+        lq_ptr=state.next_lq_ptr,
+        sq_ptr=ptr_inc(store_sq_ptr, env.config.sequence.store_queue_size),
+        issue_lane=load_issue_lane,
+    )
+    transport_stats_before_load = env.get_transport_stats()
+    send_load(env, load_txn)
+    expect_load(env, load_txn)
+    sq_forward_event = wait_sq_forward_event(
+        env,
+        lane=load_issue_lane,
+        expected_data_invalid_valid=0,
+        expected_match_invalid=0,
+        expected_forward_invalid=0,
+        require_forward_mask=True,
+        max_cycles=200,
+    )
+    load_writeback = env.wait_load_writeback_observed(
+        rob_idx=load_txn.rob_idx,
+        data=expected_load_data,
+        max_cycles=200,
+    )
+    completed_loads = env.wait_completed_load_count(completed_before + 1, max_cycles=64)
+    transport_stats_after_load = env.get_transport_stats()
+    env.backend.pulse_store_commit(1)
+    env.advance_cycles(env.config.sequence.store_settle_cycles)
+    committed_store = env.wait_store_materialized(
+        store_sq_ptr.value,
+        expected_addr=PARTIAL_STORE_WINDOW_BASE,
+        expected_data=store_data,
         expected_mmio=False,
         require_committed=True,
-        materialize_cycles=300,
-    ).run(env)
-    committed_store = commit_result.committed_store_view
-    assert committed_store is not None and committed_store.committed, "partial word store 未进入 committed"
-    assert committed_store.mask == 0x0F, "partial word store 未保持 4B mask"
-
-    load_result = ScalarLoadSequence(
-        LoadTxn(
-            req_id=1,
-            addr=PARTIAL_STORE_WINDOW_BASE,
-            lq_ptr=state.next_lq_ptr,
-            sq_ptr=commit_result.store_result.next_sq_ptr,
-        ),
-        expected_completed_loads=1,
-    ).run(env)
+        max_cycles=300,
+    )
     drain_summary = FlushStoreBuffersSequence(max_cycles=800).run(env)
 
-    assert load_result.next_lq_ptr == QueuePtr(flag=0, value=1), "partial word store 后的 load 未按预期推进 LQ"
+    assert sq_forward_event["lane"] == load_issue_lane, "partial word store 未命中目标 load lane 的 forward 响应"
+    assert sq_forward_event["valid"] == 1, "partial word store 未产生有效 forward 响应"
+    assert sq_forward_event["addr_invalid_valid"] == 0, "partial word store 正向 forward 不应返回 addrInvalid"
+    assert sq_forward_event["data_invalid_valid"] == 0, "partial word store 正向 forward 不应返回 dataInvalid"
+    assert sq_forward_event["match_invalid"] == 0, "partial word store 正向 forward 不应退化成 matchInvalid"
+    assert sq_forward_event["forward_invalid"] == 0, "partial word store 正向 forward 不应退化成 forwardInvalid"
+    _assert_forward_response_matches_partial_word(sq_forward_event, store_data=store_data)
+    assert load_writeback["data"] == expected_load_data, "partial word store forward 后的 load 写回数据不匹配"
+    assert completed_loads == completed_before + 1, "partial word store 后的 load 未按预期完成 compare"
+    assert ptr_inc(load_txn.lq_ptr, env.config.sequence.load_queue_size) == QueuePtr(flag=0, value=1), (
+        "partial word store 后的 load 未按预期推进 LQ"
+    )
+    assert committed_store is not None and committed_store.committed, "partial word store 收尾未进入 committed"
+    assert transport_stats_after_load["outer_request_count"] == transport_stats_before_load["outer_request_count"], (
+        "partial word store forward 不应走 outer/uncache 路径"
+    )
     assert env.memory.read(PARTIAL_STORE_WINDOW_BASE, 8) == expected_refmem.read(
         PARTIAL_STORE_WINDOW_BASE, 8
     ), "partial word store merge 结果不匹配"

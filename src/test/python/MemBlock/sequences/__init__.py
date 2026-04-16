@@ -6,6 +6,8 @@ MemBlock reusable test sequences.
 from .memblock_sequences import (
     FlushStoreBuffersSequence,
     ResetEnvSequence,
+    sample_sbuffer_forward_events,
+    sample_sq_forward_events,
     ScalarBankConflictReplaySequence,
     ScalarBankConflictReplaySequenceResult,
     ScalarCacheMissReplaySequence,
@@ -24,6 +26,8 @@ from .memblock_sequences import (
     ScalarStoreSequence,
     ScalarStoreThenLoadSequence,
     SequenceState,
+    wait_sbuffer_forward_event,
+    wait_sq_forward_event,
 )
 from .mmu_sequences import (
     LOAD_ACCESS_FAULT_BIT,
