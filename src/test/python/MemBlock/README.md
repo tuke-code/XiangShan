@@ -78,8 +78,12 @@
   - backend 主动控制请求模型专项说明，重点覆盖 `env.backend.send(...)`、`env.backend.execute(...)`、`IssueCyclePlan`、`BackendSendPlan`、`StoreTxn.mask -> SB/SH/SW/SD` 映射与兼容层收敛策略。
 - `backend_rob_cookbook.md`
   - 面向 testcase / sequence 作者的 backend/ROB cookbook，集中给出 `BackendSendPlan`、`NonMemBlockerStep`、`StoreCommitReadyStep` 的常见脚本模板。
+- `mmu_env_design_and_usage.md`
+  - MMU/PTW/DTLB 环境设计与使用说明，集中说明 `env.mmu` 的控制面职责、PTW responder、PMP helper 和推荐调试顺序。
 - `vmem_design_and_usage.md`
   - 向量访存环境设计与使用说明，集中说明 `VectorMemTxn`、`env.vector_backend`、`VectorLoadSequence`、当前 real-DUT smoke 口径与 known gap。
+- `mmu_fault_directed_cases.md`
+  - 标量 load 的 `MMU/TLB/PMP fault matrix` 专题说明，集中解释 `MmuFaultingScalarLoadSequence`、TLB-hit fault 背景和当前异常位断言口径。
 - `misalign.md`
   - 面向 scalar load/store misalign 的专题分析，集中说明 DUT 中 misalign 的当前设计形态、验证功能点、推荐验证方案，以及当前环境与 testcase 的满足情况。
 - `clock_control_and_migration_guide.md`
@@ -100,6 +104,8 @@
   - 基于当前覆盖率结果整理出的用例补强清单。
 - `vp_pipeline_plan.md`
   - 面向标量 ld/st pipeline 的细粒度白盒验证总体方案。
+- `scalar_load_pipeline_probe_cases.md`
+  - `scalar load pipeline probe` 专题说明，集中解释 bank-conflict、matchInvalid proxy、hi-prio replay 抢占和 late-STA violation 这组 probe case 的设计意图。
 - `DUT_CHANGELOG-20260331.md`
   - 一次针对 RTL `mem/` 目录版本变化的详细对比与验证影响分析。
 
@@ -112,17 +118,20 @@
 3. `docs/verification_env_design.md`
 4. `docs/backend_request_model_design.md`
 5. `docs/backend_rob_cookbook.md`
-6. `docs/vmem_design_and_usage.md`
-7. `docs/clock_control_and_migration_guide.md`
-8. `docs/memory_model_design.md`
-9. `docs/rob_model.md`
-10. `docs/coverage_summary.md`
-11. `docs/coverage_todo.md`
-12. `docs/vp_pipeline_plan.md`
-13. `tests/test_MemBlock_scalar_load_pipeline.py`
-14. `tests/test_MemBlock_scalar_store_pipeline.py`
-15. `tests/test_MemBlock_scalar_ordering.py`
-16. `tests/test_MemBlock_replay.py`
+6. `docs/mmu_env_design_and_usage.md`
+7. `docs/mmu_fault_directed_cases.md`
+8. `docs/vmem_design_and_usage.md`
+9. `docs/clock_control_and_migration_guide.md`
+10. `docs/memory_model_design.md`
+11. `docs/rob_model.md`
+12. `docs/coverage_summary.md`
+13. `docs/coverage_todo.md`
+14. `docs/vp_pipeline_plan.md`
+15. `docs/scalar_load_pipeline_probe_cases.md`
+16. `tests/test_MemBlock_scalar_load_pipeline.py`
+17. `tests/test_MemBlock_scalar_store_pipeline.py`
+18. `tests/test_MemBlock_scalar_ordering.py`
+19. `tests/test_MemBlock_replay.py`
 
 ## 当前测试与报告入口
 

@@ -360,6 +360,22 @@ env.backend.execute(
    - 用于真实 DUT 下的 `sq dataInvalid + matchInvalid + nuke` 冒烟。
    - 当前推荐由 testcase 先组织 `MmuSv39AddressSpaceInstallSequence`，再调用该 trigger sequence。
 
+14. `MmuFaultingScalarLoadSequence`
+   - 封装 `prime load(optional) -> TLB-hit 背景下的主 faulting load -> 异常写回/transport 统计收口`。
+   - 用于 `MMU/TLB/PMP fault matrix` 这类 load-side fault directed。
+
+15. `ScalarBankConflictLoadClusterSequence`
+   - 封装 `cache warmup -> 多条 load 同拍发射 -> bank-conflict/debugLsInfo 采样 -> final writeback/wakeup 收尾`。
+   - 用于 `BC` 基线与更复杂 probe 场景的公共前置。
+
+16. `ScalarFastReplayCancelledByReplayHiPrioSequence`
+   - 封装 `bank-conflict fast replay` 被更高优先级 replay 请求抢占、改落 replay queue，且最终 compare/writeback 仍全部收敛。
+   - 用于 `forward_dchannel` / `nc_replay` 抢占下的 probe 型 testcase。
+
+17. `ScalarLateStaStoreLoadViolationSequence`
+   - 封装 `older store 晚到 STA -> younger bank-conflict load 先走 fast replay -> 之后触发 st-ld violation -> store commit/drain 收尾`。
+   - 用于 `late-STA` 相关的 load pipeline probe。
+
 ### 4.9 replay 观测辅助 API
 
 当前 env 已经把真实 DUT replay 观测收口成公共 helper，testcase 不需要自己逐拍扫内部信号：
@@ -408,7 +424,9 @@ env.backend.execute(
 更完整的 MMU 使用说明见：
 
 - `src/test/python/MemBlock/docs/mmu_env_design_and_usage.md`
+- `src/test/python/MemBlock/docs/mmu_fault_directed_cases.md`
 - `src/test/python/MemBlock/docs/sq_matchinvalid_nuke_case_analysis.md`
+- `src/test/python/MemBlock/docs/scalar_load_pipeline_probe_cases.md`
 
 这些 helper 的判定真值固定来自真实 DUT 导出的 replay 相关端口，而不是 Python 侧 mock tracker。
 

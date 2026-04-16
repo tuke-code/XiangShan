@@ -10,6 +10,7 @@
 
 本文档聚焦“环境如何搭起来并稳定复用”，具体的 `matchInvalid + nuke` 场景原理见：
 
+- `src/test/python/MemBlock/docs/mmu_fault_directed_cases.md`
 - `src/test/python/MemBlock/docs/sq_matchinvalid_nuke_case_analysis.md`
 
 ## 2. 设计背景

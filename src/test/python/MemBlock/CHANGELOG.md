@@ -2,7 +2,33 @@
 
 ## 2026-04-16
 
-### 1. 将 `scalar_load_pipeline_probe` 中两个 XPASS 用例升级为真实验证
+### 1. 为 load fault / scalar load probe 新增专题文档入口
+
+本条目记录一次围绕 `00e7578f1b17bc30c718cb099a7bd59d1556f4d6` 新增用例的文档收口。此前 `test_MemBlock_mmu_fault.py` 与 `test_MemBlock_scalar_load_pipeline_probe.py` 已经落地，但对应的设计意图、sequence 边界和推荐阅读入口还没有同步进入文档体系。本轮补齐专题说明，并把入口挂回 README、MMU 文档、pipeline 方案文档与 sequence 指南。
+
+#### 变更摘要
+
+- 新增专题文档：
+  - `docs/mmu_fault_directed_cases.md`
+    - 说明 `MmuFaultingScalarLoadSequence`、TLB-hit fault 背景和当前异常位断言口径
+  - `docs/scalar_load_pipeline_probe_cases.md`
+    - 说明 bank-conflict、matchInvalid proxy、hi-prio replay 抢占、late-STA violation 这组 probe case 的设计目标与当前收口口径
+- `README.md`
+  - 在 `docs/` 列表与推荐阅读顺序中加入上述两篇新文档入口
+- `docs/mmu_env_design_and_usage.md`
+  - 把 MMU fault directed 文档挂入专题阅读入口
+- `docs/vp_pipeline_plan.md`
+  - 增补当前已落地的 probe 级 case 入口，并更新 `BC` 场景的计划状态表述
+- `docs/test_sequence_and_extension_guide.md`
+  - 补入 `MmuFaultingScalarLoadSequence`、`ScalarBankConflictLoadClusterSequence`、`ScalarFastReplayCancelledByReplayHiPrioSequence`、`ScalarLateStaStoreLoadViolationSequence` 的使用说明
+- `docs/coverage_todo.md`
+  - 更新 `P2-2 PMP allow/deny / access fault directed` 的状态描述，明确 load-side baseline 已落地
+
+#### 验证情况
+
+- 文档改动，未单独重跑 pytest
+
+### 2. 将 `scalar_load_pipeline_probe` 中两个 XPASS 用例升级为真实验证
 
 本条目记录一次对 `test_MemBlock_scalar_load_pipeline_probe.py` 中两个历史 XPASS 用例的验证口径收紧。此前它们虽然“跑绿”，但分别存在 `older store` 只验证 materialize、以及 `nc_replay` 组合只验证 replay queue 落点而未明确证明最终 compare/writeback 收敛的问题。本轮不再依赖宽松断言，而是把 sequence 和 testcase 一起收紧到与测试意图一致的真实行为证明。
 
@@ -27,7 +53,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py`
   - 结果：`10 passed, 1 xfailed`
 
-### 2. 修复 rebase 后 mmu fault / scalar load probe 的 load writeback 登记错位
+### 3. 修复 rebase 后 mmu fault / scalar load probe 的 load writeback 登记错位
 
 本条目记录一次针对主线 `cff44ae39d0cba512943b4d817ab397d9363153f` rebase 后兼容性的收口。该主线改动将 testcase/sequence 对 load 观测的口径切换到 runtime 绑定的 `txn.rob_idx`，而这两条 directed 链路里仍残留若干按旧 `req_id -> legacy robIdx` 登记 `expect_scalar_load` / `wait_load_writeback_observed` 的位置，导致真实 writeback 被 scoreboard 误判为“未登记的 load writeback”。
 
