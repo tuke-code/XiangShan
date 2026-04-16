@@ -424,9 +424,6 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   biasTable.io.trainReadReq.bits.setIdx   := t0_biasIdx
   biasTable.io.trainReadReq.bits.bankMask := t0_bankMask
 
-  dontTouch(t0_bankConflict)
-  XSPerfAccumulate("t0_writeConflict", t0_bankConflict)
-
   /*
    *  train pipeline stage 1
    */
