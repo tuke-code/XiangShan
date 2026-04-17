@@ -303,6 +303,7 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     vstdEnq.bits.isRVC.foreach(_ := staEnq.bits.isRVC.get)
     vstdEnq.bits.fuType := staEnq.bits.fuType
     vstdEnq.bits.fuOpType := staEnq.bits.fuOpType
+    vstdEnq.bits.latency := staEnq.bits.latency
     vstdEnq.bits.robIdx := staEnq.bits.robIdx
     vstdEnq.bits.uopIdx.foreach(_ := staEnq.bits.uopIdx.get)
     vstdEnq.bits.lastUop.foreach(_ := staEnq.bits.lastUop.get)
@@ -1033,4 +1034,3 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val debugIQEnqHasIssuedVec = Option.when(backendParams.debugEn)(Vec(IQNum, Output(Bool())))
   val debugIQDeqRobIdxVec = Option.when(backendParams.debugEn)(Vec(iqDeqSum, ValidIO(new RobPtr())))
 }
-
