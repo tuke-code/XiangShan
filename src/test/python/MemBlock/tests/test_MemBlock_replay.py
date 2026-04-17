@@ -359,11 +359,12 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
 
 def test_api_MemBlock_scalar_bank_conflict_replay_smoke(env):
     """
-    两条同地址 load 同拍 issue 时，低优先级 lane 应命中一次纯 `BC` replay。
+    先验证 2-lane，再验证 3-lane：同拍 issue 的低优先级 load 应命中纯 `BC` replay。
     """
 
     initial_state = _reset_env_and_state(env)
     lead_addr = BC_REPLAY_ADDR + 0x40
+    second_victim_addr = BC_REPLAY_ADDR + 0x80
     warmed_state = _warm_cacheable_load(
         env,
         state=initial_state,
@@ -378,31 +379,80 @@ def test_api_MemBlock_scalar_bank_conflict_replay_smoke(env):
         addr=lead_addr,
         data=BC_REPLAY_DATA ^ 0x1111111111111111,
     )
+    warmed_state = _warm_cacheable_load(
+        env,
+        state=warmed_state,
+        req_id=2,
+        addr=second_victim_addr,
+        data=BC_REPLAY_DATA ^ 0x2222222222222222,
+    )
     victim_lq_ptr = ptr_inc(warmed_state.next_lq_ptr, env.config.sequence.load_queue_size)
 
     result = ScalarBankConflictReplaySequence(
         lead_load_txn=LoadTxn(
-            req_id=2,
+            req_id=3,
             addr=lead_addr,
             lq_ptr=warmed_state.next_lq_ptr,
             sq_ptr=warmed_state.sq_ptr,
             issue_lane=0,
         ),
-        victim_load_txn=LoadTxn(
-            req_id=3,
-            addr=BC_REPLAY_ADDR,
-            lq_ptr=victim_lq_ptr,
-            sq_ptr=warmed_state.sq_ptr,
-            issue_lane=1,
+        victim_load_txns=(
+            LoadTxn(
+                req_id=4,
+                addr=BC_REPLAY_ADDR,
+                lq_ptr=victim_lq_ptr,
+                sq_ptr=warmed_state.sq_ptr,
+                issue_lane=1,
+            ),
         ),
         assert_no_outstanding=True,
     ).run(env)
 
-    if result.replay_event is not None:
-        assert result.replay_event["rob_idx_value"] == result.issued_loads[1].rob_idx_value, "bank conflict replay 未对应 victim load"
-    assert "BC" in result.load_debug_event["replay_causes"], "load debug 未命中 BC cause"
-    assert "FF" not in result.load_debug_event["replay_causes"], "bank conflict 场景不应混入 FF cause"
-    assert "NK" not in result.load_debug_event["replay_causes"], "bank conflict 场景不应混入 NK cause"
+    assert len(result.load_debug_events) == 1, "2-lane bank conflict 应只返回一个 victim debug 事件"
+    if result.replay_events[0] is not None:
+        assert result.replay_events[0]["rob_idx_value"] == result.issued_loads[1].rob_idx_value, "bank conflict replay 未对应 victim load"
+    assert "BC" in result.load_debug_events[0]["replay_causes"], "load debug 未命中 BC cause"
+    assert "FF" not in result.load_debug_events[0]["replay_causes"], "bank conflict 场景不应混入 FF cause"
+    assert "NK" not in result.load_debug_events[0]["replay_causes"], "bank conflict 场景不应混入 NK cause"
+
+    first_victim_lq_ptr = ptr_inc(result.final_state.next_lq_ptr, env.config.sequence.load_queue_size)
+    second_victim_lq_ptr = ptr_inc(result.final_state.next_lq_ptr, env.config.sequence.load_queue_size, step=2)
+    three_lane_result = ScalarBankConflictReplaySequence(
+        lead_load_txn=LoadTxn(
+            req_id=5,
+            addr=lead_addr,
+            lq_ptr=result.final_state.next_lq_ptr,
+            sq_ptr=result.final_state.sq_ptr,
+            issue_lane=0,
+        ),
+        victim_load_txns=(
+            LoadTxn(
+                req_id=6,
+                addr=BC_REPLAY_ADDR,
+                lq_ptr=first_victim_lq_ptr,
+                sq_ptr=result.final_state.sq_ptr,
+                issue_lane=1,
+            ),
+            LoadTxn(
+                req_id=7,
+                addr=second_victim_addr,
+                lq_ptr=second_victim_lq_ptr,
+                sq_ptr=result.final_state.sq_ptr,
+                issue_lane=2,
+            ),
+        ),
+        assert_no_outstanding=True,
+    ).run(env)
+
+    assert len(three_lane_result.load_debug_events) == 2, "3-lane bank conflict 应返回两个 victim debug 事件"
+    for victim_idx, load_debug_event in enumerate(three_lane_result.load_debug_events):
+        if three_lane_result.replay_events[victim_idx] is not None:
+            assert three_lane_result.replay_events[victim_idx]["rob_idx_value"] == three_lane_result.issued_loads[victim_idx + 1].rob_idx_value, (
+                "3-lane bank conflict replay 未对应目标 victim load"
+            )
+        assert "BC" in load_debug_event["replay_causes"], "3-lane bank conflict victim 未命中 BC cause"
+        assert "FF" not in load_debug_event["replay_causes"], "3-lane bank conflict victim 不应混入 FF cause"
+        assert "NK" not in load_debug_event["replay_causes"], "3-lane bank conflict victim 不应混入 NK cause"
 
 
 def test_api_MemBlock_scalar_pipeline_stld_nuke_smoke(env):

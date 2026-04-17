@@ -2,7 +2,28 @@
 
 ## 2026-04-17
 
-### 1. 收口 replay 用例对默认 transport delay 的隐式时序依赖
+### 1. 收紧 `ScalarBankConflictReplaySequence` 的多 victim 接口
+
+本条目记录一次围绕 bank-conflict replay sequence 接口收口的小型重构。此前为了平滑从单 victim 迁移到多 victim，`ScalarBankConflictReplaySequence` 同时保留了 `victim_load_txn` 与 `victim_load_txns` 两套入口；但当前用例已经升级到显式多 victim 语义，继续保留单数入口只会让 sequence API 维持多余兼容层，也容易让后续 testcase 混入过时调用方式。本轮去掉单数参数，只保留 tuple 形式的 `victim_load_txns`。
+
+#### 变更摘要
+
+- `sequences/memblock_sequences.py`
+  - `ScalarBankConflictReplaySequence` 删除 `victim_load_txn`
+  - 构造阶段不再做单数到复数的兼容归一化
+- `tests/test_MemBlock_replay.py`
+  - 2-lane bank-conflict smoke 用例切换到 `victim_load_txns=(...,)` 调用形态
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/sequences/memblock_sequences.py src/test/python/MemBlock/tests/test_MemBlock_replay.py`
+  - 结果：通过
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_replay.py -k 'scalar_bank_conflict_replay_smoke'`
+  - 结果：`1 passed, 9 deselected`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_replay.py`
+  - 结果：`9 passed, 1 xfailed`
+
+### 2. 收口 replay 用例对默认 transport delay 的隐式时序依赖
 
 本条目记录一次围绕“缩短默认 DCache/Uncache delay 后 replay 用例暴露出的隐式时序假设”的收口。问题并不在于新 delay 本身，而在于若干 sequence/testcase 把 `hot-cache ready`、`release/query` 捕获窗口、以及 `BC/FF/NK` 的表达方式写成了依赖旧 delay 的偶然时序。本轮把这些口径改成显式 warmup / trace-first / lifecycle 断言，同时保留缩短后的默认 delay。
 
@@ -64,7 +85,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py src/test/python/MemBlock/tests/test_MemBlock_scalar_ordering.py src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py`
   - 结果：`19 passed, 4 xfailed`
 
-### 2. 去掉 `req_id` 的隐式 runtime 语义，并补上显式 ROB wrap seed 接口
+### 3. 去掉 `req_id` 的隐式 runtime 语义，并补上显式 ROB wrap seed 接口
 
 本条目记录一次围绕 backend/ROB 运行时绑定口径的收口。此前虽然 env 已托管 `robIdx` 分配，但 `transactions`、`lsq_agent` 和 `expect_scalar_load()` 等边界仍残留若干 `req_id -> robIdx/pdest/ftq/pc` 的 legacy fallback，这会让 testcase 在未 prepare 的情况下继续“看起来能跑”，也会让 ROB wrap 场景混入大 `req_id` 的副作用。本轮把这些隐式依赖切掉，要求 runtime 字段必须来自 `prepare()/send()/execute()` 或显式赋值，同时补入 allocator/frontier 的显式 seed 接口与对应单测。
 
@@ -105,7 +126,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py`
   - 结果：`6 passed, 1 xfailed`
 
-### 3. 收口 `store_todo` 并补强 store partial/misalign/translated uncache 场景
+### 4. 收口 `store_todo` 并补强 store partial/misalign/translated uncache 场景
 
 本条目记录一次围绕 store 专题实施地图和三组真实 DUT testcase 的收口。此前 `docs/store_todo.md` 同时承担了 coverage 讨论摘录、TODO 列表和实施建议三种职责，已经开始与 `coverage_summary.md` / `coverage_todo.md` 的主状态源口径分叉；同时 `scalar_store_pipeline`、`store_misalign`、`uncache_semantics` 三组用例也还缺少若干直接对应文档计划的场景。本轮一边把 `store_todo` 收敛成专题实施地图，一边把 partial 深矩阵、cross-page `SW` 和 translated NC/MMIO store 语义补进真实 DUT 回归。
 

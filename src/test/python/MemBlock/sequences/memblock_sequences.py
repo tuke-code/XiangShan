@@ -125,9 +125,9 @@ class ScalarForwardFailReplaySequenceResult:
 @dataclass(frozen=True)
 class ScalarBankConflictReplaySequenceResult:
     issued_loads: tuple[LoadTxn, ...]
-    replay_event: dict | None
-    load_debug_event: dict
-    load_debug_trace: tuple[dict, ...]
+    replay_events: tuple[dict | None, ...]
+    load_debug_events: tuple[dict, ...]
+    load_debug_traces: tuple[tuple[dict, ...], ...]
     final_state: SequenceState
     completed_load_count: int
 
@@ -1418,44 +1418,58 @@ class ScalarBankConflictReplaySequence:
         self,
         *,
         lead_load_txn: LoadTxn,
-        victim_load_txn: LoadTxn,
+        victim_load_txns: tuple[LoadTxn, ...] = (),
         replay_wait_cycles: int = 200,
         drain_cycles: int | None = None,
         assert_no_outstanding: bool = False,
     ) -> None:
         self.lead_load_txn = lead_load_txn
-        self.victim_load_txn = victim_load_txn
+        self.victim_load_txns = tuple(victim_load_txns)
+        if not self.victim_load_txns:
+            raise ValueError("bank conflict sequence 至少需要一个 victim load")
         self.replay_wait_cycles = int(replay_wait_cycles)
         self.drain_cycles = drain_cycles
         self.assert_no_outstanding = assert_no_outstanding
 
     def run(self, env) -> ScalarBankConflictReplaySequenceResult:
-        if self.lead_load_txn.issue_lane == self.victim_load_txn.issue_lane:
-            raise ValueError("bank conflict sequence 需要两个不同的 issue lane")
+        issued_loads = (self.lead_load_txn, *self.victim_load_txns)
+        issue_lanes = [int(txn.issue_lane) for txn in issued_loads]
+        if len(set(issue_lanes)) != len(issue_lanes):
+            raise ValueError(f"bank conflict sequence 需要所有 load 使用不同 issue lane: lanes={issue_lanes}")
 
         completed_before = env.get_completed_load_count()
         lead_expected = expect_load(env, self.lead_load_txn)
-        victim_expected = expect_load(env, self.victim_load_txn)
+        victim_expected_pairs = [
+            (victim_load_txn, expect_load(env, victim_load_txn))
+            for victim_load_txn in self.victim_load_txns
+        ]
 
         with (
             _capture_load_debug_trace(env, max_events=96) as load_debug_trace,
             _capture_writeback_trace(env, max_events=64) as writeback_trace,
         ):
-            ScalarLoadBatchSameCycleSequence((self.lead_load_txn, self.victim_load_txn)).run(env)
-            load_debug_event = _wait_load_debug_event(
-                env,
-                rob_idx_value=self.victim_load_txn.rob_idx_value,
-                required_replay_causes=("BC",),
-                forbidden_replay_causes=("FF", "NK", "RAW", "RAR"),
-                max_cycles=self.replay_wait_cycles,
-            )
-            try:
-                replay_event = env.wait_replay_event(
-                    rob_idx=self.victim_load_txn.rob_idx,
-                    max_cycles=self.replay_wait_cycles,
+            ScalarLoadBatchSameCycleSequence(issued_loads).run(env)
+            load_debug_events = []
+            replay_events = []
+            for victim_load_txn in self.victim_load_txns:
+                load_debug_events.append(
+                    _wait_load_debug_event(
+                        env,
+                        rob_idx_value=victim_load_txn.rob_idx_value,
+                        required_replay_causes=("BC",),
+                        forbidden_replay_causes=("FF", "NK", "RAW", "RAR"),
+                        max_cycles=self.replay_wait_cycles,
+                    )
                 )
-            except TimeoutError:
-                replay_event = None
+                try:
+                    replay_events.append(
+                        env.wait_replay_event(
+                            rob_idx=victim_load_txn.rob_idx,
+                            max_cycles=self.replay_wait_cycles,
+                        )
+                    )
+                except TimeoutError:
+                    replay_events.append(None)
 
             def _trace_has_writeback(*, rob_idx, data):
                 for event in writeback_trace:
@@ -1474,37 +1488,41 @@ class ScalarBankConflictReplaySequence:
                     data=lead_expected.expected_data,
                     max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
                 )
-            if not _trace_has_writeback(rob_idx=self.victim_load_txn.rob_idx, data=victim_expected.expected_data):
-                env.wait_load_writeback_observed(
-                    rob_idx=self.victim_load_txn.rob_idx,
-                    data=victim_expected.expected_data,
-                    max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
-                )
+            for victim_load_txn, victim_expected in victim_expected_pairs:
+                if not _trace_has_writeback(rob_idx=victim_load_txn.rob_idx, data=victim_expected.expected_data):
+                    env.wait_load_writeback_observed(
+                        rob_idx=victim_load_txn.rob_idx,
+                        data=victim_expected.expected_data,
+                        max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+                    )
             completed = _wait_completed_load_count(
                 env,
-                completed_before + 2,
+                completed_before + len(issued_loads),
                 max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
             )
 
         final_state = SequenceState(
-            next_lq_ptr=ptr_inc(self.victim_load_txn.lq_ptr, env.config.sequence.load_queue_size),
+            next_lq_ptr=ptr_inc(issued_loads[-1].lq_ptr, env.config.sequence.load_queue_size),
             sq_ptr=self.lead_load_txn.sq_ptr,
         )
         if self.assert_no_outstanding:
             env.assert_no_outstanding()
 
         return ScalarBankConflictReplaySequenceResult(
-            issued_loads=(self.lead_load_txn, self.victim_load_txn),
-            replay_event=replay_event,
-            load_debug_event=load_debug_event,
-            load_debug_trace=tuple(
-                event
-                for event in load_debug_trace
-                if self.victim_load_txn.rob_idx_value in {
-                    event["s1_rob_idx_value"],
-                    event["s2_rob_idx_value"],
-                    event["s3_rob_idx_value"],
-                }
+            issued_loads=issued_loads,
+            replay_events=tuple(replay_events),
+            load_debug_events=tuple(load_debug_events),
+            load_debug_traces=tuple(
+                tuple(
+                    event
+                    for event in load_debug_trace
+                    if victim_load_txn.rob_idx_value in {
+                        event["s1_rob_idx_value"],
+                        event["s2_rob_idx_value"],
+                        event["s3_rob_idx_value"],
+                    }
+                )
+                for victim_load_txn in self.victim_load_txns
             ),
             final_state=final_state,
             completed_load_count=completed,
