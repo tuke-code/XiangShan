@@ -10,6 +10,22 @@ import pytest
 import MemBlock_api
 from transactions import QueuePtr, VectorMemTxn
 
+
+def _drive_dft_inputs(env, pattern):
+    for signal_name, value in pattern.items():
+        getattr(env.dut, signal_name).value = value
+    env.advance_cycles(1)
+
+
+def _assert_dft_passthrough(env, pattern, output_to_input):
+    for signal_name, value in pattern.items():
+        assert getattr(env.dut, signal_name).value == value, f"DFT 输入 {signal_name} 未保持驱动值 {value}"
+    for output_name, input_name in output_to_input.items():
+        expected = pattern[input_name]
+        observed = getattr(env.dut, output_name).value
+        assert observed == expected, f"DFT 透传不匹配: {output_name}={observed}, expected {input_name}={expected}"
+
+
 def test_api_MemBlock_env_create(env):
     """验证 env、dut 和 MemoryModel 能正常创建。"""
 
@@ -86,6 +102,78 @@ def test_api_MemBlock_env_has_core_bundles(env):
     assert len(env.store_addr_re_inputs) == env.config.store_pipeline_width
     assert len(env.sbuffer_writes) == env.config.sbuffer_write_ports
     assert len(env.sq_shadow_entries) == env.config.store_queue_size
+
+
+def test_api_MemBlock_env_dft_sram_broadcast_passthrough_smoke(env):
+    """验证顶层 `io_dft_*` SRAM broadcast 输入能透传到前端/后端导出端口。"""
+
+    output_to_input = {
+        "io_dft_frnt_ram_hold": "io_dft_ram_hold",
+        "io_dft_frnt_ram_bypass": "io_dft_ram_bypass",
+        "io_dft_frnt_ram_bp_clken": "io_dft_ram_bp_clken",
+        "io_dft_frnt_ram_aux_clk": "io_dft_ram_aux_clk",
+        "io_dft_frnt_ram_aux_ckbp": "io_dft_ram_aux_ckbp",
+        "io_dft_frnt_ram_mcp_hold": "io_dft_ram_mcp_hold",
+        "io_dft_frnt_cgen": "io_dft_cgen",
+        "io_dft_bcknd_cgen": "io_dft_cgen",
+    }
+    zero_pattern = {
+        "io_dft_ram_hold": 0,
+        "io_dft_ram_bypass": 0,
+        "io_dft_ram_bp_clken": 0,
+        "io_dft_ram_aux_clk": 0,
+        "io_dft_ram_aux_ckbp": 0,
+        "io_dft_ram_mcp_hold": 0,
+        "io_dft_cgen": 0,
+    }
+    mixed_pattern = {
+        "io_dft_ram_hold": 1,
+        "io_dft_ram_bypass": 0,
+        "io_dft_ram_bp_clken": 1,
+        "io_dft_ram_aux_clk": 0,
+        "io_dft_ram_aux_ckbp": 1,
+        "io_dft_ram_mcp_hold": 0,
+        "io_dft_cgen": 1,
+    }
+
+    try:
+        _drive_dft_inputs(env, zero_pattern)
+        _assert_dft_passthrough(env, zero_pattern, output_to_input)
+        _drive_dft_inputs(env, mixed_pattern)
+        _assert_dft_passthrough(env, mixed_pattern, output_to_input)
+    finally:
+        _drive_dft_inputs(env, zero_pattern)
+
+
+def test_api_MemBlock_env_dft_reset_passthrough_smoke(env):
+    """验证顶层 `io_dft_reset_*` 输入能透传到前端/后端导出端口。"""
+
+    output_to_input = {
+        "io_dft_reset_frnt_lgc_rst_n": "io_dft_reset_lgc_rst_n",
+        "io_dft_reset_frnt_mode": "io_dft_reset_mode",
+        "io_dft_reset_frnt_scan_mode": "io_dft_reset_scan_mode",
+        "io_dft_reset_bcknd_lgc_rst_n": "io_dft_reset_lgc_rst_n",
+        "io_dft_reset_bcknd_mode": "io_dft_reset_mode",
+        "io_dft_reset_bcknd_scan_mode": "io_dft_reset_scan_mode",
+    }
+    zero_pattern = {
+        "io_dft_reset_lgc_rst_n": 0,
+        "io_dft_reset_mode": 0,
+        "io_dft_reset_scan_mode": 0,
+    }
+    mixed_pattern = {
+        "io_dft_reset_lgc_rst_n": 1,
+        "io_dft_reset_mode": 1,
+        "io_dft_reset_scan_mode": 0,
+    }
+
+    try:
+        _drive_dft_inputs(env, zero_pattern)
+        _assert_dft_passthrough(env, zero_pattern, output_to_input)
+        _drive_dft_inputs(env, mixed_pattern)
+        _assert_dft_passthrough(env, mixed_pattern, output_to_input)
+    finally:
+        _drive_dft_inputs(env, zero_pattern)
 
 
 def test_api_MemBlock_env_advance_cycles_and_reset(env):
