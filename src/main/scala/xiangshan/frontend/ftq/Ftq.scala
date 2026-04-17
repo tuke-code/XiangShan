@@ -31,6 +31,7 @@ import utility.XSError
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
 import utility.XSPerfSeqAccumulate
+import xiangshan.Redirect
 import xiangshan.RedirectLevel
 import xiangshan.TopDownCounters
 import xiangshan.backend.CtrlToFtqIO
@@ -39,6 +40,7 @@ import xiangshan.frontend.BlameBpuSource
 import xiangshan.frontend.BpuToFtqIO
 import xiangshan.frontend.ExceptionType
 import xiangshan.frontend.FetchRequestBundle
+import xiangshan.frontend.FrontendRedirect
 import xiangshan.frontend.FrontendTopDownBundle
 import xiangshan.frontend.FtqToBpuIO
 import xiangshan.frontend.FtqToICacheIO
@@ -109,11 +111,25 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // perfQueue stores information for performance monitoring. These queues should not exist in hardware
   private val perfQueue = Reg(Vec(FtqSize, new PerfMeta))
 
-  private val specTopAddr = metaQueueRedirect(io.fromIfu.wbRedirect.bits.ftqIdx.value).ras.topRetAddr.toUInt
-  private val ifuRedirect = receiveIfuRedirect(io.fromIfu.wbRedirect, specTopAddr)
+  // private val fromIfuRedirect = RegInit(0.U.asTypeOf(Valid(new FrontendRedirect)))
+  // fromIfuRedirect := io.fromIfu.wbRedirect
+  // private val specTopAddr     = metaQueueRedirect(fromIfuRedirect.bits.ftqIdx.value).ras.topRetAddr.toUInt
+  // private val ifuRedirect     = receiveIfuRedirect(fromIfuRedirect, specTopAddr)
+  private val testSpecTopAddr = metaQueueRedirect(io.fromIfu.wbRedirect.bits.ftqIdx.value).ras.topRetAddr.toUInt
+  private val testIfuRedirect = receiveIfuRedirect(io.fromIfu.wbRedirect, testSpecTopAddr)
+  private val ifuRedirect     = RegInit(0.U.asTypeOf(Valid(new Redirect)))
+  ifuRedirect := testIfuRedirect
 
-  private val (backendRedirectFtqIdx, backendRedirect) = receiveBackendRedirect(io.fromBackend)
+  // private val fromBackendRedirect = RegInit(0.U.asTypeOf(new CtrlToFtqIO))
+  // fromBackendRedirect := io.fromBackend
+  // private val (backendRedirectFtqIdx, backendRedirect)         = receiveBackendRedirect(fromBackendRedirect)
+  private val (testBackendRedirectFtqIdx, testBackendRedirect) = receiveBackendRedirect(io.fromBackend)
+  private val backendRedirectFtqIdx                            = RegInit(0.U.asTypeOf(Valid(new FtqPtr)))
+  private val backendRedirect                                  = RegInit(0.U.asTypeOf(Valid(new Redirect)))
+  backendRedirectFtqIdx := testBackendRedirectFtqIdx
+  backendRedirect       := testBackendRedirect
 
+  private val testRedirect = Mux(testBackendRedirect.valid, testBackendRedirect, testIfuRedirect)
   private val redirect     = Mux(backendRedirect.valid, backendRedirect, ifuRedirect)
   private val redirectNext = RegNext(redirect)
 
@@ -294,7 +310,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
     Seq(bpuPtr, ifuPtr, pfPtr).foreach(_ := newEntryPtr)
   }
 
-  io.toIfu.redirect.valid := backendRedirect.valid
+  io.toIfu.redirect.valid := backendRedirect.valid || testBackendRedirect.valid
   // TODO: only valid should be needed
   io.toIfu.redirect.bits := DontCare
 
@@ -303,7 +319,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toBpu.redirect.bits.target    := redirect.bits.target
   io.toBpu.redirect.bits.taken     := redirect.bits.taken
   io.toBpu.redirect.bits.attribute := redirect.bits.attribute
-  io.toBpu.redirect.bits.meta      := metaQueueRedirect(redirect.bits.ftqIdx.value)
+  io.toBpu.redirect.bits.meta      := RegNext(metaQueueRedirect(testRedirect.bits.ftqIdx.value))
   io.toBpu.redirectFromIFU         := ifuRedirect.valid
 
   resolveQueue.io.backendRedirect    := backendRedirect.valid
