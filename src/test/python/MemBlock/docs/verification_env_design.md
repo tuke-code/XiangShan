@@ -403,6 +403,8 @@ env.backend.execute(
 - `wait_release_event()` 与 `wait_rar_nuke_response()` 把 `RAR` 场景所需的 release / query-response 观测也收口进 env facade。
 - `wait_load_writeback_observed()` 允许 testcase 直接证明某条 load 已经先写回，而不要求它已经穿过 commit-boundary compare，这对 `RAR` 这类“younger 先写回、older 后退休”的场景很重要。
 
+需要强调一条 sequence 设计约束：`transport delay` 只能影响性能和事件分布，不能承载 testcase 的关键语义窗口。像 `probe/release`、`RAW backpressure`、`hot-cache hit` 这类前提，都必须由 sequence 显式表达等待/settle/quiesce，而不是默认假设“旧的较长 delay 会自然留出足够窗口”。
+
 ## 10. `EnvConfig` 统一参数入口
 
 `env_config.py` 提供了当前环境的统一配置对象。它的目标不是立即把所有结构都做成完全可参数化，而是先把“运行策略参数”和“高频默认值”收口，包括：

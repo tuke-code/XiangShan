@@ -27,6 +27,12 @@ def test_api_MemBlock_env_create(env):
     assert env.rob_agent is not None
     assert env.backend is not None
     assert env.config.rob_size == 512
+    assert env.config.transport.outer_delay == 4
+    assert env.config.transport.grant_delay_min == 2
+    assert env.config.transport.grant_delay_max == 8
+    assert env.memory.transport.outer_delay == 4
+    assert env.memory.transport.grant_delay_min == 2
+    assert env.memory.transport.grant_delay_max == 8
     assert env.memory.strict_writeback_check is True
 
 

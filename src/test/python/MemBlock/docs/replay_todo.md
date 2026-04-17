@@ -24,7 +24,7 @@
 | RAR Violation | `RAR` / `memoryViolation` 相关恢复 | stable | `test_api_MemBlock_scalar_rar_violation_smoke` / `ScalarRarViolationSequence` | older load load-wait 暂停、younger load 先写回旧值、probe/release 后 older load 被 nuke 并读到新值 |
 | Bank Conflict Replay | `BC` | stable | `test_api_MemBlock_scalar_bank_conflict_replay_smoke` / `ScalarBankConflictReplaySequence` | 两条 cache-hit load 同拍 issue，victim load 只命中纯 `BC`，不混入 `FF` / `NK` |
 | Pipeline ST-LD Nuke | `NK` | stable | `test_api_MemBlock_scalar_pipeline_stld_nuke_smoke` / `ScalarPipelineStldNukeSequence` | older store 先有 data、younger load issue 后补 `STA`，目标 load 命中纯 `NK`，恢复后读到 store 数据 |
-| Bank Conflict + SQ dataInvalid + NK 组合 | `BC + FF + NK` | stable | `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke` / `ScalarBankConflictSqDataInvalidNukeSequence` | victim load 同时命中 `BC` / `FF`，并能稳定观测到 transient `NK` |
+| Bank Conflict + SQ dataInvalid + NK 组合 | `BC + FF + NK` | stable | `test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke` / `ScalarBankConflictSqDataInvalidNukeSequence` | victim load 先命中 pure `BC`，后续 trace 再命中 `FF`，并能稳定观测到 transient `NK` |
 | MatchInvalid Trigger + Redirect | `matchInvalid + memoryViolation(level=1)` | stable with known DUT bug | `test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke` / `ScalarSqDataInvalidMatchInvalidTriggerSequence` | `SQ dataInvalid=1 + matchInvalid=1`、younger load 命中 flush-level `memoryViolation`、恢复后读到 store 数据；但存在已知 dual-path replay bug |
 
 ## 3. 当前已经验证到的检查口径
@@ -81,6 +81,8 @@
 - replay cause 是否保持为 `RAW`
 - younger loads 恢复后是否全部完成且不遗留 outstanding
 
+实现 RAW baseline 时，如果主意图是验证 `RAW` 而不是 `DM`，应先把主循环里会反复访问的热点地址显式 warm 到 hit-path；否则默认 transport delay 变短后，前几波 younger load 很容易先被 cold miss 吃掉，根本压不出目标 `RAW` 窗口。
+
 ### 4.2 RAR violation / release / nuke 细分
 
 目标：把 `RAR` 从单个基础 smoke 扩成“release 时序 + overlap 形态 + query/response 行为”的组合矩阵。
@@ -98,6 +100,9 @@
 - younger load 是否先写回旧值
 - older load 是否仅在 release 后被 nuke 并重写回
 - `memoryViolation`、`rar_nuke_response` 与 writeback 顺序是否一致
+
+实现这些子场景时，`release early / late` 必须通过 sequence 的显式等待参数区分，不能再借默认 transport delay 的快慢“自然形成”窗口。
+同时，`release` / `nuke query` / `load_debug replay cause` 这类瞬时事件不要只靠事后 `wait_*()`；应优先在刺激窗口外层捕获 trace，先查 trace 再 fallback 等待。
 
 ### 4.3 FF 细分
 

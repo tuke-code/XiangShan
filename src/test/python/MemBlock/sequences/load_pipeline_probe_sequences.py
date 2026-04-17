@@ -383,7 +383,15 @@ def _collect_expected_load_writebacks(
     )
 
 
-def _prime_hot_cacheable_load(env, txn: LoadTxn, expected_addr: int, expected_data: int) -> None:
+def _prime_hot_cacheable_load(
+    env,
+    txn: LoadTxn,
+    expected_addr: int,
+    expected_data: int,
+    *,
+    wait_memory_quiesce_after_prime: bool = True,
+    post_prime_settle_cycles: int = 32,
+) -> object:
     completed_before = env.get_completed_load_count()
     prepared = env.backend.prepare(txn)
     env.expect_scalar_load(
@@ -404,6 +412,52 @@ def _prime_hot_cacheable_load(env, txn: LoadTxn, expected_addr: int, expected_da
         completed_before + 1,
         max_cycles=_resolve_replay_drain_cycles(env, None),
     )
+    if wait_memory_quiesce_after_prime:
+        env.wait_memory_quiesce(max_cycles=_resolve_replay_drain_cycles(env, None))
+    if post_prime_settle_cycles > 0:
+        env.advance_cycles(post_prime_settle_cycles)
+    verify_transport_before = _snapshot_transport_stats(env)
+    verify_txn = LoadTxn(
+        req_id=int(txn.req_id) | 0x40000000,
+        addr=txn.addr,
+        lq_ptr=ptr_inc(txn.lq_ptr, env.config.sequence.load_queue_size),
+        sq_ptr=txn.sq_ptr,
+        issue_lane=txn.issue_lane,
+        size=txn.size,
+        mask=txn.mask,
+        store_set_hit=txn.store_set_hit,
+    )
+    verify_completed_before = env.get_completed_load_count()
+    verify_prepared = env.backend.prepare(verify_txn)
+    env.expect_scalar_load(
+        rob_idx=verify_txn.rob_idx,
+        pdest=verify_txn.resolved_pdest,
+        addr=expected_addr,
+        size=verify_txn.size,
+        mask=verify_txn.mask,
+    )
+    env.backend.execute(verify_prepared)
+    env.wait_load_writeback_observed(
+        rob_idx=verify_txn.rob_idx,
+        data=expected_data,
+        max_cycles=_resolve_replay_drain_cycles(env, None),
+    )
+    _wait_completed_load_count(
+        env,
+        verify_completed_before + 1,
+        max_cycles=_resolve_replay_drain_cycles(env, None),
+    )
+    verify_transport_after = _snapshot_transport_stats(env)
+    assert verify_transport_after["dcache_a_request_count"] == verify_transport_before["dcache_a_request_count"], (
+        f"cache warmup verify 仍触发 dcache miss: addr=0x{int(txn.addr):x}, "
+        f"before={verify_transport_before['dcache_a_request_count']}, "
+        f"after={verify_transport_after['dcache_a_request_count']}"
+    )
+    if wait_memory_quiesce_after_prime:
+        env.wait_memory_quiesce(max_cycles=_resolve_replay_drain_cycles(env, None))
+    if post_prime_settle_cycles > 0:
+        env.advance_cycles(post_prime_settle_cycles)
+    return ptr_inc(verify_txn.lq_ptr, env.config.sequence.load_queue_size)
 
 
 class ScalarBankConflictLoadClusterSequence:
@@ -445,8 +499,12 @@ class ScalarBankConflictLoadClusterSequence:
                     sq_ptr=sq_ptr,
                     issue_lane=0,
                 )
-                _prime_hot_cacheable_load(env, prime_txn, expected_addr=addr, expected_data=data)
-                next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
+                next_lq_ptr = _prime_hot_cacheable_load(
+                    env,
+                    prime_txn,
+                    expected_addr=addr,
+                    expected_data=data,
+                )
         completed_before_main = env.get_completed_load_count()
 
         txns = []
@@ -584,13 +642,12 @@ class ScalarLateStaStoreLoadViolationSequence:
             sq_ptr=warmup_sq_ptr,
             issue_lane=0,
         )
-        _prime_hot_cacheable_load(
+        next_lq_ptr = _prime_hot_cacheable_load(
             env,
             warmup_lead,
             expected_addr=warmup_lead.addr,
             expected_data=env.memory.read(warmup_lead.addr, 8),
         )
-        next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
 
         warmup_victim = LoadTxn(
             req_id=0x1C0 + victim_req[0],
@@ -599,13 +656,12 @@ class ScalarLateStaStoreLoadViolationSequence:
             sq_ptr=warmup_sq_ptr,
             issue_lane=1,
         )
-        _prime_hot_cacheable_load(
+        next_lq_ptr = _prime_hot_cacheable_load(
             env,
             warmup_victim,
             expected_addr=warmup_victim.addr,
             expected_data=env.memory.read(warmup_victim.addr, 8),
         )
-        next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
         store_ref = StoreRef(name=f"late_sta_store_{self.store_txn.req_id}")
         store_sq_ptr = env.backend.execute(
             BackendSendPlan.from_steps(

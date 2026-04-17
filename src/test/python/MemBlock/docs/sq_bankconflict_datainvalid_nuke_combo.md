@@ -21,7 +21,8 @@
 
 它要回答的核心问题是：
 
-- `BC + FF + dataInvalid` 与 pipeline `NK` 能否在同一条 victim load 上稳定露出来
+- 同一条 victim load 能否先稳定命中 pure `BC`，随后在恢复路径里再露出 `FF + dataInvalid`
+- 同一条 victim load 是否还能稳定观测到 pipeline `NK`
 - 这条路径最终是否能恢复并读到 older store data
 - 构造完成后的恢复阶段，是否仍可能伴随 queue-side `RAW/RAR` 查询流量
 
@@ -32,12 +33,13 @@
 1. 预热 victim 地址和 lead 地址，保证后续两条 load 都走 dcache hit
 2. 先 enqueue older store，但暂不补 `STD`
 3. lead load 与 victim load 同拍发射，稳定制造 `BC`
-4. 立即补发 older store 的 `STA`
-5. 先等待：
+4. 先等待 victim load 的 pure `BC` precondition
+5. 再补发 older store 的 `STA`
+6. 先等待：
    - SQ forward 命中 `dataInvalid=1 && matchInvalid=0`
    - victim load 的早期 `NK`
-   - victim load 的后续 `BC + FF`
-6. 只有在上述窗口稳定出现后，才补 `STD` 并提交 store
+   - victim load 的后续 `FF`
+7. 只有在上述窗口稳定出现后，才补 `STD` 并提交 store
 
 关键点不在“把 `STD` 尽早发掉”，而在“先等 transient `NK` 露出来，再让 store data 完整化”。如果过早补 `STD`，场景会退化成只剩 `FF` 的重发表现，victim load 可能长期不收敛。
 
@@ -52,9 +54,11 @@
 
 ### 4.2 victim load debug 事实
 
-- 早期 trace 可稳定看到 `NK`
-- 后续 trace 可稳定看到 `BC + FF`
-- testcase 的主断言点 `load_debug_event` 仍要求不退化成 `RAW/RAR`
+- 主断言点先命中 pure `BC`
+- 后续 trace 可稳定看到 `FF`
+- victim trace 内还可稳定看到 `NK`
+- testcase 不要求 `BC/FF/NK` 必须在同一拍压成同一个 cause mask；要求的是同一条 victim load 在完整生命周期里真实经过这三个阶段
+- testcase 的主断言点仍要求不退化成 `RAW/RAR`
 
 ### 4.3 端到端恢复事实
 

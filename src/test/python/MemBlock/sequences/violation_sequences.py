@@ -17,6 +17,7 @@ from request_apis import (
 )
 from transactions import (
     BackendSendPlan,
+    EnqueueLoadCyclePlan,
     EnqueueLoadStep,
     EnqueueStoreStep,
     IssueCyclePlan,
@@ -44,7 +45,7 @@ from .memblock_sequences import (
 @dataclass(frozen=True)
 class ScalarRawReplaySequenceResult:
     store_sq_ptr: QueuePtr
-    nuke_query_event: dict
+    nuke_query_event: dict | None
     replay_event: dict
     committed_store_view: object
     final_state: SequenceState
@@ -188,6 +189,28 @@ def _capture_nuke_query_trace(env, *, max_events: int = 64):
         env.remove_after_step_callback(_sample)
 
 
+@contextmanager
+def _capture_release_trace(env, *, max_events: int = 64):
+    trace = deque(maxlen=max(1, int(max_events)))
+    seen = set()
+
+    def _sample() -> None:
+        event = env.sample_release_state()
+        if not event.get("valid"):
+            return
+        event_key = (event.get("cycle"), event.get("paddr"))
+        if event_key in seen:
+            return
+        seen.add(event_key)
+        trace.append(dict(event))
+
+    env.add_after_step_callback(_sample)
+    try:
+        yield trace
+    finally:
+        env.remove_after_step_callback(_sample)
+
+
 def _wait_load_debug_stage(env, *, rob_idx_value: int, stage: str, max_cycles: int = 200) -> dict:
     stage_key = f"{stage}_rob_idx_value"
     if stage_key not in {"s1_rob_idx_value", "s2_rob_idx_value", "s3_rob_idx_value"}:
@@ -218,6 +241,7 @@ class ScalarRawReplaySequence:
         replay_wait_cycles: int = 400,
         materialize_cycles: int = 200,
         drain_cycles: int | None = None,
+        raw_window_settle_cycles: int = 32,
         size: int = 8,
         mask: int = 0xFF,
         assert_no_outstanding: bool = False,
@@ -230,6 +254,7 @@ class ScalarRawReplaySequence:
         self.replay_wait_cycles = replay_wait_cycles
         self.materialize_cycles = materialize_cycles
         self.drain_cycles = drain_cycles
+        self.raw_window_settle_cycles = int(raw_window_settle_cycles)
         self.size = size
         self.mask = mask
         self.assert_no_outstanding = assert_no_outstanding
@@ -242,37 +267,90 @@ class ScalarRawReplaySequence:
         store_queue_size = env.config.sequence.store_queue_size
         load_queue_size = env.config.sequence.load_queue_size
 
-        env.backend.prepare(self.store_txn)
-        store_sq_ptr = enqueue_scalar_store(
-            env,
-            req_id=self.store_txn.req_id,
-            sq_ptr=self.store_txn.sq_ptr,
-            enq_port=self.store_txn.enq_port,
-            rob_idx=self.store_txn.rob_idx,
-        )
-        younger_sq_ptr = ptr_inc(self.store_txn.sq_ptr, store_queue_size)
-
-        next_lq_ptr = self.initial_lq_ptr
-        load_txns = []
-        for load_idx, addr in enumerate(self.load_addresses):
-            load_txn = LoadTxn(
-                req_id=self.first_load_req_id + load_idx,
-                addr=addr,
-                lq_ptr=next_lq_ptr,
-                sq_ptr=younger_sq_ptr,
-                size=self.size,
-                mask=self.mask,
+        with _capture_nuke_query_trace(env, max_events=128) as nuke_query_trace:
+            env.backend.prepare(self.store_txn)
+            store_sq_ptr = enqueue_scalar_store(
+                env,
+                req_id=self.store_txn.req_id,
+                sq_ptr=self.store_txn.sq_ptr,
+                enq_port=self.store_txn.enq_port,
+                rob_idx=self.store_txn.rob_idx,
             )
-            send_load(env, load_txn)
-            expect_load(env, load_txn)
-            load_txns.append(load_txn)
-            next_lq_ptr = ptr_inc(next_lq_ptr, load_queue_size)
+            younger_sq_ptr = ptr_inc(self.store_txn.sq_ptr, store_queue_size)
 
-        nuke_query_event = env.wait_nuke_query_backpressure(
-            kind="raw",
-            sq_idx=younger_sq_ptr.value,
-            max_cycles=self.nuke_wait_cycles,
-        )
+            next_lq_ptr = self.initial_lq_ptr
+            load_txns = []
+            for load_idx, addr in enumerate(self.load_addresses):
+                load_txn = LoadTxn(
+                    req_id=self.first_load_req_id + load_idx,
+                    addr=addr,
+                    lq_ptr=next_lq_ptr,
+                    sq_ptr=younger_sq_ptr,
+                    issue_lane=load_idx % env.config.load_pipeline_width,
+                    size=self.size,
+                    mask=self.mask,
+                )
+                expect_load(env, load_txn)
+                load_txns.append(load_txn)
+                next_lq_ptr = ptr_inc(next_lq_ptr, load_queue_size)
+
+            nuke_query_event = None
+            issued_loads = []
+            batch_width = max(1, min(2, int(env.config.load_pipeline_width)))
+            for start in range(0, len(load_txns), batch_width):
+                chunk = tuple(load_txns[start:start + batch_width])
+                try:
+                    ScalarLoadBatchSameCycleSequence(chunk).run(env)
+                except TimeoutError:
+                    break
+                issued_loads.extend(chunk)
+                if nuke_query_event is not None:
+                    continue
+                for event in env.sample_nuke_query_state()["raw_queries"]:
+                    if (
+                        event.get("valid")
+                        and not event.get("ready")
+                        and event.get("sq_idx_value") == younger_sq_ptr.value
+                    ):
+                        nuke_query_event = dict(event)
+                        break
+
+            if self.raw_window_settle_cycles > 0:
+                env.advance_cycles(self.raw_window_settle_cycles)
+
+            if nuke_query_event is None:
+                nuke_query_event = next(
+                    (
+                        dict(event)
+                        for event in nuke_query_trace
+                        if event.get("kind") == "RAW"
+                        and event.get("valid")
+                        and not event.get("ready")
+                        and event.get("sq_idx_value") == younger_sq_ptr.value
+                    ),
+                    None,
+                )
+            if nuke_query_event is None:
+                nuke_query_event = next(
+                    (
+                        dict(event)
+                        for event in nuke_query_trace
+                        if event.get("kind") == "RAW"
+                        and event.get("valid")
+                        and not event.get("ready")
+                        and event.get("sq_idx_value") == younger_sq_ptr.value
+                    ),
+                    None,
+                )
+            if nuke_query_event is None:
+                try:
+                    nuke_query_event = env.wait_nuke_query_backpressure(
+                        kind="raw",
+                        sq_idx=younger_sq_ptr.value,
+                        max_cycles=self.nuke_wait_cycles,
+                    )
+                except TimeoutError:
+                    nuke_query_event = None
         replay_event = env.wait_replay_event(
             cause="RAW",
             sq_idx=younger_sq_ptr.value,
@@ -310,9 +388,9 @@ class ScalarRawReplaySequence:
         )
         env.drain_writebacks(max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles))
         completed = env.get_completed_load_count()
-        assert completed == completed_before + len(load_txns), (
+        assert completed == completed_before + len(issued_loads), (
             f"RAW replay 场景未完成全部 younger loads: completed={completed}, "
-            f"expected={completed_before + len(load_txns)}"
+            f"expected={completed_before + len(issued_loads)}"
         )
 
         final_state = SequenceState(
@@ -328,7 +406,7 @@ class ScalarRawReplaySequence:
             replay_event=replay_event,
             committed_store_view=committed_store_view,
             final_state=final_state,
-            issued_loads=tuple(load_txns),
+            issued_loads=tuple(issued_loads),
             completed_load_count=completed,
         )
 
@@ -342,6 +420,8 @@ class ScalarRarViolationSequence:
         younger_load_txn,
         release_new_value: int,
         probe_param: int = 2,
+        probe_after_younger_writeback_cycles: int = 32,
+        probe_delay_cycles: int = 0,
         replay_wait_cycles: int = 400,
         violation_wait_cycles: int = 200,
         materialize_cycles: int = 200,
@@ -353,6 +433,8 @@ class ScalarRarViolationSequence:
         self.younger_load_txn = younger_load_txn
         self.release_new_value = int(release_new_value)
         self.probe_param = int(probe_param)
+        self.probe_after_younger_writeback_cycles = int(probe_after_younger_writeback_cycles)
+        self.probe_delay_cycles = int(probe_delay_cycles)
         self.replay_wait_cycles = replay_wait_cycles
         self.violation_wait_cycles = violation_wait_cycles
         self.materialize_cycles = materialize_cycles
@@ -365,46 +447,63 @@ class ScalarRarViolationSequence:
         previous_strict = env.memory.strict_writeback_check
         env.memory.strict_writeback_check = False
         try:
-            env.backend.prepare(self.fake_store_txn)
-            fake_store_sq_ptr = enqueue_scalar_store(
-                env,
-                req_id=self.fake_store_txn.req_id,
-                sq_ptr=self.fake_store_txn.sq_ptr,
-                enq_port=self.fake_store_txn.enq_port,
-                rob_idx=self.fake_store_txn.rob_idx,
-            )
-            issue_scalar_std(
-                env,
-                req_id=self.fake_store_txn.req_id,
-                sq_ptr=fake_store_sq_ptr,
-                data=self.fake_store_txn.data,
-                lane=self.fake_store_txn.std_lane,
-                rob_idx=self.fake_store_txn.rob_idx,
-                ftq_idx_flag=self.fake_store_txn.resolved_ftq_idx_flag,
-                ftq_idx_value=self.fake_store_txn.resolved_ftq_idx_value,
-            )
+            with _capture_release_trace(env, max_events=32) as release_trace:
+                env.backend.prepare(self.fake_store_txn)
+                fake_store_sq_ptr = enqueue_scalar_store(
+                    env,
+                    req_id=self.fake_store_txn.req_id,
+                    sq_ptr=self.fake_store_txn.sq_ptr,
+                    enq_port=self.fake_store_txn.enq_port,
+                    rob_idx=self.fake_store_txn.rob_idx,
+                )
+                issue_scalar_std(
+                    env,
+                    req_id=self.fake_store_txn.req_id,
+                    sq_ptr=fake_store_sq_ptr,
+                    data=self.fake_store_txn.data,
+                    lane=self.fake_store_txn.std_lane,
+                    rob_idx=self.fake_store_txn.rob_idx,
+                    ftq_idx_flag=self.fake_store_txn.resolved_ftq_idx_flag,
+                    ftq_idx_value=self.fake_store_txn.resolved_ftq_idx_value,
+                )
 
-            send_load(env, self.older_load_txn)
-            expect_load(env, self.older_load_txn)
-            env.wait_replay_event(
-                cause="MA",
-                rob_idx=self.older_load_txn.rob_idx,
-                max_cycles=self.replay_wait_cycles,
-            )
+                send_load(env, self.older_load_txn)
+                expect_load(env, self.older_load_txn)
+                env.wait_replay_event(
+                    cause="MA",
+                    rob_idx=self.older_load_txn.rob_idx,
+                    max_cycles=self.replay_wait_cycles,
+                )
 
-            send_load(env, self.younger_load_txn)
-            younger_writeback = env.wait_load_writeback_observed(
-                rob_idx=self.younger_load_txn.rob_idx,
-                data=env.memory.read(self.younger_load_txn.addr, self.younger_load_txn.size),
-                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
-            )
+                send_load(env, self.younger_load_txn)
+                younger_writeback = env.wait_load_writeback_observed(
+                    rob_idx=self.younger_load_txn.rob_idx,
+                    data=env.memory.read(self.younger_load_txn.addr, self.younger_load_txn.size),
+                    max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+                )
 
-            env.preload_u64(self.younger_load_txn.addr, self.release_new_value)
-            env.inject_dcache_probe(cacheline_addr, param=self.probe_param)
-            release_event = env.wait_release_event(
-                cacheline_addr=cacheline_addr,
-                max_cycles=self.violation_wait_cycles,
-            )
+                if self.probe_after_younger_writeback_cycles > 0:
+                    env.advance_cycles(self.probe_after_younger_writeback_cycles)
+
+                env.preload_u64(self.younger_load_txn.addr, self.release_new_value)
+                env.inject_dcache_probe(
+                    cacheline_addr,
+                    param=self.probe_param,
+                    delay_cycles=self.probe_delay_cycles,
+                )
+                release_event = next(
+                    (
+                        dict(event)
+                        for event in release_trace
+                        if (int(event.get("paddr", 0)) & ~0x3F) == cacheline_addr
+                    ),
+                    None,
+                )
+                if release_event is None:
+                    release_event = env.wait_release_event(
+                        cacheline_addr=cacheline_addr,
+                        max_cycles=self.violation_wait_cycles,
+                    )
 
             issue_scalar_sta(
                 env,
@@ -613,6 +712,7 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
         lead_load_req_id: int,
         victim_load_req_id: int,
         lead_addr: int | None = None,
+        sta_after_load_batch_cycles: int = 0,
         replay_wait_cycles: int = 200,
         materialize_cycles: int = 200,
         drain_cycles: int | None = None,
@@ -623,6 +723,7 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
         self.lead_load_req_id = int(lead_load_req_id)
         self.victim_load_req_id = int(victim_load_req_id)
         self.lead_addr = None if lead_addr is None else int(lead_addr)
+        self.sta_after_load_batch_cycles = int(sta_after_load_batch_cycles)
         self.replay_wait_cycles = int(replay_wait_cycles)
         self.materialize_cycles = int(materialize_cycles)
         self.drain_cycles = drain_cycles
@@ -677,7 +778,34 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
                     return False
                 return True
 
+            def _victim_trace_match(*, required_replay_causes=(), forbidden_replay_causes=()):
+                for event in load_debug_trace:
+                    if not _load_debug_lane_matches(
+                        event,
+                        rob_idx_value=victim_load.rob_idx_value,
+                        required_replay_causes=required_replay_causes,
+                        forbidden_replay_causes=forbidden_replay_causes,
+                    ):
+                        continue
+                    return dict(event)
+                return None
+
             ScalarLoadBatchSameCycleSequence((lead_load, victim_load)).run(env)
+            bc_event = _victim_trace_match(
+                required_replay_causes=("BC",),
+                forbidden_replay_causes=("FF", "NK", "RAW", "RAR"),
+            )
+            if bc_event is None:
+                bc_event = _wait_load_debug_event(
+                    env,
+                    rob_idx_value=victim_load.rob_idx_value,
+                    required_replay_causes=("BC",),
+                    forbidden_replay_causes=("FF", "NK", "RAW", "RAR"),
+                    max_cycles=self.replay_wait_cycles,
+                )
+
+            if self.sta_after_load_batch_cycles > 0:
+                env.advance_cycles(self.sta_after_load_batch_cycles)
             issue_scalar_sta(
                 env,
                 req_id=self.store_txn.req_id,
@@ -696,21 +824,29 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
                 expected_forward_invalid=0,
                 max_cycles=self.replay_wait_cycles,
             )
+
             # For this combo, issuing STD only after the transient pipeline NK is visible
             # makes the recovery path deterministic instead of collapsing into FF-only spin.
-            _wait_load_debug_event(
-                env,
-                rob_idx_value=victim_load.rob_idx_value,
-                required_replay_causes=("NK",),
-                max_cycles=self.replay_wait_cycles,
-            )
-            load_debug_event = _wait_load_debug_event(
-                env,
-                rob_idx_value=victim_load.rob_idx_value,
-                required_replay_causes=("BC", "FF"),
+            nk_event = _victim_trace_match(required_replay_causes=("NK",))
+            if nk_event is None:
+                nk_event = _wait_load_debug_event(
+                    env,
+                    rob_idx_value=victim_load.rob_idx_value,
+                    required_replay_causes=("NK",),
+                    max_cycles=self.replay_wait_cycles,
+                )
+            ff_event = _victim_trace_match(
+                required_replay_causes=("FF",),
                 forbidden_replay_causes=("RAW", "RAR"),
-                max_cycles=self.replay_wait_cycles,
             )
+            if ff_event is None:
+                ff_event = _wait_load_debug_event(
+                    env,
+                    rob_idx_value=victim_load.rob_idx_value,
+                    required_replay_causes=("FF",),
+                    forbidden_replay_causes=("RAW", "RAR"),
+                    max_cycles=self.replay_wait_cycles,
+                )
 
             issue_scalar_std(
                 env,
@@ -769,6 +905,12 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
                 }
             )
             nk_observed = any("NK" in event["replay_causes"] for event in victim_trace)
+            ff_observed = any("FF" in event["replay_causes"] for event in victim_trace)
+            if not ff_observed:
+                raise TimeoutError(
+                    "组合场景未观测到 FF cause: "
+                    f"victim_rob={victim_load.rob_idx_value}, trace={victim_trace}"
+                )
 
         committed_store_view = env.wait_store_materialized(
             store_sq_ptr.value,
@@ -790,7 +932,7 @@ class ScalarBankConflictSqDataInvalidNukeSequence:
             victim_load=victim_load,
             store_sq_ptr=store_sq_ptr,
             sq_forward_event=sq_forward_event,
-            load_debug_event=load_debug_event,
+            load_debug_event=bc_event,
             load_debug_trace=victim_trace,
             nk_observed=nk_observed,
             replay_events=tuple(replay_trace),

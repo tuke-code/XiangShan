@@ -195,6 +195,12 @@ assert prepared.rob_idx_of(load0) == load0.rob_idx
 
 当前 `ResetEnvSequence` 默认会在 reset 后，把 allocator 与 commit frontier 一起 seed 到 wrap 边界前一项。这样大多数真实 DUT 回归都会自然跨过一次 ROB wrap；如果某个 env/unit 场景需要明确保留 `(0,0)` 起点，应显式关闭该 profile。
 
+当前默认 transport 延迟已经收缩为较适合回归的保守值：
+
+- `outer_delay = 4`
+- `grant_delay_min = 2`
+- `grant_delay_max = 8`
+
 如果需要专门构造 ROB wrap 场景，不要再通过“大 `req_id`”旁路 legacy 编码；应显式 seed allocator / commit frontier：
 
 ```python

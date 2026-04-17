@@ -99,6 +99,13 @@ def _preload_bank_conflict_lines(env) -> None:
         env.preload_u64(addr, 0x9000000000000000 + idx)
 
 
+def _settle_warmup_load(env, *, completed_target: int, quiesce_cycles: int = 256, settle_cycles: int = 32) -> None:
+    env.wait_completed_load_count(completed_target, max_cycles=64)
+    env.wait_memory_quiesce(max_cycles=quiesce_cycles)
+    if settle_cycles > 0:
+        env.advance_cycles(settle_cycles)
+
+
 def _assert_only_bc_replay_cause(replay_causes: tuple[int, ...]) -> None:
     assert tuple(int(bit) for bit in replay_causes) == EXPECTED_BC_REPLAY_CAUSES, (
         f"bank conflict fast replay 的 replayCause 异常: actual={tuple(int(bit) for bit in replay_causes)}"
@@ -252,7 +259,7 @@ def test_api_MemBlock_scalar_aligned_load_matchinvalid_proxy_probe(env):
         data=MATCH_INVALID_WARMUP_DATA,
         max_cycles=512,
     )
-    env.wait_completed_load_count(1, max_cycles=64)
+    _settle_warmup_load(env, completed_target=1)
 
     with env.mmu.ptw_responder():
         trigger = ScalarSqDataInvalidMatchInvalidTriggerSequence(

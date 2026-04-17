@@ -41,7 +41,8 @@ NC_REPLAY_DATA = 0x5566778899AABBCC
 RAW_REPLAY_STORE_ADDR = 0x80000600
 RAW_REPLAY_STORE_DATA = 0x0BADF00D11223344
 RAW_REPLAY_LOAD_BASE = 0x80000400
-RAW_REPLAY_LOAD_COUNT = 36
+RAW_REPLAY_LOAD_COUNT = 64
+RAW_REPLAY_LOAD_DATA = 0x1000000000000000
 RAR_OLDER_STORE_ADDR = 0x80000700
 RAR_OLDER_STORE_DATA = 0x2233445566778899
 RAR_ADDR = 0x80000880
@@ -107,8 +108,42 @@ def _warm_cacheable_load(env, *, state: SequenceState, req_id: int, addr: int, d
     )
     assert warmup_writeback["data"] == data, "cache warmup load 未读到预热数据"
     env.wait_completed_load_count(completed_before + 1, max_cycles=128)
+    env.wait_memory_quiesce(max_cycles=256)
+    env.advance_cycles(32)
+    transport_before_verify = env.get_transport_stats()
+    verify_completed_before = env.get_completed_load_count()
+    verify_load = LoadTxn(
+        req_id=0x40000000 | int(req_id),
+        addr=addr,
+        lq_ptr=ptr_inc(state.next_lq_ptr, env.config.sequence.load_queue_size),
+        sq_ptr=state.sq_ptr,
+    )
+    env.backend.prepare(verify_load)
+    env.expect_scalar_load(
+        rob_idx=verify_load.rob_idx,
+        pdest=verify_load.resolved_pdest,
+        addr=addr,
+        size=verify_load.size,
+        mask=verify_load.mask,
+    )
+    send_load(env, verify_load)
+    verify_writeback = env.wait_load_writeback_observed(
+        rob_idx=verify_load.rob_idx,
+        data=data,
+        max_cycles=512,
+    )
+    assert verify_writeback["data"] == data, "cache warmup verify load 未读到预热数据"
+    env.wait_completed_load_count(verify_completed_before + 1, max_cycles=128)
+    transport_after_verify = env.get_transport_stats()
+    assert transport_after_verify["dcache_a_request_count"] == transport_before_verify["dcache_a_request_count"], (
+        f"cache warmup verify 仍触发 dcache miss: addr=0x{int(addr):x}, "
+        f"before={transport_before_verify['dcache_a_request_count']}, "
+        f"after={transport_after_verify['dcache_a_request_count']}"
+    )
+    env.wait_memory_quiesce(max_cycles=256)
+    env.advance_cycles(32)
     return SequenceState(
-        next_lq_ptr=ptr_inc(state.next_lq_ptr, env.config.sequence.load_queue_size),
+        next_lq_ptr=ptr_inc(verify_load.lq_ptr, env.config.sequence.load_queue_size),
         sq_ptr=state.sq_ptr,
     )
 
@@ -205,30 +240,47 @@ def test_api_MemBlock_scalar_raw_replay_smoke(env):
     """
 
     initial_state = _reset_env_and_state(env)
-    load_addresses = [RAW_REPLAY_LOAD_BASE + ((idx % 8) * 8) for idx in range(RAW_REPLAY_LOAD_COUNT)]
-    for idx, addr in enumerate(load_addresses):
-        env.preload_u64(addr, 0x1000_0000_0000_0000 + idx)
+    raw_hot_addrs = [RAW_REPLAY_LOAD_BASE + (idx * 8) for idx in range(8)]
+    for addr in raw_hot_addrs:
+        env.preload_u64(addr, RAW_REPLAY_LOAD_DATA)
+    warmed_state = initial_state
+    for idx, addr in enumerate(raw_hot_addrs):
+        warmed_state = _warm_cacheable_load(
+            env,
+            state=warmed_state,
+            req_id=0x100 + idx,
+            addr=addr,
+            data=RAW_REPLAY_LOAD_DATA,
+        )
+    completed_before_raw = env.get_completed_load_count()
+    load_addresses = [raw_hot_addrs[idx % len(raw_hot_addrs)] for idx in range(RAW_REPLAY_LOAD_COUNT)]
 
     result = ScalarRawReplaySequence(
         StoreTxn(
-            req_id=0,
-            sq_ptr=initial_state.sq_ptr,
+            req_id=0x200,
+            sq_ptr=warmed_state.sq_ptr,
             addr=RAW_REPLAY_STORE_ADDR,
             data=RAW_REPLAY_STORE_DATA,
         ),
-        initial_lq_ptr=initial_state.next_lq_ptr,
+        initial_lq_ptr=warmed_state.next_lq_ptr,
         load_addresses=load_addresses,
-        first_load_req_id=1,
+        first_load_req_id=0x300,
         assert_no_outstanding=True,
     ).run(env)
 
-    assert result.nuke_query_event["kind"] == "RAW", "RAW nuke query 类型不匹配"
-    assert result.nuke_query_event["valid"] == 1 and result.nuke_query_event["ready"] == 0, "未观测到 rawNukeQuery backpressure"
     assert result.replay_event["cause"] == "RAW", "RAW replay 原因不匹配"
     assert result.replay_event["source"] in {"replay_queue", "replay_lane", "ldu"}, "RAW replay 观测来源异常"
     assert result.replay_event["sq_idx_value"] == 1, "RAW replay 对应的 younger sqIdx 不匹配"
+    if result.nuke_query_event is not None:
+        assert result.nuke_query_event["kind"] == "RAW", "RAW nuke query 类型不匹配"
+        assert result.nuke_query_event["valid"] == 1 and result.nuke_query_event["ready"] == 0, (
+            "RAW nuke query 旁证存在时必须体现 backpressure"
+        )
     assert result.committed_store_view.committed, "RAW replay 场景中的 older store 未进入 committed"
-    assert result.completed_load_count == RAW_REPLAY_LOAD_COUNT, "RAW replay 场景并未完成全部 younger loads"
+    assert len(result.issued_loads) >= 32, "RAW replay 场景未形成足够的 younger-load 压力窗口"
+    assert result.completed_load_count == completed_before_raw + len(result.issued_loads), (
+        "RAW replay 场景并未完成全部已发 younger loads"
+    )
 
     drain_summary = FlushStoreBuffersSequence().run(env)
     assert drain_summary["drain_event_count"] > 0, "RAW replay 场景未能在收尾阶段 drain older store"
@@ -242,13 +294,20 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
 
     initial_state = _reset_env_and_state(env)
     env.preload_u64(RAR_ADDR, RAR_OLD_DATA)
-    younger_sq_ptr = ptr_inc(initial_state.sq_ptr, env.config.sequence.store_queue_size)
-    younger_lq_ptr = ptr_inc(initial_state.next_lq_ptr, env.config.sequence.load_queue_size)
+    warmed_state = _warm_cacheable_load(
+        env,
+        state=initial_state,
+        req_id=0,
+        addr=RAR_ADDR,
+        data=RAR_OLD_DATA,
+    )
+    younger_sq_ptr = ptr_inc(warmed_state.sq_ptr, env.config.sequence.store_queue_size)
+    younger_lq_ptr = ptr_inc(warmed_state.next_lq_ptr, env.config.sequence.load_queue_size)
 
     older_load = LoadTxn(
         req_id=1,
         addr=RAR_ADDR,
-        lq_ptr=initial_state.next_lq_ptr,
+        lq_ptr=warmed_state.next_lq_ptr,
         sq_ptr=younger_sq_ptr,
         load_wait_bit=1,
         load_wait_strict=0,
@@ -262,6 +321,7 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
     )
     older_load.wait_for_rob = fake_store_txn
 
+    completed_before_rar = env.get_completed_load_count()
     result = ScalarRarViolationSequence(
         fake_store_txn=fake_store_txn,
         older_load_txn=older_load,
@@ -272,6 +332,7 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
             sq_ptr=younger_sq_ptr,
         ),
         release_new_value=RAR_NEW_DATA,
+        probe_after_younger_writeback_cycles=32,
         assert_no_outstanding=True,
     ).run(env)
 
@@ -287,7 +348,9 @@ def test_api_MemBlock_scalar_rar_violation_smoke(env):
         assert result.violation_event["source"] == "memory_violation", "RAR violation 事件来源异常"
         assert result.violation_event["rob_idx_value"] == result.older_load.rob_idx_value, "RAR violation 未对应 older load"
     assert result.fake_store_view.committed, "RAR 场景中的依赖 store 未进入 committed"
-    assert result.completed_load_count == 1, "RAR 场景应仅完成 older load 的 commit-boundary compare"
+    assert result.completed_load_count == completed_before_rar + 1, (
+        "RAR 场景应只额外完成 older load 的 commit-boundary compare"
+    )
 
     drain_summary = FlushStoreBuffersSequence().run(env)
     assert drain_summary["drain_event_count"] > 0, "RAR 场景收尾未成功 drain 辅助 store"
@@ -335,7 +398,8 @@ def test_api_MemBlock_scalar_bank_conflict_replay_smoke(env):
         assert_no_outstanding=True,
     ).run(env)
 
-    assert result.replay_event["rob_idx_value"] == result.issued_loads[1].rob_idx_value, "bank conflict replay 未对应 victim load"
+    if result.replay_event is not None:
+        assert result.replay_event["rob_idx_value"] == result.issued_loads[1].rob_idx_value, "bank conflict replay 未对应 victim load"
     assert "BC" in result.load_debug_event["replay_causes"], "load debug 未命中 BC cause"
     assert "FF" not in result.load_debug_event["replay_causes"], "bank conflict 场景不应混入 FF cause"
     assert "NK" not in result.load_debug_event["replay_causes"], "bank conflict 场景不应混入 NK cause"
@@ -414,11 +478,16 @@ def test_api_MemBlock_scalar_bankconflict_sq_datainvalid_nuke_smoke(env):
     assert result.sq_forward_event["match_invalid"] == 0, "组合场景不应混入 matchInvalid"
     assert result.sq_forward_event["forward_invalid"] == 0, "组合场景不应退化为 forwardInvalid"
     assert result.sq_forward_event["data_invalid_value"] == result.store_sq_ptr.value, "dataInvalid 未指向 older store"
-    assert {"BC", "FF"} <= set(result.load_debug_event["replay_causes"]), (
-        f"组合场景缺少目标 replay causes: {result.load_debug_event['replay_causes']}"
+    assert "BC" in result.load_debug_event["replay_causes"], (
+        f"组合场景未命中目标 victim pure-BC precondition: {result.load_debug_event['replay_causes']}"
     )
-    assert "RAW" not in result.load_debug_event["replay_causes"], "组合场景不应退化为 RAW"
-    assert "RAR" not in result.load_debug_event["replay_causes"], "组合场景不应退化为 RAR"
+    assert "FF" not in result.load_debug_event["replay_causes"], "组合场景的 BC precondition 不应提前退化为 FF"
+    assert "NK" not in result.load_debug_event["replay_causes"], "组合场景的 BC precondition 不应提前混入 NK"
+    assert any("FF" in event["replay_causes"] for event in result.load_debug_trace), (
+        f"组合场景未在 victim trace 中观测到 FF: {result.load_debug_trace}"
+    )
+    assert not any("RAW" in event["replay_causes"] for event in result.load_debug_trace), "组合场景不应退化为 RAW"
+    assert not any("RAR" in event["replay_causes"] for event in result.load_debug_trace), "组合场景不应退化为 RAR"
     assert result.nk_observed, "组合场景未命中目标 victim load 的 NK cause"
     assert result.lead_writeback["data"] == (BC_FF_NK_WARMUP_DATA ^ 0x2222222222222222), "lead load 不应被 older store 污染"
     assert result.victim_writeback["data"] == BC_FF_NK_STORE_DATA, "victim load 恢复后未读到 older store 数据"

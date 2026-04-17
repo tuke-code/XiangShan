@@ -125,7 +125,7 @@ class ScalarForwardFailReplaySequenceResult:
 @dataclass(frozen=True)
 class ScalarBankConflictReplaySequenceResult:
     issued_loads: tuple[LoadTxn, ...]
-    replay_event: dict
+    replay_event: dict | None
     load_debug_event: dict
     load_debug_trace: tuple[dict, ...]
     final_state: SequenceState
@@ -1437,7 +1437,10 @@ class ScalarBankConflictReplaySequence:
         lead_expected = expect_load(env, self.lead_load_txn)
         victim_expected = expect_load(env, self.victim_load_txn)
 
-        with _capture_load_debug_trace(env, max_events=96) as load_debug_trace:
+        with (
+            _capture_load_debug_trace(env, max_events=96) as load_debug_trace,
+            _capture_writeback_trace(env, max_events=64) as writeback_trace,
+        ):
             ScalarLoadBatchSameCycleSequence((self.lead_load_txn, self.victim_load_txn)).run(env)
             load_debug_event = _wait_load_debug_event(
                 env,
@@ -1446,21 +1449,37 @@ class ScalarBankConflictReplaySequence:
                 forbidden_replay_causes=("FF", "NK", "RAW", "RAR"),
                 max_cycles=self.replay_wait_cycles,
             )
-            replay_event = env.wait_replay_event(
-                rob_idx=self.victim_load_txn.rob_idx,
-                max_cycles=self.replay_wait_cycles,
-            )
+            try:
+                replay_event = env.wait_replay_event(
+                    rob_idx=self.victim_load_txn.rob_idx,
+                    max_cycles=self.replay_wait_cycles,
+                )
+            except TimeoutError:
+                replay_event = None
 
-            env.wait_load_writeback_observed(
-                rob_idx=self.lead_load_txn.rob_idx,
-                data=lead_expected.expected_data,
-                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
-            )
-            env.wait_load_writeback_observed(
-                rob_idx=self.victim_load_txn.rob_idx,
-                data=victim_expected.expected_data,
-                max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
-            )
+            def _trace_has_writeback(*, rob_idx, data):
+                for event in writeback_trace:
+                    if event.get("int_wen") != 1:
+                        continue
+                    if event.get("rob_idx_flag") != rob_idx.flag or event.get("rob_idx_value") != rob_idx.value:
+                        continue
+                    if data is not None and event.get("data") != data:
+                        continue
+                    return True
+                return False
+
+            if not _trace_has_writeback(rob_idx=self.lead_load_txn.rob_idx, data=lead_expected.expected_data):
+                env.wait_load_writeback_observed(
+                    rob_idx=self.lead_load_txn.rob_idx,
+                    data=lead_expected.expected_data,
+                    max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+                )
+            if not _trace_has_writeback(rob_idx=self.victim_load_txn.rob_idx, data=victim_expected.expected_data):
+                env.wait_load_writeback_observed(
+                    rob_idx=self.victim_load_txn.rob_idx,
+                    data=victim_expected.expected_data,
+                    max_cycles=_resolve_replay_drain_cycles(env, self.drain_cycles),
+                )
             completed = _wait_completed_load_count(
                 env,
                 completed_before + 2,

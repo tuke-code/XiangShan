@@ -8,9 +8,9 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True)
 class TransportConfig:
-    outer_delay: int = 100
-    grant_delay_min: int = 32
-    grant_delay_max: int = 100
+    outer_delay: int = 4
+    grant_delay_min: int = 2
+    grant_delay_max: int = 8
     release_ack_delay: int = 1
     delay_seed: int = 20260330
 

@@ -1,5 +1,42 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-17
+
+### 1. 收口 replay 用例对默认 transport delay 的隐式时序依赖
+
+本条目记录一次围绕“缩短默认 DCache/Uncache delay 后 replay 用例暴露出的隐式时序假设”的收口。问题并不在于新 delay 本身，而在于若干 sequence/testcase 把 `hot-cache ready`、`release/query` 捕获窗口、以及 `BC/FF/NK` 的表达方式写成了依赖旧 delay 的偶然时序。本轮把这些口径改成显式 warmup / trace-first / lifecycle 断言，同时保留缩短后的默认 delay。
+
+#### 变更摘要
+
+- `sequences/violation_sequences.py`
+  - `ScalarRawReplaySequence`
+    - 增加 `raw_window_settle_cycles`
+    - 改为在发送窗口外层捕获 `raw_nuke_query` trace
+    - RAW 压力阶段按实际已发 younger loads 收口，不再假设必须把预设批量全部发完
+  - `ScalarRarViolationSequence`
+    - 增加 `probe_after_younger_writeback_cycles` / `probe_delay_cycles`
+    - 采用 `release trace first + wait fallback`
+  - `ScalarBankConflictSqDataInvalidNukeSequence`
+    - 断言口径改为“victim 先命中 pure `BC`，后续 trace 再命中 `FF`，并稳定观测 `NK`”
+- `sequences/memblock_sequences.py`
+  - `ScalarBankConflictReplaySequence` 的 writeback / replay 观测改为更稳的 trace-first 收口
+- `tests/test_MemBlock_replay.py`
+  - `RAW` 用例对 8 个热点地址做显式 cache warmup，避免主场景退化成 cold miss
+  - `RAW` completed 断言改为对比“实际已发 younger loads”
+  - `RAR` completed 断言改为基于 warmup 后基线的增量检查
+  - `BC + FF + NK` 组合断言改为验证同一 victim load 的完整生命周期，而不是硬卡同拍合并 cause mask
+- `docs/test_sequence_and_extension_guide.md`、`docs/replay_todo.md`、`docs/sq_bankconflict_datainvalid_nuke_combo.md`
+  - 补充 “capture trace + trace-first + wait fallback” 规则
+  - 明确 RAW 场景若要验证 `RAW` 而不是 `DM`，必须先把热点地址 warm 到 hit-path
+  - 更新 `BC + FF + NK` 组合场景的真实验证口径
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_replay.py -k 'scalar_raw_replay_smoke or scalar_rar_violation_smoke or scalar_bankconflict_sq_datainvalid_nuke_smoke'`
+  - 结果：`3 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_replay.py`
+  - 结果：`9 passed, 1 xfailed`
+
 ## 2026-04-16
 
 ### 1. 让 `ResetEnvSequence` 默认以 ROB wrap boundary profile 启动真实 DUT 回归

@@ -355,6 +355,7 @@ env.backend.execute(
 10. `ScalarRarViolationSequence`
    - 封装 `older load 因精确 load-wait 暂停 -> younger same-addr load 先完成 -> probe/release -> RAR nuke -> older load 重新写回`。
    - 用于真实 DUT 下的 `RAR` ld-ld violation 冒烟。
+   - `probe_after_younger_writeback_cycles` 用来显式区分 `release early/late`；不要再把 probe 注入时机隐式绑在默认 transport delay 上。
 
 11. `MmuSv39AddressSpaceInstallSequence`
    - 单次只安装一套地址空间的 gigapage mappings / preload，不隐式切换 active root。
@@ -376,6 +377,7 @@ env.backend.execute(
 15. `ScalarBankConflictLoadClusterSequence`
    - 封装 `cache warmup -> 多条 load 同拍发射 -> bank-conflict/debugLsInfo 采样 -> final writeback/wakeup 收尾`。
    - 用于 `BC` 基线与更复杂 probe 场景的公共前置。
+   - warmup 只完成 writeback/compare 还不够；进入主场景前必须显式等 memory quiesce，并再留出少量 settle cycles，避免命中场景退化成 cold miss。
 
 16. `ScalarFastReplayCancelledByReplayHiPrioSequence`
    - 封装 `bank-conflict fast replay` 被更高优先级 replay 请求抢占、改落 replay queue，且最终 compare/writeback 仍全部收敛。
@@ -438,6 +440,22 @@ env.backend.execute(
 - `src/test/python/MemBlock/docs/scalar_load_pipeline_probe_cases.md`
 
 这些 helper 的判定真值固定来自真实 DUT 导出的 replay 相关端口，而不是 Python 侧 mock tracker。
+
+## 4.10 容易犯的时序错误
+
+这类错误在默认 transport delay 变短时最容易暴露。后续新增 directed case 时，默认按下面几条规则写：
+
+1. 不要把关键事件窗口隐式绑在默认 transport delay 上。
+   - 反例：`wait_load_writeback_observed()` 一返回就立刻 `inject_dcache_probe()`，希望“自然形成 late release”。
+   - 正例：把窗口写成 sequence 参数，例如 `probe_after_younger_writeback_cycles`、`raw_window_settle_cycles`。
+
+2. 不要把 “warmup load 已 writeback/compare” 当成 “dcache hit-path 已稳定”。
+   - 对需要 hot-cache 命中的场景，warmup 后还要显式 `wait_memory_quiesce()`，必要时再 `advance_cycles()` 若干拍。
+   - 尤其是 `bank conflict`、`NK`、`dataInvalid + hit-path` 这类 probe case，否则主场景很容易退化成 `dcache first miss` 或错过瞬时 replay cause。
+
+3. 对瞬时 debug/query/release 事件，优先用 “capture trace + trace-first + wait fallback” 模式。
+   - 反例：刺激已经发完，再单独调用 `_wait_load_debug_event()` / `wait_nuke_query_backpressure()` / `wait_release_event()`，默认假设目标事件还没消失。
+   - 正例：在主刺激窗口外层先挂 `_capture_load_debug_trace()` / `_capture_nuke_query_trace()` / `_capture_release_trace()`，先从 trace 里找目标事件，找不到再 fallback 到 wait helper。
 
 ## 5. IO 地址 load 路径
 
