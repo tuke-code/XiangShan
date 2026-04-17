@@ -35,7 +35,7 @@ import xiangshan.frontend.bpu.history.commonhr.CommonHRMeta
 import xiangshan.frontend.bpu.history.phr.Phr
 import xiangshan.frontend.bpu.history.phr.PhrAllFoldedHistories
 import xiangshan.frontend.bpu.ittage.Ittage
-import xiangshan.frontend.bpu.mbtb.MainBtb
+import xiangshan.frontend.bpu.mbtb.MonitorBtb
 import xiangshan.frontend.bpu.ras.MicroRas
 import xiangshan.frontend.bpu.ras.Ras
 import xiangshan.frontend.bpu.sc.Sc
@@ -59,7 +59,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val ubtb        = Module(new MicroBtb)
   private val abtb        = Module(new AheadBtb)
   private val utage       = Module(new MicroTage)
-  private val mbtb        = Module(new MainBtb)
+  private val mbtb        = Module(new MonitorBtb)
   private val tage        = Module(new Tage)
   private val ittage      = Module(new Ittage)
   private val sc          = Module(new Sc)
@@ -340,6 +340,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_mbtbTargetDiffVec      = VecInit(s3_mbtbResult.map(_.bits.target =/= s3_s1Prediction.target))
   private val s3_ittageTargetDiff       = ittage.io.prediction.target =/= s3_s1Prediction.target
   private val s3_rasTargetDiff          = ras.io.topRetAddr =/= s3_s1Prediction.target
+  private val s3_finalTargetDiff        = mbtb.io.s3_finalTarget =/= s3_s1Prediction.target
 
   private val s3_takenMask = VecInit(s3_mbtbResult.zipWithIndex.map { case (entry, i) =>
     val tagePred = s3_tagePrediction(i)
@@ -366,6 +367,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_firstTakenBranch   = Mux1H(s3_firstTakenBranchOH, s3_mbtbResult)
   private val s3_useRas             = s3_firstTakenBranch.bits.attribute.isReturn
   private val s3_useIttage          = s3_firstTakenBranch.bits.attribute.needIttage && ittage.io.prediction.hit
+  private val s3_useFinalTarget     = mbtb.io.s3_useFinalTarget
 
   private val s2_fallThroughPrediction = RegEnable(fallThrough.io.prediction, s1_fire)
   private val s3_fallThroughPrediction = RegEnable(s2_fallThroughPrediction, s2_fire)
@@ -382,9 +384,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     MuxCase(
       s3_fallThroughPrediction.target,
       Seq(
-        (s3_taken && s3_useRas)    -> ras.io.topRetAddr,
-        (s3_taken && s3_useIttage) -> ittage.io.prediction.target,
-        s3_taken                   -> s3_firstTakenBranch.bits.target
+        (s3_taken && s3_useRas)         -> ras.io.topRetAddr,
+        (s3_taken && s3_useIttage)      -> ittage.io.prediction.target,
+        (s3_taken && s3_useFinalTarget) -> mbtb.io.s3_finalTarget,
+        s3_taken                        -> s3_firstTakenBranch.bits.target
       )
     )
 
@@ -396,9 +399,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       MuxCase(
         false.B, // fall-through
         Seq(
-          (s3_taken && s3_useRas)    -> s3_rasTargetDiff,
-          (s3_taken && s3_useIttage) -> s3_ittageTargetDiff,
-          s3_taken                   -> Mux1H(s3_firstTakenBranchOH, s3_mbtbTargetDiffVec)
+          (s3_taken && s3_useRas)         -> s3_rasTargetDiff,
+          (s3_taken && s3_useIttage)      -> s3_ittageTargetDiff,
+          (s3_taken && s3_useFinalTarget) -> s3_finalTargetDiff,
+          s3_taken                        -> Mux1H(s3_firstTakenBranchOH, s3_mbtbTargetDiffVec)
         )
       )
 

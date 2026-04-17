@@ -18,6 +18,7 @@ package xiangshan.frontend.bpu.mbtb
 import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
+import utils.EnumUInt
 import xiangshan.XSCoreParamsKey
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.BranchAttribute
@@ -32,69 +33,199 @@ object TakenCounter extends SaturateCounterFactory {
     p(XSCoreParamsKey).frontendParameters.bpuParameters.mbtbParameters.TakenCntWidth
 }
 
-class MainBtbEntry(implicit p: Parameters) extends MainBtbBundle {
-  // whether the entry is valid
-  val valid: Bool = Bool()
-
-  val tag:       UInt            = UInt(TagWidth.W)
-  val attribute: BranchAttribute = new BranchAttribute
-
-  // Whether a branch is bias toward a single target
-  // For conditional branch, this means bias toward same direction
-  // For indirect branch, this means bias toward single target
-//  val stronglyBiased: Bool = Bool() // TODO
-
-  // Relative position to the aligned start addr
-  val position: UInt = UInt(CfiAlignedPositionWidth.W)
-
-  //  Branch target info
-  val targetCarry:     TargetCarry = new TargetCarry
-  val targetLowerBits: UInt        = UInt(TargetWidth.W)
-
-//  val replaceCnt: UInt = UInt(2.W) // TODO: not used for now
+// Not support indirect branch
+object ShortAttribute {
+  object BranchType extends EnumUInt(4) {
+    def None:        UInt = 0.U(width.W)
+    def Conditional: UInt = 1.U(width.W)
+    def DirectCall:  UInt = 2.U(width.W)
+    def OtherDirect: UInt = 3.U(width.W)
+  }
 }
 
-class MainBtbEntrySramWriteReq(implicit p: Parameters) extends WriteReqBundle with HasMainBtbParameters {
-  val setIdx:       UInt         = UInt(SetIdxLen.W)
-  val entry:        MainBtbEntry = new MainBtbEntry
-  override def tag: Option[UInt] = Some(Cat(entry.tag, entry.position)) // use entry's tag directly
+class ShortAttribute extends Bundle {
+  val branchType: UInt = ShortAttribute.BranchType()
+
+  def isNone:        Bool = branchType === ShortAttribute.BranchType.None
+  def isConditional: Bool = branchType === ShortAttribute.BranchType.Conditional
+  def isDirectCall:  Bool = branchType === ShortAttribute.BranchType.DirectCall
+  def isOtherDirect: Bool = branchType === ShortAttribute.BranchType.OtherDirect
+
+  def fromBranchAttribute(attr: BranchAttribute): Unit =
+    branchType := Mux1H(Seq(
+      attr.isNone                     -> ShortAttribute.BranchType.None,
+      attr.isConditional              -> ShortAttribute.BranchType.Conditional,
+      (attr.isDirect && attr.isCall)  -> ShortAttribute.BranchType.DirectCall,
+      (attr.isDirect && !attr.isCall) -> ShortAttribute.BranchType.OtherDirect
+    ))
+  def toBranchAttribute: BranchAttribute = {
+    val attr = Wire(new BranchAttribute)
+    attr := Mux1H(Seq(
+      isNone        -> BranchAttribute.None,
+      isConditional -> BranchAttribute.Conditional,
+      isOtherDirect -> BranchAttribute.OtherDirect,
+      isDirectCall  -> BranchAttribute.DirectCall
+    ))
+    attr
+  }
 }
 
-class MainBtbCounterSramWriteReq(implicit p: Parameters) extends MainBtbBundle {
+class MonitorBtbEntry(implicit p: Parameters) extends MainBtbBundle {
+  val fusion: Bool = Bool()
+  val tag:    UInt = UInt(TagWidth.W)
+}
+
+class MonitorBtbShortSlot(implicit p: Parameters) extends MainBtbBundle {
+  val valid:           Bool           = Bool()
+  val attr:            ShortAttribute = new ShortAttribute
+  val position:        UInt           = UInt(CfiAlignedPositionWidth.W)
+  val targetLowerBits: UInt           = UInt(ShortTargetWidth.W)
+}
+
+class MonitorBtbLongSlot(implicit p: Parameters) extends MainBtbBundle {
+  val valid:           Bool            = Bool()
+  val attribute:       BranchAttribute = new BranchAttribute
+  val position:        UInt            = UInt(CfiAlignedPositionWidth.W)
+  val targetCarry:     TargetCarry     = new TargetCarry
+  val targetLowerBits: UInt            = UInt(TargetWidth.W)
+  val targetIndex:     UInt            = UInt(TargetIndexWidth.W)
+
+  def fromShortSlots(slots: Vec[MonitorBtbShortSlot]): Unit =
+    this := slots.asTypeOf(new MonitorBtbLongSlot)
+
+  def toShortSlots: Vec[MonitorBtbShortSlot] = this.asTypeOf(Vec(NumSlots, new MonitorBtbShortSlot))
+}
+
+class PageBtbEntry(implicit p: Parameters) extends MainBtbBundle {
+  val valid:    Bool = Bool()
+  val vpnLower: UInt = UInt(VpnLowerWidth.W)
+  val vpnIndex: UInt = UInt(VpnIndexWidth.W)
+}
+
+class RegionBtbEntry(implicit p: Parameters) extends MainBtbBundle {
+  val valid:    Bool = Bool()
+  val vpnUpper: UInt = UInt(VpnUpperWidth.W)
+}
+
+class MonitorBtbEntrySramWriteReq(implicit p: Parameters) extends WriteReqBundle with HasMainBtbParameters {
+  val setIdx:   UInt                     = UInt(SetIdxLen.W)
+  val entry:    MonitorBtbEntry          = new MonitorBtbEntry
+  val slots:    Vec[MonitorBtbShortSlot] = Vec(NumSlots, new MonitorBtbShortSlot)
+  val slotMask: UInt                     = UInt(NumSlots.W)
+
+  def getEffectiveLongSlot: MonitorBtbLongSlot = {
+    val longSlot = Wire(new MonitorBtbLongSlot)
+    longSlot.fromShortSlots(slots)
+    longSlot
+  }
+
+  def getEffectiveShortSlot: MonitorBtbShortSlot = {
+    val retagged = slotMask.andR
+    Mux(
+      retagged,
+      slots(0), // retagged to slot 0
+      Mux1H(slotMask, slots)
+    )
+  }
+
+  def getEffectivePosition: UInt =
+    Mux(entry.fusion, getEffectiveLongSlot.position, getEffectiveShortSlot.position)
+
+  override def tag: Option[UInt] = Some(Cat(entry.tag, getEffectivePosition))
+}
+
+class MonitorBtbCounterSramWriteReq(implicit p: Parameters) extends MainBtbBundle {
   val setIdx:   UInt                 = UInt(SetIdxLen.W)
-  val wayMask:  UInt                 = UInt(NumWay.W)
-  val counters: Vec[SaturateCounter] = Vec(NumWay, TakenCounter())
+  val wayMask:  UInt                 = UInt((NumWay * NumSlots).W)
+  val counters: Vec[SaturateCounter] = Vec(NumWay * NumSlots, TakenCounter())
 }
 
-class MainBtbMetaEntry(implicit p: Parameters) extends MainBtbBundle {
-  val rawHit:    Bool            = Bool()
-  val position:  UInt            = UInt(CfiPositionWidth.W)
-  val attribute: BranchAttribute = new BranchAttribute
-  val counter:   SaturateCounter = TakenCounter()
+class MonitorBtbMetaEntry(implicit p: Parameters) extends MainBtbBundle {
+  val rawHit:     Bool                 = Bool()
+  val fused:      Bool                 = Bool()
+  val positions:  Vec[UInt]            = Vec(NumSlots, UInt(CfiPositionWidth.W))
+  val attributes: Vec[BranchAttribute] = Vec(NumSlots, new BranchAttribute)
+  val counters:   Vec[SaturateCounter] = Vec(NumSlots, TakenCounter())
 
-  def hit(branch: BranchInfo): Bool = rawHit && position === branch.cfiPosition
+  def hitFused(branch: BranchInfo): Bool =
+    rawHit && fused && positions(0) === branch.cfiPosition
+
+  def hitUnfused(branch: BranchInfo): Vec[Bool] = VecInit.tabulate(NumSlots) { i =>
+    rawHit && !fused && positions(i) === branch.cfiPosition
+  }
+
+  def hitMask(branch: BranchInfo): Vec[Bool] = {
+    val fusedHit   = hitFused(branch)
+    val unfusedHit = hitUnfused(branch)
+    VecInit.tabulate(NumSlots) { i =>
+      if (i == 0) Mux(fused, fusedHit, unfusedHit(i))
+      else !fused && unfusedHit(i)
+    }
+  }
+
+  def hit(branch: BranchInfo): Bool =
+    hitMask(branch).reduce(_ || _)
+
+  def hitAttr(branch: BranchInfo): Vec[Bool] =
+    VecInit(hitMask(branch).zip(attributes).map { case (hit, attr) =>
+      hit && attr === branch.attribute
+    })
 }
 
-class MainBtbMeta(implicit p: Parameters) extends MainBtbBundle {
-  val entries: Vec[Vec[MainBtbMetaEntry]] = Vec(NumAlignBanks, Vec(NumWay, new MainBtbMetaEntry))
+class MonitorBtbMeta(implicit p: Parameters) extends MainBtbBundle {
+  val entries: Vec[Vec[MonitorBtbMetaEntry]] = Vec(NumAlignBanks, Vec(NumWay, new MonitorBtbMetaEntry))
 }
 
-class MainBtbAlignBankTrace(implicit p: Parameters) extends MainBtbBundle {
-  val needWrite: Bool         = Bool()
-  val setIdx:    UInt         = UInt(SetIdxLen.W)
-  val bankIdx:   UInt         = UInt(log2Ceil(NumInternalBanks).W)
-  val wayIdx:    UInt         = UInt(log2Ceil(NumWay).W)
-  val entry:     MainBtbEntry = new MainBtbEntry
-}
+class MBTBTrace(implicit p: Parameters) extends MainBtbBundle {
+  val startPc:             PrunedAddr = PrunedAddr(VAddrBits)
+  val trainBranchMask:     UInt       = UInt(ResolveEntryBranchNumber.W)
+  val trainCondMask:       UInt       = UInt(ResolveEntryBranchNumber.W)
+  val trainTakenMask:      UInt       = UInt(ResolveEntryBranchNumber.W)
+  val trainMispredictMask: UInt       = UInt(ResolveEntryBranchNumber.W)
 
-class MainBtbTrace(implicit p: Parameters) extends MainBtbBundle {
+  val mispredictValid:       Bool            = Bool()
+  val mispredictCfiPosition: UInt            = UInt(CfiPositionWidth.W)
+  val mispredictTaken:       Bool            = Bool()
+  val mispredictTarget:      PrunedAddr      = PrunedAddr(VAddrBits)
+  val mispredictAttribute:   BranchAttribute = new BranchAttribute
 
-  val startPc:     PrunedAddr      = PrunedAddr(VAddrBits)
-  val cfiPosition: UInt            = UInt(CfiPositionWidth.W)
-  val attribute:   BranchAttribute = new BranchAttribute
+  val bankStartPc:        PrunedAddr  = PrunedAddr(VAddrBits)
+  val writeAlignBankMask: UInt        = UInt(NumAlignBanks.W)
+  val writeAlignBankIdx:  UInt        = UInt(AlignBankIdxLen.W)
+  val writeSetIdx:        UInt        = UInt(SetIdxLen.W)
+  val writeInternalIdx:   UInt        = UInt(InternalBankIdxLen.W)
+  val canUseShortSlot:    Bool        = Bool()
+  val updateIsFused:      Bool        = Bool()
+  val targetCarry:        TargetCarry = new TargetCarry
 
-  val setIdx:       UInt = UInt(SetIdxLen.W)
-  val internalIdx:  UInt = UInt(InternalBankIdxLen.W)
-  val alignBankIdx: UInt = UInt(AlignBankIdxLen.W)
-  val wayIdx:       UInt = UInt(NumWay.W)
+  val hit:            Bool = Bool()
+  val longSlotHit:    Bool = Bool()
+  val longSlotHitOH:  UInt = UInt(NumWay.W)
+  val shortSlotHit:   Bool = Bool()
+  val shortSlotHitOH: UInt = UInt((NumWay * NumSlots).W)
+
+  val entryNeedWrite:   Bool                     = Bool()
+  val updateAction:     UInt                     = UInt(log2Ceil(6).W)
+  val updateActionWay:  UInt                     = UInt(log2Ceil(NumWay).W)
+  val updateActionSlot: UInt                     = UInt(log2Ceil(NumSlots).W)
+  val updateActionRrpv: UInt                     = UInt(RrpvWidth.W)
+  val writeWayMask:     UInt                     = UInt(NumWay.W)
+  val writeSlotMask:    UInt                     = UInt(NumSlots.W)
+  val writeEntry:       MonitorBtbEntry          = new MonitorBtbEntry
+  val writeSlots:       Vec[MonitorBtbShortSlot] = Vec(NumSlots, new MonitorBtbShortSlot)
+  val writeRrpvs:       Vec[UInt]                = Vec(NumWay * NumSlots, UInt(RrpvWidth.W))
+
+  val counterWriteValidMask: UInt                 = UInt(NumAlignBanks.W)
+  val counterWriteMask:      UInt                 = UInt((NumAlignBanks * NumWay * NumSlots).W)
+  val counterValues:         Vec[SaturateCounter] = Vec(NumAlignBanks * NumWay * NumSlots, TakenCounter())
+
+  val pageSetIdx:  UInt           = UInt(log2Ceil(NumPageBtbSets).W)
+  val pageHit:     Bool           = Bool()
+  val pageWay:     UInt           = UInt(log2Ceil(NumPageBtbWays).W)
+  val pageWrite:   Bool           = Bool()
+  val pageEntry:   PageBtbEntry   = new PageBtbEntry
+  val regionHit:   Bool           = Bool()
+  val regionWay:   UInt           = UInt(log2Ceil(NumRegionBtbWays).W)
+  val regionWrite: Bool           = Bool()
+  val regionEntry: RegionBtbEntry = new RegionBtbEntry
 }

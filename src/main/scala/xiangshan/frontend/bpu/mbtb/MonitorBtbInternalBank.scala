@@ -23,18 +23,19 @@ import utility.sram.SRAMTemplate
 import xiangshan.frontend.bpu.SaturateCounter
 import xiangshan.frontend.bpu.WriteBuffer
 
-class MainBtbInternalBank(
+class MonitorBtbInternalBank(
     alignIdx: Int,
     bankIdx:  Int
 )(implicit p: Parameters) extends MainBtbModule with Helpers {
-  class MainBtbInternalBankIO extends Bundle {
+  class MonitorBtbInternalBankIO extends Bundle {
     class Read extends Bundle {
       class Req extends Bundle {
         val setIdx: UInt = UInt(SetIdxLen.W)
       }
       class Resp extends Bundle {
-        val entries:  Vec[MainBtbEntry]    = Vec(NumWay, new MainBtbEntry)
-        val counters: Vec[SaturateCounter] = Vec(NumWay, TakenCounter())
+        val entries:  Vec[MonitorBtbEntry]          = Vec(NumWay, new MonitorBtbEntry)
+        val slots:    Vec[Vec[MonitorBtbShortSlot]] = Vec(NumWay, Vec(NumSlots, new MonitorBtbShortSlot))
+        val counters: Vec[SaturateCounter]          = Vec(NumWay * NumSlots, TakenCounter())
       }
 
       val req:  Valid[Req] = Flipped(Valid(new Req))
@@ -43,9 +44,11 @@ class MainBtbInternalBank(
 
     class WriteEntry extends Bundle {
       class Req extends Bundle {
-        val setIdx:  UInt         = UInt(SetIdxLen.W)
-        val wayMask: UInt         = UInt(NumWay.W)
-        val entry:   MainBtbEntry = new MainBtbEntry
+        val setIdx:   UInt                     = UInt(SetIdxLen.W)
+        val wayMask:  UInt                     = UInt(NumWay.W)
+        val slotMask: UInt                     = UInt(NumSlots.W)
+        val entry:    MonitorBtbEntry          = new MonitorBtbEntry
+        val slots:    Vec[MonitorBtbShortSlot] = Vec(NumSlots, new MonitorBtbShortSlot)
       }
 
       val req: Valid[Req] = Flipped(Valid(new Req))
@@ -54,8 +57,8 @@ class MainBtbInternalBank(
     class WriteCounter extends Bundle {
       class Req extends Bundle {
         val setIdx:   UInt                 = UInt(SetIdxLen.W)
-        val wayMask:  UInt                 = UInt(NumWay.W)
-        val counters: Vec[SaturateCounter] = Vec(NumWay, TakenCounter())
+        val wayMask:  UInt                 = UInt((NumWay * NumSlots).W)
+        val counters: Vec[SaturateCounter] = Vec(NumWay * NumSlots, TakenCounter())
       }
 
       val req: Valid[Req] = Flipped(Valid(new Req))
@@ -79,7 +82,7 @@ class MainBtbInternalBank(
     val flush:        Flush        = new Flush
   }
 
-  val io: MainBtbInternalBankIO = IO(new MainBtbInternalBankIO)
+  val io: MonitorBtbInternalBankIO = IO(new MonitorBtbInternalBankIO)
 
   // alias
   private val read         = io.read
@@ -90,7 +93,7 @@ class MainBtbInternalBank(
   private val entrySrams = Seq.tabulate(NumWay) { wayIdx =>
     Module(
       new SRAMTemplate(
-        new MainBtbEntry,
+        new MonitorBtbEntry,
         set = NumSets,
         way = 1, // Not using way in the template, preparing for future skewed assoc
         singlePort = true,
@@ -104,11 +107,30 @@ class MainBtbInternalBank(
     ).suggestName(s"mbtb_sram_entry_align${alignIdx}_bank${bankIdx}_way${wayIdx}")
   }
 
+  private val slotSrams = Seq.tabulate(NumWay) { wayIdx =>
+    Seq.tabulate(NumSlots) { slotIdx =>
+      Module(
+        new SRAMTemplate(
+          new MonitorBtbShortSlot,
+          set = NumSets,
+          way = 1,
+          singlePort = true,
+          shouldReset = true,
+          holdRead = true,
+          withClockGate = true,
+          hasMbist = hasMbist,
+          hasSramCtl = hasSramCtl,
+          suffix = Option(s"bpu_mbtb_slot${slotIdx}")
+        )
+      ).suggestName(s"mbtb_sram_slot${slotIdx}_align${alignIdx}_bank${bankIdx}_way${wayIdx}")
+    }
+  }
+
   // we often need to update counter, but not the whole entry, so store counters in separate SRAMs for better power
   private val counterSram = Module(new SRAMTemplate(
     TakenCounter(),
     set = NumSets,
-    way = NumWay,
+    way = NumWay * NumSlots,
     singlePort = true,
     shouldReset = true,
     holdRead = true,
@@ -118,39 +140,50 @@ class MainBtbInternalBank(
     suffix = Option("bpu_mbtb_counter")
   )).suggestName(s"mbtb_sram_counter_align${alignIdx}_bank${bankIdx}")
 
-  private val entryWriteBuffer = Module(new WriteBuffer(
-    new MainBtbEntrySramWriteReq,
+  private val entryWriteBuffer = Module(new MonitorBtbWriteBuffer(
     numEntries = WriteBufferSize,
     numPorts = NumWay,
     nameSuffix = s"mbtbEntryAlign${alignIdx}_Bank${bankIdx}"
   ))
 
   private val counterWriteBuffer = Module(new Queue(
-    new MainBtbCounterSramWriteReq,
+    new MonitorBtbCounterSramWriteReq,
     WriteBufferSize,
     pipe = true,
     flow = true
   ))
 
-  io.sramResetDone := entrySrams.map(_.io.resetDone).reduce(_ && _) && counterSram.io.resetDone
+  io.sramResetDone :=
+    entrySrams.map(_.io.resetDone).reduce(_ && _) &&
+      slotSrams.map(_.map(_.io.resetDone).reduce(_ && _)).reduce(_ && _) &&
+      counterSram.io.resetDone
 
   /* *** sram -> io *** */
   // handle entry & counter together
-  (entrySrams :+ counterSram).foreach { sram =>
+  (entrySrams :++ slotSrams.flatten :+ counterSram).foreach { sram =>
     sram.io.r.req.valid       := read.req.valid
     sram.io.r.req.bits.setIdx := read.req.bits.setIdx
   }
   // each entry sram template has 1 way, so here we only read data.head
   read.resp.entries  := VecInit(entrySrams.map(_.io.r.resp.data.head))
+  read.resp.slots    := VecInit(slotSrams.flatten.map(_.io.r.resp.data.head))
   read.resp.counters := counterSram.io.r.resp.data
 
   /* *** writeBuffer -> sram *** */
   // entry
-  (entrySrams zip entryWriteBuffer.io.read).foreach { case (way, bufRead) =>
-    way.io.w.req.valid        := bufRead.valid && !way.io.r.req.valid
-    way.io.w.req.bits.data(0) := bufRead.bits.entry
-    way.io.w.req.bits.setIdx  := bufRead.bits.setIdx
-    bufRead.ready             := way.io.w.req.ready && !way.io.r.req.valid
+  (entrySrams zip slotSrams zip entryWriteBuffer.io.read).foreach { case ((entry, slots), bufRead) =>
+    // entry srams
+    entry.io.w.req.valid        := bufRead.valid && !entry.io.r.req.valid
+    entry.io.w.req.bits.data(0) := bufRead.bits.entry
+    entry.io.w.req.bits.setIdx  := bufRead.bits.setIdx
+    // slot srams
+    slots.zipWithIndex.foreach { case (slot, i) =>
+      slot.io.w.req.valid        := bufRead.valid && !entry.io.r.req.valid && bufRead.bits.slotMask(i)
+      slot.io.w.req.bits.data(0) := bufRead.bits.slots(i)
+      slot.io.w.req.bits.setIdx  := bufRead.bits.setIdx
+    }
+    // control signals of entry sram and slot sram are synchronized
+    bufRead.ready := entry.io.w.req.ready && !entry.io.r.req.valid
   }
   // counter
   counterSram.io.w.req.valid            := counterWriteBuffer.io.deq.valid && !counterSram.io.r.req.valid
@@ -183,7 +216,23 @@ class MainBtbInternalBank(
       Mux(
         writeValid,
         writeEntry.req.bits.entry,
-        0.U.asTypeOf(new MainBtbEntry)
+        0.U.asTypeOf(new MonitorBtbEntry)
+      ),
+      valid
+    )
+    bufWrite.bits.slotMask := RegEnable(
+      Mux(
+        writeValid,
+        writeEntry.req.bits.slotMask,
+        0.U
+      ),
+      valid
+    )
+    bufWrite.bits.slots := RegEnable(
+      Mux(
+        writeValid,
+        writeEntry.req.bits.slots,
+        0.U.asTypeOf(Vec(NumSlots, new MonitorBtbShortSlot))
       ),
       valid
     )

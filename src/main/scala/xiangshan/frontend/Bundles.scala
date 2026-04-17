@@ -37,7 +37,7 @@ import xiangshan.frontend.bpu.BpuRedirect
 import xiangshan.frontend.bpu.BpuTrain
 import xiangshan.frontend.bpu.BranchAttribute
 import xiangshan.frontend.bpu.BranchInfo
-import xiangshan.frontend.bpu.mbtb.MainBtbMeta
+import xiangshan.frontend.bpu.mbtb.MonitorBtbMeta
 import xiangshan.frontend.ibuffer.IBufPtr
 import xiangshan.frontend.icache.ICacheCacheLineHelper
 import xiangshan.frontend.icache.ICachePerfInfo
@@ -367,7 +367,7 @@ object BlameBpuSource {
     val src              = perf.bpSource
     val pred             = perf.bpPred
     val attr             = branch.attribute
-    val isMatchMask      = perf.mbtbMeta.entries.flatten.map(e => e.hit(branch) && e.attribute === branch.attribute)
+    val isMatchMask      = perf.mbtbMeta.entries.flatten.flatMap(_.hitAttr(branch))
     val isMatchInMbtb    = isMatchMask.reduce(_ || _)
     val matchBranchOH    = PriorityEncoderOH(isMatchMask)
     val matchBranchUseSc = Mux1H(matchBranchOH, perf.scUsed.asBools)

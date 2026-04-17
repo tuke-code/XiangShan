@@ -20,6 +20,7 @@ import chisel3.util._
 import utils.AddrField
 import xiangshan.HasXSParameter
 import xiangshan.frontend.PrunedAddr
+import xiangshan.frontend.bpu.CompareMatrix
 import xiangshan.frontend.bpu.CrossPageHelper
 import xiangshan.frontend.bpu.HalfAlignHelper
 import xiangshan.frontend.bpu.TargetFixHelper
@@ -39,6 +40,7 @@ trait Helpers extends HasMainBtbParameters
     extraFields = Seq(
       ("replacerSetIdx", FetchBlockSizeWidth, SetIdxLen),
       ("targetLower", instOffsetBits, TargetWidth),
+      ("vpnLower", instOffsetBits + TargetWidth, VpnLowerWidth),
       ("position", instOffsetBits, CfiAlignedPositionWidth),
       ("cfiPosition", instOffsetBits, CfiPositionWidth)
     )
@@ -68,6 +70,25 @@ trait Helpers extends HasMainBtbParameters
   def getTag(pc: PrunedAddr): UInt =
     addrFields.extract("tag", pc)
 
+  def getVpnLower(target: PrunedAddr): UInt =
+    addrFields.extract("vpnLower", target)
+
+  def getVpnUpper(target: PrunedAddr): UInt =
+    target(target.length - 1, addrFields.getEnd("vpnLower") + 1)
+
+  // TODO: use hash for better distribution
+  def getPageBtbSetIndex(target: PrunedAddr): UInt =
+    getVpnLower(target)(log2Ceil(NumPageBtbSets) - 1, 0)
+
+  def genTargetIndex(wayIdx: UInt, setIdx: UInt): UInt =
+    Cat(wayIdx, setIdx)
+
+  def getPageBtbSetIndexFromTargetIndex(targetIndex: UInt): UInt =
+    targetIndex(log2Ceil(NumPageBtbSets) - 1, 0)
+
+  def getPageBtbWayIndexFromTargetIndex(targetIndex: UInt): UInt =
+    targetIndex(log2Ceil(NumPageBtbEntries) - 1, log2Ceil(NumPageBtbSets))
+
   // detect multi-hit, return a mask indicating which way has multi-hit
   def detectMultiHit(hitMask: IndexedSeq[Bool], position: IndexedSeq[UInt]): UInt = {
     require(hitMask.length == position.length)
@@ -84,5 +105,12 @@ trait Helpers extends HasMainBtbParameters
       }
     }
     PriorityEncoderOH(multiHitMask.asUInt)
+  }
+
+  def rrpvAging(rrpvs: Vec[UInt], matrix: CompareMatrix): Vec[UInt] = {
+    val maxRrpvOH = matrix.getLeastElementOH(VecInit.fill(rrpvs.length)(true.B))
+    val maxRrpv   = Mux1H(maxRrpvOH, rrpvs)
+    val incValue  = MaxRrpv.U - maxRrpv
+    VecInit(rrpvs.map(r => r + incValue))
   }
 }

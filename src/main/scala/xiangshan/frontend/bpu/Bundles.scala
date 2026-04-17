@@ -27,7 +27,7 @@ import xiangshan.frontend.bpu.history.commonhr.CommonHRMeta
 import xiangshan.frontend.bpu.history.commonhr.CommonHRResolveMeta
 import xiangshan.frontend.bpu.history.phr.PhrMeta
 import xiangshan.frontend.bpu.ittage.IttageMeta
-import xiangshan.frontend.bpu.mbtb.MainBtbMeta
+import xiangshan.frontend.bpu.mbtb.MonitorBtbMeta
 import xiangshan.frontend.bpu.ras.RasCommitMeta
 import xiangshan.frontend.bpu.ras.RasRedirectMeta
 import xiangshan.frontend.bpu.sc.ScMeta
@@ -278,7 +278,8 @@ class BpuRedirectMeta(implicit p: Parameters) extends BpuBundle {
 
 // metadata for resolve training (e.g. tage, mainBtb)
 class BpuResolveMeta(implicit p: Parameters) extends BpuBundle {
-  val mbtb:     MainBtbMeta         = new MainBtbMeta
+//  val mbtb:     MainBtbMeta         = new MainBtbMeta
+  val mbtb:     MonitorBtbMeta      = new MonitorBtbMeta
   val tage:     TageMeta            = new TageMeta
   val sc:       ScMeta              = new ScMeta
   val ittage:   IttageMeta          = new IttageMeta
@@ -295,7 +296,7 @@ class BpuPerfMeta(implicit p: Parameters) extends BpuBundle {
   val startPc:      PrunedAddr          = new PrunedAddr(VAddrBits)
   val s1Prediction: Prediction          = new Prediction
   val s3Prediction: Prediction          = new Prediction
-  val mbtbMeta:     MainBtbMeta         = new MainBtbMeta
+  val mbtbMeta:     MonitorBtbMeta      = new MonitorBtbMeta
   val bpSource:     BpuPredictionSource = new BpuPredictionSource
 
   def bpPred: Prediction = Mux(bpSource.s3Override, s3Prediction, s1Prediction)
@@ -317,13 +318,15 @@ class TargetCarry extends Bundle {
   def isFit:       Bool = value === TargetCarry.Value.Fit
   def isOverflow:  Bool = value === TargetCarry.Value.Overflow
   def isUnderflow: Bool = value === TargetCarry.Value.Underflow
+  def isInvalid:   Bool = value === TargetCarry.Value.Invalid
 }
 
 object TargetCarry {
-  private object Value extends EnumUInt(3) {
+  private object Value extends EnumUInt(4) {
     def Fit:       UInt = 0.U(width.W)
     def Overflow:  UInt = 1.U(width.W)
     def Underflow: UInt = 2.U(width.W)
+    def Invalid:   UInt = 3.U(width.W)
   }
 
   def apply(value: UInt): TargetCarry = {
@@ -336,6 +339,7 @@ object TargetCarry {
   def Fit:       TargetCarry = apply(Value.Fit)
   def Overflow:  TargetCarry = apply(Value.Overflow)
   def Underflow: TargetCarry = apply(Value.Underflow)
+  def Invalid:   TargetCarry = apply(Value.Invalid)
 }
 
 /* *** internal *** */
