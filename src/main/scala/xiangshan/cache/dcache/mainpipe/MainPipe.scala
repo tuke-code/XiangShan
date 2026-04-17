@@ -132,6 +132,9 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
     val store_req = Flipped(DecoupledIO(new DCacheLineReq))
     val store_replay_resp = ValidIO(new DCacheLineResp)
     val store_hit_resp = ValidIO(new DCacheLineResp)
+    val store_refill_done = ValidIO(new Bundle {
+      val paddr = UInt(PAddrBits.W)
+    })
     // atmoics
     val atomic_req = Flipped(DecoupledIO(new MainPipeReq))
     val atomic_resp = ValidIO(new MainPipeResp)
@@ -880,6 +883,9 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   io.store_hit_resp.bits.miss := mshr_handled_store_miss_s3
   io.store_hit_resp.bits.replay := false.B
   io.store_hit_resp.bits.id := Mux(mshr_handled_store_miss_s3, mshr_handled_store_miss_id_s3, s3_req.id)
+
+  io.store_refill_done.valid := s3_valid && s3_miss_can_go && s3_req.isStore
+  io.store_refill_done.bits.paddr := s3_req.addr
 
   val atomic_hit_resp = Wire(new MainPipeResp)
   atomic_hit_resp.source := s3_req.source
