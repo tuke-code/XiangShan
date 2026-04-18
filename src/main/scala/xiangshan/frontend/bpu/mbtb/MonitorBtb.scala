@@ -27,6 +27,7 @@ import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.PrunedAddrInit
 import xiangshan.frontend.bpu.BasePredictor
 import xiangshan.frontend.bpu.BasePredictorIO
+import xiangshan.frontend.bpu.BranchAttribute
 import xiangshan.frontend.bpu.CompareMatrix
 import xiangshan.frontend.bpu.Prediction
 
@@ -42,7 +43,8 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
     val s3_useFinalTarget: Bool       = Output(Bool())
     val s3_finalTarget:    PrunedAddr = Output(PrunedAddr(VAddrBits))
     // final s3_takenMask (mbtb + tage + sc), used to touch replacer accurately
-    val s3_takenMask: Vec[Bool] = Input(Vec(NumBtbResultEntries, Bool()))
+    val s3_takenMask:          Vec[Bool] = Input(Vec(NumBtbResultEntries, Bool()))
+    val s3_firstTakenBranchOH: Vec[Bool] = Input(Vec(NumBtbResultEntries, Bool()))
   }
 
   val io: MonitorBtbIO = IO(new MonitorBtbIO)
@@ -65,14 +67,15 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
       Module(new MonitorBtbInternalBank(alignIdx, internalIdx))
     )
   )
-  private val alignBankRrpvs =
-    Seq.tabulate(NumAlignBanks)(_ => Reg(Vec(NumSets, Vec(NumWay, Vec(NumSlots, UInt(RrpvWidth.W))))))
+  private val alignBankRrpvs = Seq.tabulate(NumAlignBanks)(_ =>
+    RegInit(VecInit.fill(NumSets, NumWay, NumSlots)(MaxRrpv.U(RrpvWidth.W)))
+  )
 
   private val pageBtb      = Module(new PageBtb)
-  private val pageBtbRrpvs = Reg(Vec(NumPageBtbSets, Vec(NumPageBtbWays, UInt(RrpvWidth.W))))
+  private val pageBtbRrpvs = RegInit(VecInit.fill(NumPageBtbSets, NumPageBtbWays)(MaxRrpv.U(RrpvWidth.W)))
 
   private val regionBtb      = Reg(Vec(NumRegionBtbSets, Vec(NumRegionBtbWays, new RegionBtbEntry)))
-  private val regionBtbRrpvs = Reg(Vec(NumRegionBtbSets, Vec(NumRegionBtbWays, UInt(RrpvWidth.W))))
+  private val regionBtbRrpvs = RegInit(VecInit.fill(NumRegionBtbSets, NumRegionBtbWays)(MaxRrpv.U(RrpvWidth.W)))
 
   io.sramResetDone := alignBanks.flatMap(_.map(_.io.sramResetDone)).reduce(_ && _)
   io.trainReady    := true.B
@@ -183,17 +186,18 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
     })
   }.flatten
 
-  private val s2_metasVec       = Wire(Vec(NumAlignBanks, Vec(NumWay, new MonitorBtbMetaEntry)))
+  private val s2_metasVec       = Wire(Vec(NumAlignBanks, Vec(NumWay * NumSlots, new MonitorBtbMetaEntry)))
   private val s2_predictionsVec = Wire(Vec(NumAlignBanks, Vec(NumWay, Vec(NumSlots, Valid(new Prediction)))))
 
   Seq.tabulate(NumAlignBanks) { alignIdx =>
     Seq.tabulate(NumWay) { wayIdx =>
       val entry       = s2_rawEntriesVec(alignIdx)(wayIdx)
       val slots       = s2_rawSlotsVec(alignIdx)(wayIdx)
-      val meta        = s2_metasVec(alignIdx)(wayIdx)
       val predictions = s2_predictionsVec(alignIdx)(wayIdx)
+      val metas       = s2_metasVec(alignIdx)
+      val wayBaseIdx  = wayIdx * NumSlots
       val isFused     = s2_rawEntriesVec(alignIdx)(wayIdx).fusion
-      val counters    = VecInit(s2_rawCountersVec(alignIdx).slice(wayIdx, wayIdx + NumSlots))
+      val counters    = VecInit(s2_rawCountersVec(alignIdx).slice(wayBaseIdx, wayBaseIdx + NumSlots))
 
       val longSlot = Wire(new MonitorBtbLongSlot)
       longSlot.fromShortSlots(slots)
@@ -202,6 +206,7 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
       val rawHit = valid && entry.tag === s2_tagVec(alignIdx)
 
       Seq.tabulate(NumSlots) { slotIdx =>
+        val meta = metas(wayBaseIdx + slotIdx)
         when(isFused) {
           if (slotIdx == 0) {
             val hit = rawHit && longSlot.position >= s2_alignedInstOffsetVec(alignIdx) && !s2_crossPageVec(alignIdx)
@@ -215,15 +220,19 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
             predictions(slotIdx).bits.attribute := longSlot.attribute
             predictions(slotIdx).bits.taken     := counters(slotIdx).isPositive
 
-            meta.positions(slotIdx)  := longSlot.position
-            meta.attributes(slotIdx) := longSlot.attribute
-            meta.counters(slotIdx)   := counters(slotIdx)
+            meta.rawHit    := rawHit
+            meta.fused     := true.B
+            meta.position  := Cat(s2_posHigherBitsVec(alignIdx), longSlot.position)
+            meta.attribute := longSlot.attribute
+            meta.counter   := counters(slotIdx)
           } else {
             predictions(slotIdx).valid := false.B
             predictions(slotIdx).bits  := DontCare
-            meta.positions(slotIdx)    := DontCare
-            meta.attributes(slotIdx)   := DontCare
-            meta.counters(slotIdx)     := DontCare
+            meta.rawHit                := false.B
+            meta.fused                 := true.B
+            meta.position              := 0.U
+            meta.attribute             := 0.U.asTypeOf(new BranchAttribute)
+            meta.counter               := 0.U.asTypeOf(TakenCounter())
           }
         }.otherwise {
           val hit = rawHit && slots(slotIdx).valid &&
@@ -237,13 +246,13 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
           predictions(slotIdx).bits.attribute := slots(slotIdx).attr.toBranchAttribute
           predictions(slotIdx).bits.taken     := counters(slotIdx).isPositive
 
-          meta.positions(slotIdx)  := slots(slotIdx).position
-          meta.attributes(slotIdx) := slots(slotIdx).attr.toBranchAttribute
-          meta.counters(slotIdx)   := counters(slotIdx)
+          meta.rawHit    := rawHit
+          meta.fused     := false.B
+          meta.position  := Cat(s2_posHigherBitsVec(alignIdx), slots(slotIdx).position)
+          meta.attribute := slots(slotIdx).attr.toBranchAttribute
+          meta.counter   := counters(slotIdx)
         }
       }
-      meta.rawHit := rawHit
-      meta.fused  := isFused
     }
   }
 
@@ -301,7 +310,7 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   private val s3_firstLongJumpStartPcVpnLower = getVpnLower(s3_firstLongJumpStartPc)
 
   private val s3_firstLongJumpTaken =
-    s3_firstLongJumpOH.zip(io.s3_takenMask).map { case (l, t) => l && t }.reduce(_ || _)
+    s3_firstLongJumpOH.zip(io.s3_firstTakenBranchOH).map { case (l, t) => l && t }.reduce(_ || _)
 
   private val s3_finalTarget = Cat(
     Mux(s3_regionBtbEntry.valid && s3_pageBtbEntry.valid, s3_regionBtbEntry.vpnUpper, s3_firstLongJumpStartPcVpnUpper),
@@ -313,6 +322,8 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   io.s3_finalTarget    := PrunedAddrInit(s3_finalTarget)
 
   // Align bank replacer update
+  private val s3_fusedWayMaskVec =
+    RegEnable(VecInit(s2_rawEntriesVec.map(entries => VecInit(entries.map(_.fusion)))), s2_fire)
   private val s3_replacerSetIdxVec = s3_startPcVec.map(pc => getReplacerSetIndex(pc))
   private val s3_rrpvsVec = alignBankRrpvs.zipWithIndex.map { case (rrpvs, alignIdx) =>
     rrpvs(s3_replacerSetIdxVec(alignIdx)).flatten
@@ -323,12 +334,14 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
     rrpvAging(VecInit(s3_rrpvsVec(alignIdx)), s3_victimMatrixVec(alignIdx))
   }
   private val s3_writeRrpvsVec = Seq.tabulate(NumAlignBanks) { alignIdx =>
-    val curAlignIdx = alignIdx * NumAlignBanks * NumWay * NumSlots
+    val curAlignIdx = alignIdx * NumWay * NumSlots
     VecInit.tabulate(NumWay) { wayIdx =>
       val curWayIdx = wayIdx * NumSlots
+      val wayTaken  = io.s3_takenMask.slice(curAlignIdx + curWayIdx, curAlignIdx + curWayIdx + NumSlots)
+      val clearWay  = s3_fusedWayMaskVec(alignIdx)(wayIdx) && wayTaken.reduce(_ || _)
       VecInit.tabulate(NumSlots) { slotIdx =>
         Mux(
-          io.s3_takenMask(curAlignIdx + curWayIdx + slotIdx),
+          clearWay || wayTaken(slotIdx),
           0.U,
           s3_agedRrpvsVec(alignIdx)(curWayIdx + slotIdx)
         )
@@ -407,6 +420,9 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   private val t1_bankMeta    = Mux1H(t1_writeAlignBankMask, t1_meta.entries)
   private val t1_bankRrpvs =
     Mux1H(t1_writeAlignBankMask, VecInit(alignBankRrpvs))(getReplacerSetIndex(t1_bankStartPc))
+  private val t1_bankMetaByWay = Seq.tabulate(NumWay) { wayIdx =>
+    t1_bankMeta.slice(wayIdx * NumSlots, (wayIdx + 1) * NumSlots)
+  }
 
   private val t1_targetDiff    = t1_bankStartPc.addr ^ t1_mispredictInfo.bits.target.addr
   private val t1_hasTargetDiff = t1_targetDiff.orR
@@ -425,11 +441,13 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   private val t1_pageBtbEntries   = pageBtb.io.readSet.resp.entries
   private val t1_regionBtbEntries = regionBtb(t1_regionBtbSetIdx)
 
-  private val t1_longSlotHitVec = t1_bankMeta.map(_.hitFused(t1_mispredictInfo.bits))
-  private val t1_longSlotHit    = t1_longSlotHitVec.reduce(_ || _)
-  private val t1_longSlotHitOH  = VecInit(PriorityEncoderOH(t1_longSlotHitVec))
+  private val t1_longSlotHitVec = VecInit(t1_bankMetaByWay.map(wayMeta =>
+    wayMeta.head.hit(t1_mispredictInfo.bits) && wayMeta.head.fused
+  ))
+  private val t1_longSlotHit   = t1_longSlotHitVec.reduce(_ || _)
+  private val t1_longSlotHitOH = VecInit(PriorityEncoderOH(t1_longSlotHitVec))
 
-  private val t1_shortSlotHitVec = t1_bankMeta.flatMap(_.hitUnfused(t1_mispredictInfo.bits))
+  private val t1_shortSlotHitVec = VecInit(t1_bankMeta.map(meta => meta.hit(t1_mispredictInfo.bits) && !meta.fused))
   private val t1_shortSlotHit    = t1_shortSlotHitVec.reduce(_ || _)
   private val t1_shortSlotHitOH  = VecInit(PriorityEncoderOH(t1_shortSlotHitVec))
 
@@ -494,8 +512,8 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
       //   b. attribute changed, probably indicating a software self-modification.
       !(t1_mispredictInfo.bits.attribute === Mux(
         t1_longSlotHit,
-        Mux1H(t1_longSlotHitOH, t1_bankMeta.map(_.attributes(0))),
-        Mux1H(t1_shortSlotHitOH, t1_bankMeta.flatMap(_.attributes))
+        Mux1H(t1_longSlotHitOH, t1_bankMetaByWay.map(_.head.attribute)),
+        Mux1H(t1_shortSlotHitOH, t1_bankMeta.map(_.attribute))
       ))
   )
 
@@ -559,15 +577,17 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   Seq.tabulate(NumWay) { wayIdx =>
     val action      = t1_updateActionVec(wayIdx)
     val rrpvs       = t1_bankRrpvs(wayIdx)
-    val meta        = t1_bankMeta(wayIdx)
+    val meta        = t1_bankMetaByWay(wayIdx)
+    val wayFused    = meta.head.fused
+    val wayRawHit   = meta.map(_.rawHit).reduce(_ || _)
     val maxSlotRrpv = rrpvs.reduceLeft((a, b) => Mux(a > b, a, b))
 
-    when(!t1_updateIsFused) {            // If update is unfused
-      when(!meta.fused && meta.rawHit) { // If entry is unfused and only hit tag
+    when(!t1_updateIsFused) {        // If update is unfused
+      when(!wayFused && wayRawHit) { // If entry is unfused and only hit tag
         action.actionType := UpdateActionType.ReplaceSameTagSlot
         action.rrpv       := maxSlotRrpv
         action.slot       := PriorityEncoder(rrpvs.map(_ === maxSlotRrpv))
-      }.elsewhen(!meta.fused) { // If entry is unfused and not hit
+      }.elsewhen(!wayFused) { // If entry is unfused and not hit
         action.actionType := UpdateActionType.RetagUnfusedWay
         action.rrpv       := maxSlotRrpv
         action.slot       := 0.U
@@ -576,8 +596,8 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
         action.rrpv       := rrpvs(0) // fused entry has same rrpv for 2 slots
         action.slot       := 0.U
       }
-    }.otherwise {        // If update is fused
-      when(meta.fused) { // If entry is fused
+    }.otherwise {      // If update is fused
+      when(wayFused) { // If entry is fused
         action.actionType := UpdateActionType.ReplaceFusedWay
         action.rrpv       := rrpvs(0)
         action.slot       := 0.U
@@ -597,10 +617,10 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   private val t1_missEntry      = t1_updateEntry
   private val t1_missLongSlot   = t1_updateLongSlot
   private val t1_missShortSlots = Wire(Vec(NumSlots, new MonitorBtbShortSlot))
-  private val t1_missSlotMask   = Wire(UInt(NumSlots.W))
   private val t1_missWayMask    = UIntToOH(t1_finalAction.way, NumWay)
-  private val t1_missRrpvs      = Wire(Vec(NumWay, Vec(NumSlots, UInt(RrpvWidth.W))))
+  private val t1_missSlotMask   = WireInit(0.U(NumSlots.W))
   private val t1_missSlots      = Mux(t1_missEntry.fusion, t1_missLongSlot.toShortSlots, t1_missShortSlots)
+  private val t1_missRrpvs      = WireInit(t1_bankRrpvs)
 
   private val t1_bankVictimMatrix = CompareMatrix(VecInit(t1_bankRrpvs.flatten), order = (a, b) => a > b)
   private val t1_bankAgedRrpvs    = rrpvAging(VecInit(t1_bankRrpvs.flatten), t1_bankVictimMatrix)
@@ -686,24 +706,17 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   private val t1_counterWayMask = Wire(Vec(NumAlignBanks, Vec(NumWay * NumSlots, Bool())))
 
   t1_meta.entries.zipWithIndex.foreach { case (alignMeta, alignIdx) =>
-    alignMeta.zipWithIndex.foreach { case (meta, way) =>
-      val hitMask = t1_branches.map { branch =>
-        VecInit.tabulate(NumSlots) { slot =>
-          branch.valid && branch.bits.attribute.isConditional &&
-          meta.positions(slot) === branch.bits.cfiPosition
-        }
-      }
+    alignMeta.zipWithIndex.foreach { case (meta, idx) =>
+      val way  = idx / NumSlots
+      val slot = idx % NumSlots
+      val hitMask =
+        t1_branches.map(branch => branch.valid && branch.bits.attribute.isConditional && meta.hit(branch.bits))
+      val actualTaken    = Mux1H(hitMask, t1_branches.map(_.bits.taken))
+      val slotOverridden = t1_entryNeedWrite && t1_writeWayMask(way) && t1_writeSlotMask(slot)
 
-      val actualTaken     = Mux1H(hitMask.map(_.reduce(_ || _)), t1_branches.map(_.bits.taken))
-      val entryOverridden = t1_entryNeedWrite && t1_writeWayMask(way)
-
-      for (slot <- 0 until NumSlots) {
-        val slotOverridden = entryOverridden && t1_writeSlotMask(slot)
-        t1_counterWayMask(alignIdx)(way * NumSlots + slot) :=
-          slotOverridden || hitMask.map(_(slot)).reduce(_ || _)
-        t1_newCounters(alignIdx)(way * NumSlots + slot) :=
-          Mux(slotOverridden, TakenCounter.WeakPositive, meta.counters(slot).getUpdate(actualTaken))
-      }
+      t1_counterWayMask(alignIdx)(idx) := slotOverridden || hitMask.reduce(_ || _)
+      t1_newCounters(alignIdx)(idx) :=
+        Mux(slotOverridden, TakenCounter.WeakPositive, meta.counter.getUpdate(actualTaken))
     }
   }
 
@@ -716,7 +729,7 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
     pageBtbRrpvs(t1_pageBtbSetIdx)     := t1_pageBtbWriteRrpvs
     regionBtbRrpvs(t1_regionBtbSetIdx) := t1_regionBtbWriteRrpvs
     when(!t1_regionBtbHit) {
-      regionBtb(t1_regionBtbWay) := t1_updateRegionBtbEntry
+      regionBtb(t1_regionBtbSetIdx)(t1_regionBtbWay) := t1_updateRegionBtbEntry
     }
   }
 
@@ -737,7 +750,7 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
         t1_fire && t1_counterWayMask(alignIdx).reduce(_ || _) &&
           t1_internalBankMaskVec(alignIdx)(internalIdx)
       internalBank.io.writeCounter.req.bits.setIdx   := t1_setIdxVec(alignIdx)
-      internalBank.io.writeCounter.req.bits.wayMask  := t1_counterWayMask(alignIdx)
+      internalBank.io.writeCounter.req.bits.wayMask  := t1_counterWayMask(alignIdx).asUInt
       internalBank.io.writeCounter.req.bits.counters := t1_newCounters(alignIdx)
     }
     when(t1_fire && t1_entryNeedWrite && t1_writeAlignBankMask(alignIdx)) {

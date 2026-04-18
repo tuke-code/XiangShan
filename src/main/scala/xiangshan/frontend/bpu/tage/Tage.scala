@@ -187,10 +187,10 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val (t0_mbtbHitMask, t0_basePred, t0_meta) = t0_branches.map { branch =>
     val mbtbMeta  = io.train.meta.mbtb.entries.flatten
     val tageMeta  = io.train.meta.tage.entries
-    val hitMask   = mbtbMeta.flatMap(_.hitMask(branch.bits))
+    val hitMask   = mbtbMeta.map(_.hit(branch.bits))
     val hitMaskOH = PriorityEncoderOH(hitMask)
     val mbtbHit   = hitMask.reduce(_ || _)
-    val basePred  = Mux1H(hitMaskOH, mbtbMeta.flatMap(_.counters.map(_.isPositive)))
+    val basePred  = Mux1H(hitMaskOH, mbtbMeta.map(_.counter.isPositive))
     val meta      = Mux1H(hitMaskOH, tageMeta)
     (mbtbHit, basePred, meta)
   }.unzip3

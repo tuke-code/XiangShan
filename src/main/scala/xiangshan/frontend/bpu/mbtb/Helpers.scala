@@ -93,10 +93,10 @@ trait Helpers extends HasMainBtbParameters
   def detectMultiHit(hitMask: IndexedSeq[Bool], position: IndexedSeq[UInt]): UInt = {
     require(hitMask.length == position.length)
     require(hitMask.length >= 2)
-    val multiHitMask = VecInit(Seq.fill(NumWay)(false.B))
+    val multiHitMask = VecInit(Seq.fill(hitMask.length)(false.B))
     for {
-      i <- 0 until NumWay
-      j <- i + 1 until NumWay
+      i <- hitMask.indices
+      j <- i + 1 until hitMask.length
     } {
       val bothHit      = hitMask(i) && hitMask(j)
       val samePosition = position(i) === position(j)

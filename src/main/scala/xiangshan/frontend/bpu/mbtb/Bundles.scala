@@ -141,39 +141,21 @@ class MonitorBtbCounterSramWriteReq(implicit p: Parameters) extends MainBtbBundl
 }
 
 class MonitorBtbMetaEntry(implicit p: Parameters) extends MainBtbBundle {
-  val rawHit:     Bool                 = Bool()
-  val fused:      Bool                 = Bool()
-  val positions:  Vec[UInt]            = Vec(NumSlots, UInt(CfiPositionWidth.W))
-  val attributes: Vec[BranchAttribute] = Vec(NumSlots, new BranchAttribute)
-  val counters:   Vec[SaturateCounter] = Vec(NumSlots, TakenCounter())
-
-  def hitFused(branch: BranchInfo): Bool =
-    rawHit && fused && positions(0) === branch.cfiPosition
-
-  def hitUnfused(branch: BranchInfo): Vec[Bool] = VecInit.tabulate(NumSlots) { i =>
-    rawHit && !fused && positions(i) === branch.cfiPosition
-  }
-
-  def hitMask(branch: BranchInfo): Vec[Bool] = {
-    val fusedHit   = hitFused(branch)
-    val unfusedHit = hitUnfused(branch)
-    VecInit.tabulate(NumSlots) { i =>
-      if (i == 0) Mux(fused, fusedHit, unfusedHit(i))
-      else !fused && unfusedHit(i)
-    }
-  }
+  val rawHit:    Bool            = Bool()
+  val fused:     Bool            = Bool()
+  val position:  UInt            = UInt(CfiPositionWidth.W)
+  val attribute: BranchAttribute = new BranchAttribute
+  val counter:   SaturateCounter = TakenCounter()
 
   def hit(branch: BranchInfo): Bool =
-    hitMask(branch).reduce(_ || _)
+    rawHit && position === branch.cfiPosition
 
-  def hitAttr(branch: BranchInfo): Vec[Bool] =
-    VecInit(hitMask(branch).zip(attributes).map { case (hit, attr) =>
-      hit && attr === branch.attribute
-    })
+  def hitAttr(branch: BranchInfo): Bool =
+    hit(branch) && attribute === branch.attribute
 }
 
 class MonitorBtbMeta(implicit p: Parameters) extends MainBtbBundle {
-  val entries: Vec[Vec[MonitorBtbMetaEntry]] = Vec(NumAlignBanks, Vec(NumWay, new MonitorBtbMetaEntry))
+  val entries: Vec[Vec[MonitorBtbMetaEntry]] = Vec(NumAlignBanks, Vec(NumWay * NumSlots, new MonitorBtbMetaEntry))
 }
 
 class MBTBTrace(implicit p: Parameters) extends MainBtbBundle {

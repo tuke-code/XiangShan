@@ -166,7 +166,7 @@ class MonitorBtbInternalBank(
   }
   // each entry sram template has 1 way, so here we only read data.head
   read.resp.entries  := VecInit(entrySrams.map(_.io.r.resp.data.head))
-  read.resp.slots    := VecInit(slotSrams.flatten.map(_.io.r.resp.data.head))
+  read.resp.slots    := VecInit(slotSrams.map(s => VecInit(s.map(_.io.r.resp.data.head))))
   read.resp.counters := counterSram.io.r.resp.data
 
   /* *** writeBuffer -> sram *** */

@@ -138,8 +138,8 @@ trait TargetFixHelper extends HasBpuParameters {
     MuxCase(
       TargetCarry.Invalid,
       Seq(
-        (targetUpper + 1.U === startPcUpper) -> TargetCarry.Overflow,
-        (targetUpper - 1.U === startPcUpper) -> TargetCarry.Underflow,
+        (targetUpper - 1.U === startPcUpper) -> TargetCarry.Overflow,
+        (targetUpper + 1.U === startPcUpper) -> TargetCarry.Underflow,
         (targetUpper === startPcUpper)       -> TargetCarry.Fit
       )
     )
