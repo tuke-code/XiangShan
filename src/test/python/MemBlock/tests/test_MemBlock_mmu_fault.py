@@ -8,6 +8,7 @@ from sequences import (
     LOAD_GUEST_PAGE_FAULT_BIT,
     LOAD_PAGE_FAULT_BIT,
     MmuFaultingScalarLoadSequence,
+    MmuPmpRegionLoadRecoverySequence,
     PMP_MODE_ALLOW,
     PMP_MODE_DENY,
     PTE_MODE_NORMAL,
@@ -20,6 +21,11 @@ MMU_FAULT_ROOT_PT = 0x88002000
 MMU_FAULT_VA_BASE = 0x40010000
 MMU_FAULT_PA_BASE = 0x80000000
 MMU_FAULT_PRIME_DATA = 0x123456789ABCDEF0
+PMP_REGION_DENIED_VA = MMU_FAULT_VA_BASE + 0x7000 + 0x180
+PMP_REGION_ALLOWED_VA = MMU_FAULT_VA_BASE + 0x9000 + 0x040
+PMP_REGION_SIZE = 0x1000
+PMP_REGION_DENIED_DATA = 0xCAFEBABE11223344
+PMP_REGION_ALLOWED_DATA = 0x0BADF00D55667788
 TRANSLATION_ERROR_BITS = {LOAD_ACCESS_FAULT_BIT, LOAD_PAGE_FAULT_BIT, LOAD_GUEST_PAGE_FAULT_BIT}
 MIXED_ACCESS_CASES = (
     ("byte", 1, 0x1, 0),
@@ -56,6 +62,12 @@ def _assert_no_special_paths(env, result) -> None:
         == result.transport_stats_before_main["dcache_d_response_count"]
     )
     assert env._read_optional_dut_signal("io_dcacheError_ecc_error_valid") == 0
+
+
+def _assert_transport_unchanged(before: dict[str, int], after: dict[str, int]) -> None:
+    assert after["outer_request_count"] == before["outer_request_count"]
+    assert after["dcache_a_request_count"] == before["dcache_a_request_count"]
+    assert after["dcache_d_response_count"] == before["dcache_d_response_count"]
 
 
 def test_api_MemBlock_scalar_word_load_tlb_error_tlb_hit_smoke(env):
@@ -202,3 +214,68 @@ def test_api_MemBlock_scalar_mixed_size_fault_matrix(env):
             )
             _assert_no_special_paths(env, result)
             env.assert_no_outstanding()
+
+
+def test_api_MemBlock_scalar_load_pmp_deny_region_hit_allow_outside_smoke(env):
+    """
+    同一 Sv39/TLB hit 背景下，命中 deny region 的 load 应 fault，region 外 load 仍应成功。
+    """
+
+    state = _reset_env_state(env)
+    result = MmuPmpRegionLoadRecoverySequence(
+        root_pt_addr=MMU_FAULT_ROOT_PT,
+        denied_va=PMP_REGION_DENIED_VA,
+        allowed_va=PMP_REGION_ALLOWED_VA,
+        pa_base=MMU_FAULT_PA_BASE,
+        initial_state=state,
+        prime_req_id=0,
+        denied_req_id=1,
+        allowed_req_id=2,
+        restored_req_id=3,
+        denied_data=PMP_REGION_DENIED_DATA,
+        allowed_data=PMP_REGION_ALLOWED_DATA,
+        deny_region_size=PMP_REGION_SIZE,
+    ).run(env)
+
+    exception_indices = _set_exception_indices(result.denied_writeback)
+
+    assert any(event["event"] == "a_fire" for event in result.prime_ptw_trace), "PMP region prime 未触发 PTW"
+    assert not result.denied_ptw_trace, "deny-region load 不应重新触发 PTW"
+    assert not result.allowed_ptw_trace, "region 外 allow load 不应重新触发 PTW"
+    assert LOAD_ACCESS_FAULT_BIT in exception_indices, f"deny-region load 未命中 access fault: {exception_indices}"
+    assert exception_indices <= {LOAD_ACCESS_FAULT_BIT}, f"deny-region load 出现额外异常位: {exception_indices}"
+    _assert_transport_unchanged(result.transport_stats_before_denied, result.transport_stats_after_denied)
+    assert not result.denied_replay_state["memory_violation"]["valid"], "deny-region load 不应退化成 memoryViolation"
+    assert result.allowed_writeback["data"] == PMP_REGION_ALLOWED_DATA
+    assert env._read_optional_dut_signal("io_dcacheError_ecc_error_valid") == 0
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_scalar_load_pmp_deny_region_then_restore_allow_smoke(env):
+    """
+    deny-region fault 后撤销 deny，同一 load 应在 TLB hit 背景下恢复正常访问。
+    """
+
+    state = _reset_env_state(env)
+    result = MmuPmpRegionLoadRecoverySequence(
+        root_pt_addr=MMU_FAULT_ROOT_PT,
+        denied_va=PMP_REGION_DENIED_VA,
+        allowed_va=PMP_REGION_ALLOWED_VA,
+        pa_base=MMU_FAULT_PA_BASE,
+        initial_state=state,
+        prime_req_id=0x10,
+        denied_req_id=0x11,
+        allowed_req_id=0x12,
+        restored_req_id=0x13,
+        denied_data=PMP_REGION_DENIED_DATA,
+        allowed_data=PMP_REGION_ALLOWED_DATA,
+        deny_region_size=PMP_REGION_SIZE,
+    ).run(env)
+
+    assert any(event["event"] == "a_fire" for event in result.prime_ptw_trace), "restore prime 未触发 PTW"
+    assert not result.denied_ptw_trace, "restore 场景中的 deny load 不应重新触发 PTW"
+    assert not result.restored_ptw_trace, "恢复后的 translated load 不应重新触发 PTW"
+    assert result.restored_writeback["data"] == PMP_REGION_DENIED_DATA
+    assert result.restored_writeback["rob_idx_value"] == result.restored_txn.rob_idx_value
+    assert env._read_optional_dut_signal("io_dcacheError_ecc_error_valid") == 0
+    env.assert_no_outstanding()

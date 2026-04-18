@@ -35,6 +35,8 @@ from .mmu_sequences import (
     LOAD_PAGE_FAULT_BIT,
     MmuFaultingScalarLoadSequence,
     MmuFaultingScalarLoadSequenceResult,
+    MmuPmpRegionLoadRecoverySequence,
+    MmuPmpRegionLoadRecoverySequenceResult,
     MmuPrimeLoadSpec,
     MmuSv39ActivateSequence,
     MmuSv39ActivateSequenceResult,

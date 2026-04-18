@@ -66,6 +66,7 @@ flowchart LR
 - `pulse_sfence()`
 - `write_distributed_csr(addr=..., data=..., persistent=...)`
 - `program_pmp_entry(index=..., cfg=..., addr=..., persistent=...)`
+- `program_pmp_deny_region(base_addr=..., size=..., index=..., persistent=...)`
 - `allow_all_smode_access(index=..., persistent=...)`
 - `ptw_responder(response_delay_cycles=...)`
 
@@ -127,6 +128,24 @@ env.mmu.allow_all_smode_access()
 ```
 
 它会通过 `csrCtrl.distribute_csr_w_*` 编程一个覆盖全物理地址空间的 RWX NAPOT PMP entry。默认建议把这类 CSR 写入设为 `persistent=True`，这样 reset 后也会自动重放。
+
+如果 testcase 需要验证“同一 translated 背景下，某个物理 region 被 PMP deny，而 region 外继续允许”，当前推荐直接使用：
+
+```python
+env.mmu.program_pmp_deny_region(
+    base_addr=deny_region_base,
+    size=0x1000,
+    index=0,
+    persistent=False,
+)
+env.mmu.allow_all_smode_access(index=1, persistent=False)
+```
+
+这组 helper 的推荐分工是：
+
+1. `index=0` 放更高优先级的 deny-region；
+2. `index=1` 保留全空间 allow-all fallback；
+3. testcase 只表达“哪一段地址该 fault，哪一段地址该继续成功”，不在测试文件里手写 PMP NAPOT 地址编码。
 
 ### 5.4 Svpbmt / PBMT 分类控制
 

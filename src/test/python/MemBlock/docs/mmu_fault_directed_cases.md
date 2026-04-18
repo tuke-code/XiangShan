@@ -45,6 +45,12 @@
 4. `scalar_mixed_size_fault_matrix`
    - 对 `byte/half/word/doubleword` 逐个复用同一 fault 骨架
    - 目标是把 fault 行为扩展到不同 size/mask 组合，而不是只盯着 word load
+5. `scalar_load_pmp_deny_region_hit_allow_outside_smoke`
+   - 在同一 Sv39/TLB hit 背景下，对比 deny region 内 fault 与 region 外继续成功
+   - 目标是证明 PMP 不只是“全开/全关”，而是按地址区域裁剪权限
+6. `scalar_load_pmp_deny_region_then_restore_allow_smoke`
+   - 先命中 deny-region fault，再撤销 deny 并重发同一 VA
+   - 目标是证明撤销 deny 后可以在不重新 PTW 的前提下恢复正常 writeback
 
 ### 3.2 `test_MemBlock_scalar_load_pipeline_probe.py`
 
@@ -119,7 +125,7 @@ fault 用例还会额外排除三类误命中：
 1. 确定性的 TLB miss -> refill -> replay 成功
 2. 多层级 TLB 命中/缺失组合
 3. store side PMP deny
-4. allow/deny 动态切换后的更长窗口语义
+4. 多 entry PMP 的更复杂优先级交互，以及超出“单个 deny-region + allow-all fallback”的更长窗口语义
 
 因此它们应被看作：
 

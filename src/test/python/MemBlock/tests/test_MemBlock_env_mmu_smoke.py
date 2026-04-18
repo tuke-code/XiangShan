@@ -12,6 +12,13 @@ MMU_ROOT_PT = 0x88000000
 MMU_VA = 0x40001000
 MMU_PA_BASE = 0x80000000
 MMU_DATA = 0x13579BDF2468ACE0
+PMP_CFG_CSR_BASE = 0x3A0
+PMP_ADDR_CSR_BASE = 0x3B0
+PMP_DENY_NAPOT_CFG = 0x18
+PMP_ALLOW_RWX_NAPOT_CFG = 0x1F
+PMP_REGION_BASE = 0x80004000
+PMP_REGION_SIZE = 0x1000
+MEMBLOCK_PADDR_BITS = 48
 
 
 def _reset_env_state(env):
@@ -20,6 +27,31 @@ def _reset_env_state(env):
         require_lq_ready=True,
         require_sq_ready=True,
     ).run(env)
+
+
+def _capture_distributed_csr_writes(env, action):
+    writes = []
+
+    def _sample_csr_write():
+        if int(env.csr_ctrl.distribute_csr_w_valid.value) == 0:
+            return
+        writes.append(
+            (
+                int(env.csr_ctrl.distribute_csr_w_bits_addr.value),
+                int(env.csr_ctrl.distribute_csr_w_bits_data.value),
+            )
+        )
+
+    env.add_after_step_callback(_sample_csr_write)
+    try:
+        action()
+    finally:
+        env.remove_after_step_callback(_sample_csr_write)
+    return writes
+
+
+def _encode_pmp_napot_addr(base_addr: int, size: int) -> int:
+    return (int(base_addr) + (int(size) // 2 - 1)) >> 2
 
 
 def test_api_MemBlock_env_mmu_idle_inputs_preserve_sv39_state(env):
@@ -90,3 +122,23 @@ def test_api_MemBlock_env_mmu_sv39_ptw_smoke(env):
     assert stats["dcache_d_response_count"] > 0
     assert stats["outer_request_count"] == 0
     assert env._read_optional_dut_signal("io_dcacheError_ecc_error_valid") == 0
+
+
+def test_api_MemBlock_env_mmu_program_pmp_deny_region_smoke(env):
+    """`program_pmp_deny_region()` 应稳定发出 PMP CSR 写并可与 allow-all 组合。"""
+
+    writes = _capture_distributed_csr_writes(
+        env,
+        lambda: (
+            env.mmu.program_pmp_deny_region(PMP_REGION_BASE, PMP_REGION_SIZE, index=0, persistent=False),
+            env.mmu.allow_all_smode_access(index=1, persistent=False),
+        ),
+    )
+
+    expected_region_addr = _encode_pmp_napot_addr(PMP_REGION_BASE, PMP_REGION_SIZE)
+    expected_allow_all_addr = (1 << (MEMBLOCK_PADDR_BITS - 2)) - 1
+
+    assert (PMP_ADDR_CSR_BASE, expected_region_addr) in writes
+    assert (PMP_CFG_CSR_BASE, PMP_DENY_NAPOT_CFG) in writes
+    assert (PMP_ADDR_CSR_BASE + 1, expected_allow_all_addr) in writes
+    assert (PMP_CFG_CSR_BASE, (PMP_ALLOW_RWX_NAPOT_CFG << 8) | PMP_DENY_NAPOT_CFG) in writes

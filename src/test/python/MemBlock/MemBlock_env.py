@@ -107,6 +107,7 @@ SV39_PBMT_NC = 1
 SV39_PBMT_IO = 2
 PTW_BEAT_BYTES = 32
 PMP_CFG_RWX_NAPOT = 0x1F
+PMP_CFG_DENY_NAPOT = 0x18
 PMP_CFG_CSR_BASE = 0x3A0
 PMP_ADDR_CSR_BASE = 0x3B0
 MEMBLOCK_PADDR_BITS = 48
@@ -1201,6 +1202,35 @@ class MmuFacade:
         self._pmp_cfg_words[cfg_addr] = cfg_word
         self.write_distributed_csr(PMP_ADDR_CSR_BASE + int(index), int(addr), persistent=persistent)
         self.write_distributed_csr(cfg_addr, cfg_word, persistent=persistent)
+
+    @staticmethod
+    def _encode_pmp_napot_addr(*, base_addr: int, size: int) -> int:
+        base_addr = int(base_addr)
+        size = int(size)
+        if size < 8 or (size & (size - 1)) != 0:
+            raise ValueError(f"PMP NAPOT region size 必须是 >=8 的 2 次幂，当前为 {size}")
+        if base_addr < 0:
+            raise ValueError(f"PMP region base_addr 非法: {base_addr}")
+        if base_addr & (size - 1):
+            raise ValueError(
+                f"PMP NAPOT region 需要按 region size 对齐: base=0x{base_addr:x}, size=0x{size:x}"
+            )
+        return (base_addr + (size // 2 - 1)) >> 2
+
+    def program_pmp_deny_region(
+        self,
+        base_addr: int,
+        size: int,
+        *,
+        index: int = 0,
+        persistent: bool = True,
+    ) -> None:
+        self.program_pmp_entry(
+            index=index,
+            cfg=PMP_CFG_DENY_NAPOT,
+            addr=self._encode_pmp_napot_addr(base_addr=int(base_addr), size=int(size)),
+            persistent=persistent,
+        )
 
     def allow_all_smode_access(self, *, index: int = 0, persistent: bool = True) -> None:
         max_napot_addr = (1 << (MEMBLOCK_PADDR_BITS - 2)) - 1

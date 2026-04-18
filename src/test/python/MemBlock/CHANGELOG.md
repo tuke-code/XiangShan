@@ -2,7 +2,41 @@
 
 ## 2026-04-17
 
-### 1. 为 MemBlock 顶层 `io_dft_*` 端口补上端口级 smoke 用例
+### 1. 补齐 load-side PMP 的 region deny 与 deny->allow 恢复用例
+
+本条目记录一次围绕 load-side PMP fault 语义的扩展。此前 `test_MemBlock_mmu_fault.py` 已经覆盖了 `allow_all` / `deny_all` 两态下的标量 load fault，但还无法证明 PMP 是按地址区域裁剪权限，也无法证明撤销 deny 后同一 translated load 能在 TLB hit 背景下恢复正常。本轮在 `env.mmu` 增加最小 `program_pmp_deny_region()` helper，并围绕它补上“deny region 内 fault、region 外继续成功、撤销 deny 后恢复成功”的 directed 用例。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - `MmuFacade` 新增 `program_pmp_deny_region()`
+  - 新增 PMP NAPOT region 地址编码与参数校验
+- `sequences/mmu_sequences.py`
+  - 新增 `MmuPmpRegionLoadRecoverySequence`
+- `tests/test_MemBlock_mmu_fault.py`
+  - 新增 `scalar_load_pmp_deny_region_hit_allow_outside_smoke`
+  - 新增 `scalar_load_pmp_deny_region_then_restore_allow_smoke`
+- `tests/test_MemBlock_env_mmu_smoke.py`
+  - 新增 `program_pmp_deny_region()` helper smoke
+- `docs/mmu_env_design_and_usage.md`、`docs/mmu_fault_directed_cases.md`、`docs/mmu_env_todo.md`
+  - 同步更新 PMP region helper 与 load-side PMP 覆盖口径
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/MemBlock_env.py src/test/python/MemBlock/sequences/mmu_sequences.py src/test/python/MemBlock/sequences/__init__.py src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py`
+  - 结果：通过
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py -k 'pmp'`
+  - 结果：`1 passed, 2 deselected`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py -k 'pmp_deny_region or restore_allow'`
+  - 结果：`2 passed, 4 deselected`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py`
+  - 结果：`3 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py`
+  - 结果：`6 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py -k 'fault_matrix'`
+  - 结果：`1 passed, 6 deselected`
+
+### 2. 为 MemBlock 顶层 `io_dft_*` 端口补上端口级 smoke 用例
 
 本条目记录一次围绕 MemBlock 顶层 DFT 端口可测性的收口。当前 Python 验证环境已经能直接读写 `io_dft_*` 与采样 `io_dft_frnt_*` / `io_dft_reset_frnt_*` / `io_dft_bcknd_cgen` / `io_dft_reset_bcknd_*`，但此前没有任何 testcase 覆盖这组顶层 pin，导致 line coverage 中一批 `io_dft_*` 导出长期保持未访问状态。本轮先把任务限定为“端口级 smoke”，验证顶层输入可驱动、导出端口可观测且与输入保持透传一致，不把范围扩大到 clock gate / reset tree 的内部功能验证。
 
@@ -22,7 +56,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py`
   - 结果：`27 passed`
 
-### 2. 收紧 `ScalarBankConflictReplaySequence` 的多 victim 接口
+### 3. 收紧 `ScalarBankConflictReplaySequence` 的多 victim 接口
 
 本条目记录一次围绕 bank-conflict replay sequence 接口收口的小型重构。此前为了平滑从单 victim 迁移到多 victim，`ScalarBankConflictReplaySequence` 同时保留了 `victim_load_txn` 与 `victim_load_txns` 两套入口；但当前用例已经升级到显式多 victim 语义，继续保留单数入口只会让 sequence API 维持多余兼容层，也容易让后续 testcase 混入过时调用方式。本轮去掉单数参数，只保留 tuple 形式的 `victim_load_txns`。
 
@@ -43,7 +77,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_replay.py`
   - 结果：`9 passed, 1 xfailed`
 
-### 3. 收口 replay 用例对默认 transport delay 的隐式时序依赖
+### 4. 收口 replay 用例对默认 transport delay 的隐式时序依赖
 
 本条目记录一次围绕“缩短默认 DCache/Uncache delay 后 replay 用例暴露出的隐式时序假设”的收口。问题并不在于新 delay 本身，而在于若干 sequence/testcase 把 `hot-cache ready`、`release/query` 捕获窗口、以及 `BC/FF/NK` 的表达方式写成了依赖旧 delay 的偶然时序。本轮把这些口径改成显式 warmup / trace-first / lifecycle 断言，同时保留缩短后的默认 delay。
 

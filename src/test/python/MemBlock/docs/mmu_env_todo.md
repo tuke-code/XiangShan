@@ -151,7 +151,6 @@
 
 - `install_invalid_sv39_mapping(...)`
 - `install_sv39_leaf_with_perm(...)`
-- `program_pmp_deny_region(...)`
 - `wait_load_fault_observed(...)`
 - `wait_store_fault_observed(...)`
 - `wait_no_normal_writeback_for_rob(...)`
