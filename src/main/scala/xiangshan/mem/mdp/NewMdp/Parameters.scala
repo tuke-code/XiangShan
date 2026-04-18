@@ -176,7 +176,7 @@ case class MdpTageTableParameters(
 ){}
 
 case class MdpBaseTableParameters( //fromMainBtb
-  NumEntries: Int = 2048,
+  NumEntries: Int = 1024,
   NumWay:     Int = 4,
   // Lowest level banks, each bank is a physical SRAM
   // This banking is used to resolve read-write conflicts and reduce SRAM power
