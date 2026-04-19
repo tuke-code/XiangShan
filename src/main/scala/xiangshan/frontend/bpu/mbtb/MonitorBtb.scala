@@ -563,7 +563,10 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
     val slot:       UInt = UInt(log2Ceil(NumSlots).W)
   }
 
-  // Calculate update action
+  // Calculate update action.
+  // GEM5's UseInvalidWay / UseSameTagFreeSlot depend on per-slot valid bits, which are
+  // not observable from training meta. The remaining actions compare by 2-bit RRPV only.
+  // If multiple ways have the same victim score, use an LFSR-based random tie-break.
   private val t1_updateActionVec = Wire(Vec(NumWay, new UpdateAction))
 
   // Default to zero
@@ -581,6 +584,7 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
     val wayFused    = meta.head.fused
     val wayRawHit   = meta.map(_.rawHit).reduce(_ || _)
     val maxSlotRrpv = rrpvs.reduceLeft((a, b) => Mux(a > b, a, b))
+    val minSlotRrpv = rrpvs.reduceLeft((a, b) => Mux(a < b, a, b))
 
     when(!t1_updateIsFused) {        // If update is unfused
       when(!wayFused && wayRawHit) { // If entry is unfused and only hit tag
@@ -589,7 +593,7 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
         action.slot       := PriorityEncoder(rrpvs.map(_ === maxSlotRrpv))
       }.elsewhen(!wayFused) { // If entry is unfused and not hit
         action.actionType := UpdateActionType.RetagUnfusedWay
-        action.rrpv       := maxSlotRrpv
+        action.rrpv       := minSlotRrpv
         action.slot       := 0.U
       }.otherwise { // If current way is fused
         action.actionType := UpdateActionType.BreakFusedWay
@@ -603,15 +607,16 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
         action.slot       := 0.U
       }.otherwise { // If entry is unfused
         action.actionType := UpdateActionType.ReplaceUnfusedPair
-        action.rrpv       := maxSlotRrpv
+        action.rrpv       := minSlotRrpv
         action.slot       := 0.U
       }
     }
   }
 
-  private val t1_finalMatrix   = CompareMatrix(VecInit(t1_updateActionVec.map(_.rrpv)), order = (a, b) => a > b)
-  private val t1_finalActionOH = t1_finalMatrix.getLeastElementOH(VecInit.fill(NumWay)(true.B))
-  private val t1_finalAction   = Mux1H(t1_finalActionOH, t1_updateActionVec)
+  private val t1_updateActionRrpvs = VecInit(t1_updateActionVec.map(_.rrpv))
+  private val t1_finalMatrix       = CompareMatrix(t1_updateActionRrpvs, order = (a, b) => a > b)
+  private val t1_finalRrpvOH       = t1_finalMatrix.getLeastElementOH(VecInit.fill(NumWay)(true.B))
+  private val t1_finalAction       = Mux1H(t1_finalRrpvOH, t1_updateActionVec)
 
   // Miss Path
   private val t1_missEntry      = t1_updateEntry
