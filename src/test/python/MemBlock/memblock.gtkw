@@ -1,15 +1,13 @@
 [*]
 [*] GTKWave Analyzer v3.3.61 (w)1999-2014 BSI
-[*] Thu Apr 16 00:11:36 2026
+[*] Tue Apr 21 16:51:38 2026
 [*]
-[dumpfile] "/nfs/home/majiuyue/XiangShan/src/test/python/MemBlock/data/toffee_tmp_20260415154933_307/master/test_api_MemBlock_scalar_bank_conflict_replay_smoke.fst"
-[dumpfile_mtime] "Wed Apr 15 07:56:08 2026"
-[dumpfile_size] 977044
-[savefile] "/nfs/home/majiuyue/XiangShan/src/test/python/MemBlock/memblock.gtkw"
-[timestart] 0
-[size] 3840 2051
+[dumpfile] "(null)"
+[savefile] "/nfs/home/majiuyue/XiangShan/VMEM/src/test/python/MemBlock/memblock.gtkw"
+[timestart] 54
+[size] 2160 1331
 [pos] -1111 -1
-*-7.058956 539 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
+*-3.998869 81 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1 -1
 [treeopen] TOP.
 [treeopen] TOP.MemBlock_top.
 [treeopen] TOP.MemBlock_top.MemBlock.
@@ -17,41 +15,115 @@
 [treeopen] TOP.MemBlock_top.MemBlock.inner_lsq.
 [treeopen] TOP.MemBlock_top.MemBlock.inner_lsq.loadQueue.
 [treeopen] TOP.MemBlock_top.MemBlock.inner_vlSplit_0.
-[sst_width] 486
-[signals_width] 651
+[sst_width] 561
+[signals_width] 542
 [sst_expanded] 1
-[sst_vpaned_height] 693
+[sst_vpaned_height] 683
 @28
 TOP.MemBlock_top.MemBlock.clock
 TOP.MemBlock_top.MemBlock.io_reset_backend
 @200
 -ENQ
+@28
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_0_bits_robIdx_flag
 @22
 TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_0_bits_robIdx_value[8:0]
+@23
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_0_bits_lqIdx_value[6:0]
 @28
+[color] 2
 TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_0_valid
+@200
+-
+@28
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_1_bits_robIdx_flag
 @22
 TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_1_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_1_bits_lqIdx_value[6:0]
 @28
+[color] 2
 TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_1_valid
 @200
+-
+@28
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_2_bits_robIdx_flag
+@22
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_2_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_2_bits_lqIdx_value[6:0]
+@28
+[color] 2
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_enqLsq_req_2_valid
+@200
+-
 -Issue
 @28
+TOP.MemBlock_top.MemBlock.clock
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_0_0_bits_robIdx_flag
+@22
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_0_0_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_0_0_bits_lqIdx_value[6:0]
+@28
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_0_0_ready
+[color] 3
 TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_0_0_valid
+@200
+-
+@28
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_1_0_bits_robIdx_flag
+@22
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_1_0_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_1_0_bits_lqIdx_value[6:0]
+@28
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_1_0_ready
+[color] 3
 TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_1_0_valid
 @200
+-
+@28
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_2_0_bits_robIdx_flag
+@22
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_2_0_bits_robIdx_value[8:0]
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_2_0_bits_lqIdx_value[6:0]
+@28
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_2_0_ready
+[color] 3
+TOP.MemBlock_top.MemBlock.io_ooo_to_mem_intIssue_2_0_valid
+@200
+-
 -WriteBack
+@22
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_0_0_bits_debug_vaddr[49:0]
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_0_0_bits_toIntRf_bits[63:0]
+@28
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_0_0_bits_toIntRf_valid
 @22
 TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_0_0_bits_toRob_bits_robIdx_value[8:0]
 @28
+[color] 2
 TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_0_0_valid
+@200
+-
+@22
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_1_0_bits_debug_vaddr[49:0]
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_1_0_bits_toIntRf_bits[63:0]
+@28
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_1_0_bits_toIntRf_valid
 @22
 TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_1_0_bits_toRob_bits_robIdx_value[8:0]
 @28
+[color] 2
 TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_1_0_valid
+@200
+-
+@22
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_2_0_bits_debug_vaddr[49:0]
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_2_0_bits_toIntRf_bits[63:0]
+@28
+TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_2_0_bits_toIntRf_valid
 @22
 TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_2_0_bits_toRob_bits_robIdx_value[8:0]
 @28
+[color] 2
 TOP.MemBlock_top.MemBlock.io_mem_to_ooo_intWriteback_2_0_valid
 @200
 -
@@ -86,9 +158,7 @@ TOP.MemBlock_top.MemBlock.inner_LoadUnit_1.io_replay_bits_uop_robIdx_value[8:0]
 [color] 3
 TOP.MemBlock_top.MemBlock.inner_LoadUnit_1.io_replay_valid
 TOP.MemBlock_top.MemBlock.inner_LoadUnit_1.io_debugInfo_replayCause_5
-@29
 TOP.MemBlock_top.MemBlock.inner_LoadUnit_1.io_debugInfo_replayCause_6
-@28
 TOP.MemBlock_top.MemBlock.inner_LoadUnit_1.io_debugInfo_replayCause_8
 TOP.MemBlock_top.MemBlock.inner_LoadUnit_1.io_debugInfo_s3_isReplay
 TOP.MemBlock_top.MemBlock.inner_LoadUnit_1.io_debugInfo_s3_isReplayFast
@@ -112,5 +182,20 @@ TOP.MemBlock_top.MemBlock.inner_LoadUnit_2.io_debugInfo_replayCause_8
 TOP.MemBlock_top.MemBlock.inner_LoadUnit_2.io_debugInfo_s3_isReplay
 TOP.MemBlock_top.MemBlock.inner_LoadUnit_2.io_debugInfo_s3_isReplayFast
 TOP.MemBlock_top.MemBlock.inner_LoadUnit_2.io_debugInfo_s3_isReplaySlow
+@200
+-
+-DCache
+@28
+TOP.MemBlock_top.MemBlock.clock
+@22
+TOP.MemBlock_top.MemBlock.inner_dcache.auto_client_out_a_bits_address[47:0]
+TOP.MemBlock_top.MemBlock.inner_dcache.auto_client_out_a_bits_source[5:0]
+@28
+TOP.MemBlock_top.MemBlock.inner_dcache.auto_client_out_a_valid
+@22
+TOP.MemBlock_top.MemBlock.inner_dcache.auto_client_out_d_bits_data[255:0]
+TOP.MemBlock_top.MemBlock.inner_dcache.auto_client_out_d_bits_source[5:0]
+@28
+TOP.MemBlock_top.MemBlock.inner_dcache.auto_client_out_d_valid
 [pattern_trace] 1
 [pattern_trace] 0

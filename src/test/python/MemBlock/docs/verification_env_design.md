@@ -93,6 +93,7 @@ pytest testcase
 
 1. 组装
    创建 bundle、agent、monitor、`MemoryModel`，并把 `memory.on_memory_edge` 注册到时钟回调。
+   这里需要补充一个当前已经验证过的约束：`StepRis(memory.on_memory_edge)` 只能可靠承担 rise/capture 语义，不能单独承担 transport drive phase。
 
 2. 协调
    负责 `advance_cycles()`、`reset()`、`idle_inputs()` 等顶层时序编排；同时在每拍末尾调用 `MemStatusMonitor` 与 `CommitAgent.advance()`，维持 pending pointer 和 commit 相关闭环。
@@ -127,6 +128,12 @@ testcase / sequence / request_apis / env.backend
 - DUT 拍推进的所有权唯一，便于维护和调试；
 - env 可以在统一位置固定“每拍前 drive、每拍后 monitor/model/update callback”的顺序；
 - agent 只表达业务语义与握手条件，而不是再携带散落的本地 `Step()` 时序。
+
+同时，这也暴露出 env 仍待继续收口的一点：
+
+- 当前 transport responder 的正确相位并不只是“挂到 `StepRis` 就够了”；
+- 对总线 mock 来说，env 还需要一个显式 `before_step` phase，用于在真正 `dut.Step(1)` 前把返回值 drive 到 bundle；
+- 这正是后续 `MemoryModel` 重构需要继续 formalize 的边界。
 
 ### 5.2 `advance_cycles()`、async 原语与 callback 关系
 

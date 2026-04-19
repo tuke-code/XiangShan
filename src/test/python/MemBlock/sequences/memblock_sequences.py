@@ -60,6 +60,15 @@ class ScalarLoadBurstSequenceResult:
 
 
 @dataclass(frozen=True)
+class ScalarLoadSaturationSequenceResult:
+    issued_loads: tuple[LoadTxn, ...]
+    final_state: SequenceState
+    completed_load_count: int
+    transport_stats_before: dict[str, int]
+    transport_stats_after: dict[str, int]
+
+
+@dataclass(frozen=True)
 class ScalarLoadBatchSameCycleSequenceResult:
     issued_loads: tuple[LoadTxn, ...]
     final_state: SequenceState
@@ -707,6 +716,83 @@ class ScalarLoadBurstSequence:
             env.assert_no_outstanding()
 
         return ScalarLoadBurstSequenceResult(
+            final_state=state,
+            completed_load_count=env.get_completed_load_count(),
+            transport_stats_before=stats_before,
+            transport_stats_after=_snapshot_transport_stats(env),
+        )
+
+
+class ScalarLoadSaturationSequence:
+    def __init__(
+        self,
+        requests,
+        *,
+        initial_state: SequenceState,
+        drain_cycles: int | None = None,
+        size: int = 8,
+        mask: int = 0xFF,
+        batch_width: int | None = None,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.requests = tuple((int(req_id), int(addr)) for req_id, addr in requests)
+        self.initial_state = initial_state
+        self.drain_cycles = drain_cycles
+        self.size = int(size)
+        self.mask = int(mask)
+        self.batch_width = None if batch_width is None else int(batch_width)
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> ScalarLoadSaturationSequenceResult:
+        if not self.requests:
+            raise ValueError("load saturation sequence requires at least one request")
+
+        configured_width = min(int(env.config.load_pipeline_width), int(env.config.lsq_enq_ports))
+        batch_width = configured_width if self.batch_width is None else int(self.batch_width)
+        if batch_width <= 0:
+            raise ValueError(f"load saturation sequence requires positive batch width: {batch_width}")
+        if batch_width > configured_width:
+            raise ValueError(
+                f"load saturation sequence batch width exceeds supported load input width: "
+                f"batch_width={batch_width}, supported={configured_width}"
+            )
+
+        drain_cycles = env.config.sequence.load_drain_cycles if self.drain_cycles is None else int(self.drain_cycles)
+        state = self.initial_state
+        completed_before = env.get_completed_load_count()
+        stats_before = _snapshot_transport_stats(env)
+        issued_loads = []
+
+        for batch_start in range(0, len(self.requests), batch_width):
+            batch_requests = self.requests[batch_start : batch_start + batch_width]
+            txns = []
+            for slot, (req_id, addr) in enumerate(batch_requests):
+                load_txn = LoadTxn(
+                    req_id=req_id,
+                    addr=addr,
+                    lq_ptr=ptr_inc(state.next_lq_ptr, env.config.sequence.load_queue_size, step=slot),
+                    sq_ptr=state.sq_ptr,
+                    size=self.size,
+                    mask=self.mask,
+                    enq_port=slot,
+                    issue_lane=slot,
+                )
+                txns.append(load_txn)
+
+            result = ScalarLoadBatchSameCycleSequence(tuple(txns)).run(env)
+            for load_txn in txns:
+                expect_load(env, load_txn)
+            issued_loads.extend(txns)
+            state = result.final_state
+
+        target_completed = completed_before + len(self.requests)
+        _wait_completed_load_count(env, target_completed, max_cycles=drain_cycles)
+        env.drain_writebacks(max_cycles=drain_cycles)
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+
+        return ScalarLoadSaturationSequenceResult(
+            issued_loads=tuple(issued_loads),
             final_state=state,
             completed_load_count=env.get_completed_load_count(),
             transport_stats_before=stats_before,

@@ -1691,7 +1691,7 @@ class MemBlockEnv:
         self._after_step_callbacks = []
         self._last_rar_query_req_by_lane = {}
 
-        self.dut.StepRis(self.memory.on_memory_edge)
+        self.dut.StepRis(self.memory.capture_on_rise)
 
         self.dut.reset.value = 0
         self.dut.io_hartId.value = 0
@@ -1749,6 +1749,7 @@ class MemBlockEnv:
             raise ValueError(f"cycles 必须非负，当前值为 {cycles}")
         for _ in range(cycles):
             self.commit_agent.drive()
+            self.memory.drive_pre_step()
             await self._clock.step(1)
             self.memory.after_cycle()
             self.vector_monitor.sample()

@@ -252,15 +252,22 @@ class TransportResponder:
             }
         )
 
-    def on_memory_edge(self, cycle: int) -> None:
+    def capture_on_rise(self, cycle: int) -> None:
         self._cycle = cycle
+        if self._in_reset():
+            return
+
+        self._capture_outer_request()
+        self._capture_dcache_requests()
+    
+    def drive_pre_step(self, cycle: int | None = None) -> None:
+        if cycle is not None:
+            self._cycle = int(cycle)
         self._drive_request_readies()
         if self._in_reset():
             self.drive_idle()
             return
 
-        self._capture_outer_request()
-        self._capture_dcache_requests()
         self._service_outer_d()
         self._service_b_channel()
         self._service_d_channel()

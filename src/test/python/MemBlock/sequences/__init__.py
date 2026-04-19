@@ -17,6 +17,8 @@ from .memblock_sequences import (
     ScalarLoadBatchWithStaSequence,
     ScalarLoadBatchWithStaSequenceResult,
     ScalarLoadBurstSequence,
+    ScalarLoadSaturationSequence,
+    ScalarLoadSaturationSequenceResult,
     ScalarLoadSequence,
     ScalarMixedTrafficSequence,
     ScalarNcReplaySequence,

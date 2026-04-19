@@ -125,7 +125,8 @@ dut.Step(1) 不能绕过 _step_async() 的统一语义栈。
 
 1. `dut.StepRis(self.memory.on_memory_edge)`
    - 这是注册在 DUT 时钟上升沿附近的底层 callback；
-   - 主要用于 memory model / transport mock 与 DUT 边沿交互；
+   - 更准确地说，它适合采样 DUT 在当前拍边沿暴露出的输出；
+   - 不应再把它理解成“下一拍输入驱动”的保留 hook；
    - 它属于 env 内部装配的一部分，不建议在 testcase 层自行扩展。
 
 2. `env.add_after_step_callback(callback)`
@@ -139,6 +140,29 @@ dut.Step(1) 不能绕过 _step_async() 的统一语义栈。
 - `after_step_callback` 更靠近“env 语义上的拍后稳定点”。
 
 绝大多数验证侧扩展，都应该优先使用 `after_step_callback`，而不是再去碰 DUT 级回调。
+
+### 4.4 本轮补充：`StepRis` 不是 pre-step drive phase
+
+沿着 dcache D 通道丢数据问题的修复可以确认，当前 xcomm/picker 语义下：
+
+1. `dut.Step(1)` 内部先完成底层 step；
+2. `StepRis` 回调属于这次 step 的 rise callback；
+3. Python 侧在 `StepRis` 中再去写 bundle，不能等价视为“已经为本拍握手准备好输入”。
+
+这意味着：
+
+- `StepRis` 适合 capture-on-rise
+- `after_step_callback` 适合拍后采样
+- 真正的 mock/transport drive 应当进入 **pre-step phase**
+
+因此，当前 `MemBlockEnv._step_async()` 中那条“在 `await self._clock.step(1)` 之前手工调用 transport”的修复，并不是偶然 workaround，而是在补齐此前文档没有写清楚的 phase 语义。
+
+今后凡是涉及总线 responder、memory mock、probe/release 返回等逻辑，都应遵守下面这条规则：
+
+```text
+采样 DUT 输出用 StepRis；驱动 DUT 输入用 before-step；
+不要在同一个 StepRis callback 里同时做 capture 和 drive。
+```
 
 ## 5. 对外接口分层
 

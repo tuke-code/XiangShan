@@ -276,6 +276,7 @@ def test_memory_model_finalize_checks_sbuffer_drain_against_goldenmem():
 def test_memory_model_records_outer_put_partial_as_drain_event():
     model = _create_model(outer_delay=0)
 
+    model.drive_pre_step(0)
     model.outer_a.valid.value = 1
     model.outer_a.bits_opcode.value = TL_A_PUT_PARTIAL
     model.outer_a.bits_size.value = 3
@@ -284,7 +285,8 @@ def test_memory_model_records_outer_put_partial_as_drain_event():
     model.outer_a.bits_mask.value = 0x0F
     model.outer_a.bits_data.value = 0xFFEEDDCCBBAA9988
 
-    model.on_memory_edge(1)
+    model.capture_on_rise(1)
+    model.drive_pre_step(1)
 
     assert model.stats["outer_write_request_count"] == 1
     assert model.drain_log[-1]["channel"] == "outer"
@@ -340,6 +342,7 @@ def test_memory_model_finalize_ignores_mmio_outer_drain_in_golden_compare():
         sbuffer_writes=[sbuffer_write],
     )
 
+    model.drive_pre_step(0)
     model.after_cycle()
     model.outer_a.valid.value = 1
     model.outer_a.bits_opcode.value = TL_A_PUT_FULL
@@ -348,7 +351,8 @@ def test_memory_model_finalize_ignores_mmio_outer_drain_in_golden_compare():
     model.outer_a.bits_address.value = 0x1000
     model.outer_a.bits_data.value = 0x1020304050607080
 
-    model.on_memory_edge(1)
+    model.capture_on_rise(1)
+    model.drive_pre_step(1)
     result = model.finalize_and_check_drain()
 
     assert result["drain_event_count"] == 2

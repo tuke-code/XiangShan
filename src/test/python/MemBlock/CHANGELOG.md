@@ -1,5 +1,82 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-22
+
+### 1. 落地 `MemoryModel` capture/drive phase split，并把单测切到显式相位语义
+
+本条目记录 `MemoryModel` 针对 xcomm/picker 时序语义缺口的首轮代码落地。此前 `MemoryModel.on_memory_edge()` 会在同一次 `StepRis` 回调中同时做请求采样与 transport drive，默认把 `StepRis` 当成 pre-step hook 使用；沿着 commit `f06e7a10c87ea47c0cfd399ce6e46556a87ef092` 复盘后可以确认，这种混用正是 dcache D 通道丢拍类问题容易被掩盖的根源之一。本轮先把 `capture-on-rise` 与 `before-step drive` 两个 phase 从代码上拆开，并把相应单测迁移到显式时序模型。
+
+#### 变更摘要
+
+- `memory_model.py`
+  - 新增 `capture_on_rise()` / `drive_pre_step()`
+  - 删除历史 `on_memory_edge()` 兼容入口，只保留显式 phase 接口
+- `model/transport_responder.py`
+  - 新增 `capture_on_rise()` / `drive_pre_step()`
+  - transport capture 与 outer/dcache ready、D/B 返回驱动解耦
+- `MemBlock_env.py`
+  - `StepRis` 改绑定 `self.memory.capture_on_rise`
+  - `_step_async()` 在真正 `clock.step(1)` 前显式调用 `self.memory.drive_pre_step()`
+- `tests/test_memory_model_store_logic.py`
+  - outer/MMIO 相关单测改为显式 `pre-step ready -> rise capture -> pre-step drive`
+- `tests/test_MemBlock_scalar_load_pipeline.py`
+  - 更新 saturation 用例 `xfail` 说明，补记 `intIssue` 阶段未处理 `ready` 反压这一已知 DUT 问题
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_memory_model_store_logic.py`
+  - 结果：`13 passed`
+- `python3 -m pytest -q --runxfail src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
+  - 结果：仍失败，表现为 `completed_load_count` 未达到 24；结合当前调试结论，可继续归因到真实 DUT 的 saturation 剩余问题，而非本次 phase split 引入的新回归
+
+### 2. 收口 dcache D 通道问题暴露出的 xcomm 时序语义，并补充 `MemoryModel` 重构方案
+
+本条目记录一次围绕 back-to-back cacheable load saturation 调试的文档收口。沿着 commit `f06e7a10c87ea47c0cfd399ce6e46556a87ef092` 可以确认，当前问题的关键不在于 `TransportResponder` 的 beat 队列算法本身，而在于此前文档没有明确写清楚 xcomm/picker 的 phase 语义：`StepRis` 更接近 capture-on-rise，而不等价于 pre-step drive hook。此前 `MemoryModel.on_memory_edge()` 同时承担请求采样与返回驱动，容易把 capture 与 drive 两个 phase 混在一起。本轮把这层缺失语义补进设计文档，并给出更稳的 `MemoryModel` 重构方向。
+
+#### 变更摘要
+
+- `docs/memory_model_design.md`
+  - 补充当前缺失的 xcomm 时序语义说明
+  - 记录为什么 `StepRis` 不应再单独承担 transport drive
+  - 新增 `MemoryModel` 长期重构方案：拆分 `TransportObserver` / `TransportDriver` / `ScoreboardFacade` / composition root
+- `docs/clock_control_and_migration_guide.md`
+  - 明确 `StepRis` 不是 pre-step drive phase
+  - 增补“capture 用 `StepRis`、drive 用 before-step”的规则
+- `docs/verification_env_design.md`
+  - 补充 env 当前尚待 formalize 的 `before_step` transport drive phase
+
+#### 验证情况
+
+- `python3 -m pytest -s -q --runxfail src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
+  - 结果：问题仍稳定复现，且调试日志确认 `dcache D` 已连续返回两拍；本条修改为文档收口，不改变当前行为
+
+## 2026-04-18
+
+### 1. 新增 back-to-back cacheable load 饱和用例
+
+本条目记录一次围绕“构建 back-to-back 的 `ld` 用例并把 DUT 输入侧打满”的 testcase/sequence 扩展。此前已有 `ScalarLoadBurstSequence` 能串行推进单 lane load，也已有 `ScalarLoadBatchSameCycleSequence` 能表达单拍 3-lane load；但还缺一个可复用的多拍连续饱和流封装，无法直接证明 `enqLsq + load issue` 在持续满发条件下的真实 DUT 行为。本轮新增 `ScalarLoadSaturationSequence`，按 `load_pipeline_width` 连续组织同拍 enqueue + issue，并在 `test_MemBlock_scalar_load_pipeline.py` 补上一条 cacheable directed saturation 用例。
+
+#### 变更摘要
+
+- `sequences/memblock_sequences.py`
+  - 新增 `ScalarLoadSaturationSequence`
+  - 新增 `ScalarLoadSaturationSequenceResult`
+- `sequences/__init__.py`
+  - 导出新的 saturation sequence/result
+- `tests/test_MemBlock_scalar_load_pipeline.py`
+  - 新增 `test_api_MemBlock_back_to_back_cacheable_load_saturation`
+  - 验证连续多拍按 load pipeline 宽度打满 `enqLsq + intIssue` 的 cacheable load 饱和流
+  - 当前按已确认 DUT 行为标记为 `xfail`，用于稳定复现“持续 3-lane 饱和下 load 回写数据错误”
+
+#### 验证情况
+
+- `python3 -m py_compile src/test/python/MemBlock/sequences/memblock_sequences.py src/test/python/MemBlock/sequences/__init__.py src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py`
+  - 结果：通过
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation or small_cacheable_load_burst_directed'`
+  - 结果：首次运行定位到新用例命中真实 DUT 数据错误；加 `xfail` 收口后为 `1 passed, 1 xfailed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py`
+  - 结果：`1 passed, 1 xfailed`
+
 ## 2026-04-17
 
 ### 1. 补齐 load-side PMP 的 region deny 与 deny->allow 恢复用例

@@ -409,10 +409,15 @@ class MemoryModel:
             delay_cycles=delay_cycles,
         )
 
-    def on_memory_edge(self, cycle: int) -> None:
+    def capture_on_rise(self, cycle: int) -> None:
         self._cycle = cycle
-        self.transport.on_memory_edge(cycle)
         self.scoreboard.set_cycle(cycle)
+        self.transport.capture_on_rise(cycle)
+
+    def drive_pre_step(self, cycle: int | None = None) -> None:
+        if cycle is not None:
+            self._cycle = int(cycle)
+        self.transport.drive_pre_step(self._cycle)
 
     def after_cycle(self) -> None:
         self.drive_writeback_ready()
