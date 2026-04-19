@@ -431,6 +431,7 @@ class DCacheLineResp(implicit p: Parameters) extends DCacheBundle
   val data   = UInt((cfg.blockBytes * 8).W)
   // cache req missed, send it to miss queue
   val miss   = Bool()
+  val isAlloc  = Bool()
   // cache req nacked, replay it later
   val replay = Bool()
   val id     = UInt(reqIdWidth.W)
@@ -974,6 +975,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   missQueue.io.debugTopDown <> io.debugTopDown
   missQueue.io.l2_hint <> RegNext(io.l2_hint)
   missQueue.io.mainpipe_info := mainPipe.io.mainpipe_info
+  mainPipe.io.miss_req_pipe_reg_alloc := missQueue.io.miss_req_pipe_reg_alloc
   missQueue.io.occupy_set.zip(ldu.map(_.io.occupy_set)).foreach { case (l, r) => l <> r }
   missQueue.io.occupy_fail.zip(ldu.map(_.io.occupy_fail)).foreach { case (l, r) => l <> r }
   mainPipe.io.refill_info := missQueue.io.refill_info

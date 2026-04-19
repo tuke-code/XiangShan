@@ -1084,6 +1084,8 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
     val debugTopDown = new DCacheTopDownIO
     val l1Miss = Output(Bool())
+
+    val miss_req_pipe_reg_alloc = Output(Bool())
   })
 
   // 128KBL1: FIXME: provide vaddr for l2
@@ -1129,6 +1131,7 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   io.resp.id := Mux(!req_pipeline_reg_handled, OHToUInt(req_mshr_handled_vec), miss_req_pipe_reg.mshr_id)
   io.resp.handled := Cat(req_mshr_handled_vec).orR || req_pipeline_reg_handled
   io.resp.merged := merge
+  io.miss_req_pipe_reg_alloc := miss_req_pipe_reg.alloc
 
   /*  MissQueue enq logic is now splitted into 2 cycles
    *
