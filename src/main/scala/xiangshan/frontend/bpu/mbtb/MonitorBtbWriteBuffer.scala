@@ -131,10 +131,7 @@ class MonitorBtbWriteBuffer(
 
   writePortValid.zipWithIndex.foreach { case (writeValid, portIdx) =>
     val setIdxHitVec = entries(portIdx).zip(valids(portIdx)).map { case (entry, valid) =>
-      writeValid && valid && writePortBits(portIdx).setIdx === entry.setIdx &&
-      // In case of unfused write different slot, keep it.
-      !(!entry.entry.fusion && !writePortBits(portIdx).entry.fusion &&
-        writePortBits(portIdx).slotMask =/= entry.slotMask)
+      writeValid && valid && writePortBits(portIdx).setIdx === entry.setIdx
     }
     XSError(
       writeValid && PopCount(setIdxHitVec) > 1.U,
