@@ -1020,6 +1020,7 @@ package object xiangshan {
     val LoadIQFullStall = Value("LoadIQFullStall")
     val StoreIQFullStall = Value("StoreIQFullStall")
     val OtherIQFullStall = Value("OtherIQFullStall")
+    val RobHeadNotIssued = Value("RobHeadNotIssued")
 
     // memblock
     val LoadTLBStall = Value("LoadTLBStall")
