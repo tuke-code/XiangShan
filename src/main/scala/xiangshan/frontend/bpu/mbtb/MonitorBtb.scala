@@ -19,6 +19,7 @@ import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import utility.ChiselDB
+import utility.LFSR64
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
 import utils.EnumUInt
@@ -613,10 +614,21 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
     }
   }
 
+  private val t1_random = LFSR64()(log2Ceil(NumWay) - 1, 0)
+
   private val t1_updateActionRrpvs = VecInit(t1_updateActionVec.map(_.rrpv))
-  private val t1_finalMatrix       = CompareMatrix(t1_updateActionRrpvs, order = (a, b) => a > b)
-  private val t1_finalRrpvOH       = t1_finalMatrix.getLeastElementOH(VecInit.fill(NumWay)(true.B))
-  private val t1_finalAction       = Mux1H(t1_finalRrpvOH, t1_updateActionVec)
+  private val t1_rawMatrix         = CompareMatrix(t1_updateActionRrpvs, order = (a, b) => a > b)
+  private val t1_rawRrpvOH         = t1_rawMatrix.getLeastElementOH(VecInit.fill(NumWay)(true.B))
+  private val t1_rawRrpv           = Mux1H(t1_rawRrpvOH, t1_updateActionRrpvs)
+  private val t1_rawRrpvMask       = VecInit(t1_updateActionRrpvs.map(_ === t1_rawRrpv))
+  private val t1_rawRrpvRotateMask = VecInit.tabulate(NumWay) { r =>
+    VecInit.tabulate(NumWay)(way => t1_rawRrpvMask((way + r) % NumWay))
+  }
+  private val t1_rawRrpvRotateOH = t1_rawRrpvRotateMask.map(m => PriorityEncoderOH(m))
+  private val t1_finalRrpvOHVec = VecInit.tabulate(NumWay) { r =>
+    VecInit.tabulate(NumWay)(way => t1_rawRrpvRotateOH(r)((way - r + NumWay) % NumWay))
+  }
+  private val t1_finalAction = Mux1H(t1_finalRrpvOHVec(t1_random), t1_updateActionVec)
 
   // Miss Path
   private val t1_missEntry      = t1_updateEntry
