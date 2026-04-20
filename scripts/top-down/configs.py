@@ -27,6 +27,7 @@ xs_custom_rename_map = {
     'LoadIQFullStall': 'MergeIQFullStallLoad',
     'StoreIQFullStall': 'MergeIQFullStallStore',
     'OtherIQFullStall': 'MergeIQFullStall',
+    'RobHeadNotIssued': 'MergeRobHeadNotIssued',
 
     'IQEnqPolicyStallIssued': 'MergeIQpolicyStall',
     'IQEnqPolicyStall': 'MergeIQpolicyStall',
@@ -112,6 +113,7 @@ xs_backend_rename_map = {
     'LoadIQFullStall': 'MergeIQFullStall',
     'StoreIQFullStall': 'MergeIQFullStall',
     'OtherIQFullStall': 'MergeIQFullStall',
+    'RobHeadNotIssued': 'MergeIQpolicyStall',
 
     'ControlRecoveryStall': 'MergeRabWalkStall',
     'MemVioRecoveryStall': 'MergeRabWalkStall',
@@ -222,6 +224,7 @@ xs_coarse_rename_map = {
     'LoadIQFullStall': 'MergeCore',
     'StoreIQFullStall': 'MergeCore',
     'OtherIQFullStall': 'MergeCore',
+    'RobHeadNotIssued': 'MergeCore',
 
     'LoadTLBStall': 'MergeLoad',
     'LoadL1Stall': 'MergeLoad',
@@ -370,6 +373,7 @@ targets = {
     'LoadIQFullStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadIQFullStall,\s+(\d+)',
     'StoreIQFullStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: StoreIQFullStall,\s+(\d+)',
     'OtherIQFullStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: OtherIQFullStall,\s+(\d+)',
+    'RobHeadNotIssued': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: RobHeadNotIssued,\s+(\d+)',
 
     'LoadTLBStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadTLBStall,\s+(\d+)',
     'LoadL1Stall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadL1Stall,\s+(\d+)',
