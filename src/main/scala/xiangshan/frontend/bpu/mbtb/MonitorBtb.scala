@@ -502,7 +502,7 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   }
 
   // Write entry only when there's a mispredict, and if:
-  private val t1_entryNeedWrite = t1_mispredictInfo.valid && (
+  private val t1_entryNeedWrite = t1_mispredictInfo.valid && t1_mispredictInfo.bits.taken && (
     // 1. not hit, always write a new entry, use mbtb replacer's victim way.
     !t1_hit ||
       // 2. hit, do write only if:
@@ -728,8 +728,9 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
       val slot = idx % NumSlots
       val hitMask =
         t1_branches.map(branch => branch.valid && branch.bits.attribute.isConditional && meta.hit(branch.bits))
-      val actualTaken    = Mux1H(hitMask, t1_branches.map(_.bits.taken))
-      val slotOverridden = t1_entryNeedWrite && t1_writeWayMask(way) && t1_writeSlotMask(slot)
+      val actualTaken = Mux1H(hitMask, t1_branches.map(_.bits.taken))
+      val slotOverridden =
+        t1_entryNeedWrite && t1_writeAlignBankMask(alignIdx) && t1_writeWayMask(way) && t1_writeSlotMask(slot)
 
       t1_counterWayMask(alignIdx)(idx) := slotOverridden || hitMask.reduce(_ || _)
       t1_newCounters(alignIdx)(idx) :=
