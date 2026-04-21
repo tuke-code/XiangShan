@@ -29,7 +29,7 @@ import top.{ArgParser, BusPerfMonitor, Generator}
 import utility._
 import utility.sram.SramBroadcastBundle
 import coupledL2.EnableCHI
-import coupledL2.tl2chi.PortIO
+import coupledL2.tl2chi.{PortIO, LCrdyIn}
 import xiangshan.backend.trace.TraceCoreInterface
 
 class XSTile()(implicit p: Parameters) extends LazyModule
@@ -122,6 +122,7 @@ class XSTile()(implicit p: Parameters) extends LazyModule
       val dft_reset = Option.when(hasMbist)(Input(new DFTResetSignals()))
       val l2_flush_en = Option.when(EnablePowerDown) (Output(Bool()))
       val l2_flush_done = Option.when(EnablePowerDown) (Output(Bool()))
+      val lcrdy = if (enableCHI) Some(new LCrdyIn) else None
     })
 
     dontTouch(io.hartId)
@@ -171,6 +172,15 @@ class XSTile()(implicit p: Parameters) extends LazyModule
     io.l2_flush_en.foreach { _ := core.module.io.l2_flush_en }
     core.module.io.l2_flush_done := l2top.module.io.l2_flush_done.getOrElse(false.B)
     io.l2_flush_done.foreach { _ := l2top.module.io.l2_flush_done.getOrElse(false.B) }
+
+    l2top.module.io.lcrdy.foreach { l2_lcrdy =>
+      io.lcrdy.foreach { io_lcrdy =>
+        l2_lcrdy.req.rdy := io_lcrdy.req.rdy
+        l2_lcrdy.rsp.rdy := io_lcrdy.rsp.rdy
+        l2_lcrdy.dat.rdy := io_lcrdy.dat.rdy
+        l2_lcrdy.empty := io_lcrdy.empty
+      }
+    }
 
     l2top.module.io.dft.zip(io.dft).foreach({ case (a, b) => a := b })
     l2top.module.io.dft_reset.zip(io.dft_reset).foreach({ case (a, b) => a := b })
