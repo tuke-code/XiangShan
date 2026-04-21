@@ -40,7 +40,7 @@ case class ScParameters(
     GlobalEnable:        Boolean = true,
     BWEnable:            Boolean = true,
     ImliEnable:          Boolean = true,
-    BiasEnable:          Boolean = true,
+    BiasEnable:          Boolean = false,
     CtrWidth:            Int = 6,
     ThresholdWidth:      Int = 13,
     ThresholdInit:       Int = 1130, // magic number,greater than min and less than max
