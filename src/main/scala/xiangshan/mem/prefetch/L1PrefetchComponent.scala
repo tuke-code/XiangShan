@@ -954,7 +954,7 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
       ld_in.bits := io.ld_in(i).bits
     }
   }
-  stream_train_filter.io.enable := enable
+  stream_train_filter.io.enable := false.B
   stream_train_filter.io.flush := stream_pf_ctrl.flush
 
   stride_train_filter.io.ld_in.zipWithIndex.foreach {
@@ -966,7 +966,7 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   stride_train_filter.io.enable := enable
   stride_train_filter.io.flush := stride_pf_ctrl.flush
 
-  stream_bit_vec_array.io.enable := enable
+  stream_bit_vec_array.io.enable := false.B
   stream_bit_vec_array.io.flush := stream_pf_ctrl.flush
   stream_bit_vec_array.io.dynamic_depth := stream_pf_ctrl.dynamic_depth
   stream_bit_vec_array.io.confidence := stream_pf_ctrl.confidence

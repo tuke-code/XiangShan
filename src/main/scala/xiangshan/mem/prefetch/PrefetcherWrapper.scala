@@ -167,7 +167,7 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
 
   val smsOpt: Option[SMSPrefetcher] = if(HasSMS) Some(Module(new SMSPrefetcher())) else None
   smsOpt.foreach (pf => {
-    val enableSMS = Constantin.createRecord(s"pf_enableSMS$hartId", initValue = true)
+    val enableSMS = Constantin.createRecord(s"pf_enableSMS$hartId", initValue = false)
     // constantinCtrl && master switch csrCtrl && single switch csrCtrl
     pf.io.enable := enableSMS && l1D_pf_enable &&
       GatedRegNextN(io.pfCtrlFromCSR.l2_pf_recv_enable, 2, Some(false.B))
