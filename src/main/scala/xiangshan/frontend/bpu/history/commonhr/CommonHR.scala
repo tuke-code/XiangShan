@@ -28,13 +28,14 @@ import xiangshan.frontend.bpu.StageCtrl
 
 class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with HasCircularQueuePtrHelper {
   class CommonHRIO extends CommonHRBundle {
-    val stageCtrl:     StageCtrl           = Input(new StageCtrl)
-    val s1_imliTaken:  Bool                = Input(Bool())
-    val update:        CommonHRUpdate      = Input(new CommonHRUpdate)
-    val redirect:      CommonHRRedirect    = Input(new CommonHRRedirect)
-    val s0_imli:       UInt                = Output(UInt(ImliHistoryLength.W))
-    val s0_commonHR:   CommonHREntry       = Output(new CommonHREntry)
-    val s3ResolveMeta: CommonHRResolveMeta = Output(new CommonHRResolveMeta)
+    val stageCtrl:      StageCtrl           = Input(new StageCtrl)
+    val s1_imliTaken:   Bool                = Input(Bool())
+    val update:         CommonHRUpdate      = Input(new CommonHRUpdate)
+    val redirect:       CommonHRRedirect    = Input(new CommonHRRedirect)
+    val s0_imli:        UInt                = Output(UInt(ImliHistoryLength.W))
+    val s0_commonHR:    CommonHREntry       = Output(new CommonHREntry)
+    val s3ResolveMeta:  CommonHRResolveMeta = Output(new CommonHRResolveMeta)
+    val s3RedirectMeta: CommonHRResolveMeta = Output(new CommonHRResolveMeta)
 
     val s0_startPc: Option[PrunedAddr] = Some(Input(PrunedAddr(VAddrBits))) // for debug
   }
@@ -61,6 +62,8 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   private val commonHR               = RegInit(0.U.asTypeOf(new CommonHREntry))
   private val s3_commonHRResolveMeta = WireInit(0.U.asTypeOf(new CommonHRResolveMeta))
 
+  private val s3_commonHRRedirectMeta = WireInit(0.U.asTypeOf(new CommonHRResolveMeta))
+
   private val enqPtr     = RegInit(HistPtr(false.B, 0.U))
   private val predPtr    = RegInit(HistPtr(false.B, 0.U))
   private val writePtr   = RegInit(HistPtr(false.B, 0.U))
@@ -75,9 +78,15 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   s3_commonHRResolveMeta.bw    := s3_commonHR.bw
   s3_commonHRResolveMeta.imli  := s3_imli
 
-  io.s0_imli       := s0_imli
-  io.s3ResolveMeta := s3_commonHRResolveMeta
-  io.s0_commonHR   := s0_commonHR
+  s3_commonHRRedirectMeta.valid := commonHR.valid
+  s3_commonHRRedirectMeta.ghr   := commonHR.ghr
+  s3_commonHRRedirectMeta.bw    := commonHR.bw
+  s3_commonHRRedirectMeta.imli  := s3_imli
+
+  io.s0_imli        := s0_imli
+  io.s3ResolveMeta  := s3_commonHRResolveMeta
+  io.s3RedirectMeta := s3_commonHRRedirectMeta
+  io.s0_commonHR    := s0_commonHR
 
   /*
    * s3_fire update CommonHR
