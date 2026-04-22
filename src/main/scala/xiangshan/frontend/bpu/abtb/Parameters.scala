@@ -21,7 +21,7 @@ import xiangshan.frontend.bpu.HasBpuParameters
 case class AheadBtbParameters(
     NumEntries:           Int = 1024,
     NumBanks:             Int = 4,
-    NumWays:              Int = 8,
+    NumWays:              Int = 4,
     TagWidth:             Int = 24,
     TargetLowerBitsWidth: Int = 22,
     WriteBufferSize:      Int = 4,
@@ -45,6 +45,7 @@ trait HasAheadBtbParameters extends HasBpuParameters {
   def BankIdxWidth:         Int = log2Ceil(NumBanks)
   def WriteBufferSize:      Int = abtbParameters.WriteBufferSize
   def TakenCounterWidth:    Int = abtbParameters.TakenCounterWidth
+  def ForceWriteThreshold:  Int = 2
 
   def EnableTargetFix: Boolean = abtbParameters.EnableTargetFix
 }

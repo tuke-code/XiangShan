@@ -205,7 +205,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   /* *** predictor specific inputs *** */
   abtb.io.redirectValid := redirect.valid
+  abtb.io.redirectHash  := redirect.bits.meta.pathHist(AheadBtbHashBitWidth - 1, 0)
   abtb.io.overrideValid := s3_override
+  abtb.io.overrideHash  := s3_pathHist(AheadBtbHashBitWidth - 1, 0)
+  abtb.io.normalHash    := phr.io.pathHist(AheadBtbHashBitWidth - 1, 0)
 
   utage.io.pathHist         := phr.io.pathHist
   utage.io.abtbPrediction   := abtb.io.abtbResult
