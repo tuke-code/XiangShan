@@ -118,7 +118,7 @@ env.drain_writebacks()
 3. load compare 仍通过 `env.expect_scalar_load()` 登记，但需要使用已经 prepare/send 绑定好的 runtime 字段。
 4. primitive 场景结束后仍要显式调用 `drain_writebacks()` 或更强的收敛检查。
 
-如果你需要表达“多条 load 同拍 issue”或“load 与 sta/std 混合同拍 issue”，先问自己这是不是一个稳定业务场景。
+如果你需要表达“多条 load 同拍 issue”或“load 与 sta/std 混合同拍 issue”，先问自己这是不是一个稳定业务场景，以及你真正想证明的是“同拍组合”还是“在 backpressure 下持续打满”。
 
 如果答案是“是”，优先抽成 sequence，例如：
 
@@ -144,6 +144,18 @@ env.backend.execute(
 )
 ```
 
+如果你关心的是 `ready` 反压下的持续吞吐，而不是“所有 lane 必须同拍一起 fire”，请显式切到 elastic 模式：
+
+```python
+IssueCyclePlan.from_ops(
+    IssueOp.load_from_txn(load0),
+    IssueOp.load_from_txn(load1),
+    handshake_mode="elastic",
+)
+```
+
+这里的 `elastic` 表示 lane 级握手，但接受结果是在 post-step 相位观察的：env 会先保持这条 lane 的 drive 过一个周期，再根据 step 之后可见的接受结果决定是否 retire 该 lane；还没被接受的 lane 会继续保留原请求直到成功。
+
 旧的 `send_load_batch_same_cycle()` / `send_load_batch_with_sta_same_cycle()` 仍保留作兼容包装，但不再作为后续扩接口的方向；新的 testcase 应避免再从 `request_apis.py` 导入这类场景级 helper。
 
 如果你要写的是向量访存场景，而不是标量 load/store，请不要直接把这一节的标量骨架硬改成 `vecIssue` 脚本；应优先改用：
@@ -160,9 +172,11 @@ env.backend.execute(
 
 可以用一个很实用的判断标准：
 
-1. 如果你关心的是“这一拍 backend/issue 到底发了哪些 lane、这些 lane 如何组合”，优先写 `BackendSendPlan` / `IssueCyclePlan`。
-2. 如果你关心的是“这个测试场景从 reset 到收敛应该怎么组织”，优先写 sequence。
-3. 如果某个 primitive 脚本已经在多个 testcase 中重复出现，就不要继续把它散落在测试里，应该上提成 sequence。
+1. 如果你关心的是“这一拍 backend/issue 到底发了哪些 lane、这些 lane如何同拍组合”，优先写 strict `IssueCyclePlan`。
+2. 如果你关心的是“在 lane 级 `ready` 反压下能否持续把请求压进去”，优先写 elastic `IssueCyclePlan` 或封装好的 saturation sequence。
+   其中 `ScalarLoadSaturationSequence` 会自动把 drain 预算提升到 replay 场景同等级，避免满载 replay/backpressure 下 compare 预算过短。
+3. 如果你关心的是“这个测试场景从 reset 到收敛应该怎么组织”，优先写 sequence。
+4. 如果某个 primitive 脚本已经在多个 testcase 中重复出现，就不要继续把它散落在测试里，应该上提成 sequence。
 
 也就是说：
 

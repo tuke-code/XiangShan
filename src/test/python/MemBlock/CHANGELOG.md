@@ -1,8 +1,89 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-24
+
+### 1. 把 elastic issue 收敛回纯 `valid/ready` 握手语义
+
+本条目记录一次对 `IssueAgent` elastic 路径的语义回退。结合最近对 saturation 日志的复盘，当前验证环境里真正需要由 `IssueAgent` 保证的职责只有“保持请求直到 `valid && ready` 成功握手”；是否被后续 pipe 观察到、何时 writeback，不应再由 issue 层追加一段“确认/重试”状态机代劳。最终实现删除了 elastic 模式下的 `awaiting_confirm` / `retry` 逻辑，恢复为 per-lane 纯握手语义，避免 issue 层与 monitor/scoreboard 的职责继续缠绕。
+
+#### 变更摘要
+
+- `agents/issue_agent.py`
+  - elastic 模式改回“未握手 lane 持续 drive，握手成功 lane 立即 retire”
+  - 保留 issue 侧调试打印，但不再维护 load 确认状态机
+- `tests/test_issue_agent.py`
+  - 单测更新为纯 `valid/ready` 握手语义，不再期待 debug confirmation / retry
+- `docs/backend_request_model_design.md` / `docs/test_sequence_and_extension_guide.md`
+  - 同步更新 `IssueCyclePlan(elastic)` 的语义说明
+- `docs/dut_port_behavior.md` / `tests/test_issue_agent.py`
+  - 把 issue 接受结果的观测点正式定义为 post-step 相位
+  - fake env 改为在 `_step_async()` 返回后暴露刚结束那一拍的 accept 结果
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_issue_agent.py`
+  - 结果：`5 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：`21 passed`
+- `python3 -m pytest -q -s src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
+  - 结果：失败；`IssueAgent` 已按纯 `valid/ready` 语义完成所有 24 笔 issue，但 DUT 最终只完成 `10/24` 笔 compare，当前阻塞点已转移到 issue 之后的完成路径
+
 ## 2026-04-22
 
-### 1. 落地 `MemoryModel` capture/drive phase split，并把单测切到显式相位语义
+### 1. 收紧 elastic issue 的“候选发射/延迟确认”语义，并补足 saturation compare 预算
+
+本条目记录 `IssueCyclePlan(elastic)` 的第二轮收口。第一轮修复已经把“全批次 barrier”拆成了 per-lane backpressure，但真实 DUT 调试显示：在当前 picker/xcomm 语义下，`intIssue.ready` 更接近“允许候选发射”，并不等价于“本拍已经能立刻从白盒 debug 看到这条 load”；如果测试侧在看到 `ready=1` 后马上把 lane 判定为已完成握手，仍会出现请求丢失；如果又因为 debug 延迟而立刻重发，则会制造重复 issue。最终实现改成两阶段语义：`ready` 先把 lane 送入 awaiting-confirm，暂停重发；后续拍再用 `debugLsInfo` 里的 ROB 可见性做确认，超时才回到 pending 重新 drive。同时，`ScalarLoadSaturationSequence` 把 drain 预算提升到 replay 场景同等级，避免满载回放下 compare 预算过短。
+
+#### 变更摘要
+
+- `agents/issue_agent.py`
+  - elastic 模式改为 `candidate ready -> awaiting confirm -> debug confirm/retry`
+  - `note_load_issued()` 前移到候选发射时刻，保持 ROB/scoreboard 预算顺序稳定
+- `sequences/memblock_sequences.py`
+  - `ScalarLoadSaturationSequence` 的 issue/compare/drain 预算统一改用 replay 级 drain window
+- `tests/test_issue_agent.py`
+  - 新增“debug 确认期间不重复 drive lane”的单测
+- `docs/backend_request_model_design.md` / `docs/test_sequence_and_extension_guide.md`
+  - 补记 elastic 模式下“`ready` 只是候选发射、debug 延迟确认”的语义
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_issue_agent.py src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：`24 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
+  - 结果：`1 passed, 1 deselected`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_random_load.py -k 'three_random_mem_loads_same_cycle_via_sequence or three_random_mem_loads_same_cycle_via_plan'`
+  - 结果：`2 passed, 4 deselected`
+
+### 2. 给 `IssueCyclePlan` 引入 strict/elastic 握手模式，并打通饱和 load 的 ready 反压场景
+
+本条目记录一次围绕 `intIssue.ready` 反压语义的主动控制面修复。此前 `IssueCyclePlan` 被实现成“计划内所有 lane 必须同时 ready，整批才能发射”，这会把真实 DUT 的 lane-local `valid/ready` 协议错误收紧成全批次 barrier，也正是 `back_to_back_cacheable_load_saturation` 在 `completed_load_count` 卡不满 24 的直接原因。本轮把 `IssueCyclePlan` 扩展为双模式：默认 `strict` 继续表达“必须同拍一起 fire”的 directed 场景；新增 `elastic` 明确表达“同一 issue 批次、允许在 per-lane ready 反压下跨拍完成握手”。`ScalarLoadSaturationSequence` 切到 `elastic` 后，目标用例恢复为正常通过。
+
+#### 变更摘要
+
+- `transactions.py` / `agents/issue_agent.py`
+  - `IssueCyclePlan` 新增 `handshake_mode={'strict','elastic'}`
+  - `IssueAgent` 新增 elastic per-lane 握手状态机
+  - 已握手 lane 会在后续拍明确回到 idle，避免重复发射旧请求
+- `sequences/memblock_sequences.py`
+  - `ScalarLoadSaturationSequence` 改为用 `IssueCyclePlan(handshake_mode='elastic')`
+  - `ScalarLoadBatchSameCycleSequence` 保持 strict 语义，继续服务同拍组合证明
+- `tests/test_MemBlock_scalar_load_pipeline.py`
+  - `test_api_MemBlock_back_to_back_cacheable_load_saturation` 去掉 `xfail`
+- `tests/test_issue_agent.py` / `tests/test_request_apis_backend_facade.py`
+  - 新增 strict 与 elastic 握手单测
+  - 补充 backend facade 对 `handshake_mode` 透传与兼容 wrapper 默认 strict 的检查
+- `docs/backend_request_model_design.md` / `docs/test_sequence_and_extension_guide.md`
+  - 同步更新 `IssueCyclePlan` 的新语义与选型规则
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_issue_agent.py src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：通过
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
+  - 结果：通过
+
+### 3. 落地 `MemoryModel` capture/drive phase split，并把单测切到显式相位语义
 
 本条目记录 `MemoryModel` 针对 xcomm/picker 时序语义缺口的首轮代码落地。此前 `MemoryModel.on_memory_edge()` 会在同一次 `StepRis` 回调中同时做请求采样与 transport drive，默认把 `StepRis` 当成 pre-step hook 使用；沿着 commit `f06e7a10c87ea47c0cfd399ce6e46556a87ef092` 复盘后可以确认，这种混用正是 dcache D 通道丢拍类问题容易被掩盖的根源之一。本轮先把 `capture-on-rise` 与 `before-step drive` 两个 phase 从代码上拆开，并把相应单测迁移到显式时序模型。
 
@@ -29,7 +110,7 @@
 - `python3 -m pytest -q --runxfail src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
   - 结果：仍失败，表现为 `completed_load_count` 未达到 24；结合当前调试结论，可继续归因到真实 DUT 的 saturation 剩余问题，而非本次 phase split 引入的新回归
 
-### 2. 收口 dcache D 通道问题暴露出的 xcomm 时序语义，并补充 `MemoryModel` 重构方案
+### 4. 收口 dcache D 通道问题暴露出的 xcomm 时序语义，并补充 `MemoryModel` 重构方案
 
 本条目记录一次围绕 back-to-back cacheable load saturation 调试的文档收口。沿着 commit `f06e7a10c87ea47c0cfd399ce6e46556a87ef092` 可以确认，当前问题的关键不在于 `TransportResponder` 的 beat 队列算法本身，而在于此前文档没有明确写清楚 xcomm/picker 的 phase 语义：`StepRis` 更接近 capture-on-rise，而不等价于 pre-step drive hook。此前 `MemoryModel.on_memory_edge()` 同时承担请求采样与返回驱动，容易把 capture 与 drive 两个 phase 混在一起。本轮把这层缺失语义补进设计文档，并给出更稳的 `MemoryModel` 重构方向。
 
@@ -49,6 +130,34 @@
 
 - `python3 -m pytest -s -q --runxfail src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
   - 结果：问题仍稳定复现，且调试日志确认 `dcache D` 已连续返回两拍；本条修改为文档收口，不改变当前行为
+
+### 5. 用 `io_ldu_ldin` 精确确认 elastic load 接受时刻，并修复 ready 反压下的漏发/误记账
+
+本条目记录 `IssueCyclePlan(elastic)` 的第三轮真实 DUT 收口。前一版把 `ready` 解释成“候选发射”，已经能避免一部分重复 drive，但仅靠 `debugLsInfo.robIdx` 做确认仍然过弱，在 ROB wrap 与饱和流混杂下会把少数 lane 过早判成已确认，最终表现为 `dcache_a_request_count` 卡在 22、`completed_load_count` 卡在 21。最终实现改成“候选发射后优先等 `io_ldu_ldin_*` 里出现匹配的 `robIdx/lqIdx`，拿不到这类细粒度白盒时才退回 `debugLsInfo` fallback”，同时把 `note_load_issued()` 放到真正确认成功之后，修复了 ready 反压场景下的漏发和记账错位。
+
+#### 变更摘要
+
+- `agents/issue_agent.py`
+  - 恢复 elastic 三态：`pending -> awaiting_confirm -> fired/retry`
+  - load 确认优先匹配 `sample_load_issue_state()` 导出的 `io_ldu_ldin.robIdx/lqIdx`
+  - `note_load_issued()` 改到确认成功时刻，避免候选发射与真实 issue 顺序错位
+- `MemBlock_env.py`
+  - 新增 `sample_load_issue_state()`，结构化采样 `MemBlock_inner_lsq_io_ldu_ldin_*`
+- `tests/test_issue_agent.py`
+  - 补充“确认等待期间撤掉 valid”与“确认超时后 retry 且不重复记账”的单测
+- `docs/backend_request_model_design.md`
+  - 更新 elastic load 的确认优先级：`io_ldu_ldin` 优先，`debugLsInfo` 为 fallback
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_issue_agent.py`
+  - 结果：`5 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：`21 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_random_load.py -k 'three_random_mem_loads_same_cycle_via_sequence or three_random_mem_loads_same_cycle_via_plan'`
+  - 结果：`2 passed, 4 deselected`
+- `python3 -m pytest -q -s src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
+  - 结果：`1 passed, 1 deselected`
 
 ## 2026-04-18
 

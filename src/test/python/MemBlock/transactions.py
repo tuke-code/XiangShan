@@ -4,6 +4,7 @@ MemBlock 事务对象定义。
 """
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 SCALAR_STORE_MASK_TO_SIZE_BYTES = {
@@ -975,10 +976,11 @@ class IssueOp:
 
 @dataclass(frozen=True)
 class IssueCyclePlan:
-    """All issue operations that must fire in the same cycle."""
+    """One issue batch, with either strict same-cycle or elastic per-lane handshake."""
 
     ops: tuple[IssueOp, ...]
     max_cycles: int = 50
+    handshake_mode: Literal["strict", "elastic"] = "strict"
 
     def __post_init__(self) -> None:
         if not self.ops:
@@ -986,10 +988,24 @@ class IssueCyclePlan:
         lanes = [int(op.lane) for op in self.ops]
         if len(set(lanes)) != len(lanes):
             raise ValueError(f"issue cycle plan requires unique lanes: {lanes}")
+        if self.handshake_mode not in {"strict", "elastic"}:
+            raise ValueError(
+                f"unsupported issue cycle handshake mode: {self.handshake_mode!r}; "
+                "expected 'strict' or 'elastic'"
+            )
 
     @classmethod
-    def from_ops(cls, *ops: IssueOp, max_cycles: int = 50) -> "IssueCyclePlan":
-        return cls(ops=tuple(ops), max_cycles=max_cycles)
+    def from_ops(
+        cls,
+        *ops: IssueOp,
+        max_cycles: int = 50,
+        handshake_mode: Literal["strict", "elastic"] = "strict",
+    ) -> "IssueCyclePlan":
+        return cls(
+            ops=tuple(ops),
+            max_cycles=max_cycles,
+            handshake_mode=handshake_mode,
+        )
 
 
 @dataclass(frozen=True)

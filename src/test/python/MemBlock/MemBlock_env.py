@@ -1741,6 +1741,13 @@ class MemBlockEnv:
         self.vector_monitor.drive_ready()
         self.commit_agent.drive()
 
+    def refresh_comb(self) -> None:
+        """显式刷新组合逻辑，确保 drive 后的组合观测已收敛。"""
+
+        refresh = getattr(self.dut, "RefreshComb", None)
+        if refresh is not None:
+            refresh()
+
     def _run_async(self, coro):
         return self._clock.run(coro)
 
@@ -2110,6 +2117,51 @@ class MemBlockEnv:
     def _read_optional_dut_signal(self, signal_name: str, default: int = 0) -> int:
         return _read_signal_int(getattr(self.dut, signal_name, None), default)
 
+    def _read_optional_internal_signal(self, signal_name: str, default: int | None = 0) -> int | None:
+        getter = getattr(self.dut, "GetInternalSignal", None)
+        if getter is None:
+            return default
+        signal = getter(signal_name)
+        if signal is None:
+            return default
+        return int(signal.value)
+
+    def sample_issue_accept_state(self) -> dict:
+        """采样当前拍 issue lane 的 ready 与真实 load acceptance。"""
+
+        self.refresh_comb()
+        cycle = self._current_cycle()
+        lanes = []
+        sampled_lanes = min(int(self.config.load_pipeline_width), int(self.config.int_issue_ports))
+        for idx in range(sampled_lanes):
+            rar_accepted = self._read_optional_internal_signal(
+                f"inner_lsq.loadQueue.loadQueueRAR.acceptedVec_{idx}",
+                default=None,
+            )
+            raw_accepted = self._read_optional_internal_signal(
+                f"inner_lsq.loadQueue.loadQueueRAW.acceptedVec_{idx}",
+                default=None,
+            )
+            lanes.append(
+                {
+                    "cycle": cycle,
+                    "lane": idx,
+                    "ready": _read_signal_int(self.issue[idx].ready, 0),
+                    "accepted": rar_accepted if rar_accepted is not None else raw_accepted,
+                    "rar_accepted": rar_accepted,
+                    "raw_accepted": raw_accepted,
+                    "accepted_mismatch": (
+                        None
+                        if rar_accepted is None or raw_accepted is None
+                        else int(rar_accepted != raw_accepted)
+                    ),
+                }
+            )
+        return {
+            "cycle": cycle,
+            "lanes": tuple(lanes),
+        }
+
     def _normalize_replay_cause(self, cause: str | None) -> str | None:
         if cause is None:
             return None
@@ -2348,6 +2400,37 @@ class MemBlockEnv:
                 }
             )
 
+        return {
+            "cycle": cycle,
+            "lanes": tuple(lanes),
+        }
+
+    def sample_load_issue_state(self) -> dict:
+        """采样当前拍进入 load pipeline 的 `io_ldu_ldin_*` 输入。"""
+
+        cycle = self._current_cycle()
+        lanes = []
+        for idx in range(self.config.load_pipeline_width):
+            prefix = f"MemBlock_inner_lsq_io_ldu_ldin_{idx}"
+            if not self._read_optional_dut_signal(f"{prefix}_valid", 0):
+                continue
+            lanes.append(
+                {
+                    "cycle": cycle,
+                    "lane": idx,
+                    "valid": 1,
+                    "is_load_replay": self._read_optional_dut_signal(f"{prefix}_bits_isLoadReplay", 0),
+                    "rob_idx_flag": self._read_optional_dut_signal(f"{prefix}_bits_uop_robIdx_flag", None),
+                    "rob_idx_value": self._read_optional_dut_signal(f"{prefix}_bits_uop_robIdx_value", None),
+                    "lq_idx_flag": self._read_optional_dut_signal(f"{prefix}_bits_uop_lqIdx_flag", None),
+                    "lq_idx_value": self._read_optional_dut_signal(f"{prefix}_bits_uop_lqIdx_value", None),
+                    "sq_idx_flag": self._read_optional_dut_signal(f"{prefix}_bits_uop_sqIdx_flag", None),
+                    "sq_idx_value": self._read_optional_dut_signal(f"{prefix}_bits_uop_sqIdx_value", None),
+                    "sched_index": self._read_optional_dut_signal(f"{prefix}_bits_schedIndex", -1),
+                    "vaddr": self._read_optional_dut_signal(f"{prefix}_bits_fullva", None),
+                    "paddr": self._read_optional_dut_signal(f"{prefix}_bits_paddr", None),
+                }
+            )
         return {
             "cycle": cycle,
             "lanes": tuple(lanes),

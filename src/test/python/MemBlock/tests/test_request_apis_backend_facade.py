@@ -405,6 +405,8 @@ def test_api_request_apis_batch_wrappers_delegate_to_backend_execute():
     assert isinstance(env.backend.calls[1][1].steps[0], EnqueueLoadCyclePlan)
     assert [op.kind for op in env.backend.calls[0][1].steps[-1].ops] == ["load", "load"]
     assert [op.kind for op in env.backend.calls[1][1].steps[-1].ops] == ["load", "load", "sta"]
+    assert env.backend.calls[0][1].steps[-1].handshake_mode == "strict"
+    assert env.backend.calls[1][1].steps[-1].handshake_mode == "strict"
     assert env.backend.calls[1][1].steps[-1].ops[-1].mask == 0x0F
     assert [step.enq_port for step in env.backend.calls[0][1].steps[0].steps] == [0, 1]
 
@@ -514,6 +516,26 @@ def test_api_backend_facade_execute_routes_same_cycle_load_enqueue_plan():
     assert env.lsq_agent.calls[0][0] == "enqueue_load_cycle"
     assert [step.enq_port for step in env.lsq_agent.calls[0][1].steps] == [0, 1]
     assert env.issue_agent.calls[0][0] == "issue_cycle"
+
+
+def test_api_backend_facade_execute_preserves_elastic_issue_cycle_mode():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+    plan = BackendSendPlan.from_steps(
+        EnqueueLoadCyclePlan.from_steps(
+            EnqueueLoadStep(req_id=1, lq_ptr=QueuePtr(flag=0, value=1), sq_ptr=QueuePtr(flag=0, value=2), enq_port=0),
+            EnqueueLoadStep(req_id=2, lq_ptr=QueuePtr(flag=0, value=2), sq_ptr=QueuePtr(flag=0, value=2), enq_port=1),
+        ),
+        IssueCyclePlan.from_ops(
+            IssueOp.load_from_txn(LoadTxn(req_id=1, addr=0x1000, lq_ptr=QueuePtr(0, 1), sq_ptr=QueuePtr(0, 2), issue_lane=0)),
+            IssueOp.load_from_txn(LoadTxn(req_id=2, addr=0x2000, lq_ptr=QueuePtr(0, 2), sq_ptr=QueuePtr(0, 2), issue_lane=1)),
+            handshake_mode="elastic",
+        ),
+    )
+
+    backend.execute(plan)
+
+    assert env.issue_agent.calls[0][1].handshake_mode == "elastic"
 
 
 def test_api_enqueue_load_cycle_plan_rejects_duplicate_ports():

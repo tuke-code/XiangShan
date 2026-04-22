@@ -21,6 +21,53 @@ class IssueAgent:
     def __init__(self, env) -> None:
         self.env = env
 
+    def _idle_issue_lane(self, lane: int) -> None:
+        self.env.issue[int(lane)].drive_idle()
+
+    def _note_issued_ops(self, ops) -> None:
+        for op in ops:
+            if op.kind == "load":
+                self.env.backend.note_load_issued(op.resolved_rob_idx_flag, op.resolved_rob_idx_value)
+
+    def _current_cycle(self):
+        current_cycle = getattr(self.env, "_current_cycle", None)
+        if callable(current_cycle):
+            try:
+                return current_cycle()
+            except Exception:
+                return None
+        return None
+
+    def _format_issue_op(self, op: IssueOp) -> str:
+        return (
+            f"{op.kind}@lane{int(op.lane)}"
+            f"/rob=({int(op.resolved_rob_idx_flag)},{int(op.resolved_rob_idx_value)})"
+            f"/lq=({int(op.lq_ptr.flag)},{int(op.lq_ptr.value)})"
+            f"/sq=({int(op.sq_ptr.flag)},{int(op.sq_ptr.value)})"
+            f"/addr={int(getattr(op, 'addr', 0)):#x}"
+        )
+
+    def _format_issue_lane_state(self, lane: int) -> str:
+        issue = self.env.issue[int(lane)]
+        return (
+            f"lane{int(lane)}:"
+            f"v={int(issue.valid.value)}"
+            f"/r={int(issue.ready.value)}"
+            f"/rob=({int(issue.bits_robIdx_flag.value)},{int(issue.bits_robIdx_value.value)})"
+            f"/src0={int(issue.bits_src_0.value):#x}"
+        )
+
+    def _print_elastic_debug(self, event: str, **fields) -> None:
+        cycle = self._current_cycle()
+        prefix = "[IssueAgent][elastic]"
+        if cycle is not None:
+            prefix += f"[cycle={int(cycle)}]"
+        detail = " ".join(f"{key}={value}" for key, value in fields.items())
+        if detail:
+            print(f"{prefix} {event} {detail}")
+        else:
+            print(f"{prefix} {event}")
+
     def _drive_scalar_std(
         self,
         *,
@@ -157,20 +204,85 @@ class IssueAgent:
         if len(set(lanes)) != len(lanes):
             raise ValueError(f"同拍 issue 需要 lane 唯一: lanes={lanes}")
 
+        pending_ops = {int(op.lane): op for op in plan.ops} if plan.handshake_mode == "elastic" else None
         for _ in range(plan.max_cycles):
             if int(self.env.dut.io_reset_backend.value):
+                if plan.handshake_mode == "elastic":
+                    raise RuntimeError(f"等待 issue 批次握手时 backend 进入 reset: lanes={lanes}")
                 raise RuntimeError(f"等待同拍 issue 握手时 backend 进入 reset: lanes={lanes}")
 
-            if all(int(self.env.issue[lane].ready.value) for lane in lanes):
-                for op in plan.ops:
-                    self._drive_issue_op(op)
+            if plan.handshake_mode == "strict":
+                if all(int(self.env.issue[lane].ready.value) for lane in lanes):
+                    for op in plan.ops:
+                        self._drive_issue_op(op)
+                    if hasattr(self.env, "refresh_comb"):
+                        self.env.refresh_comb()
+                    await self.env._step_async(1)
+                    self._note_issued_ops(plan.ops)
+                    self.env.idle_inputs()
+                    if hasattr(self.env, "refresh_comb"):
+                        self.env.refresh_comb()
+                    return
+
                 await self.env._step_async(1)
-                self.env.idle_inputs()
-                return
+                continue
+
+            self._print_elastic_debug(
+                "loop",
+                pending=tuple(self._format_issue_op(pending_ops[lane]) for lane in sorted(pending_ops)),
+            )
+            for lane in lanes:
+                if lane in pending_ops:
+                    self._drive_issue_op(pending_ops[lane])
+                else:
+                    self._idle_issue_lane(lane)
+            if hasattr(self.env, "refresh_comb"):
+                self.env.refresh_comb()
+            self._print_elastic_debug(
+                "driven",
+                lanes=tuple(self._format_issue_lane_state(lane) for lane in lanes),
+            )
 
             await self.env._step_async(1)
 
+            candidate_lanes = [
+                lane
+                for lane in tuple(pending_ops)
+                if int(self.env.issue[lane].valid.value) and int(self.env.issue[lane].ready.value)
+            ]
+            self._print_elastic_debug("candidate", lanes=tuple(int(lane) for lane in candidate_lanes))
+            self._print_elastic_debug(
+                "post-step",
+                candidates=tuple(int(lane) for lane in candidate_lanes),
+            )
+            for lane in candidate_lanes:
+                op = pending_ops.pop(lane)
+                self._note_issued_ops((op,))
+                self._print_elastic_debug("fire", lane=int(lane), op=self._format_issue_op(op))
+
+            for lane in lanes:
+                if lane in pending_ops:
+                    self._drive_issue_op(pending_ops[lane])
+                else:
+                    self._idle_issue_lane(lane)
+            if hasattr(self.env, "refresh_comb"):
+                self.env.refresh_comb()
+            if not pending_ops:
+                self._print_elastic_debug("done", lanes=tuple(int(lane) for lane in lanes))
+                self.env.idle_inputs()
+                if hasattr(self.env, "refresh_comb"):
+                    self.env.refresh_comb()
+                return
+
         self.env.idle_inputs()
+        if hasattr(self.env, "refresh_comb"):
+            self.env.refresh_comb()
+        if plan.handshake_mode == "elastic":
+            self._print_elastic_debug(
+                "timeout",
+                pending=tuple(sorted(int(lane) for lane in pending_ops)),
+            )
+            raise TimeoutError(f"等待 issue 批次完成握手超时: lanes={lanes}, pending_lanes={sorted(pending_ops)}")
         raise TimeoutError(f"等待同拍 issue 完成握手超时: lanes={lanes}")
 
     def issue_scalar_load(
@@ -311,9 +423,6 @@ class IssueAgent:
 
     def issue_cycle(self, plan: IssueCyclePlan) -> None:
         self.env._run_async(self._issue_cycle_async(plan))
-        for op in plan.ops:
-            if op.kind == "load":
-                self.env.backend.note_load_issued(op.resolved_rob_idx_flag, op.resolved_rob_idx_value)
 
     def issue_script(self, plans) -> None:
         for plan in plans:

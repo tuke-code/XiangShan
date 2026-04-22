@@ -3,8 +3,6 @@
 MemBlock 标量 load pipeline 的定向真实 DUT 用例。
 """
 
-import pytest
-
 from transactions import QueuePtr
 from sequences import (
     ResetEnvSequence,
@@ -68,19 +66,13 @@ def test_api_MemBlock_small_cacheable_load_burst_directed(env):
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "当前 DUT 在持续 3-lane cacheable load saturation 下除会回写错误数据外，"
-        "intIssue 阶段也未正确处理 ready 反压"
-    ),
-)
 def test_api_MemBlock_back_to_back_cacheable_load_saturation(env):
     """
     连续多拍按 load pipeline 宽度打满 `enqLsq + intIssue` 的 cacheable load 饱和流。
 
     检查点：
-      - 每拍按 `load_pipeline_width` 同时 enqueue + issue 标量 load
+      - 每拍按 `load_pipeline_width` 持续尝试 enqueue + issue 标量 load
+      - `intIssue.ready` 出现反压时，未握手 lane 会在后续拍继续发射
       - 所有 load 均完成在线 compare
       - 流量经 dcache A/D/E，而非 outer/uncache
       - 场景结束后 LQ 指针、completed 计数和 outstanding 状态都正确

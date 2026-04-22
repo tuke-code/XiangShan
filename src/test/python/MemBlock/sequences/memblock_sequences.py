@@ -757,7 +757,7 @@ class ScalarLoadSaturationSequence:
                 f"batch_width={batch_width}, supported={configured_width}"
             )
 
-        drain_cycles = env.config.sequence.load_drain_cycles if self.drain_cycles is None else int(self.drain_cycles)
+        drain_cycles = _resolve_replay_drain_cycles(env, self.drain_cycles)
         state = self.initial_state
         completed_before = env.get_completed_load_count()
         stats_before = _snapshot_transport_stats(env)
@@ -779,14 +779,42 @@ class ScalarLoadSaturationSequence:
                 )
                 txns.append(load_txn)
 
-            result = ScalarLoadBatchSameCycleSequence(tuple(txns)).run(env)
+            prepared = env.backend.prepare(
+                BackendSendPlan.from_steps(
+                    EnqueueLoadCyclePlan.from_txns(*txns),
+                    IssueCyclePlan(
+                        ops=tuple(IssueOp.load_from_txn(txn) for txn in txns),
+                        max_cycles=drain_cycles,
+                        handshake_mode="elastic",
+                    ),
+                )
+            )
             for load_txn in txns:
                 expect_load(env, load_txn)
+            env.backend.execute(prepared)
+            result = ScalarLoadBatchSameCycleSequenceResult(
+                issued_loads=tuple(txns),
+                final_state=SequenceState(
+                    next_lq_ptr=ptr_inc(txns[-1].lq_ptr, env.config.sequence.load_queue_size),
+                    sq_ptr=txns[-1].sq_ptr,
+                ),
+                completed_load_count=env.get_completed_load_count(),
+            )
             issued_loads.extend(txns)
             state = result.final_state
 
         target_completed = completed_before + len(self.requests)
-        _wait_completed_load_count(env, target_completed, max_cycles=drain_cycles)
+        with _capture_writeback_trace(env, max_events=16) as writeback_trace:
+            try:
+                _wait_completed_load_count(env, target_completed, max_cycles=drain_cycles)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    "load saturation 未在预算内完成 compare: "
+                    f"target_completed={target_completed}, "
+                    f"observed_completed={env.get_completed_load_count()}, "
+                    f"stats={env.get_transport_stats()}, "
+                    f"recent_writebacks={tuple(writeback_trace)}"
+                ) from exc
         env.drain_writebacks(max_cycles=drain_cycles)
         if self.assert_no_outstanding:
             env.assert_no_outstanding()

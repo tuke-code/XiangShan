@@ -192,7 +192,7 @@ def send_load(env, txn: LoadTxn) -> None:
 
 
 def send_load_batch_same_cycle(env, txns, max_cycles: int = 50) -> None:
-    """兼容入口：enqueue 多笔标量 load，并在同一拍完成 issue。
+    """兼容入口：enqueue 多笔标量 load，并按 strict 模式在同一拍完成 issue。
 
     Prefer `sequences.ScalarLoadBatchSameCycleSequence` for new testcase authoring.
     """
@@ -220,7 +220,7 @@ def send_load_batch_with_sta_same_cycle(
     sta_mask: int = 0xFF,
     max_cycles: int = 50,
 ) -> None:
-    """兼容入口：enqueue 多笔标量 load，并与一条 `STA` 在同一拍完成 issue。
+    """兼容入口：enqueue 多笔标量 load，并与一条 `STA` 按 strict 模式在同一拍完成 issue。
 
     Prefer `sequences.ScalarLoadBatchWithStaSequence` for new testcase authoring.
     """

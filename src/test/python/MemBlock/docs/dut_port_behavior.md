@@ -353,12 +353,12 @@ sequenceDiagram
 `_issue_until_fire()` 的行为等价于：
 
 1. 每拍先驱动输入。
-2. 读取 `issue.ready`。
-3. 若 ready 为 1，则本拍 handshake 成功。
-4. 立即推进 1 拍，让请求被 DUT 吃进去。
+2. 推进 1 拍，让本拍 drive 真正经过 DUT 时钟边界。
+3. 在 post-step 相位观察 `issue.ready` 的可见结果。
+4. 若 post-step 观测结果为 ready，则这拍 drive 被视为 handshake 成功。
 5. 随后 `idle_inputs()` 清空输入。
 
-因此，测试环境对 issue 口的解释是标准 ready/valid。
+因此，测试环境对 issue 口仍然遵循标准 ready/valid，但**接受结果的观测点**定义在 post-step 相位，而不是 drive 当拍的 Python 组合读数。
 
 ## 7. intWriteback 输出端口行为
 

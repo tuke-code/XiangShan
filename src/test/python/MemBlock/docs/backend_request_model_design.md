@@ -127,14 +127,26 @@
 
 ### 4.4 `IssueCyclePlan`
 
-`IssueCyclePlan` 表示“同一拍必须一起完成 issue 的一组 `IssueOp`”。这个对象是整个新模型的关键，因为它第一次把“同拍约束”变成了显式数据，而不是隐含在 helper 名字里。
+`IssueCyclePlan` 表示“一组 lane 唯一的 issue 批次”，并显式携带握手模式。这个对象是整个新模型的关键，因为它把“这批 op 想如何与 `ready` 交互”变成了显式数据，而不是隐含在 helper 名字里。
 
 例如：
 
 - 两条 load 同拍 issue，可以写成一个 `IssueCyclePlan(load0, load1)`。
 - 两条 load 加一条 STA 同拍 issue，也只是把这三条 op 放到同一个 cycle plan 里。
 
-`IssueCyclePlan` 还做了一件很重要的事情：它在构造时检查 lane 唯一性。也就是说，同一拍重复占用同一条 issue lane，不再等运行时偶然出错，而是在 plan 构建阶段就被拒绝。这比旧模型里把冲突逻辑藏在各种特化 helper 中更稳健，也更容易测试。
+当前有两种握手模式：
+
+- `strict`
+  - 默认模式。
+  - 语义是“这批 op 必须在同一拍一起完成握手”；任何 lane 不 ready，整批都继续等待。
+  - 适合 replay / bank-conflict 这类真的要证明“同拍组合”的场景。
+- `elastic`
+  - 语义是“这批 op 属于同一个 issue 批次，但每条 lane 可按自己的 `ready` 独立完成握手”。
+  - 对 load 来说，env 会先 drive 一个周期，再在 post-step 相位观察该 lane 的接受结果；若该 lane 在该轮 drive 中被接受，就停止继续驱动。
+  - 未握手 lane 会保持同一份请求，在后续拍继续驱动直到被接受。
+  - 适合 saturation / throughput / backpressure 场景。
+
+`IssueCyclePlan` 还做了一件很重要的事情：它在构造时检查 lane 唯一性。也就是说，同一批次里重复占用同一条 issue lane，不再等运行时偶然出错，而是在 plan 构建阶段就被拒绝。这比旧模型里把冲突逻辑藏在各种特化 helper 中更稳健，也更容易测试。
 
 ### 4.5 `StoreRef`
 
@@ -172,7 +184,7 @@
 从抽象层级看：
 
 - `IssueOp` 是“lane 级动作”；
-- `IssueCyclePlan` 是“单拍动作组”；
+- `IssueCyclePlan` 是“单个 issue 批次”；
 - `BackendSendPlan` 是“多拍顺序脚本”。
 
 这三个层级构成了新的请求模型骨架。

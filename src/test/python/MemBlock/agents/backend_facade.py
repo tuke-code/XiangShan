@@ -231,7 +231,11 @@ class BackendFacade:
         for op in plan.ops:
             resolved_sq_ptr = result.resolve_sq_ptr(op.sq_ptr)
             resolved_ops.append(replace(op, sq_ptr=resolved_sq_ptr))
-        return IssueCyclePlan(ops=tuple(resolved_ops), max_cycles=plan.max_cycles)
+        return IssueCyclePlan(
+            ops=tuple(resolved_ops),
+            max_cycles=plan.max_cycles,
+            handshake_mode=plan.handshake_mode,
+        )
 
     def _rob_key(self, *, req_id: int | None = None, rob_ref: RobRef | None = None):
         if rob_ref is not None:
