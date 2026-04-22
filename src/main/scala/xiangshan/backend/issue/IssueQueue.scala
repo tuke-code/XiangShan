@@ -12,6 +12,7 @@ import xiangshan.backend.fu.{FuConfig, FuType}
 import xiangshan.backend.fu.FuConfig._
 import xiangshan.mem.{LqPtr, SqPtr}
 import utility.PerfCCT
+import xiangshan.backend.rob.RobPtr
 
 class IssueQueueIO()(implicit p: Parameters, params: IssueBlockParams) extends XSBundle {
   // Inputs

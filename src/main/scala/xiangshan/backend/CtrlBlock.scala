@@ -943,6 +943,7 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
 
   val csrCtrl = Input(new CustomCSRCtrlIO)
   val IssueQueueDeqSum  = backendParams.allIssueParams.map(_.numDeq).sum
+  val iqEntryNum = backendParams.allIssueParams.map(_.numEntries).sum
   val robio = new Bundle {
     val csr = new RobCSRIO
     val exception = ValidIO(new ExceptionInfo)
