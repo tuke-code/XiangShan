@@ -234,7 +234,6 @@ class MicroTage(implicit p: Parameters) extends BasePredictor with HasMicroTageP
     // Find the hit result from the highest-priority table
     // val priorityTableHitVec = PriorityEncoderOH(tableHitVec.reverse)
     val priorityTableHitVec = a2_reverseOHVec(i)
-    a2_abtbTakenVec(i)    := Mux1H(priorityTableHitVec, tableTakenVec.reverse)
     a2_abtbTakenCtrVec(i) := Mux1H(priorityTableHitVec, tableTakenCtrVec.reverse)
     a2_abtbUseTableId(i)  := Mux1H(priorityTableHitVec, a2_tableIdVec.reverse)
     a2_abtbUseWayId(i)    := Mux1H(priorityTableHitVec, tableWayIdVec.reverse)
