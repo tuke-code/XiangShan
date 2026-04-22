@@ -121,6 +121,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       val excpInfo = ValidIO(new VecExcpInfo)
     })
     val IssueQueueDeqSum  = backendParams.allIssueParams.map(_.numDeq).sum
+    val iqEntryNum = backendParams.allIssueParams.map(_.numEntries).sum
     val debug_ls = Flipped(new DebugLSIO)
     val debugBlockBackward = Option.when(backendParams.debugEn)(Output(Bool()))
     val debugWaitForward   = Option.when(backendParams.debugEn)(Output(Bool()))
@@ -1551,8 +1552,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val bypassLatency = 3.U
   val writeBackLatency = 1.U
 
-  val candidateVec = Option.when(backendParams.debugEn)(Wire(Vec(RobSize, Vec(io.IssueQueueDeqSum, Bool()))))
-  candidateVec.foreach( _ := VecInit.tabulate(RobSize, io.IssueQueueDeqSum){ (index, i) =>
+  val candidateIQDeqVec = Option.when(backendParams.debugEn)(Wire(Vec(RobSize, Vec(io.IssueQueueDeqSum, Bool()))))
+  candidateIQDeqVec.foreach( _ := VecInit.tabulate(RobSize, io.IssueQueueDeqSum){ (index, i) =>
     val deq = io.debugIQDeqRobIdxVec.get(i)
     deq.valid && (deq.bits.value === index.U)
   })
@@ -1591,6 +1592,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       robEntries(i).topdownCanceled.foreach(_ := topdownCanceledUpdate)
       robEntries(i).topdownIssued.foreach(_ := topdownIssuedUpdate)
       robEntries(i).topdownRobHead.foreach(_ := topdownRobHeadUpdate)
+      robEntries(i).topdownSrcReady.foreach(_ := topdownSrcReadyUpdate)
 
       robEntries(i).topdownIssueTime.foreach(_ := Mux(hasWriteBack , 0.U,
         robEntries(i).topdownIssueTime.get +& topdownIssuedUpdate))
@@ -1613,16 +1615,19 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val deqEntryNormalLatency = Mux1H(deqEntry.debug_fuType.get, sortedFulatency) +& bypassLatency +& writeBackLatency
     val issueTime = deqEntry.topdownIssueTime.get
     val lastIssueTime = deqEntry.topdownLastIssueTime.get
-    val issued = candidateVec.get(deqPtr.value).reduce(_ || _)
+    val lastShouldIssueTime = deqEntry.topdownLastShouldIssueTime.get
+    val robHeadTime = deqEntry.topdownRobHeadTime.get
+    val issued = candidateIQDeqVec.get(deqPtr.value).reduce(_ || _)
     when(deqEntry.valid){
       assert(issueTime >= lastIssueTime)
+      assert(lastIssueTime <= lastShouldIssueTime)
     }
-    val robHeadTime = deqEntry.topdownRobHeadTime.get
     val waitTime = issueTime - robHeadTime
     val robHeadFutype = deqEntry.debug_fuType.get
     val robHeadExecStall = deqEntry.valid && (lastIssueTime > deqEntryNormalLatency) && (lastIssueTime > waitTime)
     val robHeadNotIssued = deqEntry.valid && (!deqEntry.topdownIssued.get && !issued)
     val robHeadIssueCancel = deqEntry.valid && deqEntry.topdownCanceled.get && (issueTime > deqEntryNormalLatency)
+    val robHeadIssueDelay = deqEntry.valid && (lastShouldIssueTime > deqEntryNormalLatency)
     val robHeadExecStallReason =  MuxCase(OtherNotReadyStall.id.U, Seq(
       FuType.isAMO(robHeadFutype)          -> AtomicStall.id.U          ,
       FuType.isStoreVstore(robHeadFutype)  -> StoreStall.id.U           ,

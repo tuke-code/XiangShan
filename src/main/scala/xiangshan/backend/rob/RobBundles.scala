@@ -95,6 +95,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val topdownIssued    = OptionWrapper(backendParams.debugEn, Bool())
     val topdownCanceled  = OptionWrapper(backendParams.debugEn, Bool())
     val topdownRobHead   = OptionWrapper(backendParams.debugEn, Bool())
+    val topdownSrcReady  = OptionWrapper(backendParams.debugEn, Bool())
     val topdownIssueTime = OptionWrapper(backendParams.debugEn, UInt(XLEN.W))
     val topdownLastIssueTime = OptionWrapper(backendParams.debugEn, UInt(XLEN.W))
     val topdownRobHeadTime = OptionWrapper(backendParams.debugEn, UInt(XLEN.W))
@@ -182,6 +183,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robEntry.topdownIssueTime.foreach(_ := 0.U)
     robEntry.topdownLastIssueTime.foreach(_ := 0.U)
     robEntry.topdownRobHeadTime.foreach(_ := 0.U)
+    robEntry.topdownLastShouldIssueTime.foreach(_ := 0.U)
     robEntry.topdownCancelSource.foreach(_ := IQCancelSource.none)
   }
 
