@@ -25,7 +25,7 @@ import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.interrupts._
 import freechips.rocketchip.tile.{BusErrorUnit, BusErrorUnitParams, BusErrors, MaxHartIdBits}
 import freechips.rocketchip.tilelink._
-import coupledL2.{EnableCHI, EnableL2ClockGate, L2ParamKey, PrefetchCtrlFromCore}
+import coupledL2.{EnableCHI, EnableL2ClockGate, L2ParamKey, PrefetchCtrlFromCore, HasCoupledL2Parameters}
 import coupledL2.tl2tl.TL2TLCoupledL2
 import coupledL2.tl2chi.{CHIIssue, PortIO, TL2CHICoupledL2, CHIAddrWidthKey, NonSecureKey, LCrdyIn}
 import huancun.BankBitsKey
@@ -74,6 +74,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
     (buffers, node)
   }
   val enableL2 = coreParams.L2CacheParamsOpt.isDefined
+  val txSourceReady = p(L2ParamKey).txSourceReady
   // =========== Components ============
   val l1_xbar = TLXbar()
   val mmio_xbar = TLXbar()
@@ -237,7 +238,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
       val perfEvents = Output(Vec(numPCntHc * coreParams.L2NBanks + 1, new PerfEvent))
       val l2_flush_en = Option.when(EnablePowerDown) (Input(Bool()))
       val l2_flush_done = Option.when(EnablePowerDown) (Output(Bool()))
-      val lcrdy = if (enableCHI) Some(new LCrdyIn) else None
+      val lcrdy = Option.when(txSourceReady) (new LCrdyIn) 
       val dft = Option.when(hasDFT)(Input(new SramBroadcastBundle))
       val dft_reset = Option.when(hasMbist)(Input(new DFTResetSignals()))
       val dft_out = Option.when(hasDFT)(Output(new SramBroadcastBundle))
@@ -362,10 +363,10 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
           l2.io_nodeID := io.nodeID.get
           io.chi.get <> l2.io_chi
           l2.io_cpu_halt.foreach { _:= io.cpu_halt.fromCore }
-          l2.io_lcrdy.req.rdy := io.lcrdy.get.req.rdy
-          l2.io_lcrdy.rsp.rdy := io.lcrdy.get.rsp.rdy
-          l2.io_lcrdy.dat.rdy := io.lcrdy.get.dat.rdy
-          l2.io_lcrdy.empty := io.lcrdy.get.empty
+          io.lcrdy.foreach { in =>
+            l2.io_lcrdy.foreach(out => out <> in)
+          }
+
         case l2cache: TL2TLCoupledL2 =>
       }
 

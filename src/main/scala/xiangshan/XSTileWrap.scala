@@ -25,7 +25,7 @@ import freechips.rocketchip.interrupts._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util._
 import system.HasSoCParameter
-import coupledL2.tl2chi.{AsyncPortIO, CHIAsyncBridgeSource, PortIO, LCrdyIn}
+import coupledL2.tl2chi.{AsyncPortIO, CHIAsyncBridgeSource, PortIO}
 import utility.sram.SramBroadcastBundle
 import utility.{DFTResetSignals, IntBuffer, ResetGen}
 import xiangshan.backend.trace.TraceCoreInterface
@@ -187,7 +187,10 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
       case Some(param) =>
         val source = withClockAndReset(clock, reset_sync)(Module(new CHIAsyncBridgeSource(param)))
         source.io.enq <> tile.module.io.chi.get
-        source.io.lcrdy <> tile.module.io.lcrdy.get
+        //source.io.lcrdy <> tile.module.io.lcrdy.get
+        tile.module.io.lcrdy.foreach { lcrdy =>
+          source.io.lcrdy <> lcrdy
+        }
         io.chi <> source.io.async
       case None =>
         require(enableCHI)
