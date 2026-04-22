@@ -94,6 +94,7 @@ trait HasScParameters extends HasBpuParameters {
     s"ThresholdInit($ThresholdInit) should be in [$MinThreshold, $MaxThreshold]"
   )
 
+  def ShiftBits:       Int = FetchBlockAlignWidth - BankWidth - instOffsetBits
   def WriteBufferSize: Int = scParameters.WriteBufferSize
 
   def EnableScTrace: Boolean = scParameters.EnableScTrace
