@@ -112,6 +112,10 @@ class MonitorBtbEntrySramWriteReq(implicit p: Parameters) extends WriteReqBundle
   val entry:    MonitorBtbEntry          = new MonitorBtbEntry
   val slots:    Vec[MonitorBtbShortSlot] = Vec(NumSlots, new MonitorBtbShortSlot)
   val slotMask: UInt                     = UInt(NumSlots.W)
+  val retagged: Bool                     = Bool()
+  val effectiveShortSlot: MonitorBtbShortSlot = new MonitorBtbShortSlot
+  val effectivePosition: UInt                 = UInt(CfiAlignedPositionWidth.W)
+  val compareKey: UInt                        = UInt((TagWidth + CfiAlignedPositionWidth).W)
 
   def getEffectiveLongSlot: MonitorBtbLongSlot = {
     val longSlot = Wire(new MonitorBtbLongSlot)
@@ -131,7 +135,27 @@ class MonitorBtbEntrySramWriteReq(implicit p: Parameters) extends WriteReqBundle
   def getEffectivePosition: UInt =
     Mux(entry.fusion, getEffectiveLongSlot.position, getEffectiveShortSlot.position)
 
-  override def tag: Option[UInt] = Some(Cat(entry.tag, getEffectivePosition))
+  def genEffectiveFields(): Unit = {
+    retagged           := slotMask.andR
+    effectiveShortSlot := getEffectiveShortSlot
+    effectivePosition  := Mux(entry.fusion, getEffectiveLongSlot.position, effectiveShortSlot.position)
+    compareKey         := Cat(entry.tag, effectivePosition)
+  }
+
+  def fromRawWrite(
+      setIdx:   UInt,
+      entry:    MonitorBtbEntry,
+      slots:    Vec[MonitorBtbShortSlot],
+      slotMask: UInt
+  ): Unit = {
+    this.setIdx   := setIdx
+    this.entry    := entry
+    this.slots    := slots
+    this.slotMask := slotMask
+    genEffectiveFields()
+  }
+
+  override def tag: Option[UInt] = Some(compareKey)
 }
 
 class MonitorBtbCounterSramWriteReq(implicit p: Parameters) extends MainBtbBundle {

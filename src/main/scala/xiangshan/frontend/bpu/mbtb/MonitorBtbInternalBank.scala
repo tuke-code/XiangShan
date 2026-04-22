@@ -21,7 +21,6 @@ import org.chipsalliance.cde.config.Parameters
 import utility.XSPerfAccumulate
 import utility.sram.SRAMTemplate
 import xiangshan.frontend.bpu.SaturateCounter
-import xiangshan.frontend.bpu.WriteBuffer
 
 class MonitorBtbInternalBank(
     alignIdx: Int,
@@ -44,11 +43,8 @@ class MonitorBtbInternalBank(
 
     class WriteEntry extends Bundle {
       class Req extends Bundle {
-        val setIdx:   UInt                     = UInt(SetIdxLen.W)
-        val wayMask:  UInt                     = UInt(NumWay.W)
-        val slotMask: UInt                     = UInt(NumSlots.W)
-        val entry:    MonitorBtbEntry          = new MonitorBtbEntry
-        val slots:    Vec[MonitorBtbShortSlot] = Vec(NumSlots, new MonitorBtbShortSlot)
+        val wayMask: UInt                    = UInt(NumWay.W)
+        val data:    MonitorBtbEntrySramWriteReq = new MonitorBtbEntrySramWriteReq
       }
 
       val req: Valid[Req] = Flipped(Valid(new Req))
@@ -196,46 +192,19 @@ class MonitorBtbInternalBank(
   // entry
   private val conflict =
     writeEntry.req.valid &&
-      writeEntry.req.bits.setIdx === flush.req.bits.setIdx &&
-      writeEntry.req.bits.entry.tag === 0.U
+      writeEntry.req.bits.data.setIdx === flush.req.bits.setIdx &&
+      (writeEntry.req.bits.wayMask & flush.req.bits.wayMask).orR
 
   entryWriteBuffer.io.write.zipWithIndex.foreach { case (bufWrite, i) =>
-    val writeValid = writeEntry.req.valid && writeEntry.req.bits.wayMask(i)
-    val flushValid = flush.req.valid && flush.req.bits.wayMask(i) && !conflict
-    val valid      = writeValid || flushValid
-    bufWrite.valid := RegNext(valid, false.B)
-    bufWrite.bits.setIdx := RegEnable(
-      Mux(
-        writeValid,
-        writeEntry.req.bits.setIdx,
-        flush.req.bits.setIdx
-      ),
-      valid
-    )
-    bufWrite.bits.entry := RegEnable(
-      Mux(
-        writeValid,
-        writeEntry.req.bits.entry,
-        0.U.asTypeOf(new MonitorBtbEntry)
-      ),
-      valid
-    )
-    bufWrite.bits.slotMask := RegEnable(
-      Mux(
-        writeValid,
-        writeEntry.req.bits.slotMask,
-        0.U
-      ),
-      valid
-    )
-    bufWrite.bits.slots := RegEnable(
-      Mux(
-        writeValid,
-        writeEntry.req.bits.slots,
-        0.U.asTypeOf(Vec(NumSlots, new MonitorBtbShortSlot))
-      ),
-      valid
-    )
+    val writeValid = writeEntry.req.valid && writeEntry.req.bits.wayMask(i) && !conflict
+    val flushValid = flush.req.valid && flush.req.bits.wayMask(i)
+    val valid      = flushValid || writeValid
+    val flushBits  = WireInit(0.U.asTypeOf(new MonitorBtbEntrySramWriteReq))
+    flushBits.setIdx := flush.req.bits.setIdx
+    flushBits.genEffectiveFields()
+
+    bufWrite.valid := valid
+    bufWrite.bits  := Mux(flushValid, flushBits, writeEntry.req.bits.data)
   }
   // counter, dont care flush (`hit` is controlled by entry)
   counterWriteBuffer.io.enq.valid         := writeCounter.req.valid
@@ -249,7 +218,7 @@ class MonitorBtbInternalBank(
 
   XSPerfAccumulate(
     "multihit_write_conflict",
-    writeEntry.req.valid && flush.req.valid && writeEntry.req.bits.setIdx === flush.req.bits.setIdx &&
+    writeEntry.req.valid && flush.req.valid && writeEntry.req.bits.data.setIdx === flush.req.bits.setIdx &&
       (writeEntry.req.bits.wayMask & flush.req.bits.wayMask).orR
   )
 

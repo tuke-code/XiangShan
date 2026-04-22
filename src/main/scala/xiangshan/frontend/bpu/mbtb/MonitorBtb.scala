@@ -548,6 +548,50 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   t1_updateRegionBtbEntry.valid    := true.B
   t1_updateRegionBtbEntry.vpnUpper := t1_vpnUpper
 
+  /* *** t2 ***
+   * finalize write-form and drive internal banks directly
+   */
+  private val t2_fire  = RegNext(t1_fire, init = false.B) && io.enable
+  private val t2_train = RegEnable(t1_train, t1_fire)
+
+  private val t2_startPcVec           = RegEnable(t1_startPcVec, t1_fire)
+  private val t2_setIdxVec            = RegEnable(VecInit(t1_setIdxVec), t1_fire)
+  private val t2_internalBankIdxVec   = RegEnable(VecInit(t1_internalBankIdxVec), t1_fire)
+  private val t2_internalBankMaskVec  = RegEnable(VecInit(t1_internalBankMaskVec), t1_fire)
+  private val t2_writeAlignBankIdx    = RegEnable(t1_writeAlignBankIdx, t1_fire)
+  private val t2_writeAlignBankMask   = RegEnable(t1_writeAlignBankMask, t1_fire)
+  private val t2_bankStartPc          = RegEnable(t1_bankStartPc, t1_fire)
+  private val t2_bankMeta             = RegEnable(t1_bankMeta, t1_fire)
+  private val t2_bankRrpvs            = RegEnable(t1_bankRrpvs, t1_fire)
+  private val t2_branches             = RegEnable(t1_branches, t1_fire)
+  private val t2_meta                 = RegEnable(t1_meta, t1_fire)
+  private val t2_mispredictInfo       = RegEnable(t1_mispredictInfo, t1_fire)
+  private val t2_canUseShortSlot      = RegEnable(t1_canUseShortSlot, t1_fire)
+  private val t2_updateIsFused        = RegEnable(t1_updateIsFused, t1_fire)
+  private val t2_targetCarry          = RegEnable(t1_targetCarry, t1_fire)
+  private val t2_entryNeedWrite       = RegEnable(t1_entryNeedWrite, t1_fire)
+  private val t2_hit                  = RegEnable(t1_hit, t1_fire)
+  private val t2_longSlotHit          = RegEnable(t1_longSlotHit, t1_fire)
+  private val t2_longSlotHitOH        = RegEnable(t1_longSlotHitOH, t1_fire)
+  private val t2_shortSlotHit         = RegEnable(t1_shortSlotHit, t1_fire)
+  private val t2_shortSlotHitOH       = RegEnable(t1_shortSlotHitOH, t1_fire)
+  private val t2_updateEntry          = RegEnable(t1_updateEntry, t1_fire)
+  private val t2_updateLongSlot       = RegEnable(t1_updateLongSlot, t1_fire)
+  private val t2_updateShortSlot      = RegEnable(t1_updateShortSlot, t1_fire)
+  private val t2_updatePageBtbEntry   = RegEnable(t1_updatePageBtbEntry, t1_fire)
+  private val t2_updateRegionBtbEntry = RegEnable(t1_updateRegionBtbEntry, t1_fire)
+  private val t2_pageBtbSetIdx        = RegEnable(t1_pageBtbSetIdx, t1_fire)
+  private val t2_pageBtbHit           = RegEnable(t1_pageBtbHit, t1_fire)
+  private val t2_pageBtbWay           = RegEnable(t1_pageBtbWay, t1_fire)
+  private val t2_pageBtbWriteRrpvs    = RegEnable(t1_pageBtbWriteRrpvs, t1_fire)
+  private val t2_regionBtbHit         = RegEnable(t1_regionBtbHit, t1_fire)
+  private val t2_regionBtbWay         = RegEnable(t1_regionBtbWay, t1_fire)
+  private val t2_regionBtbWriteRrpvs  = RegEnable(t1_regionBtbWriteRrpvs, t1_fire)
+
+  private val t2_bankMetaByWay = Seq.tabulate(NumWay) { wayIdx =>
+    t2_bankMeta.slice(wayIdx * NumSlots, (wayIdx + 1) * NumSlots)
+  }
+
   object UpdateActionType extends EnumUInt(6) {
     def None:               UInt = 0.U(width.W)
     def ReplaceSameTagSlot: UInt = 1.U(width.W)
@@ -568,10 +612,10 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   // GEM5's UseInvalidWay / UseSameTagFreeSlot depend on per-slot valid bits, which are
   // not observable from training meta. The remaining actions compare by 2-bit RRPV only.
   // If multiple ways have the same victim score, use an LFSR-based random tie-break.
-  private val t1_updateActionVec = Wire(Vec(NumWay, new UpdateAction))
+  private val t2_updateActionVec = Wire(Vec(NumWay, new UpdateAction))
 
   // Default to zero
-  t1_updateActionVec.zipWithIndex.foreach { case (a, way) =>
+  t2_updateActionVec.zipWithIndex.foreach { case (a, way) =>
     a.actionType := UpdateActionType.None
     a.rrpv       := MaxRrpv.U
     a.way        := way.U
@@ -579,15 +623,15 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   }
 
   Seq.tabulate(NumWay) { wayIdx =>
-    val action      = t1_updateActionVec(wayIdx)
-    val rrpvs       = t1_bankRrpvs(wayIdx)
-    val meta        = t1_bankMetaByWay(wayIdx)
+    val action      = t2_updateActionVec(wayIdx)
+    val rrpvs       = t2_bankRrpvs(wayIdx)
+    val meta        = t2_bankMetaByWay(wayIdx)
     val wayFused    = meta.head.fused
     val wayRawHit   = meta.map(_.rawHit).reduce(_ || _)
     val maxSlotRrpv = rrpvs.reduceLeft((a, b) => Mux(a > b, a, b))
     val minSlotRrpv = rrpvs.reduceLeft((a, b) => Mux(a < b, a, b))
 
-    when(!t1_updateIsFused) {        // If update is unfused
+    when(!t2_updateIsFused) {        // If update is unfused
       when(!wayFused && wayRawHit) { // If entry is unfused and only hit tag
         action.actionType := UpdateActionType.ReplaceSameTagSlot
         action.rrpv       := maxSlotRrpv
@@ -614,165 +658,165 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
     }
   }
 
-  private val t1_random = LFSR64()(log2Ceil(NumWay) - 1, 0)
+  private val t2_random = LFSR64()(log2Ceil(NumWay) - 1, 0)
 
-  private val t1_updateActionRrpvs = VecInit(t1_updateActionVec.map(_.rrpv))
-  private val t1_rawMatrix         = CompareMatrix(t1_updateActionRrpvs, order = (a, b) => a > b)
-  private val t1_rawRrpvOH         = t1_rawMatrix.getLeastElementOH(VecInit.fill(NumWay)(true.B))
-  private val t1_rawRrpv           = Mux1H(t1_rawRrpvOH, t1_updateActionRrpvs)
-  private val t1_rawRrpvMask       = VecInit(t1_updateActionRrpvs.map(_ === t1_rawRrpv))
-  private val t1_rawRrpvRotateMask = VecInit.tabulate(NumWay) { r =>
-    VecInit.tabulate(NumWay)(way => t1_rawRrpvMask((way + r) % NumWay))
+  private val t2_updateActionRrpvs = VecInit(t2_updateActionVec.map(_.rrpv))
+  private val t2_rawMatrix         = CompareMatrix(t2_updateActionRrpvs, order = (a, b) => a > b)
+  private val t2_rawRrpvOH         = t2_rawMatrix.getLeastElementOH(VecInit.fill(NumWay)(true.B))
+  private val t2_rawRrpv           = Mux1H(t2_rawRrpvOH, t2_updateActionRrpvs)
+  private val t2_rawRrpvMask       = VecInit(t2_updateActionRrpvs.map(_ === t2_rawRrpv))
+  private val t2_rawRrpvRotateMask = VecInit.tabulate(NumWay) { r =>
+    VecInit.tabulate(NumWay)(way => t2_rawRrpvMask((way + r) % NumWay))
   }
-  private val t1_rawRrpvRotateOH = t1_rawRrpvRotateMask.map(m => PriorityEncoderOH(m))
-  private val t1_finalRrpvOHVec = VecInit.tabulate(NumWay) { r =>
-    VecInit.tabulate(NumWay)(way => t1_rawRrpvRotateOH(r)((way - r + NumWay) % NumWay))
+  private val t2_rawRrpvRotateOH = t2_rawRrpvRotateMask.map(m => PriorityEncoderOH(m))
+  private val t2_finalRrpvOHVec = VecInit.tabulate(NumWay) { r =>
+    VecInit.tabulate(NumWay)(way => t2_rawRrpvRotateOH(r)((way - r + NumWay) % NumWay))
   }
-  private val t1_finalAction = Mux1H(t1_finalRrpvOHVec(t1_random), t1_updateActionVec)
+  private val t2_finalAction = Mux1H(t2_finalRrpvOHVec(t2_random), t2_updateActionVec)
 
   // Miss Path
-  private val t1_missEntry      = t1_updateEntry
-  private val t1_missLongSlot   = t1_updateLongSlot
-  private val t1_missShortSlots = Wire(Vec(NumSlots, new MonitorBtbShortSlot))
-  private val t1_missWayMask    = UIntToOH(t1_finalAction.way, NumWay)
-  private val t1_missSlotMask   = WireInit(0.U(NumSlots.W))
-  private val t1_missSlots      = Mux(t1_missEntry.fusion, t1_missLongSlot.toShortSlots, t1_missShortSlots)
-  private val t1_missRrpvs      = WireInit(t1_bankRrpvs)
+  private val t2_missEntry      = t2_updateEntry
+  private val t2_missLongSlot   = t2_updateLongSlot
+  private val t2_missShortSlots = Wire(Vec(NumSlots, new MonitorBtbShortSlot))
+  private val t2_missWayMask    = UIntToOH(t2_finalAction.way, NumWay)
+  private val t2_missSlotMask   = WireInit(0.U(NumSlots.W))
+  private val t2_missSlots      = Mux(t2_missEntry.fusion, t2_missLongSlot.toShortSlots, t2_missShortSlots)
+  private val t2_missRrpvs      = WireInit(t2_bankRrpvs)
 
-  private val t1_bankVictimMatrix = CompareMatrix(VecInit(t1_bankRrpvs.flatten), order = (a, b) => a > b)
-  private val t1_bankAgedRrpvs    = rrpvAging(VecInit(t1_bankRrpvs.flatten), t1_bankVictimMatrix)
+  private val t2_bankVictimMatrix = CompareMatrix(VecInit(t2_bankRrpvs.flatten), order = (a, b) => a > b)
+  private val t2_bankAgedRrpvs    = rrpvAging(VecInit(t2_bankRrpvs.flatten), t2_bankVictimMatrix)
 
-  t1_missShortSlots.zipWithIndex.foreach { case (s, i) =>
-    s := Mux(t1_finalAction.slot === i.U, t1_updateShortSlot, 0.U.asTypeOf(new MonitorBtbShortSlot))
+  t2_missShortSlots.zipWithIndex.foreach { case (s, i) =>
+    s := Mux(t2_finalAction.slot === i.U, t2_updateShortSlot, 0.U.asTypeOf(new MonitorBtbShortSlot))
   }
-  switch(t1_finalAction.actionType) {
+  switch(t2_finalAction.actionType) {
     is(UpdateActionType.ReplaceSameTagSlot) {
-      t1_missSlotMask := UIntToOH(t1_finalAction.slot, NumSlots)
-      t1_missRrpvs.zipWithIndex.foreach { case (rrpvs, way) =>
+      t2_missSlotMask := UIntToOH(t2_finalAction.slot, NumSlots)
+      t2_missRrpvs.zipWithIndex.foreach { case (rrpvs, way) =>
         rrpvs.zipWithIndex.foreach { case (r, slot) =>
           r := Mux(
-            t1_finalAction.way === way.U && t1_finalAction.slot === slot.U,
+            t2_finalAction.way === way.U && t2_finalAction.slot === slot.U,
             (MaxRrpv - 1).U,
-            t1_bankAgedRrpvs(way * NumSlots + slot)
+            t2_bankAgedRrpvs(way * NumSlots + slot)
           )
         }
       }
     }
     is(UpdateActionType.BreakFusedWay, UpdateActionType.RetagUnfusedWay) {
-      t1_missSlotMask := Fill(NumSlots, true.B)
-      t1_missRrpvs.zipWithIndex.foreach { case (rrpvs, way) =>
+      t2_missSlotMask := Fill(NumSlots, true.B)
+      t2_missRrpvs.zipWithIndex.foreach { case (rrpvs, way) =>
         rrpvs.zipWithIndex.foreach { case (r, slot) =>
           if (slot == 0)
-            r := Mux(t1_finalAction.way === way.U, (MaxRrpv - 1).U, t1_bankAgedRrpvs(way * NumSlots + slot))
+            r := Mux(t2_finalAction.way === way.U, (MaxRrpv - 1).U, t2_bankAgedRrpvs(way * NumSlots + slot))
           else
-            r := Mux(t1_finalAction.way === way.U, MaxRrpv.U, t1_bankAgedRrpvs(way * NumSlots + slot))
+            r := Mux(t2_finalAction.way === way.U, MaxRrpv.U, t2_bankAgedRrpvs(way * NumSlots + slot))
         }
       }
     }
     is(UpdateActionType.ReplaceFusedWay, UpdateActionType.ReplaceUnfusedPair) {
-      t1_missSlotMask := Fill(NumSlots, true.B)
-      t1_missRrpvs.zipWithIndex.foreach { case (rrpvs, way) =>
+      t2_missSlotMask := Fill(NumSlots, true.B)
+      t2_missRrpvs.zipWithIndex.foreach { case (rrpvs, way) =>
         rrpvs.zipWithIndex.foreach { case (r, slot) =>
-          r := Mux(t1_finalAction.way === way.U, (MaxRrpv - 1).U, t1_bankAgedRrpvs(way * NumSlots + slot))
+          r := Mux(t2_finalAction.way === way.U, (MaxRrpv - 1).U, t2_bankAgedRrpvs(way * NumSlots + slot))
         }
       }
     }
   }
 
   // Hit Path
-  private val t1_hitEntry      = t1_updateEntry
-  private val t1_hitLongSlot   = t1_updateLongSlot
-  private val t1_hitShortSlots = Wire(Vec(NumSlots, new MonitorBtbShortSlot))
-  private val t1_hitSlotMask   = Wire(UInt(NumSlots.W))
-  private val t1_hitWayMask    = Wire(UInt(NumWay.W))
-  private val t1_hitRrpvs      = Wire(Vec(NumWay, Vec(NumSlots, UInt(RrpvWidth.W))))
-  private val t1_hitSlots      = Mux(t1_hitEntry.fusion, t1_hitLongSlot.toShortSlots, t1_hitShortSlots)
+  private val t2_hitEntry      = t2_updateEntry
+  private val t2_hitLongSlot   = t2_updateLongSlot
+  private val t2_hitShortSlots = Wire(Vec(NumSlots, new MonitorBtbShortSlot))
+  private val t2_hitSlotMask   = Wire(UInt(NumSlots.W))
+  private val t2_hitWayMask    = Wire(UInt(NumWay.W))
+  private val t2_hitRrpvs      = Wire(Vec(NumWay, Vec(NumSlots, UInt(RrpvWidth.W))))
+  private val t2_hitSlots      = Mux(t2_hitEntry.fusion, t2_hitLongSlot.toShortSlots, t2_hitShortSlots)
 
-  private val t1_shortSlotHitWayOH = VecInit.tabulate(NumWay) { way =>
-    Seq.tabulate(NumSlots)(s => t1_shortSlotHitOH(way * NumSlots + s)).reduce(_ || _)
+  private val t2_shortSlotHitWayOH = VecInit.tabulate(NumWay) { way =>
+    Seq.tabulate(NumSlots)(s => t2_shortSlotHitOH(way * NumSlots + s)).reduce(_ || _)
   }
-  private val t1_shortSlotHitSlotOH = VecInit.tabulate(NumSlots) { slot =>
-    Seq.tabulate(NumWay)(w => t1_shortSlotHitOH(w * NumSlots + slot)).reduce(_ || _)
+  private val t2_shortSlotHitSlotOH = VecInit.tabulate(NumSlots) { slot =>
+    Seq.tabulate(NumWay)(w => t2_shortSlotHitOH(w * NumSlots + slot)).reduce(_ || _)
   }
 
-  t1_hitWayMask  := Mux(t1_longSlotHit, t1_longSlotHitOH.asUInt, t1_shortSlotHitWayOH.asUInt)
-  t1_hitSlotMask := Mux(t1_longSlotHit, Fill(NumSlots, true.B), t1_shortSlotHitSlotOH.asUInt)
-  t1_hitShortSlots.zipWithIndex.foreach { case (s, i) =>
-    s := Mux(t1_hitSlotMask(i), t1_updateShortSlot, 0.U.asTypeOf(new MonitorBtbShortSlot))
+  t2_hitWayMask  := Mux(t2_longSlotHit, t2_longSlotHitOH.asUInt, t2_shortSlotHitWayOH.asUInt)
+  t2_hitSlotMask := Mux(t2_longSlotHit, Fill(NumSlots, true.B), t2_shortSlotHitSlotOH.asUInt)
+  t2_hitShortSlots.zipWithIndex.foreach { case (s, i) =>
+    s := Mux(t2_hitSlotMask(i), t2_updateShortSlot, 0.U.asTypeOf(new MonitorBtbShortSlot))
   }
-  t1_hitRrpvs.zipWithIndex.foreach { case (rrpvs, way) =>
-    when(t1_longSlotHit) {
+  t2_hitRrpvs.zipWithIndex.foreach { case (rrpvs, way) =>
+    when(t2_longSlotHit) {
       rrpvs.zipWithIndex.foreach { case (r, slot) =>
-        r := Mux(t1_longSlotHitOH(way), 0.U, t1_bankAgedRrpvs(way * NumSlots + slot))
+        r := Mux(t2_longSlotHitOH(way), 0.U, t2_bankAgedRrpvs(way * NumSlots + slot))
       }
     }.otherwise {
       rrpvs.zipWithIndex.foreach { case (r, slot) =>
-        r := Mux(t1_shortSlotHitOH(way * NumSlots + slot), 0.U, t1_bankAgedRrpvs(way * NumSlots + slot))
+        r := Mux(t2_shortSlotHitOH(way * NumSlots + slot), 0.U, t2_bankAgedRrpvs(way * NumSlots + slot))
       }
     }
   }
 
-  private val t1_writeEntry    = t1_updateEntry
-  private val t1_writeSlotMask = Mux(t1_hit, t1_hitSlotMask, t1_missSlotMask)
-  private val t1_writeWayMask  = Mux(t1_hit, t1_hitWayMask, t1_missWayMask)
-  private val t1_writeRrpvs    = Mux(t1_hit, t1_hitRrpvs, t1_missRrpvs)
-  private val t1_writeSlots    = Mux(t1_hit, t1_hitSlots, t1_missSlots)
+  private val t2_writeEntry    = t2_updateEntry
+  private val t2_writeSlotMask = Mux(t2_hit, t2_hitSlotMask, t2_missSlotMask)
+  private val t2_writeWayMask  = Mux(t2_hit, t2_hitWayMask, t2_missWayMask)
+  private val t2_writeRrpvs    = Mux(t2_hit, t2_hitRrpvs, t2_missRrpvs)
+  private val t2_writeSlots    = Mux(t2_hit, t2_hitSlots, t2_missSlots)
 
   // Update Counters
-  private val t1_newCounters    = Wire(Vec(NumAlignBanks, Vec(NumWay * NumSlots, TakenCounter())))
-  private val t1_counterWayMask = Wire(Vec(NumAlignBanks, Vec(NumWay * NumSlots, Bool())))
+  private val t2_newCounters    = Wire(Vec(NumAlignBanks, Vec(NumWay * NumSlots, TakenCounter())))
+  private val t2_counterWayMask = Wire(Vec(NumAlignBanks, Vec(NumWay * NumSlots, Bool())))
 
-  t1_meta.entries.zipWithIndex.foreach { case (alignMeta, alignIdx) =>
+  t2_meta.entries.zipWithIndex.foreach { case (alignMeta, alignIdx) =>
     alignMeta.zipWithIndex.foreach { case (meta, idx) =>
       val way  = idx / NumSlots
       val slot = idx % NumSlots
       val hitMask =
-        t1_branches.map(branch => branch.valid && branch.bits.attribute.isConditional && meta.hit(branch.bits))
-      val actualTaken = Mux1H(hitMask, t1_branches.map(_.bits.taken))
+        t2_branches.map(branch => branch.valid && branch.bits.attribute.isConditional && meta.hit(branch.bits))
+      val actualTaken = Mux1H(hitMask, t2_branches.map(_.bits.taken))
       val slotOverridden =
-        t1_entryNeedWrite && t1_writeAlignBankMask(alignIdx) && t1_writeWayMask(way) && t1_writeSlotMask(slot)
+        t2_entryNeedWrite && t2_writeAlignBankMask(alignIdx) && t2_writeWayMask(way) && t2_writeSlotMask(slot)
 
-      t1_counterWayMask(alignIdx)(idx) := slotOverridden || hitMask.reduce(_ || _)
-      t1_newCounters(alignIdx)(idx) :=
+      t2_counterWayMask(alignIdx)(idx) := slotOverridden || hitMask.reduce(_ || _)
+      t2_newCounters(alignIdx)(idx) :=
         Mux(slotOverridden, TakenCounter.WeakPositive, meta.counter.getUpdate(actualTaken))
     }
   }
 
-  pageBtb.io.write.req.valid        := t1_fire && t1_entryNeedWrite && t1_targetCarry.isInvalid && !t1_pageBtbHit
-  pageBtb.io.write.req.bits.setIdx  := t1_pageBtbSetIdx
-  pageBtb.io.write.req.bits.wayMask := UIntToOH(t1_pageBtbWay, NumPageBtbWays)
-  pageBtb.io.write.req.bits.entry   := t1_updatePageBtbEntry
+  pageBtb.io.write.req.valid        := t2_fire && t2_entryNeedWrite && t2_targetCarry.isInvalid && !t2_pageBtbHit
+  pageBtb.io.write.req.bits.setIdx  := t2_pageBtbSetIdx
+  pageBtb.io.write.req.bits.wayMask := UIntToOH(t2_pageBtbWay, NumPageBtbWays)
+  pageBtb.io.write.req.bits.entry   := t2_updatePageBtbEntry
 
-  when(t1_fire && t1_entryNeedWrite && t1_targetCarry.isInvalid) {
-    pageBtbRrpvs(t1_pageBtbSetIdx)     := t1_pageBtbWriteRrpvs
-    regionBtbRrpvs(t1_regionBtbSetIdx) := t1_regionBtbWriteRrpvs
-    when(!t1_regionBtbHit) {
-      regionBtb(t1_regionBtbSetIdx)(t1_regionBtbWay) := t1_updateRegionBtbEntry
+  when(t2_fire && t2_entryNeedWrite && t2_targetCarry.isInvalid) {
+    pageBtbRrpvs(t2_pageBtbSetIdx) := t2_pageBtbWriteRrpvs
+    regionBtbRrpvs(t1_regionBtbSetIdx) := t2_regionBtbWriteRrpvs
+    when(!t2_regionBtbHit) {
+      regionBtb(t1_regionBtbSetIdx)(t2_regionBtbWay) := t2_updateRegionBtbEntry
     }
   }
 
   alignBanks.zipWithIndex.foreach { case (alignBank, alignIdx) =>
     alignBank.zipWithIndex.foreach { case (internalBank, internalIdx) =>
+      val writeReq = Wire(new MonitorBtbEntrySramWriteReq)
+      writeReq.fromRawWrite(t2_setIdxVec(alignIdx), t2_writeEntry, t2_writeSlots, t2_writeSlotMask)
+
       // Write Entry
       internalBank.io.writeEntry.req.valid :=
-        t1_fire && t1_entryNeedWrite && t1_writeAlignBankMask(alignIdx) &&
-          t1_internalBankMaskVec(alignIdx)(internalIdx)
-      internalBank.io.writeEntry.req.bits.setIdx   := t1_setIdxVec(alignIdx)
-      internalBank.io.writeEntry.req.bits.wayMask  := t1_writeWayMask
-      internalBank.io.writeEntry.req.bits.entry    := t1_writeEntry
-      internalBank.io.writeEntry.req.bits.slotMask := t1_writeSlotMask
-      internalBank.io.writeEntry.req.bits.slots    := t1_writeSlots
+        t2_fire && t2_entryNeedWrite && t2_writeAlignBankMask(alignIdx) &&
+          t2_internalBankMaskVec(alignIdx)(internalIdx)
+      internalBank.io.writeEntry.req.bits.wayMask := t2_writeWayMask
+      internalBank.io.writeEntry.req.bits.data    := writeReq
 
       // Write Counters
       internalBank.io.writeCounter.req.valid :=
-        t1_fire && t1_counterWayMask(alignIdx).reduce(_ || _) &&
-          t1_internalBankMaskVec(alignIdx)(internalIdx)
-      internalBank.io.writeCounter.req.bits.setIdx   := t1_setIdxVec(alignIdx)
-      internalBank.io.writeCounter.req.bits.wayMask  := t1_counterWayMask(alignIdx).asUInt
-      internalBank.io.writeCounter.req.bits.counters := t1_newCounters(alignIdx)
+        t2_fire && t2_counterWayMask(alignIdx).reduce(_ || _) &&
+          t2_internalBankMaskVec(alignIdx)(internalIdx)
+      internalBank.io.writeCounter.req.bits.setIdx   := t2_setIdxVec(alignIdx)
+      internalBank.io.writeCounter.req.bits.wayMask  := t2_counterWayMask(alignIdx).asUInt
+      internalBank.io.writeCounter.req.bits.counters := t2_newCounters(alignIdx)
     }
-    when(t1_fire && t1_entryNeedWrite && t1_writeAlignBankMask(alignIdx)) {
-      alignBankRrpvs(alignIdx)(getReplacerSetIndex(t1_startPcVec(alignIdx))) := t1_writeRrpvs
+    when(t2_fire && t2_entryNeedWrite && t2_writeAlignBankMask(alignIdx)) {
+      alignBankRrpvs(alignIdx)(getReplacerSetIndex(t2_startPcVec(alignIdx))) := t2_writeRrpvs
     }
   }
 
@@ -798,62 +842,62 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
 
   /* *** MBTB Trace *** */
   private val mbtbTrace = Wire(new MBTBTrace)
-  mbtbTrace.startPc             := t1_train.startPc
-  mbtbTrace.trainBranchMask     := VecInit(t1_branches.map(_.valid)).asUInt
-  mbtbTrace.trainCondMask       := VecInit(t1_branches.map(b => b.valid && b.bits.attribute.isConditional)).asUInt
-  mbtbTrace.trainTakenMask      := VecInit(t1_branches.map(b => b.valid && b.bits.taken)).asUInt
-  mbtbTrace.trainMispredictMask := VecInit(t1_branches.map(b => b.valid && b.bits.mispredict)).asUInt
+  mbtbTrace.startPc             := t2_train.startPc
+  mbtbTrace.trainBranchMask     := VecInit(t2_branches.map(_.valid)).asUInt
+  mbtbTrace.trainCondMask       := VecInit(t2_branches.map(b => b.valid && b.bits.attribute.isConditional)).asUInt
+  mbtbTrace.trainTakenMask      := VecInit(t2_branches.map(b => b.valid && b.bits.taken)).asUInt
+  mbtbTrace.trainMispredictMask := VecInit(t2_branches.map(b => b.valid && b.bits.mispredict)).asUInt
 
-  mbtbTrace.mispredictValid       := t1_mispredictInfo.valid
-  mbtbTrace.mispredictCfiPosition := t1_mispredictInfo.bits.cfiPosition
-  mbtbTrace.mispredictTaken       := t1_mispredictInfo.bits.taken
-  mbtbTrace.mispredictTarget      := t1_mispredictInfo.bits.target
-  mbtbTrace.mispredictAttribute   := t1_mispredictInfo.bits.attribute
+  mbtbTrace.mispredictValid       := t2_mispredictInfo.valid
+  mbtbTrace.mispredictCfiPosition := t2_mispredictInfo.bits.cfiPosition
+  mbtbTrace.mispredictTaken       := t2_mispredictInfo.bits.taken
+  mbtbTrace.mispredictTarget      := t2_mispredictInfo.bits.target
+  mbtbTrace.mispredictAttribute   := t2_mispredictInfo.bits.attribute
 
-  mbtbTrace.bankStartPc        := t1_bankStartPc
-  mbtbTrace.writeAlignBankMask := t1_writeAlignBankMask.asUInt
-  mbtbTrace.writeAlignBankIdx  := OHToUInt(t1_writeAlignBankMask)
-  mbtbTrace.writeSetIdx        := Mux1H(t1_writeAlignBankMask, t1_setIdxVec)
-  mbtbTrace.writeInternalIdx   := Mux1H(t1_writeAlignBankMask, t1_internalBankIdxVec)
-  mbtbTrace.canUseShortSlot    := t1_canUseShortSlot
-  mbtbTrace.updateIsFused      := t1_updateIsFused
-  mbtbTrace.targetCarry        := t1_targetCarry
+  mbtbTrace.bankStartPc        := t2_bankStartPc
+  mbtbTrace.writeAlignBankMask := t2_writeAlignBankMask.asUInt
+  mbtbTrace.writeAlignBankIdx  := OHToUInt(t2_writeAlignBankMask)
+  mbtbTrace.writeSetIdx        := Mux1H(t2_writeAlignBankMask, t2_setIdxVec)
+  mbtbTrace.writeInternalIdx   := Mux1H(t2_writeAlignBankMask, t2_internalBankIdxVec)
+  mbtbTrace.canUseShortSlot    := t2_canUseShortSlot
+  mbtbTrace.updateIsFused      := t2_updateIsFused
+  mbtbTrace.targetCarry        := t2_targetCarry
 
-  mbtbTrace.hit            := t1_hit
-  mbtbTrace.longSlotHit    := t1_longSlotHit
-  mbtbTrace.longSlotHitOH  := t1_longSlotHitOH.asUInt
-  mbtbTrace.shortSlotHit   := t1_shortSlotHit
-  mbtbTrace.shortSlotHitOH := t1_shortSlotHitOH.asUInt
+  mbtbTrace.hit            := t2_hit
+  mbtbTrace.longSlotHit    := t2_longSlotHit
+  mbtbTrace.longSlotHitOH  := t2_longSlotHitOH.asUInt
+  mbtbTrace.shortSlotHit   := t2_shortSlotHit
+  mbtbTrace.shortSlotHitOH := t2_shortSlotHitOH.asUInt
 
-  mbtbTrace.entryNeedWrite   := t1_entryNeedWrite
-  mbtbTrace.updateAction     := t1_finalAction.actionType
-  mbtbTrace.updateActionWay  := t1_finalAction.way
-  mbtbTrace.updateActionSlot := t1_finalAction.slot
-  mbtbTrace.updateActionRrpv := t1_finalAction.rrpv
-  mbtbTrace.writeWayMask     := t1_writeWayMask
-  mbtbTrace.writeSlotMask    := t1_writeSlotMask
-  mbtbTrace.writeEntry       := t1_writeEntry
-  mbtbTrace.writeSlots       := t1_writeSlots
-  mbtbTrace.writeRrpvs       := VecInit(t1_writeRrpvs.flatten)
+  mbtbTrace.entryNeedWrite   := t2_entryNeedWrite
+  mbtbTrace.updateAction     := t2_finalAction.actionType
+  mbtbTrace.updateActionWay  := t2_finalAction.way
+  mbtbTrace.updateActionSlot := t2_finalAction.slot
+  mbtbTrace.updateActionRrpv := t2_finalAction.rrpv
+  mbtbTrace.writeWayMask     := t2_writeWayMask
+  mbtbTrace.writeSlotMask    := t2_writeSlotMask
+  mbtbTrace.writeEntry       := t2_writeEntry
+  mbtbTrace.writeSlots       := t2_writeSlots
+  mbtbTrace.writeRrpvs       := VecInit(t2_writeRrpvs.flatten)
 
-  mbtbTrace.counterWriteValidMask := VecInit(t1_counterWayMask.map(_.reduce(_ || _))).asUInt
-  mbtbTrace.counterWriteMask      := VecInit(t1_counterWayMask.flatten).asUInt
-  mbtbTrace.counterValues         := VecInit(t1_newCounters.flatten)
+  mbtbTrace.counterWriteValidMask := VecInit(t2_counterWayMask.map(_.reduce(_ || _))).asUInt
+  mbtbTrace.counterWriteMask      := VecInit(t2_counterWayMask.flatten).asUInt
+  mbtbTrace.counterValues         := VecInit(t2_newCounters.flatten)
 
-  mbtbTrace.pageSetIdx  := t1_pageBtbSetIdx
-  mbtbTrace.pageHit     := t1_pageBtbHit
-  mbtbTrace.pageWay     := t1_pageBtbWay
-  mbtbTrace.pageWrite   := t1_entryNeedWrite && t1_targetCarry.isInvalid && !t1_pageBtbHit
-  mbtbTrace.pageEntry   := t1_updatePageBtbEntry
-  mbtbTrace.regionHit   := t1_regionBtbHit
-  mbtbTrace.regionWay   := t1_regionBtbWay
-  mbtbTrace.regionWrite := t1_entryNeedWrite && t1_targetCarry.isInvalid && !t1_regionBtbHit
-  mbtbTrace.regionEntry := t1_updateRegionBtbEntry
+  mbtbTrace.pageSetIdx  := t2_pageBtbSetIdx
+  mbtbTrace.pageHit     := t2_pageBtbHit
+  mbtbTrace.pageWay     := t2_pageBtbWay
+  mbtbTrace.pageWrite   := t2_entryNeedWrite && t2_targetCarry.isInvalid && !t2_pageBtbHit
+  mbtbTrace.pageEntry   := t2_updatePageBtbEntry
+  mbtbTrace.regionHit   := t2_regionBtbHit
+  mbtbTrace.regionWay   := t2_regionBtbWay
+  mbtbTrace.regionWrite := t2_entryNeedWrite && t2_targetCarry.isInvalid && !t2_regionBtbHit
+  mbtbTrace.regionEntry := t2_updateRegionBtbEntry
 
   private val mbtbTraceDBTable = ChiselDB.createTable("MBTBTrace", new MBTBTrace, EnableMainbtbTrace)
   mbtbTraceDBTable.log(
     data = mbtbTrace,
-    en = t1_fire,
+    en = t2_fire,
     clock = clock,
     reset = reset
   )
@@ -863,10 +907,10 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   private val perf_s2HasHit           = perf_s2HitMask.asUInt.orR
   private val perf_s2HasMultiHit      = VecInit(s2_multiHitMaskVec.map(_.orR)).asUInt.orR
   private val perf_s2HasLongJump      = s2_firstLongJumpOH.asUInt.orR
-  private val perf_t1CounterWriteMask = VecInit(t1_counterWayMask.flatten)
-  private val perf_t1CounterWrite     = perf_t1CounterWriteMask.asUInt.orR
-  private val perf_t1PageWrite        = t1_entryNeedWrite && t1_targetCarry.isInvalid && !t1_pageBtbHit
-  private val perf_t1RegionWrite      = t1_entryNeedWrite && t1_targetCarry.isInvalid && !t1_regionBtbHit
+  private val perf_t2CounterWriteMask = VecInit(t2_counterWayMask.flatten)
+  private val perf_t2CounterWrite     = perf_t2CounterWriteMask.asUInt.orR
+  private val perf_t2PageWrite        = t2_entryNeedWrite && t2_targetCarry.isInvalid && !t2_pageBtbHit
+  private val perf_t2RegionWrite      = t2_entryNeedWrite && t2_targetCarry.isInvalid && !t2_regionBtbHit
 
   XSPerfAccumulate("predict_total", s2_fire)
   XSPerfAccumulate("predict_hit", s2_fire && perf_s2HasHit)
@@ -876,39 +920,39 @@ class MonitorBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbPa
   XSPerfAccumulate("predict_long_jump_taken", s3_fire && s3_firstLongJumpTaken)
   XSPerfHistogram("predict_hit_count", PopCount(perf_s2HitMask), s2_fire, 0, NumBtbResultEntries + 1)
 
-  XSPerfAccumulate("train_total", t1_fire)
-  XSPerfAccumulate("train_has_mispredict", t1_fire && t1_mispredictInfo.valid)
-  XSPerfAccumulate("train_hit", t1_fire && t1_mispredictInfo.valid && t1_hit)
-  XSPerfAccumulate("train_miss", t1_fire && t1_mispredictInfo.valid && !t1_hit)
-  XSPerfAccumulate("train_entry_write", t1_fire && t1_entryNeedWrite)
-  XSPerfAccumulate("train_counter_write", t1_fire && perf_t1CounterWrite)
-  XSPerfAccumulate("train_page_write", t1_fire && perf_t1PageWrite)
-  XSPerfAccumulate("train_region_write", t1_fire && perf_t1RegionWrite)
-  XSPerfAccumulate("train_short_target", t1_fire && t1_mispredictInfo.valid && t1_canUseShortSlot)
-  XSPerfAccumulate("train_long_target", t1_fire && t1_mispredictInfo.valid && !t1_canUseShortSlot)
+  XSPerfAccumulate("train_total", t2_fire)
+  XSPerfAccumulate("train_has_mispredict", t2_fire && t2_mispredictInfo.valid)
+  XSPerfAccumulate("train_hit", t2_fire && t2_mispredictInfo.valid && t2_hit)
+  XSPerfAccumulate("train_miss", t2_fire && t2_mispredictInfo.valid && !t2_hit)
+  XSPerfAccumulate("train_entry_write", t2_fire && t2_entryNeedWrite)
+  XSPerfAccumulate("train_counter_write", t2_fire && perf_t2CounterWrite)
+  XSPerfAccumulate("train_page_write", t2_fire && perf_t2PageWrite)
+  XSPerfAccumulate("train_region_write", t2_fire && perf_t2RegionWrite)
+  XSPerfAccumulate("train_short_target", t2_fire && t2_mispredictInfo.valid && t2_canUseShortSlot)
+  XSPerfAccumulate("train_long_target", t2_fire && t2_mispredictInfo.valid && !t2_canUseShortSlot)
   XSPerfAccumulate(
     "train_replace_same_tag_slot",
-    t1_fire && t1_entryNeedWrite && t1_finalAction.actionType === UpdateActionType.ReplaceSameTagSlot
+    t2_fire && t2_entryNeedWrite && t2_finalAction.actionType === UpdateActionType.ReplaceSameTagSlot
   )
   XSPerfAccumulate(
     "train_break_fused_way",
-    t1_fire && t1_entryNeedWrite && t1_finalAction.actionType === UpdateActionType.BreakFusedWay
+    t2_fire && t2_entryNeedWrite && t2_finalAction.actionType === UpdateActionType.BreakFusedWay
   )
   XSPerfAccumulate(
     "train_retag_unfused_way",
-    t1_fire && t1_entryNeedWrite && t1_finalAction.actionType === UpdateActionType.RetagUnfusedWay
+    t2_fire && t2_entryNeedWrite && t2_finalAction.actionType === UpdateActionType.RetagUnfusedWay
   )
   XSPerfAccumulate(
     "train_replace_fused_way",
-    t1_fire && t1_entryNeedWrite && t1_finalAction.actionType === UpdateActionType.ReplaceFusedWay
+    t2_fire && t2_entryNeedWrite && t2_finalAction.actionType === UpdateActionType.ReplaceFusedWay
   )
   XSPerfAccumulate(
     "train_replace_unfused_pair",
-    t1_fire && t1_entryNeedWrite && t1_finalAction.actionType === UpdateActionType.ReplaceUnfusedPair
+    t2_fire && t2_entryNeedWrite && t2_finalAction.actionType === UpdateActionType.ReplaceUnfusedPair
   )
-  XSPerfHistogram("train_branch_count", PopCount(t1_branches.map(_.valid)), t1_fire, 0, ResolveEntryBranchNumber + 1)
-  XSPerfHistogram("train_counter_write_count", PopCount(perf_t1CounterWriteMask), t1_fire, 0, NumBtbResultEntries + 1)
-  XSPerfHistogram("train_write_way_count", PopCount(t1_writeWayMask), t1_fire && t1_entryNeedWrite, 0, NumWay + 1)
-  XSPerfHistogram("train_write_slot_count", PopCount(t1_writeSlotMask), t1_fire && t1_entryNeedWrite, 0, NumSlots + 1)
+  XSPerfHistogram("train_branch_count", PopCount(t2_branches.map(_.valid)), t2_fire, 0, ResolveEntryBranchNumber + 1)
+  XSPerfHistogram("train_counter_write_count", PopCount(perf_t2CounterWriteMask), t2_fire, 0, NumBtbResultEntries + 1)
+  XSPerfHistogram("train_write_way_count", PopCount(t2_writeWayMask), t2_fire && t2_entryNeedWrite, 0, NumWay + 1)
+  XSPerfHistogram("train_write_slot_count", PopCount(t2_writeSlotMask), t2_fire && t2_entryNeedWrite, 0, NumSlots + 1)
 
 }
