@@ -37,8 +37,8 @@ case class ScParameters(
     BiasTableInfo:       ScTableInfo = new ScTableInfo(128, 0),
     BiasUseTageBitWidth: Int = 2,    // use tage_taken as index bits
     PathEnable:          Boolean = true,
-    GlobalEnable:        Boolean = true,
-    BWEnable:            Boolean = true,
+    GlobalEnable:        Boolean = false,
+    BWEnable:            Boolean = false,
     ImliEnable:          Boolean = true,
     BiasEnable:          Boolean = true,
     CtrWidth:            Int = 6,

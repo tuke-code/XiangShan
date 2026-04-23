@@ -248,9 +248,12 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val s2_globalPercsum = VecInit(s1_globalPercsum.map(RegEnable(_, s1_fire))) // for performance counter
 
   private val s2_mbtbResult        = io.mbtbResult
-  private val s2_providerTakenMask = VecInit(io.providerTakenCtrs.map(_.bits.isPositive))
-  private val s2_providerValid     = VecInit(io.providerTakenCtrs.map(_.valid))
-  private val s2_providerCtr       = VecInit(io.providerTakenCtrs.map(_.bits))
+  private val s2_providerTakenMask = VecInit.fill(NumBtbResultEntries)(false.B)                       // for test
+  private val s2_providerValid     = VecInit.fill(NumBtbResultEntries)(true.B)                        // for test
+  private val s2_providerCtr       = VecInit.fill(NumBtbResultEntries)(TageTakenCounter.WeakNegative) // for test
+  // private val s2_providerTakenMask = VecInit(io.providerTakenCtrs.map(_.bits.isPositive))
+  // private val s2_providerValid     = VecInit(io.providerTakenCtrs.map(_.valid))
+  // private val s2_providerCtr       = VecInit(io.providerTakenCtrs.map(_.bits))
 
   private val s2_hitMask = VecInit(s2_mbtbResult.map { mbtbResult =>
     mbtbResult.valid && mbtbResult.bits.attribute.isConditional
