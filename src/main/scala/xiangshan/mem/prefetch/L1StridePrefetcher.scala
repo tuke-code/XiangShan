@@ -195,9 +195,9 @@ class StrideMetaArray(implicit p: Parameters) extends XSModule with HasStridePre
     s1_stride_valid := res._4
   }
 
-  val l1_stride_ratio_const = Constantin.createRecord(s"l1_stride_ratio${p(XSCoreParamsKey).HartId}", initValue = 2)
+  val l1_stride_ratio_const = Constantin.createRecord(s"l1_stride_ratio${p(XSCoreParamsKey).HartId}", initValue = 4)
   val l1_stride_ratio = l1_stride_ratio_const(3, 0)
-  val l2_stride_ratio_const = Constantin.createRecord(s"l2_stride_ratio${p(XSCoreParamsKey).HartId}", initValue = 5)
+  val l2_stride_ratio_const = Constantin.createRecord(s"l2_stride_ratio${p(XSCoreParamsKey).HartId}", initValue = 10)
   val l2_stride_ratio = l2_stride_ratio_const(3, 0)
   // s2: calculate L1 & L2 pf addr
   val s2_valid = GatedValidRegNext(s1_valid && s1_can_send_pf)
