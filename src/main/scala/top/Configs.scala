@@ -202,7 +202,7 @@ class TLMinimalConfig(n: Int = 1) extends Config(
           NWays = 4,
           partialStaticPMP = true,
           outsideRecvFlush = true,
-          outReplace = true,
+          outReplace = false,
           lgMaxSize = 4
         ),
         sttlbParameters = TLBParameters(
@@ -210,7 +210,7 @@ class TLMinimalConfig(n: Int = 1) extends Config(
           NWays = 4,
           partialStaticPMP = true,
           outsideRecvFlush = true,
-          outReplace = true,
+          outReplace = false,
           lgMaxSize = 4
         ),
         hytlbParameters = TLBParameters(
@@ -218,7 +218,7 @@ class TLMinimalConfig(n: Int = 1) extends Config(
           NWays = 4,
           partialStaticPMP = true,
           outsideRecvFlush = true,
-          outReplace = true,
+          outReplace = false,
           lgMaxSize = 4
         ),
         pftlbParameters = TLBParameters(
@@ -226,7 +226,7 @@ class TLMinimalConfig(n: Int = 1) extends Config(
           NWays = 4,
           partialStaticPMP = true,
           outsideRecvFlush = true,
-          outReplace = true,
+          outReplace = false,
           lgMaxSize = 4
         ),
         btlbParameters = TLBParameters(
