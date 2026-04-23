@@ -79,7 +79,10 @@ xs_frontend_rename_map = {
 
 xs_backend_rename_map = {
 
-    'IssueCancelStall': 'MergeCancelStall',
+    'IssueCancelStallOg0': 'MergeCancelStall',
+    'IssueCancelStallOg1': 'MergeCancelStall',
+    'IssueCancelStallOther': 'MergeCancelStall',
+    'IssueDelayStall': 'MergeIssueDelayStall',
     'DivStall': 'MergeExecStall',
     'IntNotReadyStall': 'MergeExecStall',
     'FPNotReadyStall': 'MergeExecStall',
@@ -138,6 +141,8 @@ xs_backend_rename_map = {
 }
 
 xs_mem_rename_map = {
+    'IssueCancelStallLd': 'MergeCancelStall',
+    'IssueCancelStallSt': 'MergeCancelStall',
     'MemNotReadyStall': 'MergeMemNotReadyStall',
 
     'LoadTLBStall': 'MergeLoadTLBStall',
@@ -179,7 +184,12 @@ xs_coarse_rename_map = {
     'FetchFragBubble': 'MergeFrontend',
     'FrontendOtherCoreStall': "MergeCoreOther",
 
-    'IssueCancelStall': 'MergeCore',
+    'IssueCancelStallOg0': 'MergeCore',
+    'IssueCancelStallOg1': 'MergeCore',
+    'IssueCancelStallLd': 'MergeLoad',
+    'IssueCancelStallSt': 'MergeStore',
+    'IssueCancelStallOther': 'MergeCore',
+    'IssueDelayStall': 'MergeCore',
     'DivStall': 'MergeCore',
     'IntNotReadyStall': 'MergeCore',
     'FPNotReadyStall': 'MergeCore',
@@ -330,7 +340,12 @@ targets = {
     'FetchFragBubble': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: FetchFragBubble,\s+(\d+)',
     'FrontendOtherCoreStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: FrontendOtherCoreStall,\s+(\d+)',
 
-    'IssueCancelStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: IssueCancelStall,\s+(\d+)',
+    'IssueCancelStallOg0': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: IssueCancelStallOg0,\s+(\d+)',
+    'IssueCancelStallOg1': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: IssueCancelStallOg1,\s+(\d+)',
+    'IssueCancelStallLd': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: IssueCancelStallLd,\s+(\d+)',
+    'IssueCancelStallSt': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: IssueCancelStallSt,\s+(\d+)',
+    'IssueCancelStallOther': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: IssueCancelStallOther,\s+(\d+)',
+    'IssueDelayStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: IssueDelayStall,\s+(\d+)',
     'DivStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: DivStall,\s+(\d+)',
     'IntNotReadyStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: IntNotReadyStall,\s+(\d+)',
     'FPNotReadyStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: FPNotReadyStall,\s+(\d+)',

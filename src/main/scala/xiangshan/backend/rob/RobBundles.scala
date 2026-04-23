@@ -26,7 +26,7 @@ import utility._
 import utils._
 import xiangshan._
 import xiangshan.backend.BackendParams
-import xiangshan.backend.Bundles.{DynInst, ExceptionInfo, ExuOutput, UopIdx, EnqRobUop}
+import xiangshan.backend.Bundles._
 import xiangshan.backend.fu.{FuConfig, FuType}
 import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
@@ -98,6 +98,8 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val topdownIssueTime = OptionWrapper(backendParams.debugEn, UInt(XLEN.W))
     val topdownLastIssueTime = OptionWrapper(backendParams.debugEn, UInt(XLEN.W))
     val topdownRobHeadTime = OptionWrapper(backendParams.debugEn, UInt(XLEN.W))
+    val topdownLastShouldIssueTime = OptionWrapper(backendParams.debugEn, UInt(XLEN.W))
+    val topdownCancelSource = OptionWrapper(backendParams.debugEn, IQCancelSource())
 
     def isWritebacked: Bool = !uopNum.orR
     def isUopWritebacked: Bool = !uopNum.orR
@@ -180,6 +182,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robEntry.topdownIssueTime.foreach(_ := 0.U)
     robEntry.topdownLastIssueTime.foreach(_ := 0.U)
     robEntry.topdownRobHeadTime.foreach(_ := 0.U)
+    robEntry.topdownCancelSource.foreach(_ := IQCancelSource.none)
   }
 
   def connectCommitEntry(robCommitEntry: RobCommitEntryBundle, robEntry: RobEntryBundle): Unit = {
