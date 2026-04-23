@@ -172,7 +172,7 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   io.pf_ctrl.confidence := confidence
 
   val depth_const = Wire(UInt(DEPTH_BITS.W))
-  depth_const := Constantin.createRecord(s"${param.name}_depth${p(XSCoreParamsKey).HartId}", initValue = 32)
+  depth_const := Constantin.createRecord(s"${param.name}_depth${p(XSCoreParamsKey).HartId}", initValue = 16)
 
   val total_prefetch_cnt = RegInit(0.U((log2Up(param.TIMELY_CHECK_INTERVAL) + 1).W))
   val pf_late_in_cache_cnt = RegInit(0.U((log2Up(param.TIMELY_CHECK_INTERVAL) + 1).W))
@@ -226,9 +226,9 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
     enable := false.B
     flush := true.B
   }
-
+  val MAX_DEPTH = (1 << 7).U // 128.U
   when(trigger_late_miss) {
-    depth := Mux(depth === (1 << (DEPTH_BITS - 1)).U, depth, depth << 1)
+    depth := Mux(depth === MAX_DEPTH, depth, depth << 1)
   }.elsewhen(trigger_late_hit) {
     // for now, late hit will disable the prefether
     confidence := 0.U(1.W)
@@ -244,8 +244,6 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
     enable := true.B
     confidence := 1.U
   }.otherwise {
-    // for now, only dynamically disable prefetcher, without depth and flush
-    depth := depth_const
     flush := false.B
   }
 
