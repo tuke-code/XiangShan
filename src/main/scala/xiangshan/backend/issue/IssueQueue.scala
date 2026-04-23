@@ -60,6 +60,7 @@ class IssueQueueIO()(implicit p: Parameters, params: IssueBlockParams) extends X
 
   val deqDelay: MixedVec[DecoupledIO[Og0InUop]] = params.genIssueDecoupledBundle// = deq.cloneType
   val deqOg1Payload: MixedVec[IssueQueueDeqOg1Payload] = params.genIssueDeqOg1PayloadBundle
+  val realOldestSelValid = Bool()
   def allWakeUp = wakeupFromWB ++ wakeupFromIQ
 }
 
@@ -254,7 +255,15 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   io.fuTypeVec := fuTypeVec
   val deqEntryVec = Wire(Vec(params.numDeq, ValidIO(new EntryBundle(isDeq = true))))
   val canIssueMergeAllBusy = Wire(Vec(params.numDeq, UInt(params.numEntries.W)))
+  val canIssueMergeAllBusyNoOldest = Wire(UInt(params.numEntries.W))
   val deqCanIssue = Wire(Vec(params.numDeq, UInt(params.numEntries.W)))
+  val realOldestSelValid = Wire(Bool())
+  val realOldestSelOH = Wire(UInt(params.numEntries.W))
+  io.realOldestSelValid := realOldestSelValid & (!Mux1H(realOldestSelOH, canIssueMergeAllBusyNoOldest))
+  dontTouch(realOldestSelValid)
+  dontTouch(realOldestSelOH)
+  realOldestSelValid := false.B
+  realOldestSelOH := 0.U
 
   //deq
   val enqEntryOldestSel = Wire(Vec(params.numDeq, ValidIO(UInt(params.numEnq.W))))
@@ -456,7 +465,75 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     }
   }
 
+  if (params.enableOldestIssueBypass) {
+    val rawCanIssue = canIssueVec.asUInt & VecInit(deqCanAcceptVec.head).asUInt
+    val rawEnqEntryOldestSel = NewAgeDetector(
+      numEntries = params.numEnq,
+      enq = VecInit(s0_doEnqSelValidVec),
+      canIssue = VecInit(Seq(rawCanIssue(params.numEnq - 1, 0)))
+    ).head
+
+    if (params.isAllComp || params.isAllSimp) {
+      val rawOthersEntryOldestSel = AgeDetector(
+        numEntries = params.numEntries - params.numEnq,
+        enq = othersEntryEnqSelVec.get,
+        canIssue = rawCanIssue(params.numEntries - 1, params.numEnq)
+      )
+
+      realOldestSelValid := rawOthersEntryOldestSel.valid || rawEnqEntryOldestSel.valid
+      realOldestSelOH := Cat(
+        rawOthersEntryOldestSel.bits,
+        Fill(params.numEnq, !rawOthersEntryOldestSel.valid) & rawEnqEntryOldestSel.bits,
+      )
+    }
+    else {
+      val rawSimpEntryOldestSel = AgeDetector(
+        numEntries = params.numSimp,
+        enq = simpEntryEnqSelVec.get,
+        canIssue = rawCanIssue(params.numEnq + params.numSimp - 1, params.numEnq)
+      )
+      val rawCompEntryOldestSel = AgeDetector(
+        numEntries = params.numComp,
+        enq = compEntryEnqSelVec.get,
+        canIssue = rawCanIssue(params.numEntries - 1, params.numEnq + params.numSimp)
+      )
+
+      realOldestSelValid := rawCompEntryOldestSel.valid || rawSimpEntryOldestSel.valid || rawEnqEntryOldestSel.valid
+      realOldestSelOH := Cat(
+        rawCompEntryOldestSel.bits,
+        Fill(params.numSimp, !rawCompEntryOldestSel.valid) & rawSimpEntryOldestSel.bits,
+        Fill(params.numEnq, !rawCompEntryOldestSel.valid && !rawSimpEntryOldestSel.valid) & rawEnqEntryOldestSel.bits,
+      )
+    }
+  }
+
   canIssueMergeAllBusy.zipWithIndex.foreach { case (merge, i) =>
+    val bypassBusyMask = Mux(realOldestSelValid, realOldestSelOH, 0.U(params.numEntries.W))
+    val mergeFuBusyOldest = {
+      if (fuBusyTableWrite(i).nonEmpty) canIssueVec.asUInt & ((~fuBusyTableMask(i)).asUInt | bypassBusyMask)
+      else canIssueVec.asUInt
+    }
+    val mergeIntWbBusyOldest = {
+      if (intWbBusyTableRead(i).nonEmpty) mergeFuBusyOldest & ((~intWbBusyTableMask(i)).asUInt | bypassBusyMask)
+      else mergeFuBusyOldest
+    }
+    val mergefpWbBusyOldest = {
+      if (fpWbBusyTableRead(i).nonEmpty) mergeIntWbBusyOldest & ((~fpWbBusyTableMask(i)).asUInt | bypassBusyMask)
+      else mergeIntWbBusyOldest
+    }
+    val mergeVfWbBusyOldest = {
+      if (vfWbBusyTableRead(i).nonEmpty) mergefpWbBusyOldest & ((~vfWbBusyTableMask(i)).asUInt | bypassBusyMask)
+      else mergefpWbBusyOldest
+    }
+    val mergeV0WbBusyOldest = {
+      if (v0WbBusyTableRead(i).nonEmpty) mergeVfWbBusyOldest & ((~v0WbBusyTableMask(i)).asUInt | bypassBusyMask)
+      else mergeVfWbBusyOldest
+    }
+    val mergeVlWbBusyOldest = {
+      if (vlWbBusyTableRead(i).nonEmpty) mergeV0WbBusyOldest & ((~vlWbBusyTableMask(i)).asUInt | bypassBusyMask)
+      else  mergeV0WbBusyOldest
+    }
+    merge := mergeVlWbBusyOldest
     val mergeFuBusy = {
       if (fuBusyTableWrite(i).nonEmpty) canIssueVec.asUInt & (~fuBusyTableMask(i)).asUInt
       else canIssueVec.asUInt
@@ -479,9 +556,9 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     }
     val mergeVlWbBusy = {
       if (vlWbBusyTableRead(i).nonEmpty) mergeV0WbBusy & (~vlWbBusyTableMask(i)).asUInt
-      else  mergeV0WbBusy
+      else mergeV0WbBusy
     }
-    merge := mergeVlWbBusy
+    canIssueMergeAllBusyNoOldest := mergeVlWbBusy
   }
 
   deqCanIssue.zipWithIndex.foreach { case (req, i) =>

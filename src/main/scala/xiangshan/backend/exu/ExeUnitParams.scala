@@ -32,6 +32,8 @@ case class ExeUnitParams(
   implicit
   val schdType: SchedulerType,
 ) {
+  private val oldestIssueBypassTargetExuNames = Set("ALU3", "ALU4", "ALU5", "FEX0", "FEX1", "FEX2", "FEX3")
+
   require(rfrPortConfigs.forall(!_.exists(_.isInstanceOf[VlRD])), "VlRD should not appear in rfrPortConfigs")
   require(!wbPortConfigs.exists(_.isInstanceOf[VlWB]), "VlWB should not appear in wbPortConfigs")
 
@@ -105,6 +107,8 @@ case class ExeUnitParams(
   val writeVType: Boolean = fuConfigs.map(_.writeVType).reduce(_ || _)
   val needCriticalErrors: Boolean = fuConfigs.map(_.needCriticalErrors).reduce(_ || _)
   val isHighestWBPriority: Boolean = wbPortConfigs.forall(_.priority == 0)
+
+  def enableOldestIssueBypass: Boolean = oldestIssueBypassTargetExuNames.contains(name)
 
   val isIntExeUnit: Boolean = schdType.isInstanceOf[IntScheduler] && (name.contains("ALU") || name.contains("BJU"))
   val isFpExeUnit: Boolean = schdType.isInstanceOf[FpScheduler]
