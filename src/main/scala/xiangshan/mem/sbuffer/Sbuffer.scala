@@ -534,15 +534,41 @@ class Sbuffer(implicit p: Parameters)
   val sbuffer_empty = Cat(invalidMask).andR
   val sq_empty = !Cat(io.in.req.map(_.valid)).orR
   val empty = sbuffer_empty && sq_empty
-  val threshold = Wire(UInt(5.W)) // RegNext(io.csrCtrl.sbuffer_threshold +& 1.U)
-  threshold := Constantin.createRecord(s"StoreBufferThreshold_${p(XSCoreParamsKey).HartId}", initValue = 12)
+  val thresholdUpBound = Wire(UInt(5.W)) // RegNext(io.csrCtrl.sbuffer_threshold +& 1.U)
+  thresholdUpBound := Constantin.createRecord(s"StoreBufferThreshold_${p(XSCoreParamsKey).HartId}", initValue = 18)
   val base = Wire(UInt(5.W))
   base := Constantin.createRecord(s"StoreBufferBase_${p(XSCoreParamsKey).HartId}", initValue = 4)
   val ActiveCount = PopCount(activeMask)
   val ValidCount = PopCount(validMask)
-  val forceThreshold = Mux(io.force_write, threshold - base, threshold)
-  val do_eviction = GatedValidRegNext(ActiveCount >= forceThreshold || ActiveCount === (StoreBufferSize-1).U || ValidCount === (StoreBufferSize).U, init = false.B)
+  // val forceThreshold = Mux(io.force_write, thresholdUpBound - base, thresholdUpBound)
+  // val do_eviction = GatedValidRegNext(ActiveCount >= forceThreshold || ActiveCount === (StoreBufferSize-1).U || ValidCount === (StoreBufferSize).U, init = false.B)
   require((StoreBufferThreshold + 1) <= StoreBufferSize)
+
+  val thresholdDynamic = RegInit(12.U(5.W))
+  val thresholdLowBound = Wire(UInt(5.W))
+  thresholdLowBound := Constantin.createRecord(s"StoreBufferThresholdLowBound_${p(XSCoreParamsKey).HartId}", initValue = 4)
+  
+  val almostFull = ValidCount > (StoreBufferSize - 2).U
+  val dyncPeriod = Wire(UInt(9.W))
+  dyncPeriod := Constantin.createRecord(s"StoreBufferDyncPeriod_${p(XSCoreParamsKey).HartId}", initValue = 128)
+  val dyncCnt = RegInit(0.U(9.W))
+  val dyncCntHigh = dyncCnt === dyncPeriod
+  dyncCnt := Mux(dyncCntHigh, 0.U, dyncCnt + 1.U)
+  val safeThreshold = Wire(UInt(5.W))
+  safeThreshold := Constantin.createRecord(s"StoreBufferSafeThreshold_${p(XSCoreParamsKey).HartId}", initValue = 20)
+  val notSafeAccum = RegInit(false.B)
+  when(dyncCntHigh) {
+    notSafeAccum := false.B
+  }.elsewhen (ValidCount >= safeThreshold || io.force_write) {
+    notSafeAccum := true.B
+  }
+
+  when (almostFull) {
+    thresholdDynamic := thresholdLowBound
+  }.elsewhen (dyncCntHigh && !notSafeAccum && thresholdDynamic =/= thresholdUpBound) {
+    thresholdDynamic := thresholdDynamic + 1.U
+  }
+  val do_eviction = GatedValidRegNext(ValidCount >= thresholdDynamic || ActiveCount === (StoreBufferSize-1).U || ValidCount === (StoreBufferSize).U, init = false.B)
 
   XSDebug(p"ActiveCount[$ActiveCount]\n")
 
