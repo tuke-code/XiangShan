@@ -213,7 +213,7 @@ case class XSCoreParameters
   ldtlbParameters: TLBParameters = TLBParameters(
     name = "ldtlb",
     NWays = 48,
-    outReplace = false,
+    outReplace = true,
     partialStaticPMP = true,
     outsideRecvFlush = true,
     saveLevel = false,
@@ -222,7 +222,7 @@ case class XSCoreParameters
   sttlbParameters: TLBParameters = TLBParameters(
     name = "sttlb",
     NWays = 48,
-    outReplace = false,
+    outReplace = true,
     partialStaticPMP = true,
     outsideRecvFlush = true,
     saveLevel = false,
@@ -231,7 +231,7 @@ case class XSCoreParameters
   hytlbParameters: TLBParameters = TLBParameters(
     name = "hytlb",
     NWays = 48,
-    outReplace = false,
+    outReplace = true,
     partialStaticPMP = true,
     outsideRecvFlush = true,
     saveLevel = false,
@@ -240,7 +240,7 @@ case class XSCoreParameters
   pftlbParameters: TLBParameters = TLBParameters(
     name = "pftlb",
     NWays = 48,
-    outReplace = false,
+    outReplace = true,
     partialStaticPMP = true,
     outsideRecvFlush = true,
     saveLevel = false,
@@ -254,7 +254,7 @@ case class XSCoreParameters
     outsideRecvFlush = true,
     saveLevel = false
   ),
-  refillBothTlb: Boolean = false,
+  refillBothTlb: Boolean = true,
   btlbParameters: TLBParameters = TLBParameters(
     name = "btlb",
     NWays = 48,
