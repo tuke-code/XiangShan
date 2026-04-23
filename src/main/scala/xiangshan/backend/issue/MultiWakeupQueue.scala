@@ -41,37 +41,54 @@ class MultiWakeupQueue[T <: Bundle, TFlush <: Data](
 
   val io = IO(new MultiWakeupQueueIO(gen, lastGen, flushGen, log2Up(latencySet.max) + 1))
 
-  val pipes = latencySet.map(x => Module(new PipeWithFlush[T, TFlush](gen, flushGen, x, flushFunc, modificationFunc))).toSeq
+  private val latencySeq = latencySet.toSeq.sorted
+  val pipes = latencySeq.map(x => Module(new PipeWithFlush[T, TFlush](gen, flushGen, x, flushFunc, modificationFunc))).toSeq
 
   val pipesOut = Wire(Valid(gen))
   val lastConnect = Reg(Valid(lastGen))
 
-  pipes.zip(latencySet).foreach {
+  pipes.zip(latencySeq).foreach {
     case (pipe, lat) =>
       pipe.io.flush := io.flush
       pipe.io.enq.valid := io.enq.valid && io.enq.bits.lat === lat.U
       pipe.io.enq.bits := io.enq.bits.uop
   }
 
-  private val pipesValidVec = VecInit(pipes.map(_.io.deq).zip(latencySet).map(_ match {
+  private val pipesValidVec = VecInit(pipes.map(_.io.deq).zip(latencySeq).map(_ match {
     case (deq, 0) => deq.valid
     case (deq, i) => deq.valid && !flushFunc(deq.bits, io.flush, i)
   }))
-  private val pipesBitsVec = VecInit(pipes.map(_.io.deq.bits).zip(latencySet).map(_ match {
+  private val pipesBitsVec = VecInit(pipes.map(_.io.deq.bits).zip(latencySeq).map(_ match {
     case (deq, 0) => deq
     case (deq, i) => modificationFunc(deq)
   }))
   // for i2f in fp iq, donot need && !pipesValidVec.asUInt.orR, for fdiv, need !pipesValidVec.asUInt.orR
   val allValidVec = VecInit(pipesValidVec :+ (io.enqAppend.valid && !pipesValidVec.asUInt.orR))
   val allBitsVec = VecInit(pipesBitsVec :+ io.enqAppend.bits.uop)
+  dontTouch(allValidVec)
+  dontTouch(allBitsVec)
+  private val selectedBits = if (exuParam.enableOldestIssueBypass) {
+    PriorityMux(allValidVec.zip(allBitsVec))
+  } else {
+    Mux1H(allValidVec, allBitsVec)
+  }
   io.enqAppend.ready := Mux(io.enqAppend.valid, !pipesValidVec.asUInt.orR, true.B)
   pipesOut.valid := allValidVec.asUInt.orR
-  pipesOut.bits := Mux1H(allValidVec, allBitsVec)
-  pipesOut.bits.rfWen .foreach(_ := allValidVec.zip(allBitsVec.map(_.rfWen .get)).map{case(valid,wen) => valid && wen}.reduce(_||_))
-  pipesOut.bits.fpWen .foreach(_ := allValidVec.zip(allBitsVec.map(_.fpWen .get)).map{case(valid,wen) => valid && wen}.reduce(_||_))
-  pipesOut.bits.vecWen.foreach(_ := allValidVec.zip(allBitsVec.map(_.vecWen.get)).map{case(valid,wen) => valid && wen}.reduce(_||_))
-  pipesOut.bits.v0Wen .foreach(_ := allValidVec.zip(allBitsVec.map(_.v0Wen .get)).map{case(valid,wen) => valid && wen}.reduce(_||_))
-  pipesOut.bits.vlWen .foreach(_ := allValidVec.zip(allBitsVec.map(_.vlWen .get)).map{case(valid,wen) => valid && wen}.reduce(_||_))
+  pipesOut.bits := Mux(pipesOut.valid, selectedBits, 0.U.asTypeOf(pipesOut.bits))
+  if (exuParam.enableOldestIssueBypass) {
+    pipesOut.bits.rfWen .foreach(_ := pipesOut.valid && selectedBits.rfWen .get)
+    pipesOut.bits.fpWen .foreach(_ := pipesOut.valid && selectedBits.fpWen .get)
+    pipesOut.bits.vecWen.foreach(_ := pipesOut.valid && selectedBits.vecWen.get)
+    pipesOut.bits.v0Wen .foreach(_ := pipesOut.valid && selectedBits.v0Wen .get)
+    pipesOut.bits.vlWen .foreach(_ := pipesOut.valid && selectedBits.vlWen .get)
+  }
+  else {
+    pipesOut.bits.rfWen .foreach(_ := allValidVec.zip(allBitsVec.map(_.rfWen .get)).map{case(valid,wen) => valid && wen}.reduce(_||_))
+    pipesOut.bits.fpWen .foreach(_ := allValidVec.zip(allBitsVec.map(_.fpWen .get)).map{case(valid,wen) => valid && wen}.reduce(_||_))
+    pipesOut.bits.vecWen.foreach(_ := allValidVec.zip(allBitsVec.map(_.vecWen.get)).map{case(valid,wen) => valid && wen}.reduce(_||_))
+    pipesOut.bits.v0Wen .foreach(_ := allValidVec.zip(allBitsVec.map(_.v0Wen .get)).map{case(valid,wen) => valid && wen}.reduce(_||_))
+    pipesOut.bits.vlWen .foreach(_ := allValidVec.zip(allBitsVec.map(_.vlWen .get)).map{case(valid,wen) => valid && wen}.reduce(_||_))
+  }
 
   lastConnect.valid := pipesOut.valid
   lastConnect.bits := lastConnectFunc(pipesOut.bits, lastConnect.bits)
@@ -79,5 +96,7 @@ class MultiWakeupQueue[T <: Bundle, TFlush <: Data](
   io.deq.valid := lastConnect.valid
   io.deq.bits := lastConnect.bits
 
-  assert(PopCount(allValidVec) <= 1.U, "PopCount(allValidVec) should be no more than 1")
+  if (!exuParam.enableOldestIssueBypass) {
+    assert(PopCount(allValidVec) <= 1.U, "PopCount(allValidVec) should be no more than 1")
+  }
 }
