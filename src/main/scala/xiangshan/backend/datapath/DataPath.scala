@@ -19,8 +19,7 @@ import xiangshan.backend.issue.EntryBundles._
 import xiangshan.backend.regfile._
 import xiangshan.backend.regcache._
 import xiangshan.backend.fu.FuConfig
-import xiangshan.backend.fu.FuType.is0latency
-import xiangshan.backend.fu.FuType.isUncertain
+import xiangshan.backend.fu.FuType._
 import xiangshan.mem.{LqPtr, SqPtr}
 
 class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockParams)
@@ -492,6 +491,19 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
   val s1_toExuDataWire: MixedVec[MixedVec[Og1InUop]] = Wire(MixedVec(toExu.map(x => MixedVec(x.map(_.bits.cloneType).toSeq)).toSeq))
   s1_toExuData := s1_toExuDataWire
   val s1_toExuReady = Wire(MixedVec(toExu.map(x => MixedVec(x.map(_.ready.cloneType).toSeq))))
+  private val wbConflictCancelS1 = Wire(MixedVec(toExu.map(x => MixedVec(x.map(_ => Bool()).toSeq)).toSeq))
+  s1_toExuData.zipWithIndex.foreach { case (exus, iqIdx) =>
+    exus.zipWithIndex.foreach { case (uop, exuIdx) =>
+      wbConflictCancelS1(iqIdx)(exuIdx) := false.B
+      if (uop.exuParams.name.contains("ALU") && uop.exuParams.enableOldestIssueBypass) {
+        wbConflictCancelS1(iqIdx)(exuIdx) := s1_toExuValid(iqIdx)(exuIdx) && FuTypeOrR(uop.fuType, Seq(bku, mul)) && io.fromIntIQRealOldestSelValid(iqIdx)
+      }
+      else if (uop.exuParams.name.contains("FEX") && uop.exuParams.enableOldestIssueBypass) {
+        println(s"uop.bits.exuParams.name.last.toInt = ${uop.exuParams.name.last.toInt}")
+        wbConflictCancelS1(iqIdx)(exuIdx) := s1_toExuValid(iqIdx)(exuIdx) && FuTypeOrR(uop.fuType, Seq(fmac, fcvt, fcmp, f2v)) && io.fromFpIQRealOldestSelValid(uop.exuParams.name.last.asDigit)
+      }
+    }
+  }
   val s1_intRfBankRaddr: MixedVec[MixedVec[Vec[UInt]]] = MixedVecInit(fromIntIQ.map(x => MixedVecInit(x.map(xx => VecInit(xx.bits.rfBankRen.get.map(xxx =>
       RegNext(xxx.asUInt)))))))
   val s1_intPregRData: MixedVec[MixedVec[Vec[UInt]]] = Wire(MixedVec(toExu.map(x => MixedVec(x.map(_.bits.src.cloneType).toSeq))))
@@ -624,10 +636,10 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
           val hasUncertain = s1_toExuData(iqIdx)(iuIdx).exuParams.needUncertainWakeup
           val lastUncertainFire = RegNext(toExu(iqIdx)(iuIdx).valid && isUncertain(s1_toExuData(iqIdx)(iuIdx).fuType) && s1_toExuReady(iqIdx)(iuIdx))
           if (hasUncertain){
-            og1FailedVec2(iqIdx)(iuIdx) := s1_toExuValid(iqIdx)(iuIdx) && isUncertain(s1_toExuData(iqIdx)(iuIdx).fuType) && (!s1_toExuReady(iqIdx)(iuIdx) || s1_toExuReady(iqIdx)(iuIdx) && lastUncertainFire)
+            og1FailedVec2(iqIdx)(iuIdx) := wbConflictCancelS1(iqIdx)(iuIdx) || (s1_toExuValid(iqIdx)(iuIdx) && isUncertain(s1_toExuData(iqIdx)(iuIdx).fuType) && (!s1_toExuReady(iqIdx)(iuIdx) || s1_toExuReady(iqIdx)(iuIdx) && lastUncertainFire))
           }
           else{
-            og1FailedVec2(iqIdx)(iuIdx) := s1_toExuValid(iqIdx)(iuIdx) && !s1_toExuReady(iqIdx)(iuIdx)
+            og1FailedVec2(iqIdx)(iuIdx) := wbConflictCancelS1(iqIdx)(iuIdx) || (s1_toExuValid(iqIdx)(iuIdx) && !s1_toExuReady(iqIdx)(iuIdx))
           }
           og1resp.failed          := og1FailedVec2(iqIdx)(iuIdx)
           og1resp.sqIdx.foreach(_ :=  0.U.asTypeOf(new SqPtr))
@@ -801,6 +813,10 @@ class DataPathIO()(implicit p: Parameters, params: BackendParams, param: SchdBlo
 
   val fromFpIQ: MixedVec[MixedVec[DecoupledIO[Og0InUop]]] =
     Flipped(MixedVec(fpSchdParams.issueBlockParams.map(_.genIssueDecoupledBundle)))
+
+  val fromIntIQRealOldestSelValid = Input(Vec(fromIntIQ.size, Bool()))
+
+  val fromFpIQRealOldestSelValid  = Input(Vec(fromFpIQ.size, Bool()))
 
   val fromVfIQ = Flipped(MixedVec(vecSchdParams.issueBlockParams.map(_.genIssueDecoupledBundle)))
 
