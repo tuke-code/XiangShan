@@ -211,7 +211,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   // val data = Reg(Vec(StoreQueueSize, new LsqEntry))
   val dataModule = Module(new SQDataModule(
     numEntries = StoreQueueSize,
-    numRead = EnsbufferWidth,
+    numRead = EnsbufferWidth + LoadPipelineWidth,
     numWrite = StorePipelineWidth,
     numForward = LoadPipelineWidth
   ))
@@ -219,7 +219,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   val paddrModule = Module(new SQAddrModule(
     dataWidth = PAddrBits,
     numEntries = StoreQueueSize,
-    numRead = EnsbufferWidth,
+    numRead = EnsbufferWidth + LoadPipelineWidth,
     numWrite = StorePipelineWidth,
     numForward = LoadPipelineWidth
   ))
@@ -364,6 +364,10 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     dataModule.io.raddr(i) := rdataPtrExtNext(i).value
     paddrModule.io.raddr(i) := rdataPtrExtNext(i).value
     vaddrModule.io.raddr(i) := rdataPtrExtNext(i).value
+  }
+  for (i <- 0 until LoadPipelineWidth) {
+    dataModule.io.raddr(EnsbufferWidth + i) := 0.U
+    paddrModule.io.raddr(EnsbufferWidth + i) := 0.U
   }
 
   /**
@@ -669,7 +673,52 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     val mdpHitVec = WireInit(VecInit((0 until StoreQueueSize).map(j =>
       io.forward(i).uop.loadPred.bits.loadWait && uop(j).robIdx === io.forward(i).uop.loadPred.bits.getWaitStoreRobIdx(io.forward(i).uop.robIdx)
     )))
+    val smbEligibleHitVec = WireInit(VecInit((0 until StoreQueueSize).map(j =>
+      mdpHitVec(j) &&
+      allocated(j) &&
+      datavalid(j) &&
+      !unaligned(j) &&
+      !mmio(j) &&
+      !nc(j) &&
+      !hasException(j) &&
+      !isVec(j)
+    )))
     dontTouch(mdpHitVec)
+    dontTouch(smbEligibleHitVec)
+    val smbReadPort = EnsbufferWidth + i
+    val smbTargetOH = PriorityEncoderOH(smbEligibleHitVec.asUInt)
+    val smbProbeHit = io.forward(i).valid && io.forward(i).uop.loadPred.valid &&
+      io.forward(i).uop.loadPred.bits.loadWait && smbEligibleHitVec.asUInt.orR
+    val smbTargetHit = smbProbeHit && io.forward(i).uop.loadPred.bits.smbEnable
+    val smbTargetIdx = OHToUInt(smbTargetOH)
+    when(io.forward(i).valid && io.forward(i).uop.loadPred.valid && io.forward(i).uop.loadPred.bits.loadWait) {
+      assert(PopCount(smbEligibleHitVec) <= 1.U, s"SMB target selection for load pipe ${i} must be at-most-one-hot")
+    }
+    dataModule.io.raddr(smbReadPort) := smbTargetIdx
+    paddrModule.io.raddr(smbReadPort) := smbTargetIdx
+    val s2_smbProbeHit = RegNext(smbProbeHit, false.B)
+    val s2_smbTargetHit = RegNext(smbTargetHit, false.B)
+    val s2_smbTargetIdx = RegEnable(smbTargetIdx, smbProbeHit)
+    val s2_smbTargetSqIdx = RegEnable(uop(smbTargetIdx).sqIdx, smbProbeHit)
+    val s2_smbLoadMask = RegEnable(io.forward(i).mask, io.forward(i).valid)
+    val s2_smbLoadPaddr = RegEnable(io.forward(i).paddr, io.forward(i).valid)
+    val s2_smbPredicted = RegEnable(io.forward(i).uop.loadPred.bits.smbEnable, io.forward(i).valid)
+    val s2_smbEntryData = dataModule.io.rdata(smbReadPort)
+    val s2_smbEntryPaddr = paddrModule.io.rdata(smbReadPort)
+    val s2_smbProbeCandidateReady = s2_smbProbeHit &&
+      allocated(s2_smbTargetIdx) &&
+      datavalid(s2_smbTargetIdx) &&
+      !unaligned(s2_smbTargetIdx) &&
+      !mmio(s2_smbTargetIdx) &&
+      !nc(s2_smbTargetIdx) &&
+      !hasException(s2_smbTargetIdx) &&
+      !isVec(s2_smbTargetIdx)
+    val s2_smbCandidateReady = s2_smbProbeCandidateReady && s2_smbTargetHit
+    val s2_smbVerifyReady = s2_smbCandidateReady && addrvalid(s2_smbTargetIdx)
+    val s2_smbVerifyPass = s2_smbVerifyReady &&
+      s2_smbEntryPaddr === s2_smbLoadPaddr &&
+      ((s2_smbEntryData.mask & s2_smbLoadMask) === s2_smbLoadMask) &&
+      s2_smbLoadMask.orR
 
     val forwardMask1 = Mux(differentFlag, ~deqMask, deqMask ^ forwardMask)
     val forwardMask2 = Mux(differentFlag, forwardMask, 0.U(StoreQueueSize.W))
@@ -715,6 +764,45 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     // Forward result will be generated 1 cycle later (load_s2)
     io.forward(i).forwardMask := dataModule.io.forwardMask(i)
     io.forward(i).forwardData := dataModule.io.forwardData(i)
+    io.forward(i).smbProbeHit := s2_smbProbeHit
+    io.forward(i).smbProbeCandidateValid := s2_smbProbeCandidateReady
+    io.forward(i).smbTargetHit := s2_smbTargetHit
+    io.forward(i).smbCandidateValid := s2_smbCandidateReady
+    io.forward(i).smbCandidateSqIdx := Mux(s2_smbTargetHit, s2_smbTargetSqIdx, RegEnable(io.forward(i).uop.sqIdx, io.forward(i).valid))
+    io.forward(i).smbVerifyReady := s2_smbVerifyReady
+    io.forward(i).smbVerifyPass := s2_smbVerifyPass
+    io.forward(i).smbForwardMask := VecInit((0 until VLEN / 8).map(j =>
+      s2_smbCandidateReady && s2_smbLoadMask(j) && s2_smbEntryData.mask(j)
+    ))
+    io.forward(i).smbForwardData := VecInit((0 until VLEN / 8).map(j =>
+      s2_smbEntryData.data(8 * (j + 1) - 1, 8 * j)
+    ))
+    when(s2_smbVerifyPass) {
+      assert(s2_smbVerifyReady, s"SMB verify pass for load pipe ${i} must imply verify-ready")
+    }
+    when(s2_smbProbeCandidateReady && !s2_smbPredicted) {
+      assert(!s2_smbCandidateReady, s"SMB probe opportunity for load pipe ${i} must stay training-only when smbEnable is low")
+    }
+    when(s2_smbCandidateReady) {
+      assert(s2_smbProbeCandidateReady,
+        s"SMB candidate for load pipe ${i} must originate from a probe candidate")
+      assert(s2_smbTargetHit,
+        s"SMB candidate for load pipe ${i} must preserve the predicted target owner")
+      assert(s2_smbTargetSqIdx === uop(s2_smbTargetIdx).sqIdx,
+        s"SMB candidate for load pipe ${i} must preserve the target SQ owner")
+    }
+    when(s2_smbVerifyReady) {
+      assert(s2_smbCandidateReady,
+        s"SMB verify-ready for load pipe ${i} requires a concrete SMB candidate")
+    }
+
+    XSPerfAccumulate(s"stq_smb_probe_hit_load_${i}", s2_smbProbeHit)
+    XSPerfAccumulate(s"stq_smb_probe_candidate_load_${i}", s2_smbProbeCandidateReady)
+    XSPerfAccumulate(s"stq_smb_probe_train_only_load_${i}", s2_smbProbeCandidateReady && !s2_smbPredicted)
+    XSPerfAccumulate(s"stq_smb_candidate_load_${i}", s2_smbCandidateReady)
+    XSPerfAccumulate(s"stq_smb_verify_ready_load_${i}", s2_smbVerifyReady)
+    XSPerfAccumulate(s"stq_smb_verify_pass_load_${i}", s2_smbVerifyPass)
+    XSPerfAccumulate(s"stq_smb_verify_fail_load_${i}", s2_smbVerifyReady && !s2_smbVerifyPass)
 
     //TODO If the previous store appears out of alignment, then simply FF, this is a very unreasonable way to do it.
     //TODO But for the time being, this is the way to ensure correctness. Such a suitable opportunity to support unaligned forward.

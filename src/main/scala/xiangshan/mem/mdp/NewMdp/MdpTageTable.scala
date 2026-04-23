@@ -49,10 +49,21 @@ object UsefulCounter extends SaturateCounterFactory {
     SaturateCounterInit(width, 6)
 }
 
+object BypassCounter extends SaturateCounterFactory {
+  def width(implicit p: Parameters): Int =
+    p(XSCoreParamsKey).frontendParameters.bpuParameters.mdpTageTableParameters.BypassCtrWidth
+
+  def Init(implicit p: Parameters): SaturateCounter =
+    SaturateCounterInit(width, 0)
+  def InitWeak(implicit p: Parameters): SaturateCounter =
+    SaturateCounterInit(width, 1)
+}
+
 class TageEntry(implicit p: Parameters) extends XSBundle with HasMdpTageTableParameters{
   val valid:    Bool            = Bool()
   val tag:      UInt            = UInt(TagWidth.W)
   val distance: UInt            = UInt(RobDistance.W)
+  val bypassCtr: SaturateCounter = BypassCounter()
 }
 
 class MdpTableReadReq(implicit p: Parameters, info: MdpTageTableInfo) extends XSBundle with HasMdpTageTableParameters{

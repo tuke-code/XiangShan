@@ -234,6 +234,15 @@ object Bundles {
     // val dataInvalid = Input(Bool()) // resp to load_s2
     val dataInvalidSqIdx = Input(new SqPtr) // resp to load_s2, sqIdx
     val addrInvalidSqIdx = Input(new SqPtr) // resp to load_s2, sqIdx
+    val smbProbeHit = Input(Bool())
+    val smbProbeCandidateValid = Input(Bool())
+    val smbTargetHit = Input(Bool())
+    val smbCandidateValid = Input(Bool())
+    val smbCandidateSqIdx = Input(new SqPtr)
+    val smbVerifyReady = Input(Bool())
+    val smbVerifyPass = Input(Bool())
+    val smbForwardMask = Input(Vec((VLEN/8), Bool()))
+    val smbForwardData = Input(Vec((VLEN/8), UInt(8.W)))
   }
 
   // Query load queue for ld-ld violation
@@ -254,6 +263,8 @@ object Bundles {
     val data_valid = Bool()
     // nc: is NC access
     val is_nc = Bool()
+    // this load consumed speculative SMB candidate data and needs late verify tracking
+    val smbConsumed = Bool()
   }
 
   class LoadNukeQueryRespBundle(implicit p: Parameters) extends XSBundle {

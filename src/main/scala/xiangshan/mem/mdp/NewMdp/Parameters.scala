@@ -172,6 +172,7 @@ case class MdpTageTableParameters(
 
   TakenCtrWidth:       Int = 3,
   UsefulCtrWidth:      Int = 3,
+  BypassCtrWidth:      Int = 2,
   UsefulCtrInitValue:  Int = 0,
 ){}
 
@@ -217,6 +218,7 @@ trait HasMdpTageTableParameters extends HasMdpParameters {
   def TagWidth:           Int = mdpTageTableParameters.TagWidth
   def TakenCtrWidth:      Int = mdpTageTableParameters.TakenCtrWidth
   def UsefulCtrWidth:     Int = mdpTageTableParameters.UsefulCtrWidth
+  def BypassCtrWidth:     Int = mdpTageTableParameters.BypassCtrWidth
   def UsefulCtrInitValue: Int = mdpTageTableParameters.UsefulCtrInitValue
   def WriteBufferSize:    Int = mdpTageTableParameters.WriteBufferSize
 

@@ -15,11 +15,19 @@ import xiangshan.frontend.bpu.history.phr.PhrAllFoldedHistories
 import xiangshan.backend.rob.RobPtr
 import xiangshan.XSCoreParamsKey
 
+class MdpSmbProviderHandle(implicit p: Parameters) extends XSBundle with HasMdpTageTableParameters {
+  val valid = Bool()
+  val tableIdx = UInt(TableIdxWidth.W)
+  val wayIdx = UInt(MaxWayIdxWidth.W)
+}
+
 //ctrlFlow
 class MdpPredictInfo(implicit p: Parameters) extends XSBundle with HasMdpParameters{ 
   val static   = Bool() // from static predictor
   val loadWait = Bool() // high : load is blocked
+  val smbEnable = Bool() // high : load can attempt SMB on the predicted store
   val distance = UInt(RobDistance.W)
+  val smbProviderHandle = new MdpSmbProviderHandle
   def getWaitStoreRobIdx(loadRobIdx: RobPtr): RobPtr = loadRobIdx - distance
   //loadRobIdx - distance = storeRobIdx
 }
@@ -35,7 +43,9 @@ class MdpToIfuIO(implicit p: Parameters) extends XSBundle with HasMdpParameters{
 class Prediction(implicit p: Parameters) extends XSBundle with HasMdpParameters{
   val static   = Bool() // from static predictor
   val loadWait = Bool() // high : load is blocked
+  val smbEnable = Bool() // high : load can attempt SMB on the predicted store
   val distance = UInt(RobDistance.W)
+  val smbProviderHandle = new MdpSmbProviderHandle
 }
 
 class BasePrediction(implicit p: Parameters) extends Prediction{
@@ -52,6 +62,11 @@ class LoadInfo(implicit p: Parameters) extends XSBundle with HasMdpParameters{
   val updateType  = UInt(MdpUpdateType.width.W)
   val cfiPosition = UInt(CfiPositionWidth.W)
   val distance    = UInt(RobDistance.W)
+  val smbPredicted = Bool()
+  val foundBypassOpportunity = Bool()
+  val canBypass = Bool()
+  val wrongBypass = Bool()
+  val smbProviderHandle = new MdpSmbProviderHandle
   def misdependence: Bool = this.updateType === MdpUpdateType.M_WZ || this.updateType === MdpUpdateType.M_AS
   /* three type for misdependence(type: M_WZ、M_AS)
     1. static predict no-dependence ,real dependence
@@ -112,6 +127,11 @@ class MdpUpdate(implicit p: Parameters) extends XSBundle with HasMdpParameters w
   val ftqOffset   = UInt(FetchBlockInstOffsetWidth.W) 
   val updateType  = UInt(MdpUpdateType.width.W)
   val distance    = UInt(RobDistance.W)      //loadRobIdx - distance = storeRobIdx
+  val smbPredicted = Bool()
+  val foundBypassOpportunity = Bool()
+  val canBypass = Bool()
+  val wrongBypass = Bool()
+  val smbProviderHandle = new MdpSmbProviderHandle
   def getDistance[T <: CircularQueuePtr[T]](enq_ptr: T, deq_ptr: T): UInt = 
     distanceBetween(enq_ptr, deq_ptr)
   def updateIsNull:           Bool = updateType === MdpUpdateType.NULL

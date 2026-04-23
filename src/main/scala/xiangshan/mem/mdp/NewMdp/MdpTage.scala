@@ -19,6 +19,7 @@ class PredictTagMatchResult(implicit p: Parameters) extends XSBundle with HasMdp
   val hitWayMaskOH: UInt            = UInt(MaxNumWays.W)
   val usefulCtr:    SaturateCounter = UsefulCounter()
   val distance :    UInt            = UInt(RobDistance.W)
+  val bypassCtr:    SaturateCounter = BypassCounter()
 }
 
 class TrainTagMatchResult(implicit p: Parameters) extends XSBundle with HasMdpTageTableParameters {
@@ -28,6 +29,7 @@ class TrainTagMatchResult(implicit p: Parameters) extends XSBundle with HasMdpTa
   val tag:                  UInt            = UInt(TagWidth.W)
   val usefulCtrs:           Vec[SaturateCounter] = Vec(MaxNumWays,UsefulCounter())
   val distance :            UInt                 = UInt(RobDistance.W)
+  val bypassCtr:            SaturateCounter      = BypassCounter()
   val allWayWeakUsefulCtrs: Vec[SaturateCounter] = Vec(MaxNumWays,UsefulCounter())
 }
 
@@ -36,17 +38,22 @@ class TrainInfo(implicit p: Parameters) extends XSBundle with HasMdpTageTablePar
   val valid = Bool()
   val trainNxOH    = UInt(NumTables.W)
   val hitWayMaskOH = UInt(MaxNumWays.W)
+  val smbUpdateTableIdx = UInt(TableIdxWidth.W)
+  val smbUpdateWayIdx = UInt(MaxWayIdxWidth.W)
   val allocateNxOH = UInt(NumTables.W)
   val allWayWeakOH = UInt(NumTables.W)
   val updateEntry  = new TageEntry
+  val smbUpdateEntry = new TageEntry
   val canAllocate = Bool()
   //
   val needUpdate         = Bool()
+  val needSmbUpdate      = Bool()
   val needAllocate       = Bool()
   val needAllWayWeak     = Bool()
   val iwNdepClampBlocked = Bool()
   val allocateUsefulCtr  = UsefulCounter()
   val updateUsefulCtr    = UsefulCounter()
+  val smbUpdateUsefulCtr = UsefulCounter()
   val AllWayWeakUsefulCtrs = Vec(MaxNumWays,UsefulCounter())
 }
 
@@ -181,6 +188,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       result.hitWayMaskOH := hitWayMaskOH.asUInt
       result.usefulCtr    := Mux1H(hitWayMaskOH, tableReadResp.usefulCtrs)
       result.distance     := Mux1H(hitWayMaskOH, tableReadResp.entries).distance
+      result.bypassCtr    := Mux1H(hitWayMaskOH, tableReadResp.entries).bypassCtr
       result
     }
     val hitTableMask = allTableTagMatchResults.map(_.hit)
@@ -188,14 +196,24 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     dontTouch(hitTableMask.asUInt.suggestName(s"s2_load_${i}_hitTableMask"))
     val longestHistTableOH  = getLongestHistTableOH(hitTableMask)
     val prediction = Mux1H(longestHistTableOH, allTableTagMatchResults)
+    val mdpConfGate = prediction.usefulCtr.isSaturatePositive
+    val bypassCtrGate = prediction.bypassCtr.isSaturatePositive
+    val smbEnable = hitTable && prediction.distance.orR && mdpConfGate && bypassCtrGate
+    val providerTableIdx = OHToUInt(longestHistTableOH)
+    val providerWayIdx = OHToUInt(prediction.hitWayMaskOH)
     when(s2_fire) {
       assert(PopCount(longestHistTableOH) <= 1.U, "Multiple tables hit in prediction")
+      assert(!smbEnable || prediction.distance.orR, "SMB enable must imply dependent prediction")
     }
 
     io.result(i).valid := hitTable
     io.result(i).bits.distance := prediction.distance
     io.result(i).bits.static   := ~hitTable
     io.result(i).bits.loadWait := prediction.distance.orR
+    io.result(i).bits.smbEnable := smbEnable
+    io.result(i).bits.smbProviderHandle.valid := hitTable
+    io.result(i).bits.smbProviderHandle.tableIdx := providerTableIdx
+    io.result(i).bits.smbProviderHandle.wayIdx := providerWayIdx
   }
 
   /* --------------------------------------------------------------------------------------------------------------
@@ -290,6 +308,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       result.tag          := tag
       result.usefulCtrs   := tableReadResp.usefulCtrs
       result.distance     := Mux1H(hitWayMaskOH, tableReadResp.entries).distance
+      result.bypassCtr    := Mux1H(hitWayMaskOH, tableReadResp.entries).bypassCtr
       result.allWayWeakUsefulCtrs := VecInit(tableReadResp.usefulCtrs.map(ctr => ctr.getDecrease())) //for AllWayWeakUsefulCtrs
       result
     }
@@ -303,6 +322,69 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     dontTouch(tageHitTableMask.asUInt.suggestName(s"t2_Load_${i}_hitTableMask"))
     val provider = Mux1H(longestHistTableOH.asUInt, tageTableTagMatchResults)
     val rawUsefulCtr = Mux1H(provider.hitWayMaskOH, provider.usefulCtrs)
+    val smbProviderHandleValid = load.valid && load.bits.smbProviderHandle.valid
+    val smbProviderTableIdx = load.bits.smbProviderHandle.tableIdx
+    val smbProviderWayIdx = load.bits.smbProviderHandle.wayIdx
+    val smbProviderTableIdxValid = smbProviderTableIdx < NumTables.U
+    val smbProviderTableOH = Mux(
+      smbProviderHandleValid && smbProviderTableIdxValid,
+      UIntToOH(smbProviderTableIdx, NumTables),
+      0.U(NumTables.W)
+    )
+    val smbProviderWayInRangePerTable = VecInit(TableInfos.indices.map { tableIdx =>
+      smbProviderWayIdx < TableInfos(tableIdx).NumWays.U
+    })
+    val smbProviderWayIdxValid = smbProviderTableOH.orR && Mux1H(smbProviderTableOH, smbProviderWayInRangePerTable)
+    val smbExpectedTagPerTable = VecInit(t2_rawTag.map(_ ^ load.bits.cfiPosition))
+    val smbSelectedEntryPerTable = VecInit(t2_readResp.zipWithIndex.map { case (resp, tableIdx) =>
+      val selectedEntry = Wire(new TageEntry)
+      selectedEntry := 0.U.asTypeOf(new TageEntry)
+      when(smbProviderWayInRangePerTable(tableIdx)) {
+        val localWayOH = UIntToOH(smbProviderWayIdx, TableInfos(tableIdx).NumWays)
+        selectedEntry := Mux1H(localWayOH, resp.entries)
+      }
+      selectedEntry
+    })
+    val smbSelectedUsefulCtrPerTable = VecInit(t2_readResp.zipWithIndex.map { case (resp, tableIdx) =>
+      val selectedUsefulCtr = Wire(UsefulCounter())
+      selectedUsefulCtr := UsefulCounter.Zero
+      when(smbProviderWayInRangePerTable(tableIdx)) {
+        val localWayOH = UIntToOH(smbProviderWayIdx, TableInfos(tableIdx).NumWays)
+        selectedUsefulCtr := Mux1H(localWayOH, resp.usefulCtrs)
+      }
+      selectedUsefulCtr
+    })
+    val smbExpectedTag = Mux(
+      smbProviderTableOH.orR,
+      Mux1H(smbProviderTableOH, smbExpectedTagPerTable),
+      0.U(TagWidth.W)
+    )
+    val smbSelectedEntry = Mux(
+      smbProviderTableOH.orR,
+      Mux1H(smbProviderTableOH, smbSelectedEntryPerTable),
+      0.U.asTypeOf(new TageEntry)
+    )
+    val smbSelectedUsefulCtr = Mux(
+      smbProviderTableOH.orR,
+      Mux1H(smbProviderTableOH, smbSelectedUsefulCtrPerTable),
+      UsefulCounter.Zero
+    )
+    val smbOwnerTagMatch = smbSelectedEntry.valid && smbSelectedEntry.tag === smbExpectedTag
+    val smbOwnerFresh = smbProviderHandleValid && smbProviderTableIdxValid && smbProviderWayIdxValid && smbOwnerTagMatch
+    val smbDependentEligible = smbOwnerFresh && load.bits.distance.orR
+    val smbNeedUpdate = smbDependentEligible && (load.bits.wrongBypass || load.bits.foundBypassOpportunity)
+    val smbOwnerStaleDrop = smbProviderHandleValid &&
+      (load.bits.foundBypassOpportunity || load.bits.wrongBypass) &&
+      !smbOwnerFresh
+    val smbNewBypassCtr = Wire(BypassCounter())
+    smbNewBypassCtr := smbSelectedEntry.bypassCtr
+    when(load.bits.wrongBypass) {
+      smbNewBypassCtr := BypassCounter.Zero
+    }.elsewhen(load.bits.foundBypassOpportunity && load.bits.canBypass) {
+      smbNewBypassCtr := smbSelectedEntry.bypassCtr.getIncrease()
+    }.elsewhen(load.bits.foundBypassOpportunity && !load.bits.canBypass) {
+      smbNewBypassCtr := BypassCounter.Zero
+    }
     val allWayWeakTargetUsefulCtrsRaw = Wire(Vec(MaxNumWays, UsefulCounter()))
     val allWayWeakTargetUsefulCtrs = Wire(Vec(MaxNumWays, UsefulCounter()))
     allWayWeakTargetUsefulCtrsRaw := VecInit(Seq.fill(MaxNumWays)(UsefulCounter.Zero))
@@ -342,9 +424,11 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     val needUpdate = providerHit && (rewriteProvider || !notNeedUpdate)
 
     val trainInfo = Wire(new TrainInfo).suggestName(s"t2_Load_${i}_trainInfo")
-    trainInfo.valid           := providerHit || needAllocateWeak || needAllocateStrong
+    trainInfo.valid           := providerHit || needAllocateWeak || needAllocateStrong || smbNeedUpdate
     trainInfo.trainNxOH       := longestHistTableOH.asUInt
     trainInfo.hitWayMaskOH    := provider.hitWayMaskOH
+    trainInfo.smbUpdateTableIdx := smbProviderTableIdx
+    trainInfo.smbUpdateWayIdx := smbProviderWayIdx
     trainInfo.allocateNxOH    := WireDefault(0.U)
     trainInfo.allWayWeakOH    := allWayWeakOH
     trainInfo.needAllocate    := needAllocateWeak || needAllocateStrong
@@ -352,6 +436,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     //感觉notNeedWrite挺关键的，因为有冲突存在
     trainInfo.needAllWayWeak  := needAllWayWeak && !notNeedAllWayWeak
     trainInfo.needUpdate      := needUpdate
+    trainInfo.needSmbUpdate   := smbNeedUpdate
     trainInfo.iwNdepClampBlocked := load.valid && load.bits.updateType === MdpUpdateType.M_IW &&
       providerHit && provider.distance === 0.U && rawUsefulCtr.value >= 2.U
     trainInfo.allocateUsefulCtr := Mux(needAllocateStrong, UsefulCounter.InitStrong,
@@ -368,6 +453,12 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       Mux(load.bits.updateType === MdpUpdateType.M_AS, load.bits.distance, 0.U),
       provider.distance
     )
+    trainInfo.updateEntry.bypassCtr := Mux(rewriteProvider, BypassCounter.Zero, provider.bypassCtr)
+    trainInfo.smbUpdateEntry.valid := smbOwnerFresh
+    trainInfo.smbUpdateEntry.tag := smbSelectedEntry.tag
+    trainInfo.smbUpdateEntry.distance := smbSelectedEntry.distance
+    trainInfo.smbUpdateEntry.bypassCtr := smbNewBypassCtr
+    trainInfo.smbUpdateUsefulCtr := smbSelectedUsefulCtr
     trainInfo.AllWayWeakUsefulCtrs := allWayWeakTargetUsefulCtrs
 
     when(load.valid){
@@ -461,28 +552,86 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     (
       trainInfo,
       Mux(needUpdate, longestHistTableOH.asUInt, 0.U(NumTables.W)),
-      Mux(needUpdate, provider.hitWayMaskOH, 0.U(MaxNumWays.W))
+      Mux(needUpdate, provider.hitWayMaskOH, 0.U(MaxNumWays.W)),
+      smbOwnerStaleDrop
     )
   }
   private val t2_trainInfoVec = t2_trainInfoWithUpdateTargetVec.map(_._1)
   private val t2_updateTableOHVec = t2_trainInfoWithUpdateTargetVec.map(_._2)
   private val t2_updateWayOHVec = t2_trainInfoWithUpdateTargetVec.map(_._3)
+  private val t2_smbOwnerStaleDropVec = t2_trainInfoWithUpdateTargetVec.map(_._4)
   private val t2_tableTrainHitMask = VecInit(TableInfos.indices.map { tableIdx =>
     t2_trainInfoVec.map(info => info.valid && info.trainNxOH(tableIdx)).reduce(_ || _)
   })
 
 
   when(t2_fire) {
+    t2_loads.zipWithIndex.foreach { case (load, i) =>
+      when(load.valid && load.bits.smbProviderHandle.valid) {
+        assert(load.bits.smbProviderHandle.tableIdx < NumTables.U, s"Load ${i} SMB tableIdx out of range")
+        assert(load.bits.smbProviderHandle.wayIdx < MaxNumWays.U, s"Load ${i} SMB wayIdx out of range")
+      }
+      when(load.valid && load.bits.smbPredicted) {
+        assert(load.bits.smbProviderHandle.valid, s"Load ${i} SMB prediction requires provider handle")
+        assert(load.bits.distance.orR, s"Load ${i} SMB prediction requires dependent distance")
+      }
+      when(load.valid && load.bits.foundBypassOpportunity) {
+        assert(load.bits.smbProviderHandle.valid, s"Load ${i} SMB opportunity requires provider handle")
+      }
+      when(load.valid && load.bits.canBypass) {
+        assert(load.bits.smbPredicted, s"Load ${i} canBypass requires SMB prediction")
+        assert(load.bits.foundBypassOpportunity, s"Load ${i} canBypass requires a bypass opportunity")
+        assert(load.bits.smbProviderHandle.valid, s"Load ${i} canBypass requires provider handle")
+      }
+      when(load.valid && (load.bits.foundBypassOpportunity || load.bits.wrongBypass)) {
+        assert(load.bits.distance.orR, s"Load ${i} SMB train feedback requires a dependent distance")
+        assert(!(t2_trainInfoVec(i).needSmbUpdate && t2_smbOwnerStaleDropVec(i)),
+          s"Load ${i} SMB feedback must not both update and stale-drop in the same cycle")
+      }
+      when(load.valid && load.bits.wrongBypass) {
+        assert(load.bits.smbPredicted, s"Load ${i} wrongBypass requires SMB prediction")
+        assert(load.bits.smbProviderHandle.valid, s"Load ${i} wrongBypass requires provider handle")
+      }
+      when(load.valid && load.bits.updateType === MdpUpdateType.M_AW) {
+        assert(load.bits.distance.orR, s"Load ${i} M_AW retraining should preserve the predicted dependent distance")
+      }
+      when(load.valid && load.bits.updateType === MdpUpdateType.M_AS) {
+        assert(load.bits.distance.orR, s"Load ${i} M_AS retraining requires dependent distance")
+      }
+      when(load.valid && load.bits.updateType === MdpUpdateType.M_IS) {
+        assert(load.bits.distance.orR, s"Load ${i} M_IS confirmation requires dependent distance")
+      }
+      when(load.valid && load.bits.updateType === MdpUpdateType.M_IW) {
+        assert(!load.bits.distance.orR, s"Load ${i} M_IW confirmation should not carry dependent distance")
+        assert(!load.bits.canBypass || load.bits.foundBypassOpportunity,
+          s"Load ${i} M_IW must not claim SMB success without a bypass opportunity")
+      }
+    }
     t2_trainInfoVec.zipWithIndex.foreach { case (info, i) =>
+      when(info.needSmbUpdate) {
+        assert(info.smbUpdateTableIdx < NumTables.U, s"Train info ${i} SMB tableIdx out of range")
+        assert(info.smbUpdateWayIdx < MaxNumWays.U, s"Train info ${i} SMB wayIdx out of range")
+        assert(info.smbUpdateEntry.valid, s"Train info ${i} SMB updates require a valid provider entry")
+        assert(info.smbUpdateEntry.distance.orR, s"Train info ${i} SMB updates require a dependent entry")
+      }
       when(info.valid && ~info.needAllocate) {
         // 检查valid trainInfo的基本一致性
-        assert(info.trainNxOH.orR, s"Train info ${i} trainNxOH should be valid when info is valid")
-        assert(info.hitWayMaskOH.orR, s"Train info ${i} hitWayMaskOH should be valid when info is valid")
+        assert(
+          info.trainNxOH.orR || info.needSmbUpdate,
+          s"Train info ${i} should have either MDP or SMB provider metadata when valid without allocate"
+        )
+        when(info.needUpdate) {
+          assert(info.trainNxOH.orR, s"Train info ${i} trainNxOH should be valid when needUpdate")
+          assert(info.hitWayMaskOH.orR, s"Train info ${i} hitWayMaskOH should be valid when needUpdate")
+        }
         
       }
       when(info.valid && info.needAllocate && info.canAllocate) {
         // 如果needAllocate，必须要有有效的分配信息
         assert(info.allocateNxOH.orR, s"Train info ${i} allocateNxOH should be valid when needAllocate")
+      }
+      when(t2_smbOwnerStaleDropVec(i)) {
+        assert(!info.needSmbUpdate, s"Train info ${i} stale SMB owner must drop the SMB update")
       }
     }
   }
@@ -493,6 +642,7 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   val mdpTageTrainAllocate    = VecInit(t2_trainInfoVec.map(info => info.valid && t2_fire && info.needAllocate))
   val mdpTageTrainAllWayWeak  = VecInit(t2_trainInfoVec.map(info => info.valid && t2_fire && info.needAllWayWeak))
   val mdpTageTrainUpdate = VecInit(t2_trainInfoVec.map(info => info.valid && info.needUpdate && t2_fire))
+  val mdpTageTrainSmbUpdate = VecInit(t2_trainInfoVec.map(info => info.valid && info.needSmbUpdate && t2_fire))
   val mdpTageTrainLoadsValidCnt = PopCount(t2_loads.map(load => load.valid  && t2_fire && (load.bits.updateType =/= MdpUpdateType.M_WZ 
                                                                                        && load.bits.updateType =/= MdpUpdateType.NULL)))
   val mdpTageTrainLoadsAW = PopCount(t2_loads.map(load => load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AW))
@@ -523,6 +673,75 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   val mdpTageTrainLoadsIWOnBase = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
     load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IW && !info.trainNxOH.orR
   })
+  val mdpTageTrainAwSmbPredicted = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AW && load.bits.smbPredicted
+  ))
+  val mdpTageTrainAsSmbPredicted = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AS && load.bits.smbPredicted
+  ))
+  val mdpTageTrainIsSmbPredicted = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IS && load.bits.smbPredicted
+  ))
+  val mdpTageTrainIwSmbPredicted = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IW && load.bits.smbPredicted
+  ))
+  val mdpTageTrainAwSmbOpportunity = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AW && load.bits.foundBypassOpportunity
+  ))
+  val mdpTageTrainAsSmbOpportunity = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AS && load.bits.foundBypassOpportunity
+  ))
+  val mdpTageTrainIsSmbOpportunity = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IS && load.bits.foundBypassOpportunity
+  ))
+  val mdpTageTrainIwSmbOpportunity = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IW && load.bits.foundBypassOpportunity
+  ))
+  val mdpTageTrainAwWrongBypass = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AW && load.bits.wrongBypass
+  ))
+  val mdpTageTrainAsWrongBypass = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AS && load.bits.wrongBypass
+  ))
+  val mdpTageTrainIsWrongBypass = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IS && load.bits.wrongBypass
+  ))
+  val mdpTageTrainIwWrongBypass = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IW && load.bits.wrongBypass
+  ))
+  val mdpTageTrainAwSmbUpdate = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AW && info.needSmbUpdate
+  })
+  val mdpTageTrainAsSmbUpdate = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AS && info.needSmbUpdate
+  })
+  val mdpTageTrainIsSmbUpdate = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IS && info.needSmbUpdate
+  })
+  val mdpTageTrainIwSmbUpdate = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IW && info.needSmbUpdate
+  })
+  val mdpTageTrainAwSmbStaleDrop = PopCount(t2_loads.zip(t2_smbOwnerStaleDropVec).map { case (load, stale) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AW && stale
+  })
+  val mdpTageTrainAsSmbStaleDrop = PopCount(t2_loads.zip(t2_smbOwnerStaleDropVec).map { case (load, stale) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_AS && stale
+  })
+  val mdpTageTrainIsSmbStaleDrop = PopCount(t2_loads.zip(t2_smbOwnerStaleDropVec).map { case (load, stale) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IS && stale
+  })
+  val mdpTageTrainIwSmbStaleDrop = PopCount(t2_loads.zip(t2_smbOwnerStaleDropVec).map { case (load, stale) =>
+    load.valid && t2_fire && load.bits.updateType === MdpUpdateType.M_IW && stale
+  })
+  val mdpTageTrainSmbFromWrongBypass = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.wrongBypass
+  ))
+  val mdpTageTrainSmbFoundCanBypass = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.foundBypassOpportunity && load.bits.canBypass
+  ))
+  val mdpTageTrainSmbFoundCannotBypass = PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.foundBypassOpportunity && !load.bits.canBypass
+  ))
   val mdpTageTrainProviderWeakReq = PopCount(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
     load.valid && t2_fire && (load.bits.updateType === MdpUpdateType.M_AW || load.bits.updateType === MdpUpdateType.M_AS) &&
       info.trainNxOH.orR
@@ -546,19 +765,22 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
     t2_fire && (PopCount(t2_trainInfoVec.map(info => info.valid && info.allWayWeakOH(tableIdx))) > 1.U)
   })
   val mdpTageTrainNeedWrite = VecInit(t2_trainInfoVec.map(info => 
-    info.valid && (info.needUpdate || info.needAllocate || info.needAllWayWeak) && t2_fire))
+    info.valid && (info.needUpdate || info.needSmbUpdate || info.needAllocate || info.needAllWayWeak) && t2_fire))
 
   val mdpTageTrainSkipUpdate = VecInit(t2_trainInfoVec.map(info =>
-    info.valid && !info.needUpdate && !info.needAllocate && !info.needAllWayWeak && t2_fire))
+    info.valid && !info.needUpdate && !info.needSmbUpdate && !info.needAllocate && !info.needAllWayWeak && t2_fire))
 
   val mdpTageTrainCnt = PopCount(mdpTageTrain)
   val mdpTageTrainAllocateCnt = PopCount(mdpTageTrainAllocate)
   val mdpTageTrainAllWayWeakCnt = PopCount(mdpTageTrainAllWayWeak)
   val mdpTageTrainUpdateCnt = PopCount(mdpTageTrainUpdate)
+  val mdpTageTrainSmbUpdateCnt = PopCount(mdpTageTrainSmbUpdate)
+  val mdpTageTrainSmbOwnerStaleDropCnt = PopCount(t2_smbOwnerStaleDropVec.map(_ && t2_fire))
   dontTouch(mdpTageTrain)
   dontTouch(mdpTageTrainAllocate)
   dontTouch(mdpTageTrainAllWayWeak)
   dontTouch(mdpTageTrainUpdate)
+  dontTouch(mdpTageTrainSmbUpdate)
 
   // //allocate
   // private val t2_needAllocateLoadOH = t2_trainInfoVec.map(info => info.valid && info.needAllocate)
@@ -593,13 +815,22 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       Mux(tableOH(tableIdx), wayOH, 0.U(MaxNumWays.W))
     }.reduce(_ | _)
   }
+  private val t2_tableSmbUpdateWayMask = TableInfos.indices.map { tableIdx =>
+    t2_trainInfoVec.map { info =>
+      Mux(
+        info.valid && info.needSmbUpdate && info.smbUpdateTableIdx === tableIdx.U,
+        UIntToOH(info.smbUpdateWayIdx, MaxNumWays),
+        0.U(MaxNumWays.W)
+      )
+    }.reduce(_ | _)
+  }
   private val t2_tageTableCanAllocateWayMask = t2_readResp.zipWithIndex.map { case (tableReadResp, tableIdx) =>
     val notValidMask = tableReadResp.entries.map(!_.valid).asUInt
     val zeroUsefulMask = tableReadResp.entries.zip(tableReadResp.usefulCtrs).map { case (entry, usefulCtr) =>
       entry.valid && usefulCtr.isSaturateNegative
     }.asUInt
     val rawAllocateWayMask = Mux(notValidMask.orR, notValidMask, zeroUsefulMask)
-    rawAllocateWayMask & ~t2_tableUpdateWayMask(tableIdx)
+    rawAllocateWayMask & ~t2_tableUpdateWayMask(tableIdx) & ~t2_tableSmbUpdateWayMask(tableIdx)
   }
   private val t2_canAllocate =
     t2_trainInfoVec.map(info => Mux(info.valid && info.needAllocate, info.canAllocate, true.B)).reduce(_ && _)
@@ -858,16 +1089,42 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       info.valid && info.needAllWayWeak && info.allWayWeakOH(tableIdx)
     }
     (0 until NumWays).foreach { wayIdx =>
-      val hitMask = PriorityEncoderOH(t2_trainInfoVec.map { info =>
+      val rawMdpReqVec = VecInit(t2_trainInfoVec.map { info =>
         info.valid && info.needUpdate && info.trainNxOH(tableIdx) && info.hitWayMaskOH(wayIdx)
       })
+      val rawSmbReqVec = VecInit(t2_trainInfoVec.map { info =>
+        info.valid && info.needSmbUpdate &&
+          info.smbUpdateTableIdx === tableIdx.U &&
+          info.smbUpdateWayIdx === wayIdx.U
+      })
+      val rawSmbWrongBypassReqVec = VecInit(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+        load.valid && info.valid && info.needSmbUpdate &&
+          info.smbUpdateTableIdx === tableIdx.U &&
+          info.smbUpdateWayIdx === wayIdx.U &&
+          load.bits.wrongBypass
+      })
+      val rawSmbFailReqVec = VecInit(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+        load.valid && info.valid && info.needSmbUpdate &&
+          info.smbUpdateTableIdx === tableIdx.U &&
+          info.smbUpdateWayIdx === wayIdx.U &&
+          load.bits.foundBypassOpportunity && !load.bits.canBypass && !load.bits.wrongBypass
+      })
+      val rawSmbSuccessReqVec = VecInit(t2_loads.zip(t2_trainInfoVec).map { case (load, info) =>
+        load.valid && info.valid && info.needSmbUpdate &&
+          info.smbUpdateTableIdx === tableIdx.U &&
+          info.smbUpdateWayIdx === wayIdx.U &&
+          load.bits.foundBypassOpportunity && load.bits.canBypass && !load.bits.wrongBypass
+      })
+      val mdpWinnerMask = PriorityEncoderOH(rawMdpReqVec)
+      val mdpHasWinner = rawMdpReqVec.asUInt.orR
+      val smbHasReq = rawSmbReqVec.asUInt.orR
+      val smbHasWrongBypass = rawSmbWrongBypassReqVec.asUInt.orR
+      val smbHasFail = rawSmbFailReqVec.asUInt.orR
+      val smbHasSuccess = rawSmbSuccessReqVec.asUInt.orR
       val allocateMask = t2_trainInfoVec.zipWithIndex.map { case(info,infoIdx) =>
         info.valid && info.needAllocate && t2_allocate(infoIdx) && t2_allocateTableOHVec(infoIdx)(tableIdx) && t2_allocateWayOHVec(infoIdx)(wayIdx)
       }
-      when(t2_fire) {
-        assert(PopCount(hitMask) <= 1.U)
-      }
-      val updateEn = hitMask.reduce(_ || _)
+      val updateEn = mdpHasWinner || smbHasReq
       val allocateEn = allocateMask.reduce(_ || _)
       val weakWayEn  = allWayNeedWeakMask.reduce(_ || _) && !updateEn && !allocateEn
       val allocateLoad      = Mux1H(allocateMask, t2_loads)
@@ -876,17 +1133,51 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
       allocateEntry.valid   := true.B
       allocateEntry.tag     := Mux1H(allocateTableOH, t2_rawTag) ^ allocateLoad.bits.cfiPosition
       allocateEntry.distance := allocateLoad.bits.distance
+      allocateEntry.bypassCtr := BypassCounter.Zero
       val allocateUsefulCtr = Mux1H(allocateMask, t2_trainInfoVec).allocateUsefulCtr
-      val updateEntry       = Mux1H(hitMask, t2_trainInfoVec).updateEntry
-      val updateUsefulCtr   = Mux1H(hitMask, t2_trainInfoVec).updateUsefulCtr
+      val selectedMdpInfo = Mux1H(mdpWinnerMask, t2_trainInfoVec)
+      val currentEntry = t2_readResp(tableIdx).entries(wayIdx)
+      val currentUsefulCtr = t2_readResp(tableIdx).usefulCtrs(wayIdx)
+      val smbBaseBypassCtr = Mux(mdpHasWinner, selectedMdpInfo.updateEntry.bypassCtr, currentEntry.bypassCtr)
+      val mergedSmbBypassCtr = Wire(BypassCounter())
+      mergedSmbBypassCtr := smbBaseBypassCtr
+      when(smbHasWrongBypass || smbHasFail) {
+        mergedSmbBypassCtr := BypassCounter.Zero
+      }.elsewhen(smbHasSuccess) {
+        mergedSmbBypassCtr := smbBaseBypassCtr.getIncrease()
+      }
+      val updateEntry = Wire(new TageEntry)
+      updateEntry := currentEntry
+      when(mdpHasWinner) {
+        updateEntry := selectedMdpInfo.updateEntry
+      }
+      when(smbHasReq) {
+        updateEntry.bypassCtr := mergedSmbBypassCtr
+      }
+      val updateUsefulCtr = Mux(mdpHasWinner, selectedMdpInfo.updateUsefulCtr, currentUsefulCtr)
       val weakWayUsefulCtr  = Mux1H(allWayNeedWeakMask, t2_trainInfoVec).AllWayWeakUsefulCtrs(wayIdx)
       writeWayMask(wayIdx)    := updateEn || allocateEn
       writeEntries(wayIdx)    := Mux(allocateEn, allocateEntry, updateEntry)
       writeUsefulCtrs(wayIdx) := Mux(allocateEn, allocateUsefulCtr,
                                   Mux(weakWayEn, weakWayUsefulCtr, updateUsefulCtr))
+      XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_multi_mdp_req",
+        t2_fire && PopCount(rawMdpReqVec) > 1.U)
+      XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_multi_smb_req",
+        t2_fire && PopCount(rawSmbReqVec) > 1.U)
+      XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_mdp_smb_coexist",
+        t2_fire && mdpHasWinner && smbHasReq)
+      XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_smb_merge_wrong_bypass",
+        t2_fire && smbHasWrongBypass)
+      XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_smb_merge_fail",
+        t2_fire && !smbHasWrongBypass && smbHasFail)
+      XSPerfAccumulate(s"mdp_tage_table_${tableIdx}_way_${wayIdx}_smb_merge_success_only",
+        t2_fire && !smbHasWrongBypass && !smbHasFail && smbHasSuccess)
       when(t2_fire) {
         val opCount = PopCount(Cat(weakWayEn, allocateEn, updateEn))
         assert(opCount <= 1.U, cf"Multiple write operations on table ${tableIdx} way ${wayIdx}: update=${updateEn}, allocate=${allocateEn}, weak=${weakWayEn}, opCount=${opCount}")
+        when(smbHasReq && !mdpHasWinner) {
+          assert(updateEntry.distance.orR, cf"SMB update on table ${tableIdx} way ${wayIdx} requires dependent distance")
+        }
       }
       t2_tableWayAllocateEnVec(tableIdx)(wayIdx) := allocateEn
       t2_tableWayUpdateEnVec(tableIdx)(wayIdx) := updateEn
@@ -1017,6 +1308,31 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   XSPerfAccumulate("mdp_tage_train_provider_rewrite", mdpTageTrainProviderRewrite)
   XSPerfAccumulate("mdp_tage_train_iw_ndep_clamp_blocked", mdpTageTrainIwNdepClampBlocked)
   XSPerfAccumulate("mdp_tage_train_update", mdpTageTrainUpdateCnt)
+  XSPerfAccumulate("mdp_tage_train_aw_smb_predicted", mdpTageTrainAwSmbPredicted)
+  XSPerfAccumulate("mdp_tage_train_as_smb_predicted", mdpTageTrainAsSmbPredicted)
+  XSPerfAccumulate("mdp_tage_train_is_smb_predicted", mdpTageTrainIsSmbPredicted)
+  XSPerfAccumulate("mdp_tage_train_iw_smb_predicted", mdpTageTrainIwSmbPredicted)
+  XSPerfAccumulate("mdp_tage_train_aw_smb_opportunity", mdpTageTrainAwSmbOpportunity)
+  XSPerfAccumulate("mdp_tage_train_as_smb_opportunity", mdpTageTrainAsSmbOpportunity)
+  XSPerfAccumulate("mdp_tage_train_is_smb_opportunity", mdpTageTrainIsSmbOpportunity)
+  XSPerfAccumulate("mdp_tage_train_iw_smb_opportunity", mdpTageTrainIwSmbOpportunity)
+  XSPerfAccumulate("mdp_tage_train_aw_wrong_bypass", mdpTageTrainAwWrongBypass)
+  XSPerfAccumulate("mdp_tage_train_as_wrong_bypass", mdpTageTrainAsWrongBypass)
+  XSPerfAccumulate("mdp_tage_train_is_wrong_bypass", mdpTageTrainIsWrongBypass)
+  XSPerfAccumulate("mdp_tage_train_iw_wrong_bypass", mdpTageTrainIwWrongBypass)
+  XSPerfAccumulate("mdp_tage_train_aw_smb_update", mdpTageTrainAwSmbUpdate)
+  XSPerfAccumulate("mdp_tage_train_as_smb_update", mdpTageTrainAsSmbUpdate)
+  XSPerfAccumulate("mdp_tage_train_is_smb_update", mdpTageTrainIsSmbUpdate)
+  XSPerfAccumulate("mdp_tage_train_iw_smb_update", mdpTageTrainIwSmbUpdate)
+  XSPerfAccumulate("mdp_tage_train_aw_smb_stale_drop", mdpTageTrainAwSmbStaleDrop)
+  XSPerfAccumulate("mdp_tage_train_as_smb_stale_drop", mdpTageTrainAsSmbStaleDrop)
+  XSPerfAccumulate("mdp_tage_train_is_smb_stale_drop", mdpTageTrainIsSmbStaleDrop)
+  XSPerfAccumulate("mdp_tage_train_iw_smb_stale_drop", mdpTageTrainIwSmbStaleDrop)
+  XSPerfAccumulate("mdp_tage_train_smb_update", mdpTageTrainSmbUpdateCnt)
+  XSPerfAccumulate("mdp_tage_train_smb_owner_stale_drop", mdpTageTrainSmbOwnerStaleDropCnt)
+  XSPerfAccumulate("mdp_tage_train_smb_from_wrong_bypass", mdpTageTrainSmbFromWrongBypass)
+  XSPerfAccumulate("mdp_tage_train_smb_found_can_bypass", mdpTageTrainSmbFoundCanBypass)
+  XSPerfAccumulate("mdp_tage_train_smb_found_cannot_bypass", mdpTageTrainSmbFoundCannotBypass)
   XSPerfAccumulate("mdp_tage_train_need_write", PopCount(mdpTageTrainNeedWrite))
   XSPerfAccumulate("mdp_tage_train_skip_update", PopCount(mdpTageTrainSkipUpdate))
 }

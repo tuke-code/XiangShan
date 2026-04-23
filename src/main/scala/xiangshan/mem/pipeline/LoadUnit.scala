@@ -1148,8 +1148,15 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
     Mux(Pbmt.isUncache(s2_pbmt), s2_in.mmio, s2_tlb_hit && s2_pmp.mmio)
 
   val s2_full_fwd      = Wire(Bool())
+  val s2_smbOpportunity = s2_in.uop.loadPred.valid &&
+    s2_in.uop.loadPred.bits.smbProviderHandle.valid &&
+    io.lsq.forward.smbProbeCandidateValid
+  val s2_smbCanConsume = s2_in.uop.loadPred.valid &&
+    s2_in.uop.loadPred.bits.smbEnable &&
+    io.lsq.forward.smbCandidateValid &&
+    (!io.lsq.forward.smbVerifyReady || io.lsq.forward.smbVerifyPass)
   val s2_mem_amb       = (s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait && ~s2_in.uop.loadPred.bits.static &&
-                          io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid))
+                          io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid) && !s2_smbCanConsume)
   val s2_tlb_miss      = s2_in.tlbMiss
   val s2_fwd_fail      = io.lsq.forward.dataInvalid && RegNext(io.lsq.forward.valid)
   val s2_dcache_miss   = io.dcache.resp.bits.miss &&
@@ -1268,6 +1275,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   io.lsq.ldld_nuke_query.req.bits.paddr      := s2_in.paddr
   io.lsq.ldld_nuke_query.req.bits.data_valid := Mux(s2_full_fwd || s2_fwd_data_valid || s2_nc_with_data, true.B, !s2_dcache_miss)
   io.lsq.ldld_nuke_query.req.bits.is_nc := s2_nc_with_data
+  io.lsq.ldld_nuke_query.req.bits.smbConsumed := false.B
 
   // st-ld violation require
   io.lsq.stld_nuke_query.req.valid           := s2_valid && s2_can_query
@@ -1276,25 +1284,40 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   io.lsq.stld_nuke_query.req.bits.paddr      := s2_in.paddr
   io.lsq.stld_nuke_query.req.bits.data_valid := Mux(s2_full_fwd || s2_fwd_data_valid || s2_nc_with_data, true.B, !s2_dcache_miss)
   io.lsq.stld_nuke_query.req.bits.is_nc := s2_nc_with_data
+  io.lsq.stld_nuke_query.req.bits.smbConsumed := s2_smbCanConsume
 
   // merge forward result
   // lsq has higher priority than sbuffer
   val s2_fwd_mask = Wire(Vec((VLEN/8), Bool()))
   val s2_fwd_data = Wire(Vec((VLEN/8), UInt(8.W)))
+  val s2_smbConsume = s2_smbCanConsume
   s2_full_fwd := ((~s2_fwd_mask.asUInt).asUInt & s2_in.mask) === 0.U && !io.lsq.forward.dataInvalid
   // generate XLEN/8 Muxs
   for (i <- 0 until VLEN / 8) {
-    s2_fwd_mask(i) := io.lsq.forward.forwardMask(i) || io.sbuffer.forwardMask(i) || io.ubuffer.forwardMask(i)
+    s2_fwd_mask(i) := io.lsq.forward.smbForwardMask(i) || io.lsq.forward.forwardMask(i) || io.sbuffer.forwardMask(i) || io.ubuffer.forwardMask(i)
     s2_fwd_data(i) :=
+      Mux(io.lsq.forward.smbForwardMask(i), io.lsq.forward.smbForwardData(i),
       Mux(io.lsq.forward.forwardMask(i), io.lsq.forward.forwardData(i),
       Mux(s2_nc_with_data, io.ubuffer.forwardData(i),
-      io.sbuffer.forwardData(i)))
+      io.sbuffer.forwardData(i))))
   }
 
-  val s2_fwd_mask_no_ubuffer = io.lsq.forward.forwardMask.asUInt | io.sbuffer.forwardMask.asUInt
+  val s2_fwd_mask_no_ubuffer = io.lsq.forward.forwardMask.asUInt | io.lsq.forward.smbForwardMask.asUInt | io.sbuffer.forwardMask.asUInt
   //来自前递就是mdp预测依赖成功，不来自前递就是mdp预测依赖失败
   val s2_mdpPredictHit = (~s2_fwd_mask_no_ubuffer & s2_in.mask) === 0.U && !io.lsq.forward.dataInvalid
   dontTouch(s2_mdpPredictHit)
+  when(s2_fire) {
+    assert(!s2_smbConsume || (!io.lsq.forward.smbVerifyReady || io.lsq.forward.smbVerifyPass),
+      "SMB consume requires either late verify pending or a passing verify result")
+    assert(!s2_smbConsume || s2_smbOpportunity,
+      "SMB consume requires a candidate opportunity in the same cycle")
+    assert(!s2_smbConsume || io.lsq.stld_nuke_query.req.valid,
+      "Speculative SMB consume must retain a stld late-verify tracking entry")
+    assert(!io.lsq.stld_nuke_query.req.bits.smbConsumed || s2_in.uop.loadPred.bits.smbEnable,
+      "SMB-consumed late-verify tracking requires smbEnable")
+    assert(!s2_smbConsume || io.lsq.forward.smbProbeHit,
+      "SMB consume requires a matching probe hit")
+  }
   //TODO:: XSDebug
 
   XSDebug(s2_fire, "[FWD LOAD RESP] pc %x fwd %x(%b) + %x(%b)\n",
@@ -1558,12 +1581,37 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
     MdpPredictStatuses.INDEPEND     -> MdpUpdateType.M_IW
   ))
   io.mdpUpdate.bits.updateType := Mux(s3_out.bits.uop.loadPred.bits.loadWait,fromMdpPredictDependency,fromMdpPredictNoDependency)
-  io.mdpUpdate.bits.distance := 0.U //MdpPredictStatuses.INDEPEND分配的是非依赖项，所以不需要distance
+  io.mdpUpdate.bits.distance := Mux(
+    s3_out.bits.uop.loadPred.bits.loadWait,
+    s3_out.bits.uop.loadPred.bits.distance,
+    0.U
+  )
+  io.mdpUpdate.bits.smbPredicted := s3_out.bits.uop.loadPred.bits.smbEnable
+  io.mdpUpdate.bits.foundBypassOpportunity := RegEnable(s2_smbOpportunity, s2_fire)
+  io.mdpUpdate.bits.canBypass := RegEnable(s2_smbConsume, s2_fire)
+  io.mdpUpdate.bits.wrongBypass := false.B
+  io.mdpUpdate.bits.smbProviderHandle := s3_out.bits.uop.loadPred.bits.smbProviderHandle
+  when(io.mdpUpdate.valid && io.mdpUpdate.bits.smbPredicted) {
+    assert(io.mdpUpdate.bits.distance.orR, "LoadUnit SMB prediction feedback requires dependent distance")
+    assert(io.mdpUpdate.bits.smbProviderHandle.valid, "LoadUnit SMB prediction feedback requires provider handle")
+  }
+  when(io.mdpUpdate.valid && io.mdpUpdate.bits.foundBypassOpportunity) {
+    assert(io.mdpUpdate.bits.smbProviderHandle.valid, "LoadUnit SMB opportunity requires provider handle")
+    assert(io.mdpUpdate.bits.distance.orR, "LoadUnit SMB opportunity requires dependent distance")
+  }
+  when(io.mdpUpdate.valid && io.mdpUpdate.bits.canBypass) {
+    assert(io.mdpUpdate.bits.smbPredicted, "LoadUnit canBypass requires SMB prediction")
+    assert(io.mdpUpdate.bits.foundBypassOpportunity, "LoadUnit canBypass requires SMB opportunity")
+    assert(io.mdpUpdate.bits.smbProviderHandle.valid, "LoadUnit canBypass requires provider handle")
+  }
 
   XSPerfAccumulate("loadU_status_depend", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.DEPEND)
   XSPerfAccumulate("loadU_status_independ", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.INDEPEND)
   XSPerfAccumulate("loadU_status_depend_other", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.DEPENDOT)
   XSPerfAccumulate("loadU_status_null", io.mdpUpdate.valid && s3_out.bits.mdpPredictStatuses === MdpPredictStatuses.NULL)
+  XSPerfAccumulate("loadU_smb_predicted", io.mdpUpdate.valid && io.mdpUpdate.bits.smbPredicted)
+  XSPerfAccumulate("loadU_smb_opportunity", io.mdpUpdate.valid && io.mdpUpdate.bits.foundBypassOpportunity)
+  XSPerfAccumulate("loadU_smb_can_bypass", io.mdpUpdate.valid && io.mdpUpdate.bits.canBypass)
 
   val s3_revoke = s3_exception || io.lsq.ldin.bits.rep_info.need_rep || s3_mis_align || (s3_frm_mabuf && io.misalign_ldout.bits.rep_info.need_rep)
   io.lsq.ldld_nuke_query.revoke := s3_revoke

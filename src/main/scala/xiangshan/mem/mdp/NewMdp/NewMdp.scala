@@ -65,6 +65,19 @@ class MdpResolveQueue(implicit p: Parameters) extends XSModule with HasMdpParame
     entry.bits.ftqIdx     := io.toMdpResolveUpdate(i).bits.ftqIdx
     entry.bits.ftqOffset  := io.toMdpResolveUpdate(i).bits.ftqOffset
     entry.bits.distance   := io.toMdpResolveUpdate(i).bits.distance
+    entry.bits.smbPredicted := io.toMdpResolveUpdate(i).bits.smbPredicted
+    entry.bits.foundBypassOpportunity := io.toMdpResolveUpdate(i).bits.foundBypassOpportunity
+    entry.bits.canBypass := io.toMdpResolveUpdate(i).bits.canBypass
+    entry.bits.wrongBypass := io.toMdpResolveUpdate(i).bits.wrongBypass
+    entry.bits.smbProviderHandle := io.toMdpResolveUpdate(i).bits.smbProviderHandle
+    when(entry.valid) {
+      assert(!entry.bits.smbPredicted || entry.bits.distance.orR,
+        s"MdpResolve input ${i} SMB prediction requires dependent distance")
+      assert(!(entry.bits.foundBypassOpportunity || entry.bits.canBypass || entry.bits.wrongBypass) || entry.bits.smbProviderHandle.valid,
+        s"MdpResolve input ${i} SMB feedback requires provider handle")
+      assert(!(entry.bits.foundBypassOpportunity || entry.bits.canBypass || entry.bits.wrongBypass) || entry.bits.distance.orR,
+        s"MdpResolve input ${i} SMB feedback requires dependent distance")
+    }
   }
   dontTouch(mdpResolve)
 
@@ -111,6 +124,15 @@ class MdpResolveQueue(implicit p: Parameters) extends XSModule with HasMdpParame
       loadSlot.bits.updateType  := load.bits.updateType
       loadSlot.bits.cfiPosition := getAlignedPosition(startPc, load.bits.ftqOffset)._1
       loadSlot.bits.distance    := load.bits.distance
+      loadSlot.bits.smbPredicted := load.bits.smbPredicted
+      loadSlot.bits.foundBypassOpportunity := load.bits.foundBypassOpportunity
+      loadSlot.bits.canBypass := load.bits.canBypass
+      loadSlot.bits.wrongBypass := load.bits.wrongBypass
+      loadSlot.bits.smbProviderHandle := load.bits.smbProviderHandle
+      assert(!loadSlot.bits.smbPredicted || loadSlot.bits.smbProviderHandle.valid,
+        s"MdpResolveQueue slot ${i} predicted SMB requires provider handle")
+      assert(!(loadSlot.bits.foundBypassOpportunity || loadSlot.bits.canBypass || loadSlot.bits.wrongBypass) || loadSlot.bits.smbProviderHandle.valid,
+        s"MdpResolveQueue slot ${i} SMB feedback requires provider handle")
     }
   }
 
@@ -181,7 +203,11 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
       pred.bits.cfiPosition := base.bits.cfiPosition
       pred.bits.static      := base.bits.static
       pred.bits.loadWait    := base.bits.loadWait
+      pred.bits.smbEnable   := false.B
       pred.bits.distance    := base.bits.distance
+      pred.bits.smbProviderHandle.valid := false.B
+      pred.bits.smbProviderHandle.tableIdx := 0.U
+      pred.bits.smbProviderHandle.wayIdx := 0.U
     }
     prediction
   }
@@ -196,7 +222,9 @@ class MdpMASCOT(implicit p: Parameters) extends XSModule with HasMdpParameters {
       pred.bits.cfiPosition := base.bits.cfiPosition
       pred.bits.static   := Mux(tage.valid, tage.bits.static, base.bits.static)
       pred.bits.loadWait := Mux(tage.valid, tage.bits.loadWait, base.bits.loadWait)
+      pred.bits.smbEnable := Mux(tage.valid, tage.bits.smbEnable, base.bits.smbEnable)
       pred.bits.distance := Mux(tage.valid, tage.bits.distance, base.bits.distance)
+      pred.bits.smbProviderHandle := Mux(tage.valid, tage.bits.smbProviderHandle, base.bits.smbProviderHandle)
     }
     prediction
   }

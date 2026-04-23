@@ -103,6 +103,7 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   ))
   maskModule.io := DontCare
   val datavalid = RegInit(VecInit(List.fill(LoadQueueRAWSize)(false.B)))
+  val smbConsumed = RegInit(VecInit(List.fill(LoadQueueRAWSize)(false.B)))
 
   // freeliset: store valid entries index.
   // +---+---+--------------+-----+-----+
@@ -167,6 +168,11 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
       //  Fill info
       uop(enqIndex) := enq.bits.uop
       datavalid(enqIndex) := enq.bits.data_valid
+      smbConsumed(enqIndex) := enq.bits.smbConsumed
+      when(enq.bits.smbConsumed) {
+        assert(enq.bits.uop.loadPred.valid && enq.bits.uop.loadPred.bits.smbEnable && enq.bits.uop.loadPred.bits.loadWait,
+          s"LoadQueueRAW enqueue SMB-consumed entry on pipe ${w} requires dependent SMB prediction")
+      }
     }
     val debug_robIdx = enq.bits.uop.robIdx.asUInt
     XSError(needEnqueue(w) && enq.ready && allocated(enqIndex), p"LoadQueueRAW: You can not write an valid entry! check: ldu $w, robIdx $debug_robIdx")
@@ -190,7 +196,12 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
     val needCancel = uop(i).robIdx.needFlush(io.redirect)
 
     when (allocated(i) && (deqNotBlock || needCancel)) {
+      when(smbConsumed(i)) {
+        assert(deqNotBlock || needCancel,
+          s"LoadQueueRAW SMB-tracked entry ${i} may only clear after address tracking closes or redirect cancels it")
+      }
       allocated(i) := false.B
+      smbConsumed(i) := false.B
       freeMaskVec(i) := true.B
     }
   }
@@ -206,11 +217,20 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
 
     when (allocated(revokeIndex) && revokeValid) {
       allocated(revokeIndex) := false.B
+      smbConsumed(revokeIndex) := false.B
       freeMaskVec(revokeIndex) := true.B
       willRevoke(revokeIndex) := true.B
     }
   }
   freeList.io.free := freeMaskVec.asUInt
+
+  (0 until LoadQueueRAWSize).foreach { i =>
+    when(smbConsumed(i)) {
+      assert(allocated(i), s"LoadQueueRAW SMB-tracked entry ${i} must remain allocated while tracked")
+      assert(uop(i).loadPred.valid && uop(i).loadPred.bits.smbEnable && uop(i).loadPred.bits.loadWait,
+        s"LoadQueueRAW SMB-tracked entry ${i} must preserve dependent SMB ownership")
+    }
+  }
 
   io.lqFull := freeList.io.empty
 
@@ -296,44 +316,87 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   val storeIn = io.storeIn
 
   def detectRollback(i: Int) = {
+    class RollbackEntry extends XSBundleWithMicroOp {
+      val wrongBypass = Bool()
+    }
     paddrModule.io.violationMdata(i) := genPartialPAddr(RegEnable(storeIn(i).bits.paddr, storeIn(i).valid))
     paddrModule.io.violationCheckLine.get(i) := RegEnable(storeIn(i).bits.wlineflag, storeIn(i).valid)
     maskModule.io.violationMdata(i) := RegEnable(storeIn(i).bits.mask, storeIn(i).valid)
 
     val addrMaskMatch = paddrModule.io.violationMmask(i).asUInt & maskModule.io.violationMmask(i).asUInt
+    val storeRobIdx = RegEnable(storeIn(i).bits.uop.robIdx, storeIn(i).valid)
     val entryNeedCheck = GatedValidRegNext(VecInit((0 until LoadQueueRAWSize).map(j => {
       allocated(j) && storeIn(i).valid && isAfter(uop(j).robIdx, storeIn(i).bits.uop.robIdx) && datavalid(j) && !uop(j).robIdx.needFlush(io.redirect) && !willRevoke(j)
     })))
     val lqViolationSelVec = VecInit((0 until LoadQueueRAWSize).map(j => {
       addrMaskMatch(j) && entryNeedCheck(j)
     }))
+    val smbWrongBypassSelVec = VecInit((0 until LoadQueueRAWSize).map(j => {
+      val predictedStoreRobIdx = uop(j).loadPred.bits.getWaitStoreRobIdx(uop(j).robIdx)
+      entryNeedCheck(j) &&
+      smbConsumed(j) &&
+      (predictedStoreRobIdx === storeRobIdx) &&
+      !addrMaskMatch(j)
+    }))
+    val hasAnyLqViolation = lqViolationSelVec.asUInt.orR
+    val hasAnySmbWrongBypass = smbWrongBypassSelVec.asUInt.orR
+    val hasRollbackSourceOverlap = hasAnyLqViolation && hasAnySmbWrongBypass
+    (0 until LoadQueueRAWSize).foreach { j =>
+      when(entryNeedCheck(j) && smbConsumed(j)) {
+        assert(uop(j).loadPred.valid && uop(j).loadPred.bits.smbEnable && !uop(j).loadPred.bits.static,
+          s"LoadQueueRAW SMB-tracked entry ${j} must come from a dynamic SMB prediction")
+      }
+      when(smbWrongBypassSelVec(j)) {
+        assert(uop(j).loadPred.bits.getWaitStoreRobIdx(uop(j).robIdx) === storeRobIdx,
+          s"LoadQueueRAW wrongBypass entry ${j} must match the predicted wait-store ROB")
+        assert(!addrMaskMatch(j),
+          s"LoadQueueRAW wrongBypass entry ${j} requires a late verify mismatch")
+        assert(!uop(j).robIdx.needFlush(io.redirect) && !willRevoke(j),
+          s"LoadQueueRAW wrongBypass entry ${j} must not come from a flushed or revoked SMB-tracked load")
+      }
+    }
+    val rollbackSelVec = VecInit((0 until LoadQueueRAWSize).map(j => {
+      lqViolationSelVec(j) || smbWrongBypassSelVec(j)
+    }))
 
-    val lqViolationSelUopExts = uop.map(uop => {
-      val wrapper = Wire(new XSBundleWithMicroOp)
+    val lqViolationSelUopExts = uop.zip(smbWrongBypassSelVec).map { case (uop, wrongBypass) =>
+      val wrapper = Wire(new RollbackEntry)
       wrapper.uop := uop
+      wrapper.wrongBypass := wrongBypass
       wrapper
-    })
+    }
 
     // select logic
-    val lqSelect: (Seq[Bool], Seq[XSBundleWithMicroOp]) = selectOldest(lqViolationSelVec, lqViolationSelUopExts)
+    val lqSelect = selectOldest(rollbackSelVec, lqViolationSelUopExts)
 
     // select one inst
     val lqViolation = lqSelect._1(0)
     val lqViolationUop = lqSelect._2(0).uop
+    val lqWrongBypass = lqSelect._2(0).wrongBypass
 
     XSDebug(
       lqViolation,
       "need rollback (ld wb before store) pc %x robidx %d target %x\n",
       storeIn(i).bits.uop.pc, storeIn(i).bits.uop.robIdx.asUInt, lqViolationUop.robIdx.asUInt
     )
+    when(lqViolation && lqWrongBypass) {
+      assert(lqViolationUop.loadPred.valid && lqViolationUop.loadPred.bits.smbEnable && !lqViolationUop.loadPred.bits.static,
+        s"LoadQueueRAW wrongBypass on store pipe ${i} requires a dynamic SMB-predicted load")
+      assert(lqViolationUop.loadPred.bits.getWaitStoreRobIdx(lqViolationUop.robIdx) === storeRobIdx,
+        s"LoadQueueRAW wrongBypass on store pipe ${i} must target the triggering store")
+    }
 
-    (lqViolation, lqViolationUop)
+    (lqViolation, lqViolationUop, lqWrongBypass, hasAnyLqViolation, hasAnySmbWrongBypass, hasRollbackSourceOverlap)
   }
 
   // select rollback (part1) and generate rollback request
   // rollback check
   // Lq rollback seq check is done in s3 (next stage), as getting rollbackLq MicroOp is slow
   val rollbackLqWb = Wire(Vec(StorePipelineWidth, Valid(new DynInst)))
+  val rollbackWrongBypass = Wire(Vec(StorePipelineWidth, Bool()))
+  val rollbackHasNormalSource = Wire(Vec(StorePipelineWidth, Bool()))
+  val rollbackHasSmbSource = Wire(Vec(StorePipelineWidth, Bool()))
+  val rollbackHasSourceOverlap = Wire(Vec(StorePipelineWidth, Bool()))
   val stFtqIdx = Wire(Vec(StorePipelineWidth, new FtqPtr))
   val stFtqOffset = Wire(Vec(StorePipelineWidth, UInt(FetchBlockInstOffsetWidth.W)))
   val stRobIdx = Wire(Vec(StorePipelineWidth, new RobPtr))
@@ -341,6 +404,10 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
     val detectedRollback = detectRollback(w)
     rollbackLqWb(w).valid := detectedRollback._1 && DelayN(storeIn(w).valid && !storeIn(w).bits.miss, TotalSelectCycles)
     rollbackLqWb(w).bits  := detectedRollback._2
+    rollbackWrongBypass(w) := detectedRollback._3 && DelayN(storeIn(w).valid && !storeIn(w).bits.miss, TotalSelectCycles)
+    rollbackHasNormalSource(w) := DelayN(detectedRollback._4 && storeIn(w).valid && !storeIn(w).bits.miss, TotalSelectCycles)
+    rollbackHasSmbSource(w) := DelayN(detectedRollback._5 && storeIn(w).valid && !storeIn(w).bits.miss, TotalSelectCycles)
+    rollbackHasSourceOverlap(w) := DelayN(detectedRollback._6 && storeIn(w).valid && !storeIn(w).bits.miss, TotalSelectCycles)
     stFtqIdx(w) := DelayNWithValid(storeIn(w).bits.uop.ftqPtr, storeIn(w).valid, TotalSelectCycles)._2
     stFtqOffset(w) := DelayNWithValid(storeIn(w).bits.uop.ftqOffset, storeIn(w).valid, TotalSelectCycles)._2
     stRobIdx(w) := DelayNWithValid(storeIn(w).bits.uop.robIdx, storeIn(w).valid, TotalSelectCycles)._2
@@ -370,6 +437,7 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   io.rollback := allRedirect
 
   dontTouch(rollbackLqWb)
+  dontTouch(rollbackWrongBypass)
   val oldestOH = Redirect.selectOldestRedirect(allRedirect)
   val mdpUpdateFilter = (0 until StorePipelineWidth).map(i => {
     val update = Wire(Valid(new MdpUpdate))
@@ -380,12 +448,32 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
     update.bits.ftqOffset := rollbackLqWb(i).bits.ftqOffset
     update.bits.updateType := Mux(predictFromStatic, MdpUpdateType.M_WZ , MdpUpdateType.M_AS)
     update.bits.distance   := update.bits.getDistance(rollbackLqWb(i).bits.robIdx,stRobIdx(i))
+    update.bits.smbPredicted := rollbackLqWb(i).bits.loadPred.bits.smbEnable
+    update.bits.foundBypassOpportunity := false.B
+    update.bits.canBypass := false.B
+    update.bits.wrongBypass := rollbackWrongBypass(i)
+    update.bits.smbProviderHandle := rollbackLqWb(i).bits.loadPred.bits.smbProviderHandle
+    when(update.valid && update.bits.wrongBypass) {
+      assert(update.bits.smbPredicted && !predictFromStatic, s"LoadQueueRAW wrongBypass on pipe ${i} requires dynamic SMB prediction")
+      assert(rollbackLqWb(i).bits.loadPred.bits.smbProviderHandle.valid,
+        s"LoadQueueRAW wrongBypass on pipe ${i} requires provider handle")
+      assert(rollbackLqWb(i).bits.loadPred.bits.getWaitStoreRobIdx(rollbackLqWb(i).bits.robIdx) === stRobIdx(i),
+        s"LoadQueueRAW wrongBypass on pipe ${i} must point to the triggering store")
+    }
     update
   })
   io.mdpUpdateOldest := Mux1H(oldestOH, mdpUpdateFilter)
   XSPerfAccumulate("mdp_update_from_loadQRAW",io.mdpUpdateOldest.valid)
   XSPerfAccumulate("mdp_update_from_loadQRAW_WriteZero",io.mdpUpdateOldest.valid && io.mdpUpdateOldest.bits.updateIsWriteZero)
   XSPerfAccumulate("mdp_update_from_loadQRAW_AllocateStrong",io.mdpUpdateOldest.valid && io.mdpUpdateOldest.bits.updateIsAllocateStrong)
+  XSPerfAccumulate("loadQRAW_lq_violation_source_any", PopCount(rollbackHasNormalSource))
+  XSPerfAccumulate("loadQRAW_smb_wrong_bypass_source_any", PopCount(rollbackHasSmbSource))
+  XSPerfAccumulate("loadQRAW_rollback_source_overlap", PopCount(rollbackHasSourceOverlap))
+  XSPerfAccumulate("loadQRAW_smb_wrong_bypass_oldest",
+    io.mdpUpdateOldest.valid && io.mdpUpdateOldest.bits.wrongBypass)
+  XSPerfAccumulate("loadQRAW_normal_violation_oldest_with_smb_source",
+    io.mdpUpdateOldest.valid && !io.mdpUpdateOldest.bits.wrongBypass && rollbackHasSmbSource.asUInt.orR)
+  XSPerfAccumulate("loadQRAW_smb_tracked_entry_active", PopCount(smbConsumed))
 
   // perf cnt
   val canEnqCount = PopCount(io.query.map(_.req.fire))

@@ -398,8 +398,12 @@ class TageBaseTableAlignBank(
     pred.valid            := hit
     pred.bits.static      := ~hit
     pred.bits.loadWait    := c.isPositive
+    pred.bits.smbEnable   := false.B
     pred.bits.distance    := e.distance
     pred.bits.cfiPosition := e.cfiPosition
+    pred.bits.smbProviderHandle.valid := false.B
+    pred.bits.smbProviderHandle.tableIdx := 0.U
+    pred.bits.smbProviderHandle.wayIdx := 0.U
 
     meta.rawHit      := rawHit
     meta.cfiPosition := e.cfiPosition

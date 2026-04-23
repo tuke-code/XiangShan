@@ -150,7 +150,19 @@ trait IfuHelper extends HasIfuParameters with HalfAlignHelper with HasMdpParamet
       mdpPredInfo(i).valid := isLoad(i)
       mdpPredInfo(i).bits.static := !hasHit
       mdpPredInfo(i).bits.loadWait := hasHit && matchedPred.loadWait && isLoad(i)
+      mdpPredInfo(i).bits.smbEnable := hasHit && matchedPred.smbEnable && isLoad(i)
       mdpPredInfo(i).bits.distance := Mux(hasHit, matchedPred.distance, 0.U)
+      mdpPredInfo(i).bits.smbProviderHandle.valid := hasHit && matchedPred.smbProviderHandle.valid && isLoad(i)
+      mdpPredInfo(i).bits.smbProviderHandle.tableIdx := Mux(hasHit, matchedPred.smbProviderHandle.tableIdx, 0.U)
+      mdpPredInfo(i).bits.smbProviderHandle.wayIdx := Mux(hasHit, matchedPred.smbProviderHandle.wayIdx, 0.U)
+      when(isLoad(i)) {
+        assert(!mdpPredInfo(i).bits.smbEnable || mdpPredInfo(i).bits.loadWait,
+          s"IFU MDP slot ${i} SMB transport requires loadWait")
+        assert(!mdpPredInfo(i).bits.smbEnable || mdpPredInfo(i).bits.smbProviderHandle.valid,
+          s"IFU MDP slot ${i} SMB transport requires provider handle")
+        assert(!mdpPredInfo(i).bits.smbProviderHandle.valid || hasHit,
+          s"IFU MDP slot ${i} provider handle must come from a matched prediction")
+      }
     }
     mdpPredInfo
   }
