@@ -342,6 +342,8 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
   dataPath.io.fromBypassNetwork := 0.U.asTypeOf(dataPath.io.fromBypassNetwork)
   dataPath.io.fromPcTargetMem.toDataPathTargetPC := 0.U.asTypeOf(dataPath.io.fromPcTargetMem.toDataPathTargetPC)
   dataPath.io.fromPcTargetMem.toDataPathPC := 0.U.asTypeOf(dataPath.io.fromPcTargetMem.toDataPathPC)
+  dataPath.io.fromIntIQRealOldestSelValid := 0.U.asTypeOf(dataPath.io.fromIntIQRealOldestSelValid)
+  dataPath.io.fromFpIQRealOldestSelValid := 0.U.asTypeOf(dataPath.io.fromFpIQRealOldestSelValid)
 
   bypassNetwork.io.fromDataPath.int.foreach(x => x.foreach{ xx =>
       xx.valid := false.B
@@ -435,6 +437,9 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
         iqOut(i).bits := source.io.deqDelay(i).bits
         source.io.deqDelay(i).ready := s.ready && iqOut(i).ready
       }
+    }
+    dataPath.io.fromIntIQRealOldestSelValid.zip(issueQueues).map { case (sink, source) =>
+      sink := source.io.realOldestSelValid
     }
     dataPath.io.fromIntIQDeqOg1Payload.zip(issueQueues).zip(io.intIQDeqOg1PayloadOut.get).map { case ((sink, source), plOut) =>
       sink.zipWithIndex.map { case (s, i) =>
@@ -554,6 +559,9 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
         iqOut(i).bits := source.io.deqDelay(i).bits
         source.io.deqDelay(i).ready := s.ready && iqOut(i).ready
       }
+    }
+    dataPath.io.fromFpIQRealOldestSelValid.zip(issueQueues).map { case (sink, source) =>
+      sink := source.io.realOldestSelValid
     }
     dataPath.io.fromFpIQDeqOg1Payload.zip(issueQueues).zip(io.fpIQDeqOg1PayloadOut.get).map { case ((sink, source), plOut) =>
       sink.zipWithIndex.map { case (s, i) =>

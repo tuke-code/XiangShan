@@ -67,6 +67,8 @@ case class IssueBlockParams(
 
   def isVecMemIQ: Boolean = isVecLduIQ || isVecStuIQ
 
+  def enableOldestIssueBypass: Boolean = exuBlockParams.exists(_.enableOldestIssueBypass)
+
   def needLqIdx: Boolean = isLdAddrIQ || isVecMemIQ
 
   def needSqIdx: Boolean = isStAddrIQ || isStdIQ || isVecMemIQ || isLdAddrIQ
