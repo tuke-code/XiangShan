@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from transactions import (
     BackendSendPlan,
+    CACHELINE_BYTES,
     EnqueueLoadCyclePlan,
     IssueCyclePlan,
     IssueOp,
@@ -109,6 +110,13 @@ class ScalarStoreFlushSequenceResult:
     drain_summary: dict
     outer_write_delta: int
     sbuffer_drain_delta: int
+
+
+@dataclass(frozen=True)
+class CboZeroFlushSequenceResult:
+    store_result: ScalarStoreSequenceResult
+    drain_summary: dict
+    line_addr: int
 
 
 @dataclass(frozen=True)
@@ -1301,6 +1309,77 @@ class ScalarStoreFlushSequence:
             drain_summary=drain_summary,
             outer_write_delta=env.get_counter("outer_write_request_count") - outer_writes_before,
             sbuffer_drain_delta=env.get_counter("sbuffer_drain_count") - sbuffer_drains_before,
+        )
+
+
+class CboZeroFlushSequence:
+    def __init__(
+        self,
+        txn,
+        *,
+        require_committed: bool = False,
+        materialize_cycles: int | None = None,
+        max_cycles: int | None = None,
+        settle_cycles: int | None = None,
+        assert_no_outstanding: bool = False,
+    ) -> None:
+        self.txn = txn
+        self.require_committed = require_committed
+        self.materialize_cycles = materialize_cycles
+        self.max_cycles = max_cycles
+        self.settle_cycles = settle_cycles
+        self.assert_no_outstanding = assert_no_outstanding
+
+    def run(self, env) -> CboZeroFlushSequenceResult:
+        if not self.txn.is_cbo_zero:
+            raise ValueError("CboZeroFlushSequence requires a StoreTxn with opcode='cbo_zero'")
+        line_addr = int(self.txn.addr) & ~(CACHELINE_BYTES - 1)
+        sbuffer_drains_before = env.get_counter("sbuffer_drain_count")
+        commit_result = ScalarStoreCommitSequence(
+            self.txn,
+            expected_mmio=False,
+            require_committed=self.require_committed,
+            materialize_cycles=self.materialize_cycles,
+            settle_cycles=self.settle_cycles,
+        ).run(env)
+        try:
+            drain_summary = FlushStoreBuffersSequence(
+                max_cycles=self.max_cycles,
+                settle_cycles=self.settle_cycles,
+            ).run(env)
+        except TimeoutError:
+            env.wait_counter_growth(
+                "sbuffer_drain_count",
+                sbuffer_drains_before,
+                max_cycles=(
+                    env.config.sequence.store_flush_cycles
+                    if self.max_cycles is None
+                    else self.max_cycles
+                ),
+            )
+            env.wait_memory_quiesce(
+                max_cycles=(
+                    env.config.sequence.store_flush_cycles
+                    if self.max_cycles is None
+                    else self.max_cycles
+                ),
+            )
+            drain_summary = env.memory.finalize_and_check_drain()
+        if self.assert_no_outstanding:
+            env.assert_no_outstanding()
+        return CboZeroFlushSequenceResult(
+            store_result=ScalarStoreSequenceResult(
+                txn=commit_result.store_result.txn,
+                allocated_sq_ptr=commit_result.store_result.allocated_sq_ptr,
+                next_sq_ptr=commit_result.store_result.next_sq_ptr,
+                store_view=(
+                    commit_result.committed_store_view
+                    if commit_result.committed_store_view is not None
+                    else commit_result.store_result.store_view
+                ),
+            ),
+            drain_summary=drain_summary,
+            line_addr=line_addr,
         )
 
 

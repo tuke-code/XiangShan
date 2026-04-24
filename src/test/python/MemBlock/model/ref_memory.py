@@ -5,7 +5,7 @@ RefMemory: MemBlock 黄金内存抽象。
 
 import random
 
-from transactions import scalar_store_size_bytes_from_mask
+from transactions import CACHELINE_BYTES, scalar_store_size_bytes_from_mask
 
 
 class RefMemory:
@@ -60,6 +60,11 @@ class RefMemory:
     def read_cacheline(self, block_addr: int, line_bytes: int = 64) -> bytes:
         return bytes(self.storage.get(block_addr + idx, 0) & 0xFF for idx in range(line_bytes))
 
+    def apply_cbo_zero(self, addr: int, line_bytes: int = CACHELINE_BYTES) -> None:
+        block_addr = int(addr) & ~(int(line_bytes) - 1)
+        for byte_idx in range(int(line_bytes)):
+            self.storage[block_addr + byte_idx] = 0
+
     def apply_masked_write(self, addr: int, data: int, mask: int, width_bytes: int) -> None:
         for byte_idx in range(width_bytes):
             if (mask >> byte_idx) & 0x1:
@@ -78,4 +83,9 @@ class RefMemory:
     def with_store(self, addr: int, data: int, mask: int = 0xFF) -> "RefMemory":
         predicted = self.clone()
         predicted.apply_store(addr, data, mask)
+        return predicted
+
+    def with_cbo_zero(self, addr: int, line_bytes: int = CACHELINE_BYTES) -> "RefMemory":
+        predicted = self.clone()
+        predicted.apply_cbo_zero(addr, line_bytes=line_bytes)
         return predicted

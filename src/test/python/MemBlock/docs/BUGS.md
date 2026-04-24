@@ -18,6 +18,46 @@
 - `suspected`
   - 已有稳定 testcase 签名，静态 RTL 检查也能看到可疑点，但还需要进一步波形或更小粒度 probe 来最终闭环。
 
+## DUTBUG-cbo-zero-missing-wline-drain
+
+- 状态：open
+- 当前 pytest 处置：精确条件 `xfail`
+- DUT `src/main/` commit hash：`03bc924c72cb055ccb8146a2eecd750ead0b4d7b`
+- DUT `src/main/` commit 摘要：`03bc924c72cb055ccb8146a2eecd750ead0b4d7b 2026-03-31 13:50:09 +0800 top: make MemBlockTop wrapper for memblock only`
+- 关联 testcase：
+  - `src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py`
+- 关联场景：
+  - `test_api_MemBlock_cbo_zero_flush_zeroes_entire_cacheline`
+- 关联 RTL 位置：
+  - `src/main/scala/xiangshan/mem/lsqueue/NewStoreQueue.scala`
+
+问题描述：
+
+- 当前 `cbo.zero` 在真实 DUT 上已经能够稳定进入 `StoreQueue`，并在 store shadow 中表现为：
+  - `allocated = 1`
+  - `addr` 正确
+  - `data = 0`
+  - `completed = 1`
+- 但在当前 flush 窗口内仍无法观测到对应的 `wline` sbuffer drain：
+  - `sbuffer_drain_count` 不增长
+  - `drain_log` 中没有新的 `wline` 事件
+  - `flushSb` 最终超时，等不到 `sbIsEmpty`
+- 从静态 RTL 看，`cbo.zero` 的设计意图是 `idle -> writeZero -> flushSb -> writeback`，且 `writeZero` 依赖 `io.writeToSbuffer.req.head.fire`；但普通 `toSbufferValid` 生成又会被 `ctrlEntry.isCbo` 对应的 `cboStall` 挡住，这条路径存在明显可疑点。
+
+验证口径：
+
+- testcase 不做整文件或整组 CBO 用例的无条件 `xfail`。
+- 只有 `test_api_MemBlock_cbo_zero_flush_zeroes_entire_cacheline` 这一条真实 DUT 定向场景按已确认缺陷挂起。
+- 纯 Python model / facade 单测保持硬断言，以确保 env 侧 `cbo.zero` 语义不会被 DUT 缺陷掩盖。
+
+后续动作：
+
+- DUT 侧需要继续确认：
+  - `cbo.zero` 是否真的走到 `CboState.writeZero`
+  - `io.writeToSbuffer.req.head.fire` 为何没有形成
+  - `cbo.zero` 到 sbuffer 的写零路径是否被 `cboStall` 意外挡住
+- 修复后移除该 testcase 上的 `xfail`，恢复为普通 real-DUT regression。
+
 ## DUTBUG-vector-store-data-path-disconnected
 
 - 状态：open

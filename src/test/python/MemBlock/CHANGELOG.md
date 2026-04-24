@@ -28,6 +28,38 @@
 - `python3 -m pytest -q -s src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
   - 结果：失败；`IssueAgent` 已按纯 `valid/ready` 语义完成所有 24 笔 issue，但 DUT 最终只完成 `10/24` 笔 compare，当前阻塞点已转移到 issue 之后的完成路径
 
+### 2. 打通 `cbo.zero` 的验证环境闭环，并补齐 `wline` drain 语义
+
+本条目记录一次围绕 `cbo.zero`/`wline` 的 store-side 扩展。此前 Python 验证环境在 monitor 层一旦看到 sbuffer `wline=1` 就会直接报错，事务层也只有普通 scalar store 语义，导致 `cbo.zero` 既不能被 testcase 主动发射，也不能在 `MemoryModel` 里完成整条 cacheline 清零与 drain 收口。本轮把能力限定在 `cbo.zero`，从事务、facade、monitor、scoreboard、golden memory 到 directed testcase 全链补齐。
+
+#### 变更摘要
+
+- `transactions.py` / `agents/issue_agent.py` / `agents/backend_facade.py` / `request_apis.py`
+  - `StoreTxn` / `IssueOp` 新增 `cbo_zero` opcode 语义
+  - `send_store()` 正式支持 `StoreTxn(opcode='cbo_zero')`
+  - 新增 `StoreTxn.cbo_zero()` 与 `send_cbo_zero()` 便于 testcase 直接构造 `cbo.zero`
+- `model/ref_memory.py` / `model/scoreboard.py` / `monitors/store_monitor.py`
+  - 新增 cacheline 级 `apply_cbo_zero()` 语义
+  - `wline=1` 不再报错，改为记录 `cbo.zero` line write drain 事件
+  - store retire / finalize drain compare 现在能正确处理整条 cacheline 清零
+- `MemBlock_env.py` / `memory_model.py` / `sequences/memblock_sequences.py`
+  - `StoreView` 新增 `is_cbo_zero`
+  - 新增 `preload_bytes()` / `read_cacheline()` facade
+  - 新增 `CboZeroFlushSequence`
+- `tests/test_request_apis_backend_facade.py` / `tests/test_memory_model_store_logic.py` / `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 补充 `cbo.zero` 的事务编码、memory model、真实 DUT directed 覆盖
+- `docs/dut_port_behavior.md` / `docs/memory_model_design.md`
+  - 把 `wline` 从“不支持”更新为“支持 `cbo.zero`，其余 CBO 仍未纳入”
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：`24 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_memory_model_store_logic.py`
+  - 结果：`15 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'cbo_zero_flush_zeroes_entire_cacheline'`
+  - 结果：`1 xfailed, 13 deselected`（`DUTBUG-cbo-zero-missing-wline-drain`）
+
 ## 2026-04-22
 
 ### 1. 收紧 elastic issue 的“候选发射/延迟确认”语义，并补足 saturation compare 预算

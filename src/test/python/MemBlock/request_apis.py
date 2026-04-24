@@ -60,6 +60,7 @@ __all__ = [
     "send_load_batch_with_sta_same_cycle",
     "expect_load",
     "send_store",
+    "send_cbo_zero",
     "send_vector_load",
     "send_vector_store",
     "issue_scalar_load",
@@ -263,6 +264,17 @@ def expect_load(env, txn: LoadTxn):
 def send_store(env, txn: StoreTxn) -> QueuePtr:
     """兼容入口：按标准时序发送一笔标量 store。"""
 
+    return env.backend.send(txn)
+
+
+def send_cbo_zero(env, txn: StoreTxn) -> QueuePtr:
+    """发送一笔 `cbo.zero` store。"""
+
+    if not txn.is_cbo_zero:
+        raise ValueError("send_cbo_zero requires a StoreTxn with opcode='cbo_zero'")
+    send_fn = getattr(env.backend, "send_cbo_zero", None)
+    if send_fn is not None:
+        return send_fn(txn)
     return env.backend.send(txn)
 
 

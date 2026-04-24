@@ -8,6 +8,14 @@ from __future__ import annotations
 from collections import defaultdict, deque
 from dataclasses import dataclass
 
+from transactions import (
+    CACHELINE_BYTES,
+    CBO_ZERO_STORE_OPCODE,
+    LSU_OP_CBO_ZERO,
+    SCALAR_STORE_OPCODE,
+    normalized_store_opcode,
+)
+
 
 STORE_DATA_WIDTH_BYTES = 16
 
@@ -71,6 +79,7 @@ class PendingStore:
     data: int | None = None
     mask: int = 0
     width_bytes: int = STORE_DATA_WIDTH_BYTES
+    opcode: str = SCALAR_STORE_OPCODE
     allocated: bool = False
     addr_valid: bool = False
     data_valid: bool = False
@@ -84,11 +93,17 @@ class PendingStore:
     request_addr: int | None = None
     request_data: int | None = None
     request_mask: int | None = None
+    request_opcode: str = SCALAR_STORE_OPCODE
+
+    @property
+    def is_cbo_zero(self) -> bool:
+        return self.opcode == CBO_ZERO_STORE_OPCODE or self.request_opcode == CBO_ZERO_STORE_OPCODE
 
     @property
     def ready_for_retire(self) -> bool:
+        retired_boundary = self.completed if self.is_cbo_zero else self.committed
         return (
-            self.committed
+            retired_boundary
             and self.addr_valid
             and self.data_valid
             and self.addr is not None
@@ -192,12 +207,13 @@ class Scoreboard:
         store.allocated = True
         store.rob_idx = RobIndex(flag=rob_idx_flag, value=rob_idx_value)
 
-    def note_store_request(self, *, sq_idx: int, addr: int, data: int, mask: int) -> None:
+    def note_store_request(self, *, sq_idx: int, addr: int, data: int, mask: int, opcode: str = SCALAR_STORE_OPCODE) -> None:
         store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
         store.allocated = True
         store.request_addr = int(addr)
         store.request_data = int(data)
         store.request_mask = int(mask) & 0xFF
+        store.request_opcode = normalized_store_opcode(opcode)
 
     def note_load_commits(self, commit_count: int) -> None:
         for _ in range(max(0, int(commit_count))):
@@ -333,12 +349,21 @@ class Scoreboard:
         store.allocated = True
         store.mask = mask
 
-    def observe_store_data(self, *, sq_idx: int, data: int, width_bytes: int = STORE_DATA_WIDTH_BYTES) -> None:
+    def observe_store_data(
+        self,
+        *,
+        sq_idx: int,
+        data: int,
+        width_bytes: int = STORE_DATA_WIDTH_BYTES,
+        fu_op_type: int | None = None,
+    ) -> None:
         store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
         store.allocated = True
         store.data = data
         store.data_valid = True
         store.width_bytes = width_bytes
+        if fu_op_type is not None and int(fu_op_type) == LSU_OP_CBO_ZERO:
+            store.opcode = CBO_ZERO_STORE_OPCODE
 
     def observe_sbuffer_write(
         self,
@@ -359,6 +384,29 @@ class Scoreboard:
                 "mask": mask,
                 "width_bytes": width_bytes,
                 "cycle": self._cycle,
+            }
+        )
+
+    def observe_sbuffer_wline(
+        self,
+        *,
+        lane_idx: int,
+        addr: int,
+        line_bytes: int = CACHELINE_BYTES,
+    ) -> None:
+        self.sbuffer_drain_count += 1
+        block_addr = int(addr) & ~(int(line_bytes) - 1)
+        self.drain_log.append(
+            {
+                "channel": "sbuffer",
+                "lane": lane_idx,
+                "addr": block_addr,
+                "data": 0,
+                "mask": (1 << int(line_bytes)) - 1,
+                "width_bytes": int(line_bytes),
+                "cycle": self._cycle,
+                "kind": CBO_ZERO_STORE_OPCODE,
+                "wline": True,
             }
         )
 
@@ -497,8 +545,14 @@ class Scoreboard:
             store.retired = True
 
     def _retire_store(self, store: PendingStore) -> None:
+        if store.request_opcode == CBO_ZERO_STORE_OPCODE and store.request_addr is not None:
+            self.ref_memory.apply_cbo_zero(store.request_addr)
+            return
         if store.request_addr is not None and store.request_data is not None and store.request_mask is not None:
             self.ref_memory.apply_store(store.request_addr, store.request_data, store.request_mask)
+            return
+        if store.is_cbo_zero and store.addr is not None:
+            self.ref_memory.apply_cbo_zero(store.addr)
             return
         normalized = _normalized_store_window(store.addr, store.mask, store.width_bytes)
         if normalized is None:

@@ -286,6 +286,8 @@ store 的完整信息来自多个入口拼装：
 
 - channel=`sbuffer`
   - 来自 `_observe_sbuffer_writes()`。
+  - 普通 store 记录 16B `addr/data/mask`。
+  - `wline=1` 时记录为 `cbo.zero` line write 事件，`width_bytes=64`、`data=0`、`wline=true`。
 - channel=`outer`
   - 来自 `_capture_outer_request()` 中的 Put 请求。
 
@@ -336,7 +338,7 @@ store 的完整信息来自多个入口拼装：
 当前实现已有一些明确限制：
 
 1. dcache A 通道只支持 `AcquireBlock` 的 load-only 场景。
-2. sbuffer `wline` drain 目前显式不支持。
+2. sbuffer `wline` drain 目前只支持 `cbo.zero`，其余 CBO 类型尚未纳入。
 3. compare 聚焦整数 load writeback，依赖 `intWriteback` 中的若干关键字段存在。
 4. store 采用“观测 + 结尾核对”的思路，不做每拍在线严格 compare。
 5. `MemoryModel` 仍然在一个 facade 内同时承担 transport capture、transport drive、scoreboard 组装和拍后观测收口，时序 phase 边界不够显式。

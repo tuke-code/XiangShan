@@ -4,6 +4,8 @@ MemBlock reusable test sequences.
 """
 
 from .memblock_sequences import (
+    CboZeroFlushSequence,
+    CboZeroFlushSequenceResult,
     FlushStoreBuffersSequence,
     ResetEnvSequence,
     sample_sbuffer_forward_events,

@@ -13,6 +13,10 @@ SCALAR_STORE_MASK_TO_SIZE_BYTES = {
     0x0F: 4,
     0xFF: 8,
 }
+SCALAR_STORE_OPCODE = "scalar"
+CBO_ZERO_STORE_OPCODE = "cbo_zero"
+CACHELINE_BYTES = 64
+LSU_OP_CBO_ZERO = 0x7
 SCALAR_STORE_SIZE_BYTES_TO_FU_OP_TYPE = {
     1: 0x0,
     2: 0x1,
@@ -48,6 +52,30 @@ def scalar_store_size_bytes_from_mask(mask: int) -> int:
 
 def scalar_store_fu_op_type_from_mask(mask: int) -> int:
     return SCALAR_STORE_SIZE_BYTES_TO_FU_OP_TYPE[scalar_store_size_bytes_from_mask(mask)]
+
+
+def normalized_store_opcode(opcode: str) -> str:
+    normalized = str(opcode)
+    if normalized not in {SCALAR_STORE_OPCODE, CBO_ZERO_STORE_OPCODE}:
+        raise ValueError(
+            f"unsupported store opcode: {opcode!r}; "
+            f"expected one of {[SCALAR_STORE_OPCODE, CBO_ZERO_STORE_OPCODE]}"
+        )
+    return normalized
+
+
+def store_size_bytes(*, opcode: str, mask: int) -> int:
+    normalized_opcode = normalized_store_opcode(opcode)
+    if normalized_opcode == CBO_ZERO_STORE_OPCODE:
+        return CACHELINE_BYTES
+    return scalar_store_size_bytes_from_mask(mask)
+
+
+def store_fu_op_type(*, opcode: str, mask: int) -> int:
+    normalized_opcode = normalized_store_opcode(opcode)
+    if normalized_opcode == CBO_ZERO_STORE_OPCODE:
+        return LSU_OP_CBO_ZERO
+    return scalar_store_fu_op_type_from_mask(mask)
 
 
 def vector_fu_op_type(*, is_load: bool, opcode_class: str) -> int:
@@ -293,6 +321,7 @@ class StoreTxn:
     addr: int
     data: int
     mask: int = 0xFF
+    opcode: Literal["scalar", "cbo_zero"] = SCALAR_STORE_OPCODE
     enq_port: int = 0
     sta_lane: int = 3
     std_lane: int = 5
@@ -305,6 +334,44 @@ class StoreTxn:
     assigned_rob_idx_value: int | None = field(default=None, repr=False, compare=False)
     assigned_ftq_idx_flag: int | None = field(default=None, repr=False, compare=False)
     assigned_ftq_idx_value: int | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        normalized_store_opcode(self.opcode)
+        if self.opcode == SCALAR_STORE_OPCODE:
+            scalar_store_size_bytes_from_mask(self.mask)
+
+    @classmethod
+    def cbo_zero(
+        cls,
+        *,
+        req_id: int,
+        sq_ptr: QueuePtr,
+        addr: int,
+        enq_port: int = 0,
+        sta_lane: int = 3,
+        std_lane: int = 5,
+        rob_ref: RobRef | None = None,
+        rob_idx_override_flag: int | None = None,
+        rob_idx_override_value: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+    ) -> "StoreTxn":
+        return cls(
+            req_id=req_id,
+            sq_ptr=sq_ptr,
+            addr=addr,
+            data=0,
+            mask=0xFF,
+            opcode=CBO_ZERO_STORE_OPCODE,
+            enq_port=enq_port,
+            sta_lane=sta_lane,
+            std_lane=std_lane,
+            rob_ref=rob_ref,
+            rob_idx_override_flag=rob_idx_override_flag,
+            rob_idx_override_value=rob_idx_override_value,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+        )
 
     @property
     def rob_idx_override(self) -> RobIndex | None:
@@ -370,11 +437,21 @@ class StoreTxn:
 
     @property
     def size_bytes(self) -> int:
-        return scalar_store_size_bytes_from_mask(self.mask)
+        return store_size_bytes(opcode=self.opcode, mask=self.mask)
 
     @property
     def fu_op_type(self) -> int:
-        return scalar_store_fu_op_type_from_mask(self.mask)
+        return store_fu_op_type(opcode=self.opcode, mask=self.mask)
+
+    @property
+    def issue_data(self) -> int:
+        if self.opcode == CBO_ZERO_STORE_OPCODE:
+            return 0
+        return int(self.data)
+
+    @property
+    def is_cbo_zero(self) -> bool:
+        return self.opcode == CBO_ZERO_STORE_OPCODE
 
 
 @dataclass
@@ -728,6 +805,7 @@ class IssueOp:
     data: int | None = None
     lq_ptr: QueuePtr | None = None
     mask: int = 0xFF
+    store_opcode: Literal["scalar", "cbo_zero"] = SCALAR_STORE_OPCODE
     store_set_hit: int = 0
     load_wait_bit: int = 0
     load_wait_strict: int = 0
@@ -752,11 +830,11 @@ class IssueOp:
         elif self.kind == "sta":
             if self.addr is None:
                 raise ValueError("STA issue op requires `addr`")
-            scalar_store_size_bytes_from_mask(self.mask)
+            store_fu_op_type(opcode=self.store_opcode, mask=self.mask)
         elif self.kind == "std":
             if self.data is None:
                 raise ValueError("STD issue op requires `data`")
-            scalar_store_size_bytes_from_mask(self.mask)
+            store_fu_op_type(opcode=self.store_opcode, mask=self.mask)
 
     @classmethod
     def load_from_txn(cls, txn: LoadTxn) -> "IssueOp":
@@ -789,6 +867,7 @@ class IssueOp:
         addr: int,
         lane: int = 3,
         mask: int = 0xFF,
+        store_opcode: Literal["scalar", "cbo_zero"] = SCALAR_STORE_OPCODE,
         rob_ref: RobRef | None = None,
         rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
@@ -809,6 +888,7 @@ class IssueOp:
             sq_ptr=sq_ptr,
             addr=addr,
             mask=mask,
+            store_opcode=store_opcode,
             rob_ref=rob_ref,
             rob_idx_flag=None if normalized_rob_idx is None else normalized_rob_idx.flag,
             rob_idx_value=None if normalized_rob_idx is None else normalized_rob_idx.value,
@@ -826,6 +906,7 @@ class IssueOp:
         data: int,
         lane: int = 5,
         mask: int = 0xFF,
+        store_opcode: Literal["scalar", "cbo_zero"] = SCALAR_STORE_OPCODE,
         rob_ref: RobRef | None = None,
         rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
@@ -846,6 +927,7 @@ class IssueOp:
             sq_ptr=sq_ptr,
             data=data,
             mask=mask,
+            store_opcode=store_opcode,
             rob_ref=rob_ref,
             rob_idx_flag=None if normalized_rob_idx is None else normalized_rob_idx.flag,
             rob_idx_value=None if normalized_rob_idx is None else normalized_rob_idx.value,
@@ -967,11 +1049,11 @@ class IssueOp:
 
     @property
     def store_size_bytes(self) -> int:
-        return scalar_store_size_bytes_from_mask(self.mask)
+        return store_size_bytes(opcode=self.store_opcode, mask=self.mask)
 
     @property
     def store_fu_op_type(self) -> int:
-        return scalar_store_fu_op_type_from_mask(self.mask)
+        return store_fu_op_type(opcode=self.store_opcode, mask=self.mask)
 
 
 @dataclass(frozen=True)

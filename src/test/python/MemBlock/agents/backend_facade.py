@@ -498,9 +498,10 @@ class BackendFacade:
                         IssueOp.std(
                             req_id=request.req_id,
                             sq_ptr=store_ref,
-                            data=request.data,
+                            data=request.issue_data,
                             lane=request.std_lane,
                             mask=request.mask,
+                            store_opcode=request.opcode,
                             rob_ref=request.rob_ref,
                         )
                     ),
@@ -511,6 +512,7 @@ class BackendFacade:
                             addr=request.addr,
                             lane=request.sta_lane,
                             mask=request.mask,
+                            store_opcode=request.opcode,
                             rob_ref=request.rob_ref,
                         )
                     ),
@@ -626,8 +628,9 @@ class BackendFacade:
                 self.env.memory.note_store_request(
                     sq_idx=allocated_sq_ptr.value,
                     addr=request.addr,
-                    data=request.data,
+                    data=request.issue_data,
                     mask=request.mask,
+                    opcode=request.opcode,
                 )
             return allocated_sq_ptr
         raise TypeError(f"unsupported backend send request: {type(request)!r}")
@@ -969,6 +972,11 @@ class BackendFacade:
         )
 
     def send_store(self, txn: StoreTxn):
+        return self.send(txn)
+
+    def send_cbo_zero(self, txn: StoreTxn):
+        if not txn.is_cbo_zero:
+            raise ValueError("send_cbo_zero requires a StoreTxn with opcode='cbo_zero'")
         return self.send(txn)
 
     def note_load_issued(

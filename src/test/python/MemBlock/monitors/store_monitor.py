@@ -161,6 +161,7 @@ class StoreMonitor:
             self.scoreboard.observe_store_data(
                 sq_idx=lane.read("sqIdx_value", 0),
                 data=lane.read("data", 0),
+                fu_op_type=lane.read("fuOpType", None),
             )
 
     def _observe_sbuffer_writes(self) -> None:
@@ -172,7 +173,11 @@ class StoreMonitor:
             if lane.connected("vecValid") and lane.read("vecValid", 1) == 0:
                 continue
             if lane.read("wline", 0):
-                raise AssertionError("当前 MemoryModel 暂不支持 wline store drain 校验")
+                self.scoreboard.observe_sbuffer_wline(
+                    lane_idx=lane_idx,
+                    addr=lane.read("addr", 0),
+                )
+                continue
             self.scoreboard.observe_sbuffer_write(
                 lane_idx=lane_idx,
                 addr=lane.read("addr", 0),

@@ -138,6 +138,7 @@ class StoreView:
     retired: bool
     rob_idx_flag: int | None
     rob_idx_value: int | None
+    is_cbo_zero: bool
 
 
 class PendingPtrDriver:
@@ -1865,6 +1866,16 @@ class MemBlockEnv:
 
         self.memory.preload_u64(addr, value)
 
+    def preload_bytes(self, base_addr: int, data: bytes) -> None:
+        """向黄金内存预置一段字节序列。"""
+
+        self.memory.preload_bytes(base_addr, data)
+
+    def read_cacheline(self, block_addr: int, line_bytes: int = 64) -> bytes:
+        """读取黄金内存中的整条 cacheline。"""
+
+        return self.memory.read_cacheline(block_addr, line_bytes=line_bytes)
+
     def wait_backend_reset_deassert(self, *, must_observe_assert: bool, max_cycles: int = 200) -> None:
         """等待 `io_reset_backend` 先被拉高再解复位。"""
 
@@ -2874,6 +2885,7 @@ class MemBlockEnv:
             retired=bool(store.retired),
             rob_idx_flag=rob_idx_flag,
             rob_idx_value=rob_idx_value,
+            is_cbo_zero=bool(getattr(store, "is_cbo_zero", False)),
         )
 
     def wait_store_addr_observed(self, sq_idx: int, expected_addr: int, max_cycles: int = 200):

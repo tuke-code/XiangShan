@@ -3,7 +3,7 @@
 Issue active agent.
 """
 
-from transactions import IssueCyclePlan, IssueOp, scalar_store_fu_op_type_from_mask
+from transactions import IssueCyclePlan, IssueOp
 
 
 LSU_OP_LD = 0x3
@@ -75,11 +75,10 @@ class IssueAgent:
         sq_ptr,
         data: int,
         lane: int,
-        mask: int = 0xFF,
     ) -> None:
         issue = self.env.issue[lane]
         issue.valid.value = 1
-        issue.bits_fuOpType.value = scalar_store_fu_op_type_from_mask(mask)
+        issue.bits_fuOpType.value = op.store_fu_op_type
         issue.bits_src_0.value = data
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
         issue.bits_robIdx_value.value = op.resolved_rob_idx_value
@@ -107,7 +106,6 @@ class IssueAgent:
                 sq_ptr=op.sq_ptr,
                 addr=op.addr,
                 lane=int(op.lane),
-                mask=op.mask,
             )
             return
         if op.kind == "std":
@@ -116,7 +114,6 @@ class IssueAgent:
                 sq_ptr=op.sq_ptr,
                 data=op.data,
                 lane=int(op.lane),
-                mask=op.mask,
             )
             return
         raise ValueError(f"unsupported issue op kind: {op.kind}")
@@ -176,12 +173,11 @@ class IssueAgent:
         sq_ptr,
         addr: int,
         lane: int,
-        mask: int = 0xFF,
     ) -> None:
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        issue.bits_fuOpType.value = scalar_store_fu_op_type_from_mask(mask)
+        issue.bits_fuOpType.value = op.store_fu_op_type
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
         issue.bits_robIdx_value.value = op.resolved_rob_idx_value

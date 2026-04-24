@@ -273,6 +273,48 @@ def test_memory_model_finalize_checks_sbuffer_drain_against_goldenmem():
     assert model.read(0x2000, 8) == 0xAABBCCDDEEFF0011
 
 
+def test_memory_model_finalize_accepts_cbo_zero_wline_drain_and_zeroes_cacheline():
+    sq_shadow = FakeReadBundle(
+        allocated=1,
+        addrvalid=1,
+        datavalid=1,
+        committed=1,
+        completed=1,
+        nc=0,
+        robIdx_flag=0,
+        robIdx_value=4,
+    )
+    store_addr = FakeReadBundle(valid=1, sqIdx_value=0, paddr=0x2040, miss=0, nc=0)
+    store_mask = FakeReadBundle(valid=1, sqIdx_value=0, mask=0xFFFF)
+    store_data = FakeReadBundle(valid=1, sqIdx_value=0, fuType=1 << 17, fuOpType=0x7, data=0)
+    sbuffer_write = FakeReadBundle(
+        valid=1,
+        ready=1,
+        addr=0x2040,
+        data=0,
+        mask=0,
+        wline=1,
+        vecValid=1,
+    )
+
+    model = _create_model(
+        store_addr_inputs=[store_addr],
+        store_mask_inputs=[store_mask],
+        store_data_inputs=[store_data],
+        sq_shadow_entries=[sq_shadow],
+        sbuffer_writes=[sbuffer_write],
+    )
+    model.preload_bytes(0x2040, bytes(range(64)))
+
+    model.after_cycle()
+    result = model.finalize_and_check_drain()
+
+    assert result["drain_event_count"] == 1
+    assert model.drain_log[-1]["wline"] is True
+    assert model.drain_log[-1]["kind"] == "cbo_zero"
+    assert model.read_cacheline(0x2040) == bytes(64)
+
+
 def test_memory_model_records_outer_put_partial_as_drain_event():
     model = _create_model(outer_delay=0)
 
@@ -457,6 +499,15 @@ def test_ref_memory_apply_store_decodes_mask_width():
     refmem.apply_store(0x1006, 0xA1A2, 0x03)
 
     assert refmem.read(0x1000, 8) == 0xA1A2334455667788
+
+
+def test_ref_memory_apply_cbo_zero_zeroes_entire_cacheline():
+    refmem = RefMemory()
+
+    refmem.preload_bytes(0x1040, bytes((index * 3) & 0xFF for index in range(64)))
+    refmem.apply_cbo_zero(0x1058)
+
+    assert refmem.read_cacheline(0x1040) == bytes(64)
 
 
 def test_ref_memory_with_store_returns_predicted_view():

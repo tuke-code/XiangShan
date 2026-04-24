@@ -614,9 +614,10 @@ store 的提交时序目前主要依赖：
 1. `valid = 1`
 2. `ready = 1`
 3. `vecValid != 0`
-4. `wline = 0`
+4. 若 `wline = 0`，按普通 sbuffer drain 记录 16B `addr/data/mask`
+5. 若 `wline = 1`，按 `cbo.zero` line write 记录整条 cacheline drain
 
-这说明当前环境明确不支持 line write drain 的校验。
+这意味着当前环境已经支持 `cbo.zero` 的 line write drain 校验；其余 CBO 类型仍不在本轮校验范围内。
 
 ## 11. outer TileLink 端口行为
 

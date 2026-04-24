@@ -228,11 +228,17 @@ class MemoryModel:
     def apply_store(self, addr: int, data: int, mask: int = 0xFF) -> None:
         self.ref_memory.apply_store(addr, data, mask)
 
+    def apply_cbo_zero(self, addr: int, line_bytes: int = DEFAULT_CACHELINE_BYTES) -> None:
+        self.ref_memory.apply_cbo_zero(addr, line_bytes=line_bytes)
+
     def fork_ref_memory(self) -> RefMemory:
         return self.ref_memory.clone()
 
     def predict_store(self, addr: int, data: int, mask: int = 0xFF) -> RefMemory:
         return self.ref_memory.with_store(addr, data, mask)
+
+    def predict_cbo_zero(self, addr: int, line_bytes: int = DEFAULT_CACHELINE_BYTES) -> RefMemory:
+        return self.ref_memory.with_cbo_zero(addr, line_bytes=line_bytes)
 
     def expect_load(
         self,
@@ -269,12 +275,21 @@ class MemoryModel:
             rob_idx_value=rob_idx_value,
         )
 
-    def note_store_request(self, *, sq_idx: int, addr: int, data: int, mask: int) -> None:
+    def note_store_request(
+        self,
+        *,
+        sq_idx: int,
+        addr: int,
+        data: int,
+        mask: int,
+        opcode: str = "scalar",
+    ) -> None:
         self.scoreboard.note_store_request(
             sq_idx=sq_idx,
             addr=addr,
             data=data,
             mask=mask,
+            opcode=opcode,
         )
 
     def note_load_commits(self, commit_count: int) -> None:

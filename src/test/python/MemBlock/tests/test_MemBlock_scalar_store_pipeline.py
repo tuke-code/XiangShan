@@ -8,6 +8,7 @@ import pytest
 from request_apis import enqueue_scalar_store, expect_load, issue_scalar_sta, issue_scalar_std, send_load
 from transactions import LoadTxn, ptr_inc, QueuePtr, StoreTxn
 from sequences import (
+    CboZeroFlushSequence,
     FlushStoreBuffersSequence,
     ResetEnvSequence,
     ScalarLoadSequence,
@@ -34,6 +35,7 @@ PARTIAL_STORE_WINDOW_ADDRS = [
     PARTIAL_STORE_WINDOW_BASE,
     PARTIAL_STORE_WINDOW_BASE + 0x8,
 ]
+CBO_ZERO_LINE_ADDR = STORE_ADDR_BASE + 0x100
 
 
 def _reset_env_and_state(env, *, require_issue_lanes=(), require_lq_ready: bool = False) -> SequenceState:
@@ -177,6 +179,42 @@ def test_api_MemBlock_cross_line_two_cacheable_stores_flush_directed(env):
     assert drain_summary["drain_event_count"] >= 1, "跨线双 store flush 未记录到 drain 事件"
     assert drain_summary["touched_byte_count"] >= 16, "跨线双 store flush 覆盖字节数不足"
     env.assert_no_outstanding()
+
+
+@pytest.mark.xfail(
+    reason="DUTBUG-cbo-zero-missing-wline-drain: cbo.zero reaches completed but does not emit observable wline drain within the current flush window",
+    strict=False,
+)
+def test_api_MemBlock_cbo_zero_flush_zeroes_entire_cacheline(env):
+    """
+    一条 `cbo.zero` 命中 cacheable line。
+
+    检查点：
+      - `cbo.zero` 能 materialize/commit
+      - flush 后记录到 `wline` drain
+      - 最终整条 cacheline 被清零
+    """
+
+    state = _reset_env_and_state(env)
+    env.preload_bytes(CBO_ZERO_LINE_ADDR, bytes(((index * 5) + 1) & 0xFF for index in range(64)))
+
+    result = CboZeroFlushSequence(
+        StoreTxn.cbo_zero(
+            req_id=0,
+            sq_ptr=state.sq_ptr,
+            addr=CBO_ZERO_LINE_ADDR,
+        ),
+        assert_no_outstanding=True,
+    ).run(env)
+
+    store_view = result.store_result.store_view
+
+    assert store_view is not None and store_view.completed, "`cbo.zero` 未进入 completed"
+    assert store_view.is_cbo_zero, "store view 未标记为 `cbo.zero`"
+    assert store_view.addr == CBO_ZERO_LINE_ADDR, "`cbo.zero` 地址不匹配"
+    assert result.drain_summary["drain_event_count"] >= 1, "`cbo.zero` flush 未记录到 drain 事件"
+    assert any(event.get("wline") for event in env.memory.drain_log), "`cbo.zero` 未记录到 wline drain"
+    assert env.read_cacheline(CBO_ZERO_LINE_ADDR) == bytes(64), "`cbo.zero` 未把整条 cacheline 清零"
 
 
 def test_api_MemBlock_misaligned_store_dual_overlap_loads_directed(env):
