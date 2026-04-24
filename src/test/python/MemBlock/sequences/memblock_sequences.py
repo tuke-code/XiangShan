@@ -1826,7 +1826,7 @@ from .mmu_sequences import (
     MmuSv39AddressSpaceConfig,
     MmuSv39AddressSpaceInstallSequence,
     MmuSv39AddressSpaceInstallSequenceResult,
-    Sv39GigapageMapping,
+    Sv39Mapping,
     TranslatedU64MemoryPreload,
     U64MemoryPreload,
 )

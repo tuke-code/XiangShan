@@ -24,7 +24,7 @@ from sequences import (
     ScalarLateStaStoreLoadViolationSequence,
     ScalarSqDataInvalidMatchInvalidTriggerSequence,
     SequenceState,
-    Sv39GigapageMapping,
+    Sv39Mapping,
 )
 
 
@@ -64,6 +64,8 @@ HIGH_PRIO_NC_PREEMPTORS = (
 
 MATCH_INVALID_ROOT_A = 0x88022000
 MATCH_INVALID_ROOT_B = 0x88023000
+MATCH_INVALID_ROOT_A_PAGE_TABLE_PAGES = (0x88024000, 0x88025000)
+MATCH_INVALID_ROOT_B_PAGE_TABLE_PAGES = (0x88026000, 0x88027000)
 MATCH_INVALID_MAIN_VA = 0x40030000
 MATCH_INVALID_TLB_PRIME_VA = 0x40032000
 MATCH_INVALID_PA_BASE_A = 0x80000000
@@ -92,6 +94,11 @@ def _set_exception_indices(writeback: dict) -> set[int]:
         for index, bit in enumerate(writeback.get("exception_bits", ()))
         if bit
     }
+
+
+def _sv39_4k_mapping_pa_base(space_pa_base: int, va: int) -> int:
+    page_offset = (int(va) & ((1 << 30) - 1)) & ~0xFFF
+    return int(space_pa_base) | page_offset
 
 
 def _preload_bank_conflict_lines(env) -> None:
@@ -133,8 +140,9 @@ def test_api_MemBlock_scalar_aligned_load_fault_matrix_with_pipeline_checks(env)
             va = MMU_FAULT_VA_BASE + 0x4000 + case_index * 0x1000 + offset
             result = MmuFaultingScalarLoadSequence(
                 root_pt_addr=MMU_FAULT_ROOT_PT,
+                page_table_page_addrs=(0x88013000, 0x88014000),
                 va=va,
-                pa_base=MMU_FAULT_PA_BASE,
+                pa_base=_sv39_4k_mapping_pa_base(MMU_FAULT_PA_BASE, va),
                 initial_state=state,
                 main_req_id=req_id + 1,
                 size=size,
@@ -218,16 +226,29 @@ def test_api_MemBlock_scalar_aligned_load_matchinvalid_proxy_probe(env):
     root_a = MmuSv39AddressSpaceInstallSequence(
         MmuSv39AddressSpaceConfig(
             root_pt_addr=MATCH_INVALID_ROOT_A,
-            mappings=(Sv39GigapageMapping(va=MATCH_INVALID_MAIN_VA, pa_base=MATCH_INVALID_PA_BASE_A),),
+            mappings=(
+                Sv39Mapping(
+                    va=MATCH_INVALID_MAIN_VA,
+                    pa_base=_sv39_4k_mapping_pa_base(MATCH_INVALID_PA_BASE_A, MATCH_INVALID_MAIN_VA),
+                ),
+            ),
+            page_table_page_addrs=MATCH_INVALID_ROOT_A_PAGE_TABLE_PAGES,
         )
     ).run(env)
     root_b = MmuSv39AddressSpaceInstallSequence(
         MmuSv39AddressSpaceConfig(
             root_pt_addr=MATCH_INVALID_ROOT_B,
             mappings=(
-                Sv39GigapageMapping(va=MATCH_INVALID_MAIN_VA, pa_base=MATCH_INVALID_PA_BASE_B),
-                Sv39GigapageMapping(va=MATCH_INVALID_TLB_PRIME_VA, pa_base=MATCH_INVALID_PA_BASE_B),
+                Sv39Mapping(
+                    va=MATCH_INVALID_MAIN_VA,
+                    pa_base=_sv39_4k_mapping_pa_base(MATCH_INVALID_PA_BASE_B, MATCH_INVALID_MAIN_VA),
+                ),
+                Sv39Mapping(
+                    va=MATCH_INVALID_TLB_PRIME_VA,
+                    pa_base=_sv39_4k_mapping_pa_base(MATCH_INVALID_PA_BASE_B, MATCH_INVALID_TLB_PRIME_VA),
+                ),
             ),
+            page_table_page_addrs=MATCH_INVALID_ROOT_B_PAGE_TABLE_PAGES,
         )
     ).run(env)
     del root_a

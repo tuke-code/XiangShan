@@ -145,6 +145,7 @@ state = ResetEnvSequence(
 
 result = MmuFaultingScalarLoadSequence(
     root_pt_addr=root_pt,
+    page_table_page_addrs=(l1_pt_addr, l0_pt_addr),
     va=main_va,
     pa_base=pa_base,
     initial_state=state,

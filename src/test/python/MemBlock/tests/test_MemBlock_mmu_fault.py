@@ -18,6 +18,12 @@ from sequences import (
 
 
 MMU_FAULT_ROOT_PT = 0x88002000
+MMU_FAULT_PAGE_TABLE_PAGES = (
+    0x88003000,
+    0x88004000,
+    0x88005000,
+    0x88006000,
+)
 MMU_FAULT_VA_BASE = 0x40010000
 MMU_FAULT_PA_BASE = 0x80000000
 MMU_FAULT_PRIME_DATA = 0x123456789ABCDEF0
@@ -51,6 +57,11 @@ def _set_exception_indices(writeback: dict) -> set[int]:
     }
 
 
+def _sv39_4k_mapping_pa_base(space_pa_base: int, va: int) -> int:
+    page_offset = (int(va) & ((1 << 30) - 1)) & ~0xFFF
+    return int(space_pa_base) | page_offset
+
+
 def _assert_no_special_paths(env, result) -> None:
     assert result.transport_stats_after_main["outer_request_count"] == result.transport_stats_before_main["outer_request_count"]
     assert (
@@ -79,7 +90,8 @@ def test_api_MemBlock_scalar_word_load_tlb_error_tlb_hit_smoke(env):
     result = MmuFaultingScalarLoadSequence(
         root_pt_addr=MMU_FAULT_ROOT_PT,
         va=MMU_FAULT_VA_BASE,
-        pa_base=MMU_FAULT_PA_BASE,
+        pa_base=_sv39_4k_mapping_pa_base(MMU_FAULT_PA_BASE, MMU_FAULT_VA_BASE),
+        page_table_page_addrs=MMU_FAULT_PAGE_TABLE_PAGES[:2],
         initial_state=state,
         main_req_id=1,
         size=4,
@@ -111,7 +123,8 @@ def test_api_MemBlock_scalar_word_load_pmp_access_fault_tlb_hit_smoke(env):
     result = MmuFaultingScalarLoadSequence(
         root_pt_addr=MMU_FAULT_ROOT_PT,
         va=MMU_FAULT_VA_BASE + 0x1000,
-        pa_base=MMU_FAULT_PA_BASE,
+        pa_base=_sv39_4k_mapping_pa_base(MMU_FAULT_PA_BASE, MMU_FAULT_VA_BASE + 0x1000),
+        page_table_page_addrs=MMU_FAULT_PAGE_TABLE_PAGES[:2],
         initial_state=state,
         main_req_id=1,
         size=4,
@@ -144,7 +157,8 @@ def test_api_MemBlock_scalar_word_load_tlb_error_plus_pmp_fault_overlap_smoke(en
     result = MmuFaultingScalarLoadSequence(
         root_pt_addr=MMU_FAULT_ROOT_PT,
         va=MMU_FAULT_VA_BASE + 0x2000,
-        pa_base=MMU_FAULT_PA_BASE,
+        pa_base=_sv39_4k_mapping_pa_base(MMU_FAULT_PA_BASE, MMU_FAULT_VA_BASE + 0x2000),
+        page_table_page_addrs=MMU_FAULT_PAGE_TABLE_PAGES[:2],
         initial_state=state,
         main_req_id=1,
         size=4,
@@ -185,7 +199,8 @@ def test_api_MemBlock_scalar_mixed_size_fault_matrix(env):
             result = MmuFaultingScalarLoadSequence(
                 root_pt_addr=MMU_FAULT_ROOT_PT,
                 va=va,
-                pa_base=MMU_FAULT_PA_BASE,
+                pa_base=_sv39_4k_mapping_pa_base(MMU_FAULT_PA_BASE, va),
+                page_table_page_addrs=MMU_FAULT_PAGE_TABLE_PAGES[:2],
                 initial_state=state,
                 main_req_id=req_id + 1,
                 size=size,
@@ -224,9 +239,11 @@ def test_api_MemBlock_scalar_load_pmp_deny_region_hit_allow_outside_smoke(env):
     state = _reset_env_state(env)
     result = MmuPmpRegionLoadRecoverySequence(
         root_pt_addr=MMU_FAULT_ROOT_PT,
+        page_table_page_addrs=MMU_FAULT_PAGE_TABLE_PAGES[:2],
         denied_va=PMP_REGION_DENIED_VA,
         allowed_va=PMP_REGION_ALLOWED_VA,
-        pa_base=MMU_FAULT_PA_BASE,
+        denied_pa_base=_sv39_4k_mapping_pa_base(MMU_FAULT_PA_BASE, PMP_REGION_DENIED_VA),
+        allowed_pa_base=_sv39_4k_mapping_pa_base(MMU_FAULT_PA_BASE, PMP_REGION_ALLOWED_VA),
         initial_state=state,
         prime_req_id=0,
         denied_req_id=1,
@@ -259,9 +276,11 @@ def test_api_MemBlock_scalar_load_pmp_deny_region_then_restore_allow_smoke(env):
     state = _reset_env_state(env)
     result = MmuPmpRegionLoadRecoverySequence(
         root_pt_addr=MMU_FAULT_ROOT_PT,
+        page_table_page_addrs=MMU_FAULT_PAGE_TABLE_PAGES[:2],
         denied_va=PMP_REGION_DENIED_VA,
         allowed_va=PMP_REGION_ALLOWED_VA,
-        pa_base=MMU_FAULT_PA_BASE,
+        denied_pa_base=_sv39_4k_mapping_pa_base(MMU_FAULT_PA_BASE, PMP_REGION_DENIED_VA),
+        allowed_pa_base=_sv39_4k_mapping_pa_base(MMU_FAULT_PA_BASE, PMP_REGION_ALLOWED_VA),
         initial_state=state,
         prime_req_id=0x10,
         denied_req_id=0x11,

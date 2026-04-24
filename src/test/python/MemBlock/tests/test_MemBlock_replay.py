@@ -29,7 +29,7 @@ from sequences import (
     ScalarRawReplaySequence,
     ScalarSqDataInvalidMatchInvalidTriggerSequence,
     SequenceState,
-    Sv39GigapageMapping,
+    Sv39Mapping,
 )
 
 
@@ -58,6 +58,8 @@ BC_FF_NK_WARMUP_DATA = 0x0123456789ABCDEF
 BC_FF_NK_STORE_DATA = 0xDEADBEEFCAFEBABE
 MATCH_INVALID_ROOT_A = 0x88000000
 MATCH_INVALID_ROOT_B = 0x88001000
+MATCH_INVALID_ROOT_A_PAGE_TABLE_PAGES = (0x88002000, 0x88003000)
+MATCH_INVALID_ROOT_B_PAGE_TABLE_PAGES = (0x88004000, 0x88005000)
 MATCH_INVALID_MAIN_VA = 0x40001000
 MATCH_INVALID_TLB_PRIME_VA = 0x40002000
 MATCH_INVALID_PA_BASE_A = 0x80000000
@@ -146,6 +148,11 @@ def _warm_cacheable_load(env, *, state: SequenceState, req_id: int, addr: int, d
         next_lq_ptr=ptr_inc(verify_load.lq_ptr, env.config.sequence.load_queue_size),
         sq_ptr=state.sq_ptr,
     )
+
+
+def _sv39_4k_mapping_pa_base(space_pa_base: int, va: int) -> int:
+    page_offset = (int(va) & ((1 << 30) - 1)) & ~0xFFF
+    return int(space_pa_base) | page_offset
 
 
 def test_api_MemBlock_scalar_forward_fail_replay_smoke(env):
@@ -558,16 +565,29 @@ def test_api_MemBlock_scalar_sq_datainvalid_matchinvalid_nuke_smoke(env):
     root_a = MmuSv39AddressSpaceInstallSequence(
         MmuSv39AddressSpaceConfig(
             root_pt_addr=MATCH_INVALID_ROOT_A,
-            mappings=(Sv39GigapageMapping(va=MATCH_INVALID_MAIN_VA, pa_base=MATCH_INVALID_PA_BASE_A),),
+            mappings=(
+                Sv39Mapping(
+                    va=MATCH_INVALID_MAIN_VA,
+                    pa_base=_sv39_4k_mapping_pa_base(MATCH_INVALID_PA_BASE_A, MATCH_INVALID_MAIN_VA),
+                ),
+            ),
+            page_table_page_addrs=MATCH_INVALID_ROOT_A_PAGE_TABLE_PAGES,
         )
     ).run(env)
     root_b = MmuSv39AddressSpaceInstallSequence(
         MmuSv39AddressSpaceConfig(
             root_pt_addr=MATCH_INVALID_ROOT_B,
             mappings=(
-                Sv39GigapageMapping(va=MATCH_INVALID_MAIN_VA, pa_base=MATCH_INVALID_PA_BASE_B),
-                Sv39GigapageMapping(va=MATCH_INVALID_TLB_PRIME_VA, pa_base=MATCH_INVALID_PA_BASE_B),
+                Sv39Mapping(
+                    va=MATCH_INVALID_MAIN_VA,
+                    pa_base=_sv39_4k_mapping_pa_base(MATCH_INVALID_PA_BASE_B, MATCH_INVALID_MAIN_VA),
+                ),
+                Sv39Mapping(
+                    va=MATCH_INVALID_TLB_PRIME_VA,
+                    pa_base=_sv39_4k_mapping_pa_base(MATCH_INVALID_PA_BASE_B, MATCH_INVALID_TLB_PRIME_VA),
+                ),
             ),
+            page_table_page_addrs=MATCH_INVALID_ROOT_B_PAGE_TABLE_PAGES,
         )
     ).run(env)
     del root_a

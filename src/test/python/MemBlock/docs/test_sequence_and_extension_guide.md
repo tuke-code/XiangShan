@@ -372,7 +372,8 @@ env.backend.execute(
    - `probe_after_younger_writeback_cycles` 用来显式区分 `release early/late`；不要再把 probe 注入时机隐式绑在默认 transport delay 上。
 
 11. `MmuSv39AddressSpaceInstallSequence`
-   - 单次只安装一套地址空间的 gigapage mappings / preload，不隐式切换 active root。
+   - 单次只安装一套地址空间的 Sv39 4KB mappings / preload，不隐式切换 active root。
+   - 调用方需要显式提供 `page_table_page_addrs`，用于中间页表页分配。
    - 适合在 testcase 中多次调用，分别配置 root-A / root-B。
 
 12. `MmuSv39ActivateSequence`
@@ -439,7 +440,7 @@ env.backend.execute(
 对于 translation 相关 testcase，还应优先复用：
 
 9. `env.mmu`
-   - 统一提供 `enable_sv39()`、`disable_translation()`、`install_sv39_gigapage_mapping()`、`allow_all_smode_access()` 和 `ptw_responder()`。
+   - 统一提供 `enable_sv39()`、`disable_translation()`、`install_sv39_mapping()`、`allow_all_smode_access()` 和 `ptw_responder()`。
    - 这样 testcase 不需要自己 monkey-patch `idle_inputs()`、也不需要再本地复制 PTW/PMP helper。
 
 10. `MmuSv39AddressSpaceInstallSequence`
@@ -448,6 +449,7 @@ env.backend.execute(
 
 更完整的 MMU 使用说明见：
 
+- `src/test/python/MemBlock/docs/dtlb_fill_and_replacement_cases.md`
 - `src/test/python/MemBlock/docs/mmu_env_design_and_usage.md`
 - `src/test/python/MemBlock/docs/mmu_fault_directed_cases.md`
 - `src/test/python/MemBlock/docs/sq_matchinvalid_nuke_case_analysis.md`

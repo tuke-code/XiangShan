@@ -3,6 +3,10 @@
 MemBlock MMU-oriented reusable sequences.
 """
 
+from __future__ import annotations
+
+from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from transactions import LoadTxn, ptr_inc
@@ -12,18 +16,43 @@ from request_apis import send_load
 from .memblock_sequences import (
     SequenceState,
     _resolve_replay_drain_cycles,
+    _sample_l2_tlb_port,
+    _sample_tlb_debug,
     _snapshot_transport_stats,
     _wait_completed_load_count,
 )
 
 
-def _resolve_sv39_gigapage_pa(va: int, pa_base: int) -> int:
-    return int(pa_base) | (int(va) & ((1 << 30) - 1))
+SV39_PAGE_SIZE_4K = 1 << 12
+SV39_PAGE_SIZE_NAME_4K = "4k"
+
+
+def _normalize_sv39_page_size(page_size: str | int) -> int:
+    if isinstance(page_size, str):
+        normalized = page_size.strip().lower()
+        aliases = {
+            "4k": SV39_PAGE_SIZE_4K,
+            "4kb": SV39_PAGE_SIZE_4K,
+            "4096": SV39_PAGE_SIZE_4K,
+        }
+        if normalized not in aliases:
+            raise ValueError(f"未知 Sv39 page size: {page_size}")
+        return aliases[normalized]
+    value = int(page_size)
+    if value != SV39_PAGE_SIZE_4K:
+        raise ValueError(f"未知 Sv39 page size: {page_size}")
+    return value
+
+
+def _resolve_sv39_pa(va: int, *, pa_base: int, page_size: str | int = SV39_PAGE_SIZE_NAME_4K) -> int:
+    page_size_bytes = _normalize_sv39_page_size(page_size)
+    return int(pa_base) | (int(va) & (page_size_bytes - 1))
 
 
 SV39_PTE_V = 1 << 0
 SV39_PTE_R = 1 << 1
 SV39_PTE_W = 1 << 2
+SV39_PTE_X = 1 << 3
 SV39_PTE_A = 1 << 6
 SV39_PTE_D = 1 << 7
 
@@ -39,9 +68,11 @@ PTE_MODE_PAGE_FAULT = "page_fault"
 
 
 @dataclass(frozen=True)
-class Sv39GigapageMapping:
+class Sv39Mapping:
     va: int
     pa_base: int
+    page_size: str | int = SV39_PAGE_SIZE_NAME_4K
+    pbmt: str | int = "cacheable"
 
 
 @dataclass(frozen=True)
@@ -59,7 +90,8 @@ class TranslatedU64MemoryPreload:
 @dataclass(frozen=True)
 class MmuSv39AddressSpaceConfig:
     root_pt_addr: int
-    mappings: tuple[Sv39GigapageMapping, ...]
+    mappings: tuple[Sv39Mapping, ...]
+    page_table_page_addrs: tuple[int, ...] = ()
     translated_preloads: tuple[TranslatedU64MemoryPreload, ...] = ()
     bare_preloads: tuple[U64MemoryPreload, ...] = ()
 
@@ -67,15 +99,17 @@ class MmuSv39AddressSpaceConfig:
 @dataclass(frozen=True)
 class MmuSv39AddressSpaceInstallSequenceResult:
     root_pt_addr: int
-    mappings: tuple[Sv39GigapageMapping, ...]
+    mappings: tuple[Sv39Mapping, ...]
+    page_table_page_addrs: tuple[int, ...]
     translated_preloads: tuple[U64MemoryPreload, ...]
     bare_preloads: tuple[U64MemoryPreload, ...]
 
     def translated_pa_for(self, va: int) -> int:
         for mapping in self.mappings:
-            if (int(mapping.va) >> 30) == (int(va) >> 30):
-                return _resolve_sv39_gigapage_pa(int(va), int(mapping.pa_base))
-        raise KeyError(f"地址空间 0x{self.root_pt_addr:x} 未配置 va=0x{int(va):x} 的 1GiB gigapage mapping")
+            page_size_bytes = _normalize_sv39_page_size(mapping.page_size)
+            if (int(mapping.va) >> 12) == (int(va) >> 12):
+                return _resolve_sv39_pa(int(va), pa_base=int(mapping.pa_base), page_size=page_size_bytes)
+        raise KeyError(f"地址空间 0x{self.root_pt_addr:x} 未配置 va=0x{int(va):x} 的 Sv39 4KB mapping")
 
 
 @dataclass(frozen=True)
@@ -92,6 +126,68 @@ class MmuSv39ActivateSequenceResult:
     completed_load_count: int
     prime_loads: tuple[LoadTxn, ...]
     prime_writebacks: tuple[dict, ...]
+
+
+@dataclass(frozen=True)
+class MmuDtlbPageSpec:
+    page_va: int
+    pa_base: int
+    data: int
+    offset: int = 0x8
+    pbmt: str | int = "cacheable"
+
+    @property
+    def load_va(self) -> int:
+        return int(self.page_va) + int(self.offset)
+
+    @property
+    def expected_pa(self) -> int:
+        return int(self.pa_base) + int(self.offset)
+
+
+@dataclass(frozen=True)
+class MmuDtlbProbeEvent:
+    cycle: int
+    tlb_debug: dict[str, int | None]
+    l2_tlb_port: dict[str, int | None]
+    first_miss_events: tuple[dict[str, int], ...]
+
+
+@dataclass(frozen=True)
+class MmuDtlbAccessResult:
+    txn: LoadTxn
+    va: int
+    expected_pa: int
+    expected_data: int
+    writeback: dict
+    ptw_trace: tuple[dict, ...]
+    probe_events: tuple[MmuDtlbProbeEvent, ...]
+    ptw_a_fire_count: int
+    ptw_d_fire_count: int
+    tlb_first_miss_seen: bool
+    l2_tlb_req_seen: bool
+
+    @property
+    def miss_observed(self) -> bool:
+        return bool(
+            self.tlb_first_miss_seen
+            or self.l2_tlb_req_seen
+            or self.ptw_a_fire_count
+            or self.ptw_d_fire_count
+        )
+
+
+@dataclass(frozen=True)
+class MmuDtlbReplacementSequenceResult:
+    final_state: SequenceState
+    completed_load_count: int
+    dtlb_capacity: int
+    install_result: MmuSv39AddressSpaceInstallSequenceResult
+    prime_accesses: tuple[MmuDtlbAccessResult, ...]
+    rehit_accesses: tuple[MmuDtlbAccessResult, ...]
+    overflow_accesses: tuple[MmuDtlbAccessResult, ...]
+    reprobe_accesses: tuple[MmuDtlbAccessResult, ...]
+    reprobe_access: MmuDtlbAccessResult
 
 
 @dataclass(frozen=True)
@@ -133,12 +229,18 @@ class MmuSv39AddressSpaceInstallSequence:
 
     def run(self, env) -> MmuSv39AddressSpaceInstallSequenceResult:
         mappings = tuple(
-            Sv39GigapageMapping(va=int(mapping.va), pa_base=int(mapping.pa_base))
+            Sv39Mapping(
+                va=int(mapping.va),
+                pa_base=int(mapping.pa_base),
+                page_size=_normalize_sv39_page_size(mapping.page_size),
+                pbmt=mapping.pbmt,
+            )
             for mapping in self.config.mappings
         )
         result = MmuSv39AddressSpaceInstallSequenceResult(
             root_pt_addr=int(self.config.root_pt_addr),
             mappings=mappings,
+            page_table_page_addrs=tuple(int(addr) for addr in self.config.page_table_page_addrs),
             translated_preloads=(),
             bare_preloads=tuple(
                 U64MemoryPreload(addr=int(preload.addr), data=int(preload.data))
@@ -146,12 +248,17 @@ class MmuSv39AddressSpaceInstallSequence:
             ),
         )
 
+        next_page_table_idx = 0
         for mapping in mappings:
-            env.mmu.install_sv39_gigapage_mapping(
+            install_result = env.mmu.install_sv39_mapping(
                 root_pt_addr=result.root_pt_addr,
                 va=mapping.va,
                 pa_base=mapping.pa_base,
+                page_size=mapping.page_size,
+                pbmt=mapping.pbmt,
+                page_table_page_addrs=result.page_table_page_addrs[next_page_table_idx:],
             )
+            next_page_table_idx += len(install_result["allocated_table_addrs"])
 
         translated_preloads = []
         for preload in self.config.translated_preloads:
@@ -165,6 +272,7 @@ class MmuSv39AddressSpaceInstallSequence:
         return MmuSv39AddressSpaceInstallSequenceResult(
             root_pt_addr=result.root_pt_addr,
             mappings=result.mappings,
+            page_table_page_addrs=result.page_table_page_addrs,
             translated_preloads=tuple(translated_preloads),
             bare_preloads=result.bare_preloads,
         )
@@ -235,9 +343,260 @@ class MmuSv39ActivateSequence:
         )
 
 
+def _sample_tlb_first_miss_events(env) -> tuple[dict[str, int], ...]:
+    events = []
+    for lane in range(env.config.load_pipeline_width):
+        prefix = f"io_debug_ls_debugLsInfo_{lane}"
+        first_miss = env._read_optional_dut_signal(f"{prefix}_s1_isTlbFirstMiss", None)
+        if first_miss in (None, 0):
+            continue
+        events.append(
+            {
+                "lane": lane,
+                "s1_rob_idx": env._read_optional_dut_signal(f"{prefix}_s1_robIdx", -1),
+                "s2_rob_idx": env._read_optional_dut_signal(f"{prefix}_s2_robIdx", -1),
+                "s3_rob_idx": env._read_optional_dut_signal(f"{prefix}_s3_robIdx", -1),
+            }
+        )
+    return tuple(events)
+
+
+def _tlb_probe_has_activity(
+    tlb_debug: dict[str, int | None],
+    l2_tlb_port: dict[str, int | None],
+    first_miss_events: tuple[dict[str, int], ...],
+) -> bool:
+    if first_miss_events:
+        return True
+    if any(value not in (None, 0) for value in tlb_debug.values()):
+        return True
+    return any(
+        l2_tlb_port.get(signal_name) not in (None, 0)
+        for signal_name in ("req_valid", "resp_valid", "resp_miss")
+    )
+
+
+@contextmanager
+def _capture_tlb_probe_events(env, *, max_events: int = 64):
+    trace = deque(maxlen=max(1, int(max_events)))
+
+    def _sample() -> None:
+        tlb_debug = _sample_tlb_debug(env)
+        l2_tlb_port = _sample_l2_tlb_port(env)
+        first_miss_events = _sample_tlb_first_miss_events(env)
+        if not _tlb_probe_has_activity(tlb_debug, l2_tlb_port, first_miss_events):
+            return
+        trace.append(
+            MmuDtlbProbeEvent(
+                cycle=env._current_cycle(),
+                tlb_debug=dict(tlb_debug),
+                l2_tlb_port=dict(l2_tlb_port),
+                first_miss_events=tuple(dict(event) for event in first_miss_events),
+            )
+        )
+
+    env.add_after_step_callback(_sample)
+    try:
+        yield trace
+    finally:
+        env.remove_after_step_callback(_sample)
+
+
+class MmuDtlbReplacementSequence:
+    def __init__(
+        self,
+        *,
+        root_pt_addr: int,
+        page_table_page_addrs: tuple[int, ...],
+        page_specs: tuple[MmuDtlbPageSpec, ...],
+        initial_state: SequenceState,
+        dtlb_capacity: int = 4,
+        settle_cycles: int = 4,
+        response_delay_cycles: int = 1,
+        max_cycles: int | None = None,
+    ) -> None:
+        self.root_pt_addr = int(root_pt_addr)
+        self.page_table_page_addrs = tuple(int(addr) for addr in page_table_page_addrs)
+        self.page_specs = tuple(page_specs)
+        self.initial_state = initial_state
+        self.dtlb_capacity = int(dtlb_capacity)
+        self.settle_cycles = int(settle_cycles)
+        self.response_delay_cycles = int(response_delay_cycles)
+        self.max_cycles = max_cycles
+
+        if self.dtlb_capacity < 1:
+            raise ValueError("dtlb_capacity 必须大于 0")
+        if len(self.page_specs) < self.dtlb_capacity + 1:
+            raise ValueError("page_specs 至少需要包含 dtlb_capacity + 1 个不同页")
+
+        for spec in self.page_specs:
+            if int(spec.page_va) & (SV39_PAGE_SIZE_4K - 1):
+                raise ValueError(f"DTLB page spec 需要 4KB 对齐虚拟页基址: 0x{int(spec.page_va):x}")
+            if int(spec.pa_base) & (SV39_PAGE_SIZE_4K - 1):
+                raise ValueError(f"DTLB page spec 需要 4KB 对齐物理页基址: 0x{int(spec.pa_base):x}")
+            if not 0 <= int(spec.offset) < SV39_PAGE_SIZE_4K:
+                raise ValueError(f"DTLB page spec offset 超出 4KB 页内范围: {int(spec.offset)}")
+
+    def _run_one_access(self, env, *, ptw, spec: MmuDtlbPageSpec, lq_ptr, completed_loads: int, req_id: int):
+        load_va = int(spec.load_va)
+        expected_pa = int(spec.expected_pa)
+        expected_data = int(spec.data)
+        txn = LoadTxn(
+            req_id=int(req_id),
+            addr=load_va,
+            lq_ptr=lq_ptr,
+            sq_ptr=self.initial_state.sq_ptr,
+        )
+        max_cycles = _resolve_replay_drain_cycles(env, self.max_cycles)
+
+        env.backend.prepare(txn)
+        expected = env.expect_scalar_load(
+            rob_idx=txn.rob_idx,
+            pdest=txn.resolved_pdest,
+            addr=expected_pa,
+            size=txn.size,
+            mask=txn.mask,
+        )
+        expected.expected_data = expected_data
+
+        ptw_trace_start = len(ptw.trace)
+        with _capture_tlb_probe_events(env) as probe_trace:
+            send_load(env, txn)
+            writeback = env.wait_load_writeback_observed(
+                rob_idx=txn.rob_idx,
+                data=expected_data,
+                max_cycles=max_cycles,
+            )
+
+        completed_loads = _wait_completed_load_count(
+            env,
+            completed_loads + 1,
+            max_cycles=max_cycles,
+        )
+        ptw_trace = tuple(list(ptw.trace)[ptw_trace_start:])
+        probe_events = tuple(probe_trace)
+
+        return (
+            MmuDtlbAccessResult(
+                txn=txn,
+                va=load_va,
+                expected_pa=expected_pa,
+                expected_data=expected_data,
+                writeback=writeback,
+                ptw_trace=ptw_trace,
+                probe_events=probe_events,
+                ptw_a_fire_count=sum(1 for event in ptw_trace if event.get("event") == "a_fire"),
+                ptw_d_fire_count=sum(1 for event in ptw_trace if event.get("event") == "d_fire"),
+                tlb_first_miss_seen=any(event.first_miss_events for event in probe_events),
+                l2_tlb_req_seen=any(event.l2_tlb_port.get("req_valid") not in (None, 0) for event in probe_events),
+            ),
+            ptr_inc(lq_ptr, env.config.sequence.load_queue_size),
+            completed_loads,
+        )
+
+    def run(self, env) -> MmuDtlbReplacementSequenceResult:
+        install_sequence = MmuSv39AddressSpaceInstallSequence(
+            MmuSv39AddressSpaceConfig(
+                root_pt_addr=self.root_pt_addr,
+                mappings=tuple(
+                    Sv39Mapping(
+                        va=int(spec.page_va),
+                        pa_base=int(spec.pa_base),
+                        pbmt=spec.pbmt,
+                    )
+                    for spec in self.page_specs
+                ),
+                page_table_page_addrs=self.page_table_page_addrs,
+                translated_preloads=tuple(
+                    TranslatedU64MemoryPreload(va=int(spec.load_va), data=int(spec.data))
+                    for spec in self.page_specs
+                ),
+            )
+        )
+        install_result = install_sequence.run(env)
+        env.mmu.allow_all_smode_access()
+
+        next_lq_ptr = self.initial_state.next_lq_ptr
+        completed_loads = env.get_completed_load_count()
+        prime_accesses = []
+        rehit_accesses = []
+        overflow_accesses = []
+        prime_specs = self.page_specs[:self.dtlb_capacity]
+        overflow_specs = self.page_specs[self.dtlb_capacity:]
+
+        with env.mmu.ptw_responder(response_delay_cycles=self.response_delay_cycles) as ptw:
+            env.mmu.enable_sv39(root_pt_addr=self.root_pt_addr, settle_cycles=self.settle_cycles)
+
+            for req_id, spec in enumerate(prime_specs):
+                access_result, next_lq_ptr, completed_loads = self._run_one_access(
+                    env,
+                    ptw=ptw,
+                    spec=spec,
+                    lq_ptr=next_lq_ptr,
+                    completed_loads=completed_loads,
+                    req_id=req_id,
+                )
+                prime_accesses.append(access_result)
+
+            for req_id, spec in enumerate(prime_specs, start=len(prime_specs)):
+                access_result, next_lq_ptr, completed_loads = self._run_one_access(
+                    env,
+                    ptw=ptw,
+                    spec=spec,
+                    lq_ptr=next_lq_ptr,
+                    completed_loads=completed_loads,
+                    req_id=req_id,
+                )
+                rehit_accesses.append(access_result)
+
+            next_req_id = 2 * len(prime_specs)
+            for spec in overflow_specs:
+                access_result, next_lq_ptr, completed_loads = self._run_one_access(
+                    env,
+                    ptw=ptw,
+                    spec=spec,
+                    lq_ptr=next_lq_ptr,
+                    completed_loads=completed_loads,
+                    req_id=next_req_id,
+                )
+                overflow_accesses.append(access_result)
+                next_req_id += 1
+            reprobe_accesses = []
+            reprobe_access = None
+            for spec in prime_specs:
+                access_result, next_lq_ptr, completed_loads = self._run_one_access(
+                    env,
+                    ptw=ptw,
+                    spec=spec,
+                    lq_ptr=next_lq_ptr,
+                    completed_loads=completed_loads,
+                    req_id=next_req_id,
+                )
+                reprobe_accesses.append(access_result)
+                next_req_id += 1
+                if access_result.miss_observed:
+                    reprobe_access = access_result
+                    break
+
+        if reprobe_access is None:
+            raise AssertionError("DTLB 容量溢出后未观测到旧页重新 miss/refill，无法证明 replacement")
+
+        return MmuDtlbReplacementSequenceResult(
+            final_state=SequenceState(next_lq_ptr=next_lq_ptr, sq_ptr=self.initial_state.sq_ptr),
+            completed_load_count=completed_loads,
+            dtlb_capacity=self.dtlb_capacity,
+            install_result=install_result,
+            prime_accesses=tuple(prime_accesses),
+            rehit_accesses=tuple(rehit_accesses),
+            overflow_accesses=tuple(overflow_accesses),
+            reprobe_accesses=tuple(reprobe_accesses),
+            reprobe_access=reprobe_access,
+        )
+
+
 def _sv39_fault_leaf_pte(*, pa_base: int, pte_mode: str) -> int:
-    if int(pa_base) & ((1 << 30) - 1):
-        raise ValueError(f"SV39 1GiB leaf PTE 需要 1GiB 对齐物理地址: 0x{int(pa_base):x}")
+    if int(pa_base) & (SV39_PAGE_SIZE_4K - 1):
+        raise ValueError(f"SV39 4KB leaf PTE 需要 4KB 对齐物理地址: 0x{int(pa_base):x}")
     if pte_mode == PTE_MODE_NORMAL:
         return (
             ((int(pa_base) >> 12) << 10)
@@ -252,10 +611,23 @@ def _sv39_fault_leaf_pte(*, pa_base: int, pte_mode: str) -> int:
     raise ValueError(f"未知 PTE mode: {pte_mode}")
 
 
-def _install_sv39_fault_mapping(env, *, root_pt_addr: int, va: int, pa_base: int, pte_mode: str) -> None:
-    vpn2 = (int(va) >> 30) & 0x1FF
-    pte_addr = int(root_pt_addr) + vpn2 * 8
-    env.preload_u64(pte_addr, _sv39_fault_leaf_pte(pa_base=pa_base, pte_mode=pte_mode))
+def _write_sv39_fault_mapping(
+    env,
+    *,
+    root_pt_addr: int,
+    va: int,
+    pa_base: int,
+    pte_mode: str,
+    page_table_page_addrs: tuple[int, ...],
+) -> None:
+    install_result = env.mmu.install_sv39_mapping(
+        root_pt_addr=int(root_pt_addr),
+        va=int(va) & ~(SV39_PAGE_SIZE_4K - 1),
+        pa_base=int(pa_base),
+        page_size=SV39_PAGE_SIZE_NAME_4K,
+        page_table_page_addrs=tuple(int(addr) for addr in page_table_page_addrs),
+    )
+    env.preload_u64(int(install_result["leaf_pte_addr"]), _sv39_fault_leaf_pte(pa_base=pa_base, pte_mode=pte_mode))
 
 
 def _configure_pmp_mode(env, pmp_mode: str) -> None:
@@ -324,6 +696,7 @@ class MmuFaultingScalarLoadSequence:
         self,
         *,
         root_pt_addr: int,
+        page_table_page_addrs: tuple[int, ...],
         va: int,
         pa_base: int,
         initial_state: SequenceState,
@@ -342,6 +715,7 @@ class MmuFaultingScalarLoadSequence:
         required_main_exception_bits: tuple[int, ...] = (),
     ) -> None:
         self.root_pt_addr = int(root_pt_addr)
+        self.page_table_page_addrs = tuple(int(addr) for addr in page_table_page_addrs)
         self.va = int(va)
         self.pa_base = int(pa_base)
         self.initial_state = initial_state
@@ -370,12 +744,13 @@ class MmuFaultingScalarLoadSequence:
         expected_data: int | None,
         required_exception_bits: tuple[int, ...],
     ) -> tuple[LoadTxn, dict]:
-        _install_sv39_fault_mapping(
+        _write_sv39_fault_mapping(
             env,
             root_pt_addr=self.root_pt_addr,
             va=self.va,
             pa_base=self.pa_base,
             pte_mode=pte_mode,
+            page_table_page_addrs=self.page_table_page_addrs,
         )
         env.mmu.pulse_sfence()
         _configure_pmp_mode(env, pmp_mode)
@@ -392,7 +767,7 @@ class MmuFaultingScalarLoadSequence:
         prepared = env.backend.prepare(txn)
 
         if expected_data is not None:
-            translated_pa = _resolve_sv39_gigapage_pa(self.va, self.pa_base)
+            translated_pa = _resolve_sv39_pa(self.va, pa_base=self.pa_base)
             completed_before = env.get_completed_load_count()
             expected = env.expect_scalar_load(
                 rob_idx=txn.rob_idx,
@@ -428,7 +803,7 @@ class MmuFaultingScalarLoadSequence:
             env.memory.strict_writeback_check = previous_strict
 
     def run(self, env) -> MmuFaultingScalarLoadSequenceResult:
-        translated_pa = _resolve_sv39_gigapage_pa(self.va, self.pa_base)
+        translated_pa = _resolve_sv39_pa(self.va, pa_base=self.pa_base)
         next_lq_ptr = self.initial_state.next_lq_ptr
         prime_txn = None
         prime_writeback = None
@@ -489,9 +864,11 @@ class MmuPmpRegionLoadRecoverySequence:
         self,
         *,
         root_pt_addr: int,
+        page_table_page_addrs: tuple[int, ...],
         denied_va: int,
         allowed_va: int,
-        pa_base: int,
+        denied_pa_base: int,
+        allowed_pa_base: int,
         initial_state: SequenceState,
         prime_req_id: int,
         denied_req_id: int,
@@ -506,9 +883,11 @@ class MmuPmpRegionLoadRecoverySequence:
         denied_exception_bits: tuple[int, ...] = (LOAD_ACCESS_FAULT_BIT,),
     ) -> None:
         self.root_pt_addr = int(root_pt_addr)
+        self.page_table_page_addrs = tuple(int(addr) for addr in page_table_page_addrs)
         self.denied_va = int(denied_va)
         self.allowed_va = int(allowed_va)
-        self.pa_base = int(pa_base)
+        self.denied_pa_base = int(denied_pa_base)
+        self.allowed_pa_base = int(allowed_pa_base)
         self.initial_state = initial_state
         self.prime_req_id = int(prime_req_id)
         self.denied_req_id = int(denied_req_id)
@@ -578,8 +957,8 @@ class MmuPmpRegionLoadRecoverySequence:
             env.memory.strict_writeback_check = previous_strict
 
     def run(self, env) -> MmuPmpRegionLoadRecoverySequenceResult:
-        denied_pa = _resolve_sv39_gigapage_pa(self.denied_va, self.pa_base)
-        allowed_pa = _resolve_sv39_gigapage_pa(self.allowed_va, self.pa_base)
+        denied_pa = _resolve_sv39_pa(self.denied_va, pa_base=self.denied_pa_base)
+        allowed_pa = _resolve_sv39_pa(self.allowed_va, pa_base=self.allowed_pa_base)
         deny_region_base = denied_pa & ~(self.deny_region_size - 1)
         if allowed_pa >= deny_region_base and allowed_pa < (deny_region_base + self.deny_region_size):
             raise ValueError(
@@ -588,11 +967,21 @@ class MmuPmpRegionLoadRecoverySequence:
                 f"deny_region=[0x{deny_region_base:x},0x{deny_region_base + self.deny_region_size:x})"
             )
 
-        env.mmu.install_sv39_gigapage_mapping(
+        next_page_table_idx = 0
+        denied_install = env.mmu.install_sv39_mapping(
             root_pt_addr=self.root_pt_addr,
-            va=self.denied_va,
-            pa_base=self.pa_base,
+            va=self.denied_va & ~(SV39_PAGE_SIZE_4K - 1),
+            pa_base=self.denied_pa_base,
+            page_table_page_addrs=self.page_table_page_addrs[next_page_table_idx:],
         )
+        next_page_table_idx += len(denied_install["allocated_table_addrs"])
+        allowed_install = env.mmu.install_sv39_mapping(
+            root_pt_addr=self.root_pt_addr,
+            va=self.allowed_va & ~(SV39_PAGE_SIZE_4K - 1),
+            pa_base=self.allowed_pa_base,
+            page_table_page_addrs=self.page_table_page_addrs[next_page_table_idx:],
+        )
+        next_page_table_idx += len(allowed_install["allocated_table_addrs"])
         env.preload_u64(denied_pa, self.denied_data)
         env.preload_u64(allowed_pa, self.allowed_data)
 
@@ -612,6 +1001,15 @@ class MmuPmpRegionLoadRecoverySequence:
                 lq_ptr=next_lq_ptr,
                 expected_pa=denied_pa,
                 expected_data=self.denied_data,
+            )
+            next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
+            _, _ = self._run_translated_load(
+                env,
+                req_id=self.prime_req_id | 0x100,
+                va=self.allowed_va,
+                lq_ptr=next_lq_ptr,
+                expected_pa=allowed_pa,
+                expected_data=self.allowed_data,
             )
             prime_ptw_trace = tuple(list(ptw.trace)[prime_trace_start:])
             next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)

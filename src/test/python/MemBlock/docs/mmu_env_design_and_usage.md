@@ -10,6 +10,7 @@
 
 本文档聚焦“环境如何搭起来并稳定复用”，具体的 `matchInvalid + nuke` 场景原理见：
 
+- `src/test/python/MemBlock/docs/dtlb_fill_and_replacement_cases.md`
 - `src/test/python/MemBlock/docs/mmu_fault_directed_cases.md`
 - `src/test/python/MemBlock/docs/sq_matchinvalid_nuke_case_analysis.md`
 
@@ -62,7 +63,7 @@ flowchart LR
 - `disable_translation()`
 - `enable_svpbmt(pmm_menvcfg=..., pmm_henvcfg=...)`
 - `disable_svpbmt()`
-- `install_sv39_gigapage_mapping(root_pt_addr=..., va=..., pa_base=..., pbmt=...)`
+- `install_sv39_mapping(root_pt_addr=..., va=..., pa_base=..., page_size="4k", pbmt=..., page_table_page_addrs=(...))`
 - `pulse_sfence()`
 - `write_distributed_csr(addr=..., data=..., persistent=...)`
 - `program_pmp_entry(index=..., cfg=..., addr=..., persistent=...)`
@@ -159,10 +160,11 @@ env.mmu.allow_all_smode_access(index=1, persistent=False)
 
 ```python
 env.mmu.enable_svpbmt()
-env.mmu.install_sv39_gigapage_mapping(
+env.mmu.install_sv39_mapping(
     root_pt_addr=root_pt,
     va=uncache_va,
     pa_base=uncache_pa_base,
+    page_table_page_addrs=page_table_page_addrs,
     pbmt="ncio",
 )
 ```
@@ -173,6 +175,7 @@ env.mmu.install_sv39_gigapage_mapping(
 2. 因此当前相关 testcase 采用“helper + capability probe”双轨：
    - helper 已固定，可重复复用；
    - 若 real DUT 仍未稳定给出预期分类或提交语义，testcase 会用精确条件 `xfail` 记录 gap，而不是 silently 降级成普通 smoke。
+3. 当前 `install_sv39_mapping()` 只支持 `page_size="4k"`，并要求调用方显式提供 `page_table_page_addrs` 作为中间页表页地址池，env 不会隐式分配页表页。
 
 ## 6. 推荐使用流程
 
@@ -184,10 +187,11 @@ state = ResetEnvSequence(
     require_lq_ready=True,
 ).run(env)
 
-env.mmu.install_sv39_gigapage_mapping(
+env.mmu.install_sv39_mapping(
     root_pt_addr=root_pt,
     va=main_va,
     pa_base=pa_base,
+    page_table_page_addrs=page_table_page_addrs,
 )
 env.preload_u64(main_pa, expected_data)
 env.mmu.allow_all_smode_access()
@@ -227,7 +231,11 @@ with env.mmu.ptw_responder():
 2. `MmuSv39ActivateSequence`
    - 用于“切 root + 可选 prime loads”的通用场景。
 
-3. 专题 trigger sequence
+3. `MmuDtlbReplacementSequence`
+   - 用于“跨大范围虚拟页填满 DTLB，并通过 overflow + reprobe 证明替换发生”的定向场景。
+   - 对外直接返回每次 translated load 的 PTW trace 增量与可选 TLB 调试摘要，testcase 不必自己散落 callback。
+
+4. 专题 trigger sequence
    - 例如 `ScalarSqDataInvalidMatchInvalidTriggerSequence`。
    - 当某个 testcase 对时序顺序特别敏感时，可以把 `enable_sv39()` / `TLB prime` 放进 trigger 内部，这样可以保住“bare older store 必须发生在 activation 之前”这类真实 DUT 依赖。
 
@@ -281,11 +289,12 @@ with env.mmu.ptw_responder():
 
 截至当前版本，env.mmu 及其配套 sequence 已经被真实 DUT 验证过的能力包括：
 
-1. Sv39 gigapage 映射安装
+1. Sv39 4KB 页表映射安装
 2. PTW 多拍 D 响应
 3. PMP 放开后的 S-mode cacheable load
 4. `idle_inputs()` 与 reset 后的 MMU 状态重放
-5. 基于新 MMU 环境的 `sq dataInvalid + matchInvalid + nuke` replay 场景
+5. 基于 4KB translated load 的 DTLB fill / re-hit / replacement 定向场景
+6. 基于新 MMU 环境的 `sq dataInvalid + matchInvalid + nuke` replay 场景
 
 但仍要注意，`env.mmu` 并不意味着“所有 store translation 组合都已经稳定抽象好了”。当前 `matchInvalid_nuke` 场景之所以采用“install address spaces in test + bare older store + translated younger load”的组织方式，正是因为这个组合最符合当前 DUT 的稳定可观测行为。
 
@@ -294,5 +303,6 @@ with env.mmu.ptw_responder():
 - `src/test/python/MemBlock/MemBlock_env.py`
 - `src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py`
 - `src/test/python/MemBlock/sequences/memblock_sequences.py`
+- `src/test/python/MemBlock/docs/dtlb_fill_and_replacement_cases.md`
 - `src/test/python/MemBlock/tests/test_MemBlock_replay.py`
 - `src/test/python/MemBlock/docs/sq_matchinvalid_nuke_case_analysis.md`

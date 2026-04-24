@@ -15,6 +15,14 @@ from sequences import FlushStoreBuffersSequence, ResetEnvSequence, ScalarStoreCo
 
 
 MMU_ROOT_PT = 0x88010000
+MMU_PAGE_TABLE_PAGES = (
+    0x88011000,
+    0x88012000,
+    0x88013000,
+    0x88014000,
+    0x88015000,
+    0x88016000,
+)
 
 CACHEABLE_VA = 0x40001000
 NCIO_VA = 0x80002000
@@ -43,7 +51,8 @@ def _reset_env_state(env) -> SequenceState:
 
 
 def _translated_pa(va: int, pa_base: int) -> int:
-    return int(pa_base) | (int(va) & ((1 << 30) - 1))
+    page_offset = (int(va) & ((1 << 30) - 1)) & ~0xFFF
+    return int(pa_base) | page_offset
 
 
 CACHEABLE_PA = _translated_pa(CACHEABLE_VA, CACHEABLE_PA_BASE)
@@ -53,23 +62,26 @@ MMIO_PA = _translated_pa(MMIO_VA, MMIO_PA_BASE)
 
 def _install_svpbmt_address_space(env) -> None:
     env.mmu.enable_svpbmt()
-    env.mmu.install_sv39_gigapage_mapping(
+    env.mmu.install_sv39_mapping(
         root_pt_addr=MMU_ROOT_PT,
         va=CACHEABLE_VA,
         pa_base=CACHEABLE_PA_BASE,
         pbmt="cacheable",
+        page_table_page_addrs=MMU_PAGE_TABLE_PAGES[0:2],
     )
-    env.mmu.install_sv39_gigapage_mapping(
+    env.mmu.install_sv39_mapping(
         root_pt_addr=MMU_ROOT_PT,
         va=NCIO_VA,
         pa_base=NCIO_PA_BASE,
         pbmt="ncio",
+        page_table_page_addrs=MMU_PAGE_TABLE_PAGES[2:4],
     )
-    env.mmu.install_sv39_gigapage_mapping(
+    env.mmu.install_sv39_mapping(
         root_pt_addr=MMU_ROOT_PT,
         va=MMIO_VA,
         pa_base=MMIO_PA_BASE,
         pbmt="mmio",
+        page_table_page_addrs=MMU_PAGE_TABLE_PAGES[4:6],
     )
     env.preload_u64(CACHEABLE_PA, CACHEABLE_DATA)
     env.preload_u64(NCIO_PA, NCIO_DATA)

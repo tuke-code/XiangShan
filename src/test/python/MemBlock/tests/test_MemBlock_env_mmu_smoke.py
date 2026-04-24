@@ -3,15 +3,33 @@
 MemBlockEnv MMU/PTW/DTLB smoke。
 """
 
+import pytest
+
 from transactions import LoadTxn
 from request_apis import send_load
-from sequences import ResetEnvSequence
+from sequences import (
+    MmuDtlbPageSpec,
+    MmuDtlbReplacementSequence,
+    MmuSv39AddressSpaceConfig,
+    MmuSv39AddressSpaceInstallSequence,
+    ResetEnvSequence,
+    Sv39Mapping,
+    TranslatedU64MemoryPreload,
+)
 
 
 MMU_ROOT_PT = 0x88000000
 MMU_VA = 0x40001000
+MMU_SECOND_VA = 0x40201000
 MMU_PA_BASE = 0x80000000
 MMU_DATA = 0x13579BDF2468ACE0
+MMU_SECOND_DATA = 0x02468ACE13579BDF
+MMU_PAGE_TABLE_PAGES = (
+    0x88001000,
+    0x88002000,
+    0x88003000,
+    0x88004000,
+)
 PMP_CFG_CSR_BASE = 0x3A0
 PMP_ADDR_CSR_BASE = 0x3B0
 PMP_DENY_NAPOT_CFG = 0x18
@@ -19,6 +37,20 @@ PMP_ALLOW_RWX_NAPOT_CFG = 0x1F
 PMP_REGION_BASE = 0x80004000
 PMP_REGION_SIZE = 0x1000
 MEMBLOCK_PADDR_BITS = 48
+MMU_DTLB_REPLACEMENT_ROOT_PT = 0x88100000
+MMU_DTLB_CAPACITY = 4
+MMU_DTLB_REPLACEMENT_SWEEP_PAGE_COUNT = 64
+MMU_DTLB_REPLACEMENT_PAGE_TABLE_PAGES = tuple(
+    0x88101000 + index * 0x1000 for index in range(MMU_DTLB_REPLACEMENT_SWEEP_PAGE_COUNT * 2)
+)
+MMU_DTLB_REPLACEMENT_PAGE_SPECS = tuple(
+    MmuDtlbPageSpec(
+        page_va=0x0040001000 + (index << 30),
+        pa_base=0x81001000 + (index << 12),
+        data=0x1111222233334444 + index,
+    )
+    for index in range(MMU_DTLB_REPLACEMENT_SWEEP_PAGE_COUNT)
+)
 
 
 def _reset_env_state(env):
@@ -54,6 +86,11 @@ def _encode_pmp_napot_addr(base_addr: int, size: int) -> int:
     return (int(base_addr) + (int(size) // 2 - 1)) >> 2
 
 
+def _sv39_4k_mapping_pa_base(space_pa_base: int, va: int) -> int:
+    page_offset = (int(va) & ((1 << 30) - 1)) & ~0xFFF
+    return int(space_pa_base) | int(page_offset)
+
+
 def test_api_MemBlock_env_mmu_idle_inputs_preserve_sv39_state(env):
     """激活的 MMU facade 需要在 idle_inputs 后稳定重放 satp/S-mode 状态。"""
 
@@ -78,11 +115,12 @@ def test_api_MemBlock_env_mmu_sv39_ptw_smoke(env):
     """真实 DUT 下跑通一条 Sv39 + PTW + DTLB + cacheable load 的基础闭环。"""
 
     state = _reset_env_state(env)
-    translated_pa = MMU_PA_BASE | (MMU_VA & ((1 << 30) - 1))
-    env.mmu.install_sv39_gigapage_mapping(
+    translated_pa = _sv39_4k_mapping_pa_base(MMU_PA_BASE, MMU_VA)
+    env.mmu.install_sv39_mapping(
         root_pt_addr=MMU_ROOT_PT,
         va=MMU_VA,
-        pa_base=MMU_PA_BASE,
+        pa_base=translated_pa,
+        page_table_page_addrs=MMU_PAGE_TABLE_PAGES,
     )
     env.preload_u64(translated_pa, MMU_DATA)
     env.mmu.allow_all_smode_access()
@@ -116,12 +154,130 @@ def test_api_MemBlock_env_mmu_sv39_ptw_smoke(env):
 
     assert writeback["data"] == MMU_DATA
     assert env.get_completed_load_count() == 1
-    assert any(event["event"] == "a_fire" for event in ptw_events)
-    assert sum(1 for event in ptw_events if event["event"] == "d_fire") == 2
+    assert sum(1 for event in ptw_events if event["event"] == "a_fire") >= 2
+    assert sum(1 for event in ptw_events if event["event"] == "d_fire") >= 4
     assert stats["dcache_a_request_count"] > 0
     assert stats["dcache_d_response_count"] > 0
     assert stats["outer_request_count"] == 0
     assert env._read_optional_dut_signal("io_dcacheError_ecc_error_valid") == 0
+
+
+def test_api_MemBlock_env_mmu_sv39_dtlb_fill_and_replacement(env):
+    """跨大范围 Sv39 4KB 地址空间填满 DTLB，并证明容量溢出后旧项重新 miss/refill。"""
+
+    state = _reset_env_state(env)
+    result = MmuDtlbReplacementSequence(
+        root_pt_addr=MMU_DTLB_REPLACEMENT_ROOT_PT,
+        page_table_page_addrs=MMU_DTLB_REPLACEMENT_PAGE_TABLE_PAGES,
+        page_specs=MMU_DTLB_REPLACEMENT_PAGE_SPECS,
+        initial_state=state,
+        dtlb_capacity=MMU_DTLB_CAPACITY,
+    ).run(env)
+
+    assert result.dtlb_capacity == MMU_DTLB_CAPACITY
+    assert len(result.overflow_accesses) == MMU_DTLB_REPLACEMENT_SWEEP_PAGE_COUNT - MMU_DTLB_CAPACITY
+    assert result.completed_load_count == (
+        2 * MMU_DTLB_CAPACITY + len(result.overflow_accesses) + len(result.reprobe_accesses)
+    )
+
+    for access, spec in zip(result.prime_accesses, MMU_DTLB_REPLACEMENT_PAGE_SPECS[:MMU_DTLB_CAPACITY]):
+        assert access.va == spec.load_va
+        assert access.expected_pa == spec.expected_pa
+        assert access.writeback["data"] == spec.data
+        assert access.miss_observed
+
+    for access, spec in zip(result.rehit_accesses, MMU_DTLB_REPLACEMENT_PAGE_SPECS[:MMU_DTLB_CAPACITY]):
+        assert access.va == spec.load_va
+        assert access.writeback["data"] == spec.data
+        assert not access.miss_observed
+
+    overflow_specs_by_va = {
+        spec.load_va: spec for spec in MMU_DTLB_REPLACEMENT_PAGE_SPECS[MMU_DTLB_CAPACITY:]
+    }
+    assert all(access.va in overflow_specs_by_va for access in result.overflow_accesses)
+    assert all(access.writeback["data"] == overflow_specs_by_va[access.va].data for access in result.overflow_accesses)
+    assert all(
+        access.expected_pa == overflow_specs_by_va[access.va].expected_pa
+        for access in result.overflow_accesses
+    )
+    assert all(access.miss_observed for access in result.overflow_accesses)
+
+    reprobe_specs_by_va = {
+        spec.load_va: spec for spec in MMU_DTLB_REPLACEMENT_PAGE_SPECS[:MMU_DTLB_CAPACITY]
+    }
+    assert 1 <= len(result.reprobe_accesses) <= MMU_DTLB_CAPACITY
+    assert all(access.va in reprobe_specs_by_va for access in result.reprobe_accesses)
+    assert all(access.writeback["data"] == reprobe_specs_by_va[access.va].data for access in result.reprobe_accesses)
+    assert all(
+        access.expected_pa == reprobe_specs_by_va[access.va].expected_pa
+        for access in result.reprobe_accesses
+    )
+    assert all(not access.miss_observed for access in result.reprobe_accesses[:-1])
+    assert result.reprobe_access == result.reprobe_accesses[-1]
+    assert result.reprobe_access.miss_observed
+
+
+def test_api_MemBlock_env_mmu_install_sv39_mapping_writes_expected_4k_tables(env):
+    """4KB mapping helper 需要按需创建 non-leaf，并在共享上层页表时复用已有页表页。"""
+
+    first_pa_base = _sv39_4k_mapping_pa_base(MMU_PA_BASE, MMU_VA)
+    second_pa_base = _sv39_4k_mapping_pa_base(MMU_PA_BASE, MMU_SECOND_VA)
+
+    first = env.mmu.install_sv39_mapping(
+        root_pt_addr=MMU_ROOT_PT,
+        va=MMU_VA,
+        pa_base=first_pa_base,
+        page_table_page_addrs=MMU_PAGE_TABLE_PAGES,
+    )
+    second = env.mmu.install_sv39_mapping(
+        root_pt_addr=MMU_ROOT_PT,
+        va=MMU_SECOND_VA,
+        pa_base=second_pa_base,
+        page_table_page_addrs=MMU_PAGE_TABLE_PAGES[2:],
+    )
+
+    assert first["allocated_table_addrs"] == MMU_PAGE_TABLE_PAGES[:2]
+    assert second["allocated_table_addrs"] == (MMU_PAGE_TABLE_PAGES[2],)
+    assert env.memory.read(first["root_pte_addr"], 8) == env.mmu.sv39_nonleaf_pte(MMU_PAGE_TABLE_PAGES[0])
+    assert env.memory.read(first["l1_pte_addr"], 8) == env.mmu.sv39_nonleaf_pte(MMU_PAGE_TABLE_PAGES[1])
+    assert env.memory.read(first["leaf_pte_addr"], 8) == env.mmu.sv39_leaf_pte(first_pa_base)
+    assert env.memory.read(second["root_pte_addr"], 8) == env.mmu.sv39_nonleaf_pte(MMU_PAGE_TABLE_PAGES[0])
+    assert env.memory.read(second["l1_pte_addr"], 8) == env.mmu.sv39_nonleaf_pte(MMU_PAGE_TABLE_PAGES[2])
+    assert env.memory.read(second["leaf_pte_addr"], 8) == env.mmu.sv39_leaf_pte(second_pa_base)
+
+
+def test_api_MemBlock_env_mmu_install_sv39_mapping_requires_page_table_pool(env):
+    """4KB helper 需要显式页表页地址池，不能在 env 内隐式分配中间页表页。"""
+
+    with pytest.raises(ValueError, match="缺少页表页地址池"):
+        env.mmu.install_sv39_mapping(
+            root_pt_addr=MMU_ROOT_PT,
+            va=MMU_VA,
+            pa_base=_sv39_4k_mapping_pa_base(MMU_PA_BASE, MMU_VA),
+        )
+
+
+def test_api_MemBlock_env_mmu_address_space_sequence_applies_4k_translated_preloads(env):
+    """地址空间 sequence 应按 4KB mapping 解析 translated preload。"""
+
+    first_pa_base = _sv39_4k_mapping_pa_base(MMU_PA_BASE, MMU_VA)
+    second_pa_base = _sv39_4k_mapping_pa_base(MMU_PA_BASE, MMU_SECOND_VA)
+    preload_va = MMU_VA + 0x8
+
+    result = MmuSv39AddressSpaceInstallSequence(
+        MmuSv39AddressSpaceConfig(
+            root_pt_addr=MMU_ROOT_PT,
+            mappings=(
+                Sv39Mapping(va=MMU_VA, pa_base=first_pa_base),
+                Sv39Mapping(va=MMU_SECOND_VA, pa_base=second_pa_base),
+            ),
+            page_table_page_addrs=MMU_PAGE_TABLE_PAGES,
+            translated_preloads=(TranslatedU64MemoryPreload(va=preload_va, data=MMU_SECOND_DATA),),
+        )
+    ).run(env)
+
+    assert result.translated_pa_for(preload_va) == first_pa_base + 0x8
+    assert env.memory.read(first_pa_base + 0x8, 8) == MMU_SECOND_DATA
 
 
 def test_api_MemBlock_env_mmu_program_pmp_deny_region_smoke(env):

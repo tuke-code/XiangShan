@@ -96,9 +96,12 @@ TL_A_GET = 4
 TL_D_ACCESS_ACK_DATA = 1
 SV39_MODE = 8
 PRIV_MODE_S = 1
+SV39_PAGE_SHIFT = 12
+SV39_PAGE_SIZE_4K = 1 << SV39_PAGE_SHIFT
 SV39_PTE_V = 1 << 0
 SV39_PTE_R = 1 << 1
 SV39_PTE_W = 1 << 2
+SV39_PTE_X = 1 << 3
 SV39_PTE_A = 1 << 6
 SV39_PTE_D = 1 << 7
 SV39_PTE_PBMT_SHIFT = 61
@@ -1165,12 +1168,62 @@ class MmuFacade:
             raise ValueError(f"unsupported Svpbmt value: {pbmt}")
         return value
 
-    def sv39_gigapage_leaf_pte(self, pa_base: int, *, pbmt: str | int = "cacheable") -> int:
-        if int(pa_base) & ((1 << 30) - 1):
-            raise ValueError(f"SV39 1GiB leaf PTE 需要 1GiB 对齐物理地址: 0x{int(pa_base):x}")
+    @staticmethod
+    def _normalize_sv39_page_size(page_size: str | int) -> int:
+        if isinstance(page_size, str):
+            normalized = page_size.strip().lower()
+            aliases = {
+                "4k": SV39_PAGE_SIZE_4K,
+                "4kb": SV39_PAGE_SIZE_4K,
+                "4096": SV39_PAGE_SIZE_4K,
+            }
+            if normalized not in aliases:
+                raise ValueError(f"unsupported Sv39 page size: {page_size}")
+            return aliases[normalized]
+        value = int(page_size)
+        if value != SV39_PAGE_SIZE_4K:
+            raise ValueError(f"unsupported Sv39 page size: {page_size}")
+        return value
+
+    @staticmethod
+    def _require_aligned(value: int, alignment: int, label: str) -> None:
+        if int(value) & (int(alignment) - 1):
+            raise ValueError(f"{label} 需要按 0x{int(alignment):x} 对齐: 0x{int(value):x}")
+
+    @staticmethod
+    def _sv39_vpn_indices(va: int) -> tuple[int, int, int]:
+        value = int(va)
+        return (
+            (value >> 30) & 0x1FF,
+            (value >> 21) & 0x1FF,
+            (value >> 12) & 0x1FF,
+        )
+
+    @staticmethod
+    def _sv39_pte_ppn(pte_value: int) -> int:
+        return (int(pte_value) >> 10) & ((1 << 44) - 1)
+
+    def _read_sv39_pte(self, pte_addr: int) -> int:
+        return int(self.env.memory.read(int(pte_addr), 8))
+
+    def sv39_nonleaf_pte(self, next_table_addr: int) -> int:
+        self._require_aligned(next_table_addr, SV39_PAGE_SIZE_4K, "next_table_addr")
+        return ((int(next_table_addr) >> SV39_PAGE_SHIFT) << 10) | SV39_PTE_V
+
+    def sv39_leaf_pte(
+        self,
+        pa_base: int,
+        *,
+        page_size: str | int = "4k",
+        pbmt: str | int = "cacheable",
+    ) -> int:
+        page_size_bytes = self._normalize_sv39_page_size(page_size)
+        if page_size_bytes != SV39_PAGE_SIZE_4K:
+            raise ValueError(f"当前 env 仅支持 Sv39 4KB leaf，收到 page_size={page_size}")
+        self._require_aligned(pa_base, page_size_bytes, "pa_base")
         pbmt_bits = self._sv39_pbmt_bits(pbmt)
         return (
-            ((int(pa_base) >> 12) << 10)
+            ((int(pa_base) >> SV39_PAGE_SHIFT) << 10)
             | (pbmt_bits << SV39_PTE_PBMT_SHIFT)
             | SV39_PTE_V
             | SV39_PTE_R
@@ -1179,18 +1232,90 @@ class MmuFacade:
             | SV39_PTE_D
         )
 
-    def install_sv39_gigapage_mapping(
+    def resolve_sv39_pa(
+        self,
+        va: int,
+        *,
+        pa_base: int,
+        page_size: str | int = "4k",
+    ) -> int:
+        page_size_bytes = self._normalize_sv39_page_size(page_size)
+        return int(pa_base) | (int(va) & (page_size_bytes - 1))
+
+    def _ensure_sv39_nonleaf(
+        self,
+        *,
+        pte_addr: int,
+        page_table_page_addrs: tuple[int, ...],
+        allocated_table_addrs: list[int],
+        level_name: str,
+    ) -> int:
+        pte_value = self._read_sv39_pte(pte_addr)
+        if pte_value & SV39_PTE_V:
+            if pte_value & (SV39_PTE_R | SV39_PTE_W | SV39_PTE_X):
+                raise ValueError(
+                    f"{level_name} 期望 non-leaf PTE，但现有 leaf PTE 位于 0x{int(pte_addr):x}: 0x{pte_value:x}"
+                )
+            return self._sv39_pte_ppn(pte_value) << SV39_PAGE_SHIFT
+
+        if len(allocated_table_addrs) >= len(page_table_page_addrs):
+            raise ValueError(
+                f"{level_name} 缺少页表页地址池，无法为 pte_addr=0x{int(pte_addr):x} 创建下一层页表"
+            )
+        next_table_addr = int(page_table_page_addrs[len(allocated_table_addrs)])
+        self._require_aligned(next_table_addr, SV39_PAGE_SIZE_4K, f"{level_name}.next_table_addr")
+        self.env.preload_u64(int(pte_addr), self.sv39_nonleaf_pte(next_table_addr))
+        allocated_table_addrs.append(next_table_addr)
+        return next_table_addr
+
+    def install_sv39_mapping(
         self,
         *,
         root_pt_addr: int,
         va: int,
         pa_base: int,
+        page_size: str | int = "4k",
         pbmt: str | int = "cacheable",
-    ) -> int:
-        vpn2 = (int(va) >> 30) & 0x1FF
-        pte_addr = int(root_pt_addr) + vpn2 * 8
-        self.env.preload_u64(pte_addr, self.sv39_gigapage_leaf_pte(pa_base, pbmt=pbmt))
-        return pte_addr
+        page_table_page_addrs: tuple[int, ...] = (),
+    ) -> dict[str, int | tuple[int, ...]]:
+        page_size_bytes = self._normalize_sv39_page_size(page_size)
+        if page_size_bytes != SV39_PAGE_SIZE_4K:
+            raise ValueError(f"当前 env 仅支持 Sv39 4KB 映射安装，收到 page_size={page_size}")
+
+        self._require_aligned(root_pt_addr, SV39_PAGE_SIZE_4K, "root_pt_addr")
+        self._require_aligned(va, page_size_bytes, "va")
+        self._require_aligned(pa_base, page_size_bytes, "pa_base")
+        page_table_page_addrs = tuple(int(addr) for addr in page_table_page_addrs)
+
+        vpn2, vpn1, vpn0 = self._sv39_vpn_indices(va)
+        allocated_table_addrs: list[int] = []
+        root_pte_addr = int(root_pt_addr) + vpn2 * 8
+        l1_table_addr = self._ensure_sv39_nonleaf(
+            pte_addr=root_pte_addr,
+            page_table_page_addrs=page_table_page_addrs,
+            allocated_table_addrs=allocated_table_addrs,
+            level_name="Sv39 root/VPN2",
+        )
+        l1_pte_addr = int(l1_table_addr) + vpn1 * 8
+        l0_table_addr = self._ensure_sv39_nonleaf(
+            pte_addr=l1_pte_addr,
+            page_table_page_addrs=page_table_page_addrs,
+            allocated_table_addrs=allocated_table_addrs,
+            level_name="Sv39 level-1/VPN1",
+        )
+        leaf_pte_addr = int(l0_table_addr) + vpn0 * 8
+        self.env.preload_u64(
+            leaf_pte_addr,
+            self.sv39_leaf_pte(pa_base, page_size=page_size_bytes, pbmt=pbmt),
+        )
+        return {
+            "root_pte_addr": root_pte_addr,
+            "l1_table_addr": int(l1_table_addr),
+            "l1_pte_addr": l1_pte_addr,
+            "l0_table_addr": int(l0_table_addr),
+            "leaf_pte_addr": leaf_pte_addr,
+            "allocated_table_addrs": tuple(allocated_table_addrs),
+        }
 
     def program_pmp_entry(self, *, index: int, cfg: int, addr: int, persistent: bool = True) -> None:
         if int(index) < 0:
