@@ -42,6 +42,16 @@ object PhrPtr {
     apply(!ptr.flag, ptr.value)
 }
 
+class S1Train(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
+  val valid:              Bool                   = Bool()
+  val taken:              Bool                   = Bool()
+  val startPc:            PrunedAddr             = PrunedAddr(VAddrBits)
+  val abtbValid:          Bool                   = Bool()
+  val abtbFirstTakenBrOH: Vec[Bool]              = Vec(NumAheadBtbPredictionEntries, Bool())
+  val ubtbPrediction:     Valid[Prediction]      = Valid(new Prediction)
+  val abtbPrediction:     Vec[Valid[Prediction]] = Vec(NumAheadBtbPredictionEntries, Valid(new Prediction))
+}
+
 class PhrUpdateData(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
   val valid:     Bool                  = Bool()
   val taken:     Bool                  = Bool()
@@ -51,6 +61,12 @@ class PhrUpdateData(implicit p: Parameters) extends PhrBundle with HasPhrParamet
   val foldedPhr: PhrAllFoldedHistories = new PhrAllFoldedHistories(AllFoldedHistoryInfo)
 }
 
+class PhrUpdateResult(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
+  val phrPtr:     PhrPtr = new PhrPtr
+  val s0PhrPtr:   PhrPtr = new PhrPtr
+  val phrLowBits: UInt   = UInt(PathHashHighWidth.W)
+}
+
 class PhrUpdate(implicit p: Parameters) extends PhrBundle {
   // NOTE: if the StageCtrl structure changes, it may require refactoring
   val s0_stall:  Bool      = Bool()
@@ -58,9 +74,9 @@ class PhrUpdate(implicit p: Parameters) extends PhrBundle {
 
   val redirect: Valid[BpuRedirect] = Valid(new BpuRedirect)
 
-  val s1_valid:      Bool       = Bool()
-  val s1_prediction: Prediction = new Prediction()
-  val s1_startPc:    PrunedAddr = PrunedAddr(VAddrBits)
+  // val s1_valid:      Bool       = Bool()
+  // val s1_prediction: Prediction = new Prediction()
+  // val s1_startPc:    PrunedAddr = PrunedAddr(VAddrBits)
 
   val s3_override:   Bool       = Bool()
   val s3_phrMeta:    PhrMeta    = new PhrMeta()
