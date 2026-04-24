@@ -27,6 +27,11 @@
 4. Svpbmt/PBMT 控制面已具备最小可复用接口。
 5. `MmuSv39AddressSpaceInstallSequence` / `MmuSv39ActivateSequence` 已可复用。
 6. 真实 DUT 下已经有基础 smoke 与部分 replay/uncache 相关 MMU 场景。
+7. H extension 控制面已具备最小公开契约：
+   - `enable_vs_sv39()` / `enable_two_stage_sv39()`
+   - `pulse_hfence_vvma()` / `pulse_hfence_gvma()`
+   - `install_g_sv39_mapping()`
+   - `wait_load_fault_observed()` / `sample_mmu_fault_state()`
 
 这说明当前问题已不是“MMU 环境搭不起来”，而是“专题化验证矩阵还没有铺开”。
 
@@ -81,15 +86,30 @@
 - 但 DUT 的 debug 分类、store shadow、drain 闭环还没有全部稳定；
 - 因而还不能把所有 PBMT 场景都当成“已完全收口”。
 
+### 3.5 H extension 已打通 fault/control，但 success path 仍有 DUT gap
+
+本轮已落地并验证：
+
+- VS-only state 保活
+- two-stage guest page fault
+- two-stage PMP access fault
+- H fence helper 驱动位
+
+但当前 real DUT 仍保留两条已确认限制：
+
+1. two-stage success path 尚未稳定产生正常 writeback，因此 `basic/rehit/hfence` 组暂以精确 `xfail` 记录。
+2. G-stage guest page fault 下的 `gpaddr` 导出值与 stage-1 GPA 还未稳定对齐。
+
 ## 4. TODO 优先级总览
 
+- `P0`：two-stage success path 转正
 - `P0`：MMU 异常专题回归
 - `P1`：TLB miss/refill/hit 专题回归
 - `P1`：PBMT translated NCIO/MMIO semantic regression
 - `P2`：MMU 与 replay/nuke/fault 交叉场景补强
 - `P2`：覆盖率与状态文档同步更新
 
-建议顺序：先补“分类和正确性”，再补“覆盖率和复杂交互”。
+建议顺序：先把 H extension success path 转正，再补“分类和正确性”，最后补“覆盖率和复杂交互”。
 
 ## 5. P0：MMU 异常专题回归
 

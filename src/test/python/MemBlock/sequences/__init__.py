@@ -34,6 +34,8 @@ from .memblock_sequences import (
     wait_sq_forward_event,
 )
 from .mmu_sequences import (
+    GStageSv39Mapping,
+    InstallSequenceResult,
     LOAD_ACCESS_FAULT_BIT,
     LOAD_GUEST_PAGE_FAULT_BIT,
     LOAD_PAGE_FAULT_BIT,
@@ -47,6 +49,13 @@ from .mmu_sequences import (
     MmuPmpRegionLoadRecoverySequence,
     MmuPmpRegionLoadRecoverySequenceResult,
     MmuPrimeLoadSpec,
+    MmuTwoStageFaultSequence,
+    MmuTwoStageFaultSequenceResult,
+    MmuTwoStageFenceSequence,
+    MmuTwoStageFenceSequenceResult,
+    MmuTwoStageLoadSequence,
+    MmuTwoStageLoadSequenceResult,
+    MmuVsStageLoadSequence,
     MmuSv39ActivateSequence,
     MmuSv39ActivateSequenceResult,
     MmuSv39AddressSpaceConfig,
@@ -57,6 +66,9 @@ from .mmu_sequences import (
     PTE_MODE_NORMAL,
     PTE_MODE_PAGE_FAULT,
     Sv39Mapping,
+    TwoStageLoadAccessResult,
+    TwoStageSv39AddressSpaceConfig,
+    TwoStageSv39AddressSpaceInstallSequence,
     TranslatedU64MemoryPreload,
     U64MemoryPreload,
 )

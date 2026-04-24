@@ -11,6 +11,7 @@
 本文档聚焦“环境如何搭起来并稳定复用”，具体的 `matchInvalid + nuke` 场景原理见：
 
 - `src/test/python/MemBlock/docs/dtlb_fill_and_replacement_cases.md`
+- `src/test/python/MemBlock/docs/mmu_h_extension_cases.md`
 - `src/test/python/MemBlock/docs/mmu_fault_directed_cases.md`
 - `src/test/python/MemBlock/docs/sq_matchinvalid_nuke_case_analysis.md`
 
@@ -60,11 +61,17 @@ flowchart LR
 当前 `env.mmu` 主要提供以下 public helper：
 
 - `enable_sv39(root_pt_addr=..., asid=..., settle_cycles=...)`
+- `enable_vs_sv39(root_pt_addr=..., asid=..., settle_cycles=...)`
+- `enable_two_stage_sv39(vs_root_pt_addr=..., g_root_pt_addr=..., vs_asid=..., vmid=..., settle_cycles=...)`
 - `disable_translation()`
 - `enable_svpbmt(pmm_menvcfg=..., pmm_henvcfg=...)`
 - `disable_svpbmt()`
 - `install_sv39_mapping(root_pt_addr=..., va=..., pa_base=..., page_size="4k", pbmt=..., page_table_page_addrs=(...))`
-- `pulse_sfence()`
+- `install_vs_sv39_mapping(...)`
+- `install_g_sv39_mapping(...)`
+- `pulse_sfence(...)`
+- `pulse_hfence_vvma(...)`
+- `pulse_hfence_gvma(...)`
 - `write_distributed_csr(addr=..., data=..., persistent=...)`
 - `program_pmp_entry(index=..., cfg=..., addr=..., persistent=...)`
 - `program_pmp_deny_region(base_addr=..., size=..., index=..., persistent=...)`
@@ -81,6 +88,7 @@ flowchart LR
 4. 为 PTW TileLink A 请求返回完整的多拍 D 响应。
 5. 提供 testcase 可直接复用的 page-table helper。
 6. 为 Svpbmt/uncache testcase 提供稳定的 PBMT 控制面。
+7. 为 VS-only / two-stage translation 提供统一 active-mode、H fence 与 fault 观测契约。
 
 ### 4.2 不由 `env.mmu` 负责的事情
 
@@ -177,6 +185,79 @@ env.mmu.install_sv39_mapping(
    - 若 real DUT 仍未稳定给出预期分类或提交语义，testcase 会用精确条件 `xfail` 记录 gap，而不是 silently 降级成普通 smoke。
 3. 当前 `install_sv39_mapping()` 只支持 `page_size="4k"`，并要求调用方显式提供 `page_table_page_addrs` 作为中间页表页地址池，env 不会隐式分配页表页。
 
+### 5.5 H extension / two-stage 控制面
+
+当前 env 已把 H 扩展最小控制面收口为公开契约：
+
+1. `enable_vs_sv39()`
+   - 驱动 `vsatp_*`
+   - 驱动 `priv_virt=1`
+   - 在 `idle_inputs()` / `reset()` 后继续重放 VS-only 背景
+2. `enable_two_stage_sv39()`
+   - 同时驱动 `vsatp_*`、`hgatp_*`、`priv_virt`
+   - 当前 `hgatp.mode` 固定为 `Sv39x4`
+   - `g_root_pt_addr` 需要按 16KB 对齐
+3. `disable_translation()`
+   - 会同时清空 `satp` / `vsatp` / `hgatp` / `priv_virt`
+
+### 5.5.1 两阶段页表安装口径
+
+当前两阶段 helper 保持 `Sv39 + 4KB-only`：
+
+- VS-stage：`install_vs_sv39_mapping()`
+- G-stage：`install_g_sv39_mapping()`
+- sequence：`TwoStageSv39AddressSpaceInstallSequence`
+
+使用时要注意：
+
+1. `vs_root_pt_addr` 与 VS-stage 中间页表页在 two-stage 背景下按 guest-physical 语义理解。
+2. 如果 VS 页表实际驻留在 host memory，testcase 需要通过 G-stage mapping 把这些 guest-physical 页表页映射到可访问的 HPA。
+3. `translated_preloads` 默认预置到最终 HPA，不要求 testcase 手算两阶段合成地址。
+
+### 5.5.2 H fence 与 fault 观测
+
+当前 env 已提供：
+
+- `pulse_hfence_vvma(rs1=..., rs2=..., addr=..., asid=...)`
+- `pulse_hfence_gvma(rs1=..., rs2=..., addr=..., vmid=...)`
+- `env.wait_load_fault_observed(...)`
+- `env.sample_mmu_fault_state()`
+
+这里的 helper 参数按“是否做筛选”表达，而不是直接透传 DUT bundle：
+
+1. `rs1=False`
+   - 语义是 `all addr`
+   - env 会把 DUT bundle 的 `bits_rs1` 编成 `1`
+2. `rs1=True`
+   - 语义是 `specific addr`
+   - env 会把 DUT bundle 的 `bits_rs1` 编成 `0`
+3. `rs2=False`
+   - 语义是 `all asid/vmid`
+   - env 会把 DUT bundle 的 `bits_rs2` 编成 `1`
+4. `rs2=True`
+   - 语义是 `specific asid/vmid`
+   - env 会把 DUT bundle 的 `bits_rs2` 编成 `0`
+
+另外 `hfence.gvma` 只驱动 `hg=1`，不会把 `hv` 误置高。
+
+首批稳定口径：
+
+1. `hfence.vvma`
+   - `all addr / all asid`
+   - `all addr / specific asid`
+2. `hfence.gvma`
+   - `all addr / all vmid`
+   - `all addr / specific vmid`
+3. load fault 摘要返回：
+   - `exception_bits`
+   - `vaddr`
+   - `gpaddr`
+   - `is_guest_page_fault`
+   - `is_page_fault`
+   - `is_access_fault`
+
+当前不把 `hfence.vvma` 的按地址精确 flush 作为 must-pass 主线；已知 DUT 限制与当前 xfail 口径见 `mmu_h_extension_cases.md`。
+
 ## 6. 推荐使用流程
 
 对于一个最小 Sv39 cacheable load smoke，推荐流程是：
@@ -235,7 +316,14 @@ with env.mmu.ptw_responder():
    - 用于“跨大范围虚拟页填满 DTLB，并通过 overflow + reprobe 证明替换发生”的定向场景。
    - 对外直接返回每次 translated load 的 PTW trace 增量与可选 TLB 调试摘要，testcase 不必自己散落 callback。
 
-4. 专题 trigger sequence
+4. H extension reusable sequence
+   - `MmuVsStageLoadSequence`
+   - `MmuTwoStageLoadSequence`
+   - `MmuTwoStageFenceSequence`
+   - `MmuTwoStageFaultSequence`
+   - 统一返回两阶段地址解析、PTW trace 与 fault 摘要
+
+5. 专题 trigger sequence
    - 例如 `ScalarSqDataInvalidMatchInvalidTriggerSequence`。
    - 当某个 testcase 对时序顺序特别敏感时，可以把 `enable_sv39()` / `TLB prime` 放进 trigger 内部，这样可以保住“bare older store 必须发生在 activation 之前”这类真实 DUT 依赖。
 
@@ -295,6 +383,12 @@ with env.mmu.ptw_responder():
 4. `idle_inputs()` 与 reset 后的 MMU 状态重放
 5. 基于 4KB translated load 的 DTLB fill / re-hit / replacement 定向场景
 6. 基于新 MMU 环境的 `sq dataInvalid + matchInvalid + nuke` replay 场景
+7. H extension 下的 VS-only state/fault facade、two-stage guest fault 与 PMP access-fault directed case
+
+当前仍保留两条明确限制：
+
+1. `hfence.vvma` 的按地址精确 flush 不作为首批硬断言。
+2. 当前真实 DUT 在 two-stage success path 上尚未稳定产生正常 writeback，因此 `basic/rehit/hfence` 组被精确标记为 `xfail`；fault 组仍保持硬断言。
 
 但仍要注意，`env.mmu` 并不意味着“所有 store translation 组合都已经稳定抽象好了”。当前 `matchInvalid_nuke` 场景之所以采用“install address spaces in test + bare older store + translated younger load”的组织方式，正是因为这个组合最符合当前 DUT 的稳定可观测行为。
 
@@ -302,7 +396,9 @@ with env.mmu.ptw_responder():
 
 - `src/test/python/MemBlock/MemBlock_env.py`
 - `src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py`
+- `src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py`
 - `src/test/python/MemBlock/sequences/memblock_sequences.py`
 - `src/test/python/MemBlock/docs/dtlb_fill_and_replacement_cases.md`
+- `src/test/python/MemBlock/docs/mmu_h_extension_cases.md`
 - `src/test/python/MemBlock/tests/test_MemBlock_replay.py`
 - `src/test/python/MemBlock/docs/sq_matchinvalid_nuke_case_analysis.md`

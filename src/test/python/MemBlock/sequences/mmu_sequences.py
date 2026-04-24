@@ -113,6 +113,95 @@ class MmuSv39AddressSpaceInstallSequenceResult:
 
 
 @dataclass(frozen=True)
+class GStageSv39Mapping:
+    gpa: int
+    pa_base: int
+    page_size: str | int = SV39_PAGE_SIZE_NAME_4K
+    pbmt: str | int = "cacheable"
+
+
+@dataclass(frozen=True)
+class TwoStageSv39AddressSpaceConfig:
+    vs_root_pt_addr: int
+    g_root_pt_addr: int
+    vs_mappings: tuple[Sv39Mapping, ...]
+    g_mappings: tuple[GStageSv39Mapping, ...]
+    vs_page_table_page_addrs: tuple[int, ...] = ()
+    g_page_table_page_addrs: tuple[int, ...] = ()
+    translated_preloads: tuple[TranslatedU64MemoryPreload, ...] = ()
+    bare_preloads: tuple[U64MemoryPreload, ...] = ()
+
+
+@dataclass(frozen=True)
+class InstallSequenceResult:
+    vs_root_pt_addr: int
+    g_root_pt_addr: int
+    vs_mappings: tuple[Sv39Mapping, ...]
+    g_mappings: tuple[GStageSv39Mapping, ...]
+    vs_page_table_page_addrs: tuple[int, ...]
+    g_page_table_page_addrs: tuple[int, ...]
+    translated_preloads: tuple[U64MemoryPreload, ...]
+    bare_preloads: tuple[U64MemoryPreload, ...]
+
+    @staticmethod
+    def _resolve_mapping(addr: int, mappings: tuple, *, addr_attr: str, pa_attr: str, label: str) -> int:
+        for mapping in mappings:
+            page_size_bytes = _normalize_sv39_page_size(getattr(mapping, "page_size"))
+            base_addr = int(getattr(mapping, addr_attr))
+            if (base_addr >> 12) == (int(addr) >> 12):
+                return _resolve_sv39_pa(int(addr), pa_base=int(getattr(mapping, pa_attr)), page_size=page_size_bytes)
+        raise KeyError(f"{label} 未配置 addr=0x{int(addr):x} 的 Sv39 4KB mapping")
+
+    def resolve_vs_stage_gpa(self, va: int) -> int:
+        return self._resolve_mapping(int(va), self.vs_mappings, addr_attr="va", pa_attr="pa_base", label="VS-stage")
+
+    def resolve_g_stage_pa(self, gpa: int) -> int:
+        return self._resolve_mapping(int(gpa), self.g_mappings, addr_attr="gpa", pa_attr="pa_base", label="G-stage")
+
+    def resolve_two_stage_pa(self, va: int) -> int:
+        return self.resolve_g_stage_pa(self.resolve_vs_stage_gpa(int(va)))
+
+
+@dataclass(frozen=True)
+class TwoStageLoadAccessResult:
+    txn: LoadTxn
+    va: int
+    expected_gpa: int
+    expected_pa: int
+    writeback: dict
+    ptw_trace: tuple[dict, ...]
+    transport_stats_before: dict[str, int]
+    transport_stats_after: dict[str, int]
+    fault_event: dict | None = None
+
+    @property
+    def miss_observed(self) -> bool:
+        return bool(self.ptw_trace)
+
+
+@dataclass(frozen=True)
+class MmuTwoStageLoadSequenceResult:
+    final_state: SequenceState
+    install_result: InstallSequenceResult
+    accesses: tuple[TwoStageLoadAccessResult, ...]
+
+
+@dataclass(frozen=True)
+class MmuTwoStageFenceSequenceResult:
+    final_state: SequenceState
+    install_result: InstallSequenceResult
+    warmup_access: TwoStageLoadAccessResult
+    reprobe_access: TwoStageLoadAccessResult
+
+
+@dataclass(frozen=True)
+class MmuTwoStageFaultSequenceResult:
+    final_state: SequenceState
+    install_result: InstallSequenceResult
+    access: TwoStageLoadAccessResult
+
+
+@dataclass(frozen=True)
 class MmuPrimeLoadSpec:
     req_id: int
     va: int
@@ -340,6 +429,478 @@ class MmuSv39ActivateSequence:
             completed_load_count=completed_loads,
             prime_loads=tuple(prime_txns),
             prime_writebacks=tuple(prime_writebacks),
+        )
+
+
+class TwoStageSv39AddressSpaceInstallSequence:
+    def __init__(self, config: TwoStageSv39AddressSpaceConfig) -> None:
+        self.config = config
+
+    def run(self, env) -> InstallSequenceResult:
+        vs_mappings = tuple(
+            Sv39Mapping(
+                va=int(mapping.va),
+                pa_base=int(mapping.pa_base),
+                page_size=_normalize_sv39_page_size(mapping.page_size),
+                pbmt=mapping.pbmt,
+            )
+            for mapping in self.config.vs_mappings
+        )
+        g_mappings = tuple(
+            GStageSv39Mapping(
+                gpa=int(mapping.gpa),
+                pa_base=int(mapping.pa_base),
+                page_size=_normalize_sv39_page_size(mapping.page_size),
+                pbmt=mapping.pbmt,
+            )
+            for mapping in self.config.g_mappings
+        )
+
+        vs_install_result = MmuSv39AddressSpaceInstallSequence(
+            MmuSv39AddressSpaceConfig(
+                root_pt_addr=int(self.config.vs_root_pt_addr),
+                mappings=vs_mappings,
+                page_table_page_addrs=tuple(int(addr) for addr in self.config.vs_page_table_page_addrs),
+            )
+        ).run(env)
+
+        next_g_page_table_idx = 0
+        for mapping in g_mappings:
+            install_result = env.mmu.install_g_sv39_mapping(
+                root_pt_addr=int(self.config.g_root_pt_addr),
+                gpa=int(mapping.gpa),
+                pa_base=int(mapping.pa_base),
+                page_size=mapping.page_size,
+                pbmt=mapping.pbmt,
+                page_table_page_addrs=tuple(int(addr) for addr in self.config.g_page_table_page_addrs)[
+                    next_g_page_table_idx:
+                ],
+            )
+            next_g_page_table_idx += len(install_result["allocated_table_addrs"])
+
+        result = InstallSequenceResult(
+            vs_root_pt_addr=int(self.config.vs_root_pt_addr),
+            g_root_pt_addr=int(self.config.g_root_pt_addr),
+            vs_mappings=vs_install_result.mappings,
+            g_mappings=g_mappings,
+            vs_page_table_page_addrs=tuple(int(addr) for addr in self.config.vs_page_table_page_addrs),
+            g_page_table_page_addrs=tuple(int(addr) for addr in self.config.g_page_table_page_addrs),
+            translated_preloads=(),
+            bare_preloads=tuple(
+                U64MemoryPreload(addr=int(preload.addr), data=int(preload.data))
+                for preload in self.config.bare_preloads
+            ),
+        )
+
+        translated_preloads = []
+        for preload in self.config.translated_preloads:
+            translated_pa = result.resolve_two_stage_pa(int(preload.va))
+            env.preload_u64(translated_pa, int(preload.data))
+            translated_preloads.append(U64MemoryPreload(addr=translated_pa, data=int(preload.data)))
+
+        for preload in result.bare_preloads:
+            env.preload_u64(preload.addr, preload.data)
+
+        return InstallSequenceResult(
+            vs_root_pt_addr=result.vs_root_pt_addr,
+            g_root_pt_addr=result.g_root_pt_addr,
+            vs_mappings=result.vs_mappings,
+            g_mappings=result.g_mappings,
+            vs_page_table_page_addrs=result.vs_page_table_page_addrs,
+            g_page_table_page_addrs=result.g_page_table_page_addrs,
+            translated_preloads=tuple(translated_preloads),
+            bare_preloads=result.bare_preloads,
+        )
+
+
+class MmuVsStageLoadSequence:
+    def __init__(
+        self,
+        *,
+        root_pt_addr: int,
+        asid: int,
+        va: int,
+        gpa_base: int,
+        page_table_page_addrs: tuple[int, ...],
+        initial_state: SequenceState,
+        req_id: int,
+        expected_data: int,
+        settle_cycles: int = 4,
+        response_delay_cycles: int = 1,
+    ) -> None:
+        self.root_pt_addr = int(root_pt_addr)
+        self.asid = int(asid)
+        self.va = int(va)
+        self.gpa_base = int(gpa_base)
+        self.page_table_page_addrs = tuple(int(addr) for addr in page_table_page_addrs)
+        self.initial_state = initial_state
+        self.req_id = int(req_id)
+        self.expected_data = int(expected_data)
+        self.settle_cycles = int(settle_cycles)
+        self.response_delay_cycles = int(response_delay_cycles)
+
+    def run(self, env) -> MmuTwoStageLoadSequenceResult:
+        vs_install_result = MmuSv39AddressSpaceInstallSequence(
+            MmuSv39AddressSpaceConfig(
+                root_pt_addr=self.root_pt_addr,
+                mappings=(Sv39Mapping(va=self.va & ~(SV39_PAGE_SIZE_4K - 1), pa_base=self.gpa_base),),
+                page_table_page_addrs=self.page_table_page_addrs,
+            )
+        ).run(env)
+        translated_pa = vs_install_result.translated_pa_for(self.va)
+        env.preload_u64(translated_pa, self.expected_data)
+        install_result = InstallSequenceResult(
+            vs_root_pt_addr=self.root_pt_addr,
+            g_root_pt_addr=0,
+            vs_mappings=vs_install_result.mappings,
+            g_mappings=(),
+            vs_page_table_page_addrs=self.page_table_page_addrs,
+            g_page_table_page_addrs=(),
+            translated_preloads=(U64MemoryPreload(addr=translated_pa, data=self.expected_data),),
+            bare_preloads=(),
+        )
+        env.mmu.allow_all_smode_access(persistent=False)
+        with env.mmu.ptw_responder(response_delay_cycles=self.response_delay_cycles) as ptw:
+            env.mmu.enable_vs_sv39(root_pt_addr=self.root_pt_addr, asid=self.asid, settle_cycles=self.settle_cycles)
+            access = _run_one_two_stage_access(
+                env,
+                ptw=ptw,
+                install_result=install_result,
+                va=self.va,
+                lq_ptr=self.initial_state.next_lq_ptr,
+                sq_ptr=self.initial_state.sq_ptr,
+                req_id=self.req_id,
+                expected_data=self.expected_data,
+                two_stage=False,
+            )
+        return MmuTwoStageLoadSequenceResult(
+            final_state=SequenceState(
+                next_lq_ptr=ptr_inc(self.initial_state.next_lq_ptr, env.config.sequence.load_queue_size),
+                sq_ptr=self.initial_state.sq_ptr,
+            ),
+            install_result=install_result,
+            accesses=(access,),
+        )
+
+
+def _run_one_two_stage_access(
+    env,
+    *,
+    ptw,
+    install_result: InstallSequenceResult,
+    va: int,
+    lq_ptr,
+    sq_ptr,
+    req_id: int,
+    expected_data: int | None,
+    required_exception_bits: tuple[int, ...] = (),
+    two_stage: bool = True,
+) -> TwoStageLoadAccessResult:
+    trace_start = len(ptw.trace)
+    transport_stats_before = _snapshot_transport_stats(env)
+    txn = LoadTxn(req_id=int(req_id), addr=int(va), lq_ptr=lq_ptr, sq_ptr=sq_ptr)
+    env.backend.prepare(txn)
+    expected_gpa = install_result.resolve_vs_stage_gpa(int(va))
+    expected_pa = install_result.resolve_two_stage_pa(int(va)) if two_stage else expected_gpa
+
+    if expected_data is not None:
+        completed_before = env.get_completed_load_count()
+        env.expect_scalar_load(
+            rob_idx=txn.rob_idx,
+            pdest=txn.resolved_pdest,
+            addr=expected_pa,
+            size=txn.size,
+            mask=txn.mask,
+        )
+        env.backend.execute(
+            BackendSendPlan.from_steps(
+                EnqueueLoadStep.from_txn(txn),
+                IssueCyclePlan.from_ops(IssueOp.load_from_txn(txn)),
+            )
+        )
+        writeback = env.wait_load_writeback_observed(
+            rob_idx=txn.rob_idx,
+            max_cycles=_resolve_replay_drain_cycles(env, None),
+        )
+        _wait_completed_load_count(
+            env,
+            completed_before + 1,
+            max_cycles=_resolve_replay_drain_cycles(env, None),
+        )
+        fault_event = None
+    else:
+        previous_strict = env.memory.strict_writeback_check
+        env.memory.strict_writeback_check = False
+        try:
+            env.backend.execute(
+                BackendSendPlan.from_steps(
+                    EnqueueLoadStep.from_txn(txn),
+                    IssueCyclePlan.from_ops(IssueOp.load_from_txn(txn)),
+                )
+            )
+            fault_event = env.wait_load_fault_observed(
+                rob_idx=txn.rob_idx,
+                required_exception_bits=required_exception_bits,
+                max_cycles=_resolve_replay_drain_cycles(env, None),
+            )
+            env.drain_writebacks(max_cycles=_resolve_replay_drain_cycles(env, None))
+            writeback = fault_event
+        finally:
+            env.memory.strict_writeback_check = previous_strict
+
+    return TwoStageLoadAccessResult(
+        txn=txn,
+        va=int(va),
+        expected_gpa=expected_gpa,
+        expected_pa=expected_pa,
+        writeback=writeback,
+        ptw_trace=tuple(list(ptw.trace)[trace_start:]),
+        transport_stats_before=transport_stats_before,
+        transport_stats_after=_snapshot_transport_stats(env),
+        fault_event=fault_event,
+    )
+
+
+class MmuTwoStageLoadSequence:
+    def __init__(
+        self,
+        *,
+        config: TwoStageSv39AddressSpaceConfig,
+        va: int,
+        initial_state: SequenceState,
+        req_id_base: int = 0,
+        expected_data: int,
+        repeat_count: int = 1,
+        vs_asid: int = 0,
+        vmid: int = 0,
+        settle_cycles: int = 4,
+        response_delay_cycles: int = 1,
+    ) -> None:
+        self.config = config
+        self.va = int(va)
+        self.initial_state = initial_state
+        self.req_id_base = int(req_id_base)
+        self.expected_data = int(expected_data)
+        self.repeat_count = int(repeat_count)
+        self.vs_asid = int(vs_asid)
+        self.vmid = int(vmid)
+        self.settle_cycles = int(settle_cycles)
+        self.response_delay_cycles = int(response_delay_cycles)
+
+    def run(self, env) -> MmuTwoStageLoadSequenceResult:
+        install_result = TwoStageSv39AddressSpaceInstallSequence(self.config).run(env)
+        next_lq_ptr = self.initial_state.next_lq_ptr
+        accesses = []
+
+        env.mmu.allow_all_smode_access(persistent=False)
+        with env.mmu.ptw_responder(response_delay_cycles=self.response_delay_cycles) as ptw:
+            env.mmu.enable_two_stage_sv39(
+                vs_root_pt_addr=int(self.config.vs_root_pt_addr),
+                g_root_pt_addr=int(self.config.g_root_pt_addr),
+                vs_asid=self.vs_asid,
+                vmid=self.vmid,
+                settle_cycles=self.settle_cycles,
+            )
+            for index in range(self.repeat_count):
+                access = _run_one_two_stage_access(
+                    env,
+                    ptw=ptw,
+                    install_result=install_result,
+                    va=self.va,
+                    lq_ptr=next_lq_ptr,
+                    sq_ptr=self.initial_state.sq_ptr,
+                    req_id=self.req_id_base + index,
+                    expected_data=self.expected_data,
+                )
+                accesses.append(access)
+                next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
+
+        return MmuTwoStageLoadSequenceResult(
+            final_state=SequenceState(next_lq_ptr=next_lq_ptr, sq_ptr=self.initial_state.sq_ptr),
+            install_result=install_result,
+            accesses=tuple(accesses),
+        )
+
+
+class MmuTwoStageFenceSequence:
+    def __init__(
+        self,
+        *,
+        config: TwoStageSv39AddressSpaceConfig,
+        va: int,
+        initial_state: SequenceState,
+        req_id_base: int = 0,
+        expected_data: int,
+        fence_kind: str,
+        vs_asid: int = 0,
+        vmid: int = 0,
+        settle_cycles: int = 4,
+        response_delay_cycles: int = 1,
+        fence_specific_id: int | None = None,
+    ) -> None:
+        self.config = config
+        self.va = int(va)
+        self.initial_state = initial_state
+        self.req_id_base = int(req_id_base)
+        self.expected_data = int(expected_data)
+        self.fence_kind = str(fence_kind)
+        self.vs_asid = int(vs_asid)
+        self.vmid = int(vmid)
+        self.settle_cycles = int(settle_cycles)
+        self.response_delay_cycles = int(response_delay_cycles)
+        self.fence_specific_id = None if fence_specific_id is None else int(fence_specific_id)
+
+    def run(self, env) -> MmuTwoStageFenceSequenceResult:
+        load_result = MmuTwoStageLoadSequence(
+            config=self.config,
+            va=self.va,
+            initial_state=self.initial_state,
+            req_id_base=self.req_id_base,
+            expected_data=self.expected_data,
+            repeat_count=1,
+            vs_asid=self.vs_asid,
+            vmid=self.vmid,
+            settle_cycles=self.settle_cycles,
+            response_delay_cycles=self.response_delay_cycles,
+        ).run(env)
+
+        warmup_access = load_result.accesses[0]
+        with env.mmu.ptw_responder(response_delay_cycles=self.response_delay_cycles) as ptw:
+            if self.fence_kind == "hfence_vvma":
+                env.mmu.pulse_hfence_vvma(
+                    rs2=self.fence_specific_id is not None,
+                    asid=0 if self.fence_specific_id is None else self.fence_specific_id,
+                )
+            elif self.fence_kind == "hfence_gvma":
+                env.mmu.pulse_hfence_gvma(
+                    rs2=self.fence_specific_id is not None,
+                    vmid=0 if self.fence_specific_id is None else self.fence_specific_id,
+                )
+            else:
+                raise ValueError(f"未知 two-stage fence kind: {self.fence_kind}")
+            reprobe_access = _run_one_two_stage_access(
+                env,
+                ptw=ptw,
+                install_result=load_result.install_result,
+                va=self.va,
+                lq_ptr=load_result.final_state.next_lq_ptr,
+                sq_ptr=load_result.final_state.sq_ptr,
+                req_id=self.req_id_base + 1,
+                expected_data=self.expected_data,
+            )
+
+        return MmuTwoStageFenceSequenceResult(
+            final_state=SequenceState(
+                next_lq_ptr=ptr_inc(load_result.final_state.next_lq_ptr, env.config.sequence.load_queue_size),
+                sq_ptr=load_result.final_state.sq_ptr,
+            ),
+            install_result=load_result.install_result,
+            warmup_access=warmup_access,
+            reprobe_access=reprobe_access,
+        )
+
+
+class MmuTwoStageFaultSequence:
+    def __init__(
+        self,
+        *,
+        config: TwoStageSv39AddressSpaceConfig,
+        va: int,
+        initial_state: SequenceState,
+        req_id: int,
+        vs_asid: int = 0,
+        vmid: int = 0,
+        settle_cycles: int = 4,
+        response_delay_cycles: int = 1,
+        required_exception_bits: tuple[int, ...] = (),
+        pmp_mode: str = PMP_MODE_ALLOW,
+        fault_stage: str | None = None,
+    ) -> None:
+        self.config = config
+        self.va = int(va)
+        self.initial_state = initial_state
+        self.req_id = int(req_id)
+        self.vs_asid = int(vs_asid)
+        self.vmid = int(vmid)
+        self.settle_cycles = int(settle_cycles)
+        self.response_delay_cycles = int(response_delay_cycles)
+        self.required_exception_bits = tuple(int(bit) for bit in required_exception_bits)
+        self.pmp_mode = str(pmp_mode)
+        self.fault_stage = None if fault_stage is None else str(fault_stage)
+
+    def run(self, env) -> MmuTwoStageFaultSequenceResult:
+        install_result = TwoStageSv39AddressSpaceInstallSequence(self.config).run(env)
+        if self.fault_stage is not None:
+            if self.fault_stage == "vs":
+                for mapping in self.config.vs_mappings:
+                    if (int(mapping.va) >> 12) != (self.va >> 12):
+                        continue
+                    leaf_pte_addr = env.mmu.install_vs_sv39_mapping(
+                        root_pt_addr=int(self.config.vs_root_pt_addr),
+                        va=int(mapping.va),
+                        gpa_base=int(mapping.pa_base),
+                        page_size=mapping.page_size,
+                        pbmt=mapping.pbmt,
+                        page_table_page_addrs=tuple(int(addr) for addr in self.config.vs_page_table_page_addrs),
+                    )["leaf_pte_addr"]
+                    env.preload_u64(int(leaf_pte_addr), 0)
+                    break
+                else:
+                    raise KeyError(f"未找到 va=0x{self.va:x} 对应的 VS-stage mapping")
+            elif self.fault_stage == "g":
+                target_gpa = install_result.resolve_vs_stage_gpa(self.va)
+                for mapping in self.config.g_mappings:
+                    if (int(mapping.gpa) >> 12) != (target_gpa >> 12):
+                        continue
+                    leaf_pte_addr = env.mmu.install_g_sv39_mapping(
+                        root_pt_addr=int(self.config.g_root_pt_addr),
+                        gpa=int(mapping.gpa),
+                        pa_base=int(mapping.pa_base),
+                        page_size=mapping.page_size,
+                        pbmt=mapping.pbmt,
+                        page_table_page_addrs=tuple(int(addr) for addr in self.config.g_page_table_page_addrs),
+                    )["leaf_pte_addr"]
+                    env.preload_u64(int(leaf_pte_addr), 0)
+                    break
+                else:
+                    raise KeyError(f"未找到 gpa=0x{target_gpa:x} 对应的 G-stage mapping")
+            else:
+                raise ValueError(f"未知 two-stage fault_stage: {self.fault_stage}")
+
+        if self.pmp_mode == PMP_MODE_ALLOW:
+            env.mmu.allow_all_smode_access(persistent=False)
+        elif self.pmp_mode == PMP_MODE_DENY:
+            env.mmu.program_pmp_entry(index=0, cfg=0, addr=0, persistent=False)
+        else:
+            raise ValueError(f"未知 PMP mode: {self.pmp_mode}")
+
+        with env.mmu.ptw_responder(response_delay_cycles=self.response_delay_cycles) as ptw:
+            env.mmu.enable_two_stage_sv39(
+                vs_root_pt_addr=int(self.config.vs_root_pt_addr),
+                g_root_pt_addr=int(self.config.g_root_pt_addr),
+                vs_asid=self.vs_asid,
+                vmid=self.vmid,
+                settle_cycles=self.settle_cycles,
+            )
+            access = _run_one_two_stage_access(
+                env,
+                ptw=ptw,
+                install_result=install_result,
+                va=self.va,
+                lq_ptr=self.initial_state.next_lq_ptr,
+                sq_ptr=self.initial_state.sq_ptr,
+                req_id=self.req_id,
+                expected_data=None,
+                required_exception_bits=self.required_exception_bits,
+            )
+
+        return MmuTwoStageFaultSequenceResult(
+            final_state=SequenceState(
+                next_lq_ptr=ptr_inc(self.initial_state.next_lq_ptr, env.config.sequence.load_queue_size),
+                sq_ptr=self.initial_state.sq_ptr,
+            ),
+            install_result=install_result,
+            access=access,
         )
 
 

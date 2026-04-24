@@ -8,12 +8,15 @@ import pytest
 from transactions import LoadTxn
 from request_apis import send_load
 from sequences import (
+    GStageSv39Mapping,
     MmuDtlbPageSpec,
     MmuDtlbReplacementSequence,
     MmuSv39AddressSpaceConfig,
     MmuSv39AddressSpaceInstallSequence,
     ResetEnvSequence,
     Sv39Mapping,
+    TwoStageSv39AddressSpaceConfig,
+    TwoStageSv39AddressSpaceInstallSequence,
     TranslatedU64MemoryPreload,
 )
 
@@ -51,6 +54,16 @@ MMU_DTLB_REPLACEMENT_PAGE_SPECS = tuple(
     )
     for index in range(MMU_DTLB_REPLACEMENT_SWEEP_PAGE_COUNT)
 )
+MMU_VS_ROOT_PT = 0x88200000
+MMU_G_ROOT_PT = 0x88300000
+MMU_G_PAGE_TABLE_PAGES = (
+    0x88304000,
+    0x88305000,
+    0x88306000,
+    0x88307000,
+)
+MMU_GPA_BASE = 0x20000000
+MMU_HPA_BASE = 0x80020000
 
 
 def _reset_env_state(env):
@@ -91,6 +104,33 @@ def _sv39_4k_mapping_pa_base(space_pa_base: int, va: int) -> int:
     return int(space_pa_base) | int(page_offset)
 
 
+def _capture_sfence_pulses(env, action):
+    events = []
+
+    def _sample_sfence():
+        if not hasattr(env.dut, "io_ooo_to_mem_sfence_valid"):
+            return
+        if int(env.dut.io_ooo_to_mem_sfence_valid.value) == 0:
+            return
+        events.append(
+            {
+                "rs1": int(env.dut.io_ooo_to_mem_sfence_bits_rs1.value),
+                "rs2": int(env.dut.io_ooo_to_mem_sfence_bits_rs2.value),
+                "addr": int(env.dut.io_ooo_to_mem_sfence_bits_addr.value),
+                "id": int(env.dut.io_ooo_to_mem_sfence_bits_id.value),
+                "hv": int(env.dut.io_ooo_to_mem_sfence_bits_hv.value),
+                "hg": int(env.dut.io_ooo_to_mem_sfence_bits_hg.value),
+            }
+        )
+
+    env.add_after_step_callback(_sample_sfence)
+    try:
+        action()
+    finally:
+        env.remove_after_step_callback(_sample_sfence)
+    return events
+
+
 def test_api_MemBlock_env_mmu_idle_inputs_preserve_sv39_state(env):
     """激活的 MMU facade 需要在 idle_inputs 后稳定重放 satp/S-mode 状态。"""
 
@@ -109,6 +149,65 @@ def test_api_MemBlock_env_mmu_idle_inputs_preserve_sv39_state(env):
     assert int(env.tlb_csr.priv_imode.value) == 3
     assert int(env.tlb_csr.priv_dmode.value) == 3
     assert int(env.tlb_csr.satp_mode.value) == 0
+
+
+def test_api_MemBlock_env_mmu_enable_vs_sv39_idle_inputs_preserve_state(env):
+    """VS-only 背景需要在 idle_inputs 后稳定保活 `vsatp + priv_virt`。"""
+
+    env.mmu.enable_vs_sv39(root_pt_addr=MMU_VS_ROOT_PT, asid=0x23, settle_cycles=0)
+    env.idle_inputs()
+
+    assert int(env.tlb_csr.satp_mode.value) == 0
+    assert int(env.tlb_csr.vsatp_mode.value) == 8
+    assert int(env.tlb_csr.vsatp_asid.value) == 0x23
+    assert int(env.tlb_csr.vsatp_ppn.value) == (MMU_VS_ROOT_PT >> 12)
+    assert int(env.tlb_csr.hgatp_mode.value) == 0
+    assert int(env.tlb_csr.priv_virt.value) == 1
+    assert int(env.tlb_csr.priv_virt_changed.value) == 0
+
+    env.mmu.disable_translation()
+    env.idle_inputs()
+
+    assert int(env.tlb_csr.vsatp_mode.value) == 0
+    assert int(env.tlb_csr.priv_virt.value) == 0
+
+
+def test_api_MemBlock_env_mmu_two_stage_reapply_after_reset_preserves_state(env):
+    """reset 后 `reapply_after_reset()` 需要重放 `vsatp/hgatp/priv_virt` 两阶段背景。"""
+
+    env.mmu.enable_two_stage_sv39(
+        vs_root_pt_addr=MMU_VS_ROOT_PT,
+        g_root_pt_addr=MMU_G_ROOT_PT,
+        vs_asid=0x11,
+        vmid=0x7,
+        settle_cycles=0,
+    )
+    env.reset(cycles=1, settle_cycles=0)
+
+    assert int(env.tlb_csr.satp_mode.value) == 0
+    assert int(env.tlb_csr.vsatp_mode.value) == 8
+    assert int(env.tlb_csr.vsatp_asid.value) == 0x11
+    assert int(env.tlb_csr.vsatp_ppn.value) == (MMU_VS_ROOT_PT >> 12)
+    assert int(env.tlb_csr.hgatp_mode.value) == 8
+    assert int(env.tlb_csr.hgatp_vmid.value) == 0x7
+    assert int(env.tlb_csr.hgatp_ppn.value) == (MMU_G_ROOT_PT >> 12)
+    assert int(env.tlb_csr.priv_virt.value) == 1
+    assert int(env.tlb_csr.priv_virt_changed.value) == 0
+
+
+def test_api_MemBlock_env_mmu_hfence_helpers_drive_expected_bits(env):
+    """`hfence.vvma/gvma` helper 需要把 facade 语义正确翻译到 DUT bundle。"""
+
+    events = _capture_sfence_pulses(
+        env,
+        lambda: (
+            env.mmu.pulse_hfence_vvma(rs2=True, asid=0x44),
+            env.mmu.pulse_hfence_gvma(rs1=True, rs2=True, addr=0x12345000, vmid=0x55),
+        ),
+    )
+
+    assert events[0] == {"rs1": 1, "rs2": 0, "addr": 0, "id": 0x44, "hv": 1, "hg": 0}
+    assert events[1] == {"rs1": 0, "rs2": 0, "addr": 0x12345000, "id": 0x55, "hv": 0, "hg": 1}
 
 
 def test_api_MemBlock_env_mmu_sv39_ptw_smoke(env):
@@ -278,6 +377,30 @@ def test_api_MemBlock_env_mmu_address_space_sequence_applies_4k_translated_prelo
 
     assert result.translated_pa_for(preload_va) == first_pa_base + 0x8
     assert env.memory.read(first_pa_base + 0x8, 8) == MMU_SECOND_DATA
+
+
+def test_api_MemBlock_env_mmu_install_g_sv39_mapping_and_two_stage_preload(env):
+    """两阶段地址空间 sequence 需要把 translated preload 预置到最终 HPA。"""
+
+    gpa_base = _sv39_4k_mapping_pa_base(MMU_GPA_BASE, MMU_VA)
+    hpa_base = _sv39_4k_mapping_pa_base(MMU_HPA_BASE, gpa_base)
+    preload_va = MMU_VA + 0x18
+
+    result = TwoStageSv39AddressSpaceInstallSequence(
+        TwoStageSv39AddressSpaceConfig(
+            vs_root_pt_addr=MMU_VS_ROOT_PT,
+            g_root_pt_addr=MMU_G_ROOT_PT,
+            vs_mappings=(Sv39Mapping(va=MMU_VA, pa_base=gpa_base),),
+            g_mappings=(GStageSv39Mapping(gpa=gpa_base, pa_base=hpa_base),),
+            vs_page_table_page_addrs=MMU_PAGE_TABLE_PAGES,
+            g_page_table_page_addrs=MMU_G_PAGE_TABLE_PAGES,
+            translated_preloads=(TranslatedU64MemoryPreload(va=preload_va, data=MMU_SECOND_DATA),),
+        )
+    ).run(env)
+
+    assert result.resolve_vs_stage_gpa(preload_va) == gpa_base + 0x18
+    assert result.resolve_two_stage_pa(preload_va) == hpa_base + 0x18
+    assert env.memory.read(hpa_base + 0x18, 8) == MMU_SECOND_DATA
 
 
 def test_api_MemBlock_env_mmu_program_pmp_deny_region_smoke(env):

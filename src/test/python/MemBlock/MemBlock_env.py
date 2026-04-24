@@ -102,6 +102,7 @@ SV39_PTE_V = 1 << 0
 SV39_PTE_R = 1 << 1
 SV39_PTE_W = 1 << 2
 SV39_PTE_X = 1 << 3
+SV39_PTE_U = 1 << 4
 SV39_PTE_A = 1 << 6
 SV39_PTE_D = 1 << 7
 SV39_PTE_PBMT_SHIFT = 61
@@ -114,6 +115,10 @@ PMP_CFG_DENY_NAPOT = 0x18
 PMP_CFG_CSR_BASE = 0x3A0
 PMP_ADDR_CSR_BASE = 0x3B0
 MEMBLOCK_PADDR_BITS = 48
+HGATP_SV39X4_MODE = 8
+LOAD_ACCESS_FAULT_BIT = 5
+LOAD_PAGE_FAULT_BIT = 13
+LOAD_GUEST_PAGE_FAULT_BIT = 21
 
 
 def _read_signal_int(signal, default: int = 0) -> int:
@@ -984,9 +989,14 @@ class _PtwTileLinkResponder:
 
 
 @dataclass(frozen=True)
-class _ActiveSv39State:
-    root_pt_addr: int
-    asid: int
+class _ActiveTranslationState:
+    mode: str = "bare"
+    satp_root_pt_addr: int = 0
+    satp_asid: int = 0
+    vs_root_pt_addr: int = 0
+    vs_asid: int = 0
+    g_root_pt_addr: int = 0
+    vmid: int = 0
     pbmte_enabled: bool = False
     pmm_menvcfg: int = 0
     pmm_henvcfg: int = 0
@@ -997,7 +1007,7 @@ class MmuFacade:
 
     def __init__(self, env) -> None:
         self.env = env
-        self._active_sv39 = None
+        self._active_translation = _ActiveTranslationState()
         self._persistent_csr_writes = {}
         self._pmp_cfg_words = {}
         self._ptw_responder = None
@@ -1006,24 +1016,24 @@ class MmuFacade:
         self._pmm_henvcfg = 0
 
     def reapply_inputs(self) -> None:
-        if self._active_sv39 is None:
-            return
-        self._drive_sv39_root(
-            root_pt_addr=self._active_sv39.root_pt_addr,
-            asid=self._active_sv39.asid,
+        self._drive_translation_state(
+            self._active_translation,
             satp_changed=0,
+            vsatp_changed=0,
+            hgatp_changed=0,
+            priv_virt_changed=0,
         )
         self._drive_svpbmt_state(
-            enabled=self._active_sv39.pbmte_enabled,
-            pmm_menvcfg=self._active_sv39.pmm_menvcfg,
-            pmm_henvcfg=self._active_sv39.pmm_henvcfg,
+            enabled=self._active_translation.pbmte_enabled,
+            pmm_menvcfg=self._active_translation.pmm_menvcfg,
+            pmm_henvcfg=self._active_translation.pmm_henvcfg,
         )
 
     async def reapply_after_reset_async(self) -> None:
         for addr, data in self._persistent_csr_writes.items():
             await self._pulse_distributed_csr_write_async(addr, data)
-        if self._active_sv39 is not None:
-            self.reapply_inputs()
+        self.reapply_inputs()
+        if self._active_translation.mode != "bare":
             await self.pulse_sfence_async()
 
     def reapply_after_reset(self) -> None:
@@ -1048,15 +1058,40 @@ class MmuFacade:
             self._remember_csr_write(addr, data)
         self._pulse_distributed_csr_write(addr, data)
 
-    def _drive_sv39_root(self, *, root_pt_addr: int, asid: int, satp_changed: int) -> None:
-        self.env.tlb_csr.priv_virt.value = 0
-        self.env.tlb_csr.priv_virt_changed.value = 0
-        self.env.tlb_csr.priv_imode.value = PRIV_MODE_S
-        self.env.tlb_csr.priv_dmode.value = PRIV_MODE_S
-        self.env.tlb_csr.satp_mode.value = SV39_MODE
-        self.env.tlb_csr.satp_asid.value = int(asid)
-        self.env.tlb_csr.satp_ppn.value = int(root_pt_addr) >> 12
+    def _drive_translation_state(
+        self,
+        state: _ActiveTranslationState,
+        *,
+        satp_changed: int,
+        vsatp_changed: int,
+        hgatp_changed: int,
+        priv_virt_changed: int,
+    ) -> None:
+        mode = state.mode
+        if mode not in {"bare", "sv39", "vs_sv39", "two_stage_sv39"}:
+            raise ValueError(f"未知 MMU active mode: {mode}")
+
+        self.env.tlb_csr.satp_mode.value = SV39_MODE if mode == "sv39" else 0
+        self.env.tlb_csr.satp_asid.value = int(state.satp_asid) if mode == "sv39" else 0
+        self.env.tlb_csr.satp_ppn.value = int(state.satp_root_pt_addr) >> 12 if mode == "sv39" else 0
         self.env.tlb_csr.satp_changed.value = int(satp_changed)
+
+        self.env.tlb_csr.vsatp_mode.value = SV39_MODE if mode in {"vs_sv39", "two_stage_sv39"} else 0
+        self.env.tlb_csr.vsatp_asid.value = int(state.vs_asid) if mode in {"vs_sv39", "two_stage_sv39"} else 0
+        self.env.tlb_csr.vsatp_ppn.value = (
+            int(state.vs_root_pt_addr) >> 12 if mode in {"vs_sv39", "two_stage_sv39"} else 0
+        )
+        self.env.tlb_csr.vsatp_changed.value = int(vsatp_changed)
+
+        self.env.tlb_csr.hgatp_mode.value = HGATP_SV39X4_MODE if mode == "two_stage_sv39" else 0
+        self.env.tlb_csr.hgatp_vmid.value = int(state.vmid) if mode == "two_stage_sv39" else 0
+        self.env.tlb_csr.hgatp_ppn.value = int(state.g_root_pt_addr) >> 12 if mode == "two_stage_sv39" else 0
+        self.env.tlb_csr.hgatp_changed.value = int(hgatp_changed)
+
+        self.env.tlb_csr.priv_virt.value = 1 if mode in {"vs_sv39", "two_stage_sv39"} else 0
+        self.env.tlb_csr.priv_virt_changed.value = int(priv_virt_changed)
+        self.env.tlb_csr.priv_imode.value = PRIV_MODE_S if mode != "bare" else self.env.csr_agent.MODE_M
+        self.env.tlb_csr.priv_dmode.value = PRIV_MODE_S if mode != "bare" else self.env.csr_agent.MODE_M
 
     def _drive_svpbmt_state(self, *, enabled: bool, pmm_menvcfg: int = 0, pmm_henvcfg: int = 0) -> None:
         self.env.tlb_csr.mPBMTE.value = int(bool(enabled))
@@ -1081,18 +1116,25 @@ class MmuFacade:
         self._drive_svpbmt_state(enabled=False, pmm_menvcfg=0, pmm_henvcfg=0)
 
     async def enable_sv39_async(self, *, root_pt_addr: int, asid: int = 0, settle_cycles: int = 4) -> None:
-        self._active_sv39 = _ActiveSv39State(
-            root_pt_addr=int(root_pt_addr),
-            asid=int(asid),
+        self._active_translation = _ActiveTranslationState(
+            mode="sv39",
+            satp_root_pt_addr=int(root_pt_addr),
+            satp_asid=int(asid),
             pbmte_enabled=self._svpbmt_enabled,
             pmm_menvcfg=self._pmm_menvcfg,
             pmm_henvcfg=self._pmm_henvcfg,
         )
-        self._drive_sv39_root(root_pt_addr=root_pt_addr, asid=asid, satp_changed=1)
+        self._drive_translation_state(
+            self._active_translation,
+            satp_changed=1,
+            vsatp_changed=0,
+            hgatp_changed=0,
+            priv_virt_changed=0,
+        )
         self._drive_svpbmt_state(
-            enabled=self._active_sv39.pbmte_enabled,
-            pmm_menvcfg=self._active_sv39.pmm_menvcfg,
-            pmm_henvcfg=self._active_sv39.pmm_henvcfg,
+            enabled=self._active_translation.pbmte_enabled,
+            pmm_menvcfg=self._active_translation.pmm_menvcfg,
+            pmm_henvcfg=self._active_translation.pmm_henvcfg,
         )
         await self.env._step_async(1)
         self.reapply_inputs()
@@ -1109,44 +1151,206 @@ class MmuFacade:
             )
         )
 
+    async def enable_vs_sv39_async(
+        self,
+        *,
+        root_pt_addr: int,
+        asid: int = 0,
+        settle_cycles: int = 4,
+    ) -> None:
+        self._active_translation = _ActiveTranslationState(
+            mode="vs_sv39",
+            vs_root_pt_addr=int(root_pt_addr),
+            vs_asid=int(asid),
+            pbmte_enabled=self._svpbmt_enabled,
+            pmm_menvcfg=self._pmm_menvcfg,
+            pmm_henvcfg=self._pmm_henvcfg,
+        )
+        self._drive_translation_state(
+            self._active_translation,
+            satp_changed=0,
+            vsatp_changed=1,
+            hgatp_changed=0,
+            priv_virt_changed=1,
+        )
+        self._drive_svpbmt_state(
+            enabled=self._active_translation.pbmte_enabled,
+            pmm_menvcfg=self._active_translation.pmm_menvcfg,
+            pmm_henvcfg=self._active_translation.pmm_henvcfg,
+        )
+        await self.env._step_async(1)
+        self.reapply_inputs()
+        await self.pulse_hfence_vvma_async()
+        if settle_cycles > 0:
+            await self.env._step_async(settle_cycles)
+
+    def enable_vs_sv39(self, *, root_pt_addr: int, asid: int = 0, settle_cycles: int = 4) -> None:
+        self.env._run_async(
+            self.enable_vs_sv39_async(
+                root_pt_addr=root_pt_addr,
+                asid=asid,
+                settle_cycles=settle_cycles,
+            )
+        )
+
+    async def enable_two_stage_sv39_async(
+        self,
+        *,
+        vs_root_pt_addr: int,
+        g_root_pt_addr: int,
+        vs_asid: int = 0,
+        vmid: int = 0,
+        settle_cycles: int = 4,
+    ) -> None:
+        self._require_aligned(g_root_pt_addr, SV39_PAGE_SIZE_4K * 4, "g_root_pt_addr")
+        self._active_translation = _ActiveTranslationState(
+            mode="two_stage_sv39",
+            vs_root_pt_addr=int(vs_root_pt_addr),
+            vs_asid=int(vs_asid),
+            g_root_pt_addr=int(g_root_pt_addr),
+            vmid=int(vmid),
+            pbmte_enabled=self._svpbmt_enabled,
+            pmm_menvcfg=self._pmm_menvcfg,
+            pmm_henvcfg=self._pmm_henvcfg,
+        )
+        self._drive_translation_state(
+            self._active_translation,
+            satp_changed=0,
+            vsatp_changed=1,
+            hgatp_changed=1,
+            priv_virt_changed=1,
+        )
+        self._drive_svpbmt_state(
+            enabled=self._active_translation.pbmte_enabled,
+            pmm_menvcfg=self._active_translation.pmm_menvcfg,
+            pmm_henvcfg=self._active_translation.pmm_henvcfg,
+        )
+        await self.env._step_async(1)
+        self.reapply_inputs()
+        await self.pulse_hfence_gvma_async()
+        if settle_cycles > 0:
+            await self.env._step_async(settle_cycles)
+
+    def enable_two_stage_sv39(
+        self,
+        *,
+        vs_root_pt_addr: int,
+        g_root_pt_addr: int,
+        vs_asid: int = 0,
+        vmid: int = 0,
+        settle_cycles: int = 4,
+    ) -> None:
+        self.env._run_async(
+            self.enable_two_stage_sv39_async(
+                vs_root_pt_addr=vs_root_pt_addr,
+                g_root_pt_addr=g_root_pt_addr,
+                vs_asid=vs_asid,
+                vmid=vmid,
+                settle_cycles=settle_cycles,
+            )
+        )
+
     def disable_translation(self) -> None:
-        self._active_sv39 = None
+        self._active_translation = _ActiveTranslationState(
+            mode="bare",
+            pbmte_enabled=self._svpbmt_enabled,
+            pmm_menvcfg=self._pmm_menvcfg,
+            pmm_henvcfg=self._pmm_henvcfg,
+        )
         self._drive_translation_disabled()
 
     def _drive_translation_disabled(self) -> None:
-        self.env.tlb_csr.satp_mode.value = 0
-        self.env.tlb_csr.satp_asid.value = 0
-        self.env.tlb_csr.satp_ppn.value = 0
-        self.env.tlb_csr.satp_changed.value = 0
-        self.env.tlb_csr.vsatp_mode.value = 0
-        self.env.tlb_csr.vsatp_asid.value = 0
-        self.env.tlb_csr.vsatp_ppn.value = 0
-        self.env.tlb_csr.vsatp_changed.value = 0
-        self.env.tlb_csr.hgatp_mode.value = 0
-        self.env.tlb_csr.hgatp_vmid.value = 0
-        self.env.tlb_csr.hgatp_ppn.value = 0
-        self.env.tlb_csr.hgatp_changed.value = 0
-        self.env.tlb_csr.priv_virt.value = 0
-        self.env.tlb_csr.priv_virt_changed.value = 0
-        self.env.tlb_csr.priv_imode.value = self.env.csr_agent.MODE_M
-        self.env.tlb_csr.priv_dmode.value = self.env.csr_agent.MODE_M
+        self._drive_translation_state(
+            self._active_translation,
+            satp_changed=0,
+            vsatp_changed=0,
+            hgatp_changed=0,
+            priv_virt_changed=0,
+        )
         self._drive_svpbmt_state(enabled=False, pmm_menvcfg=0, pmm_henvcfg=0)
 
-    async def pulse_sfence_async(self) -> None:
+    async def _pulse_fence_async(
+        self,
+        *,
+        rs1: bool = False,
+        rs2: bool = False,
+        addr: int = 0,
+        id: int = 0,
+        hv: bool = False,
+        hg: bool = False,
+    ) -> None:
         if not hasattr(self.env.dut, "io_ooo_to_mem_sfence_valid"):
             return
+        # The DUT bundle carries the decoded "rs1/rs2 is zero" semantics of the
+        # fence instruction rather than a direct "filter enabled" bit:
+        #   rs1=1 -> all address, rs1=0 -> specific address
+        #   rs2=1 -> all ASID/VMID, rs2=0 -> specific ASID/VMID
+        # Keep the Python facade ergonomic by exposing `rs1/rs2=True` as
+        # "filter by addr/id", then translate here.
+        bundle_rs1 = 0 if bool(rs1) else 1
+        bundle_rs2 = 0 if bool(rs2) else 1
         self.env.dut.io_ooo_to_mem_sfence_valid.value = 1
-        self.env.dut.io_ooo_to_mem_sfence_bits_rs1.value = 0
-        self.env.dut.io_ooo_to_mem_sfence_bits_rs2.value = 0
-        self.env.dut.io_ooo_to_mem_sfence_bits_addr.value = 0
-        self.env.dut.io_ooo_to_mem_sfence_bits_id.value = 0
-        self.env.dut.io_ooo_to_mem_sfence_bits_hv.value = 0
-        self.env.dut.io_ooo_to_mem_sfence_bits_hg.value = 0
+        self.env.dut.io_ooo_to_mem_sfence_bits_rs1.value = int(bundle_rs1)
+        self.env.dut.io_ooo_to_mem_sfence_bits_rs2.value = int(bundle_rs2)
+        self.env.dut.io_ooo_to_mem_sfence_bits_addr.value = int(addr)
+        self.env.dut.io_ooo_to_mem_sfence_bits_id.value = int(id)
+        self.env.dut.io_ooo_to_mem_sfence_bits_hv.value = int(bool(hv))
+        self.env.dut.io_ooo_to_mem_sfence_bits_hg.value = int(bool(hg))
         await self.env._step_async(1)
         self.env.dut.io_ooo_to_mem_sfence_valid.value = 0
 
-    def pulse_sfence(self) -> None:
-        self.env._run_async(self.pulse_sfence_async())
+    async def pulse_sfence_async(
+        self,
+        *,
+        rs1: bool = False,
+        rs2: bool = False,
+        addr: int = 0,
+        id: int = 0,
+    ) -> None:
+        await self._pulse_fence_async(rs1=rs1, rs2=rs2, addr=addr, id=id, hv=False, hg=False)
+
+    def pulse_sfence(self, *, rs1: bool = False, rs2: bool = False, addr: int = 0, id: int = 0) -> None:
+        self.env._run_async(self.pulse_sfence_async(rs1=rs1, rs2=rs2, addr=addr, id=id))
+
+    async def pulse_hfence_vvma_async(
+        self,
+        *,
+        rs1: bool = False,
+        rs2: bool = False,
+        addr: int = 0,
+        asid: int = 0,
+    ) -> None:
+        await self._pulse_fence_async(rs1=rs1, rs2=rs2, addr=addr, id=asid, hv=True, hg=False)
+
+    def pulse_hfence_vvma(
+        self,
+        *,
+        rs1: bool = False,
+        rs2: bool = False,
+        addr: int = 0,
+        asid: int = 0,
+    ) -> None:
+        self.env._run_async(self.pulse_hfence_vvma_async(rs1=rs1, rs2=rs2, addr=addr, asid=asid))
+
+    async def pulse_hfence_gvma_async(
+        self,
+        *,
+        rs1: bool = False,
+        rs2: bool = False,
+        addr: int = 0,
+        vmid: int = 0,
+    ) -> None:
+        await self._pulse_fence_async(rs1=rs1, rs2=rs2, addr=addr, id=vmid, hv=False, hg=True)
+
+    def pulse_hfence_gvma(
+        self,
+        *,
+        rs1: bool = False,
+        rs2: bool = False,
+        addr: int = 0,
+        vmid: int = 0,
+    ) -> None:
+        self.env._run_async(self.pulse_hfence_gvma_async(rs1=rs1, rs2=rs2, addr=addr, vmid=vmid))
 
     @staticmethod
     def _sv39_pbmt_bits(pbmt: str | int) -> int:
@@ -1200,6 +1404,15 @@ class MmuFacade:
         )
 
     @staticmethod
+    def _sv39x4_gvpn_indices(gpa: int) -> tuple[int, int, int]:
+        value = int(gpa)
+        return (
+            (value >> 30) & 0x7FF,
+            (value >> 21) & 0x1FF,
+            (value >> 12) & 0x1FF,
+        )
+
+    @staticmethod
     def _sv39_pte_ppn(pte_value: int) -> int:
         return (int(pte_value) >> 10) & ((1 << 44) - 1)
 
@@ -1216,6 +1429,7 @@ class MmuFacade:
         *,
         page_size: str | int = "4k",
         pbmt: str | int = "cacheable",
+        user: bool = False,
     ) -> int:
         page_size_bytes = self._normalize_sv39_page_size(page_size)
         if page_size_bytes != SV39_PAGE_SIZE_4K:
@@ -1228,6 +1442,7 @@ class MmuFacade:
             | SV39_PTE_V
             | SV39_PTE_R
             | SV39_PTE_W
+            | (SV39_PTE_U if bool(user) else 0)
             | SV39_PTE_A
             | SV39_PTE_D
         )
@@ -1241,6 +1456,35 @@ class MmuFacade:
     ) -> int:
         page_size_bytes = self._normalize_sv39_page_size(page_size)
         return int(pa_base) | (int(va) & (page_size_bytes - 1))
+
+    def resolve_vs_stage_gpa(
+        self,
+        va: int,
+        *,
+        gpa_base: int,
+        page_size: str | int = "4k",
+    ) -> int:
+        return self.resolve_sv39_pa(va, pa_base=gpa_base, page_size=page_size)
+
+    def resolve_g_stage_pa(
+        self,
+        gpa: int,
+        *,
+        pa_base: int,
+        page_size: str | int = "4k",
+    ) -> int:
+        return self.resolve_sv39_pa(gpa, pa_base=pa_base, page_size=page_size)
+
+    def resolve_two_stage_pa(
+        self,
+        va: int,
+        *,
+        vs_pa_base: int,
+        g_pa_base: int,
+        page_size: str | int = "4k",
+    ) -> int:
+        gpa = self.resolve_vs_stage_gpa(va, gpa_base=vs_pa_base, page_size=page_size)
+        return self.resolve_g_stage_pa(gpa, pa_base=g_pa_base, page_size=page_size)
 
     def _ensure_sv39_nonleaf(
         self,
@@ -1307,6 +1551,74 @@ class MmuFacade:
         self.env.preload_u64(
             leaf_pte_addr,
             self.sv39_leaf_pte(pa_base, page_size=page_size_bytes, pbmt=pbmt),
+        )
+        return {
+            "root_pte_addr": root_pte_addr,
+            "l1_table_addr": int(l1_table_addr),
+            "l1_pte_addr": l1_pte_addr,
+            "l0_table_addr": int(l0_table_addr),
+            "leaf_pte_addr": leaf_pte_addr,
+            "allocated_table_addrs": tuple(allocated_table_addrs),
+        }
+
+    def install_vs_sv39_mapping(
+        self,
+        *,
+        root_pt_addr: int,
+        va: int,
+        gpa_base: int,
+        page_size: str | int = "4k",
+        pbmt: str | int = "cacheable",
+        page_table_page_addrs: tuple[int, ...] = (),
+    ) -> dict[str, int | tuple[int, ...]]:
+        return self.install_sv39_mapping(
+            root_pt_addr=root_pt_addr,
+            va=va,
+            pa_base=gpa_base,
+            page_size=page_size,
+            pbmt=pbmt,
+            page_table_page_addrs=page_table_page_addrs,
+        )
+
+    def install_g_sv39_mapping(
+        self,
+        *,
+        root_pt_addr: int,
+        gpa: int,
+        pa_base: int,
+        page_size: str | int = "4k",
+        pbmt: str | int = "cacheable",
+        page_table_page_addrs: tuple[int, ...] = (),
+    ) -> dict[str, int | tuple[int, ...]]:
+        page_size_bytes = self._normalize_sv39_page_size(page_size)
+        if page_size_bytes != SV39_PAGE_SIZE_4K:
+            raise ValueError(f"当前 env 仅支持 G-stage Sv39x4 4KB 映射安装，收到 page_size={page_size}")
+
+        self._require_aligned(root_pt_addr, SV39_PAGE_SIZE_4K * 4, "g_root_pt_addr")
+        self._require_aligned(gpa, page_size_bytes, "gpa")
+        self._require_aligned(pa_base, page_size_bytes, "pa_base")
+        page_table_page_addrs = tuple(int(addr) for addr in page_table_page_addrs)
+
+        gvpn2, vpn1, vpn0 = self._sv39x4_gvpn_indices(gpa)
+        allocated_table_addrs: list[int] = []
+        root_pte_addr = int(root_pt_addr) + gvpn2 * 8
+        l1_table_addr = self._ensure_sv39_nonleaf(
+            pte_addr=root_pte_addr,
+            page_table_page_addrs=page_table_page_addrs,
+            allocated_table_addrs=allocated_table_addrs,
+            level_name="G-stage Sv39x4 root/GVPN2",
+        )
+        l1_pte_addr = int(l1_table_addr) + vpn1 * 8
+        l0_table_addr = self._ensure_sv39_nonleaf(
+            pte_addr=l1_pte_addr,
+            page_table_page_addrs=page_table_page_addrs,
+            allocated_table_addrs=allocated_table_addrs,
+            level_name="G-stage Sv39x4 level-1/GVPN1",
+        )
+        leaf_pte_addr = int(l0_table_addr) + vpn0 * 8
+        self.env.preload_u64(
+            leaf_pte_addr,
+            self.sv39_leaf_pte(pa_base, page_size=page_size_bytes, pbmt=pbmt, user=True),
         )
         return {
             "root_pte_addr": root_pte_addr,
@@ -2144,6 +2456,109 @@ class MemBlockEnv:
                 max_cycles=max_cycles,
             )
         )
+
+    async def _wait_load_fault_observed_async(
+        self,
+        *,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        required_exception_bits: tuple[int, ...] = (),
+        max_cycles: int = 200,
+    ) -> dict:
+        normalized_rob_idx = self._normalize_rob_idx_filter(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+        required_bits = tuple(int(bit) for bit in required_exception_bits)
+
+        for _ in range(max_cycles):
+            for lane, bundle in enumerate(self.writeback):
+                if not bundle.connected("valid") or bundle.read("valid", 0) == 0:
+                    continue
+                if bundle.connected("ready") and bundle.read("ready", 0) == 0:
+                    continue
+                if bundle.connected("isFromLoadUnit") and bundle.read("isFromLoadUnit", 0) == 0:
+                    continue
+                if bundle.connected("toRob_valid") and bundle.read("toRob_valid", 0) == 0:
+                    continue
+
+                exception_bits = bundle.read_exception_bits() if hasattr(bundle, "read_exception_bits") else []
+                if not any(exception_bits):
+                    continue
+                if any(bit >= len(exception_bits) or exception_bits[bit] == 0 for bit in required_bits):
+                    continue
+
+                event = {
+                    "cycle": self._current_cycle(),
+                    "lane": lane,
+                    "rob_idx_flag": bundle.read("robIdx_flag", 0),
+                    "rob_idx_value": bundle.read("robIdx_value", 0),
+                    "lq_idx_flag": bundle.read("lqIdx_flag", 0),
+                    "lq_idx_value": bundle.read("lqIdx_value", 0),
+                    "pdest": bundle.read("pdest", 0),
+                    "data": bundle.read("data_0", 0),
+                    "int_wen": bundle.read("intWen", 0),
+                    "vaddr": bundle.read("debug_vaddr", None) if bundle.connected("debug_vaddr") else None,
+                    "paddr": bundle.read("debug_paddr", None) if bundle.connected("debug_paddr") else None,
+                    "gpaddr": _read_signal_int(self.lsq_status.gpaddr, 0),
+                    "exception_bits": exception_bits,
+                }
+                if not self._event_matches_rob_idx(event, normalized_rob_idx):
+                    continue
+
+                event["vaddr"] = _read_signal_int(self.lsq_status.vaddr, 0) if event["vaddr"] is None else event["vaddr"]
+                event["is_access_fault"] = bool(
+                    len(exception_bits) > LOAD_ACCESS_FAULT_BIT and exception_bits[LOAD_ACCESS_FAULT_BIT]
+                )
+                event["is_page_fault"] = bool(
+                    len(exception_bits) > LOAD_PAGE_FAULT_BIT and exception_bits[LOAD_PAGE_FAULT_BIT]
+                )
+                event["is_guest_page_fault"] = bool(
+                    len(exception_bits) > LOAD_GUEST_PAGE_FAULT_BIT and exception_bits[LOAD_GUEST_PAGE_FAULT_BIT]
+                )
+                return event
+            await self._step_async(1)
+
+        raise TimeoutError(
+            "等待 load fault 观测超时: "
+            f"rob={self._format_rob_idx(normalized_rob_idx)}, required_exception_bits={required_bits}"
+        )
+
+    def wait_load_fault_observed(
+        self,
+        *,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        required_exception_bits: tuple[int, ...] = (),
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待某条 load fault 在 writeback 口被观测到，并收口 guest-fault 辅助信息。"""
+
+        return self._run_async(
+            self._wait_load_fault_observed_async(
+                rob_idx=rob_idx,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+                required_exception_bits=required_exception_bits,
+                max_cycles=max_cycles,
+            )
+        )
+
+    def sample_mmu_fault_state(self) -> dict:
+        """聚合当前 guest/access fault 排查常用的 MMU 白盒状态。"""
+
+        return {
+            "cycle": self._current_cycle(),
+            "vaddr": _read_signal_int(self.lsq_status.vaddr, 0),
+            "gpaddr": _read_signal_int(self.lsq_status.gpaddr, 0),
+            "is_for_vs_nonleaf_pte": _read_signal_int(self.lsq_status.isForVSnonLeafPTE, 0),
+            "dcache_error_valid": self._read_optional_dut_signal("io_dcacheError_ecc_error_valid", 0),
+            "transport_stats": self.get_transport_stats(),
+            "replay_state": self.sample_replay_state(),
+        }
 
     def wait_vector_event(
         self,
