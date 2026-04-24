@@ -364,7 +364,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
           io.chi.get <> l2.io_chi
           l2.io_cpu_halt.foreach { _:= io.cpu_halt.fromCore }
           io.lcrdy.foreach { in =>
-            l2.io_lcrdy.foreach(out => out <> in)
+            l2.io_lcrdy.foreach(out => out := in)
           }
 
         case l2cache: TL2TLCoupledL2 =>
