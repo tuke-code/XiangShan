@@ -104,6 +104,12 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   maskModule.io := DontCare
   val datavalid = RegInit(VecInit(List.fill(LoadQueueRAWSize)(false.B)))
   val smbConsumed = RegInit(VecInit(List.fill(LoadQueueRAWSize)(false.B)))
+  // stAddrReadySqPtr may lead the corresponding storeIn pulse by a small bounded skew.
+  // Keep SMB-tracked entries alive across that skew, but do not let them survive indefinitely.
+  private val SmbPredStoreGraceCycles = 2
+  private val SmbPredStoreGraceWidth = log2Ceil(SmbPredStoreGraceCycles + 1)
+  val smbPredStoreObserved = RegInit(VecInit(List.fill(LoadQueueRAWSize)(false.B)))
+  val smbPredStoreGrace = RegInit(VecInit(List.fill(LoadQueueRAWSize)(0.U(SmbPredStoreGraceWidth.W))))
 
   // freeliset: store valid entries index.
   // +---+---+--------------+-----+-----+
@@ -144,6 +150,12 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
     val offset = PopCount(needEnqueue.take(w))
     val canAccept = freeList.io.canAllocate(offset)
     val enqIndex = freeList.io.allocateSlot(offset)
+    val enqPredictedStoreRobIdx = enq.bits.uop.loadPred.bits.getWaitStoreRobIdx(enq.bits.uop.robIdx)
+    val enqPredictedStoreWriteback = enq.bits.smbConsumed && VecInit((0 until StorePipelineWidth).map(storePipe =>
+      io.storeIn(storePipe).valid &&
+      !io.storeIn(storePipe).bits.miss &&
+      (io.storeIn(storePipe).bits.uop.robIdx === enqPredictedStoreRobIdx)
+    )).asUInt.orR
     enq.ready := Mux(needEnqueue(w), canAccept, true.B)
 
     enqIndexVec(w) := enqIndex
@@ -169,6 +181,8 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
       uop(enqIndex) := enq.bits.uop
       datavalid(enqIndex) := enq.bits.data_valid
       smbConsumed(enqIndex) := enq.bits.smbConsumed
+      smbPredStoreObserved(enqIndex) := enqPredictedStoreWriteback
+      smbPredStoreGrace(enqIndex) := 0.U
       when(enq.bits.smbConsumed) {
         assert(enq.bits.uop.loadPred.valid && enq.bits.uop.loadPred.bits.smbEnable && enq.bits.uop.loadPred.bits.loadWait,
           s"LoadQueueRAW enqueue SMB-consumed entry on pipe ${w} requires dependent SMB prediction")
@@ -194,14 +208,37 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   for (i <- 0 until LoadQueueRAWSize) {
     val deqNotBlock = Mux(!allAddrCheck, !isBefore(io.stAddrReadySqPtr, uop(i).sqIdx), true.B)
     val needCancel = uop(i).robIdx.needFlush(io.redirect)
+    val predictedStoreRobIdx = uop(i).loadPred.bits.getWaitStoreRobIdx(uop(i).robIdx)
+    val smbPredictedStoreWriteback = VecInit((0 until StorePipelineWidth).map(w =>
+      io.storeIn(w).valid &&
+      !io.storeIn(w).bits.miss &&
+      (io.storeIn(w).bits.uop.robIdx === predictedStoreRobIdx)
+    )).asUInt.orR
+    val smbStoreObserved = smbPredStoreObserved(i) || smbPredictedStoreWriteback
+    val smbGraceExpired = smbPredStoreGrace(i) === SmbPredStoreGraceCycles.U
+    val releaseTrackedSmb = smbConsumed(i) && (smbStoreObserved || (deqNotBlock && smbGraceExpired))
+    val shouldRelease = Mux(smbConsumed(i), releaseTrackedSmb || needCancel, deqNotBlock || needCancel)
 
-    when (allocated(i) && (deqNotBlock || needCancel)) {
+    when (allocated(i) && smbConsumed(i) && smbPredictedStoreWriteback) {
+      smbPredStoreObserved(i) := true.B
+    }
+    when (allocated(i) && smbConsumed(i)) {
+      when (releaseTrackedSmb || needCancel || !deqNotBlock) {
+        smbPredStoreGrace(i) := 0.U
+      } .elsewhen (deqNotBlock && !smbStoreObserved && !smbGraceExpired) {
+        smbPredStoreGrace(i) := smbPredStoreGrace(i) + 1.U
+      }
+    }
+
+    when (allocated(i) && shouldRelease) {
       when(smbConsumed(i)) {
-        assert(deqNotBlock || needCancel,
-          s"LoadQueueRAW SMB-tracked entry ${i} may only clear after address tracking closes or redirect cancels it")
+        assert(releaseTrackedSmb || needCancel,
+          s"LoadQueueRAW SMB-tracked entry ${i} may only clear after predicted store observation, bounded grace expiry, or redirect cancellation")
       }
       allocated(i) := false.B
       smbConsumed(i) := false.B
+      smbPredStoreObserved(i) := false.B
+      smbPredStoreGrace(i) := 0.U
       freeMaskVec(i) := true.B
     }
   }
@@ -218,6 +255,8 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
     when (allocated(revokeIndex) && revokeValid) {
       allocated(revokeIndex) := false.B
       smbConsumed(revokeIndex) := false.B
+      smbPredStoreObserved(revokeIndex) := false.B
+      smbPredStoreGrace(revokeIndex) := 0.U
       freeMaskVec(revokeIndex) := true.B
       willRevoke(revokeIndex) := true.B
     }
@@ -473,6 +512,17 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
     io.mdpUpdateOldest.valid && io.mdpUpdateOldest.bits.wrongBypass)
   XSPerfAccumulate("loadQRAW_normal_violation_oldest_with_smb_source",
     io.mdpUpdateOldest.valid && !io.mdpUpdateOldest.bits.wrongBypass && rollbackHasSmbSource.asUInt.orR)
+  XSPerfAccumulate("loadQRAW_smb_hold_until_predicted_store_wb", PopCount(VecInit((0 until LoadQueueRAWSize).map(i => {
+    val deqNotBlock = Mux(!allAddrCheck, !isBefore(io.stAddrReadySqPtr, uop(i).sqIdx), true.B)
+    val needCancel = uop(i).robIdx.needFlush(io.redirect)
+    val predictedStoreRobIdx = uop(i).loadPred.bits.getWaitStoreRobIdx(uop(i).robIdx)
+    val smbPredictedStoreWriteback = VecInit((0 until StorePipelineWidth).map(w =>
+      io.storeIn(w).valid &&
+      !io.storeIn(w).bits.miss &&
+      (io.storeIn(w).bits.uop.robIdx === predictedStoreRobIdx)
+    )).asUInt.orR
+    allocated(i) && smbConsumed(i) && deqNotBlock && !smbPredStoreObserved(i) && !smbPredictedStoreWriteback && !needCancel
+  }))))
   XSPerfAccumulate("loadQRAW_smb_tracked_entry_active", PopCount(smbConsumed))
 
   // perf cnt

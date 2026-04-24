@@ -1148,20 +1148,18 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
     Mux(Pbmt.isUncache(s2_pbmt), s2_in.mmio, s2_tlb_hit && s2_pmp.mmio)
 
   val s2_full_fwd      = Wire(Bool())
-  val s2_smbOpportunity = s2_in.uop.loadPred.valid &&
-    s2_in.uop.loadPred.bits.smbProviderHandle.valid &&
-    io.lsq.forward.smbProbeCandidateValid
-  val s2_smbCanConsume = s2_in.uop.loadPred.valid &&
-    s2_in.uop.loadPred.bits.smbEnable &&
-    io.lsq.forward.smbCandidateValid &&
-    (!io.lsq.forward.smbVerifyReady || io.lsq.forward.smbVerifyPass)
-  val s2_mem_amb       = (s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait && ~s2_in.uop.loadPred.bits.static &&
-                          io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid) && !s2_smbCanConsume)
+  // Query eligibility must not depend on speculative SMB forwarding, otherwise
+  // s2_can_query -> s2_smbCanConsume -> s2_full_fwd creates a combinational cycle.
+  val s2_query_fwd_mask = io.lsq.forward.forwardMask.asUInt | io.sbuffer.forwardMask.asUInt | io.ubuffer.forwardMask.asUInt
+  val s2_full_fwd_for_query = ((~s2_query_fwd_mask).asUInt & s2_in.mask) === 0.U && !io.lsq.forward.dataInvalid
   val s2_tlb_miss      = s2_in.tlbMiss
   val s2_fwd_fail      = io.lsq.forward.dataInvalid && RegNext(io.lsq.forward.valid)
   val s2_dcache_miss   = io.dcache.resp.bits.miss &&
                          !s2_fwd_frm_d_chan_or_mshr &&
                          !s2_full_fwd && !s2_in.nc
+  val s2_dcache_miss_for_query = io.dcache.resp.bits.miss &&
+                                 !s2_fwd_frm_d_chan_or_mshr &&
+                                 !s2_full_fwd_for_query && !s2_in.nc
 
   val s2_mq_nack       = io.dcache.s2_mq_nack &&
                          !s2_fwd_frm_d_chan_or_mshr &&
@@ -1170,10 +1168,16 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   val s2_bank_conflict = io.dcache.s2_bank_conflict &&
                          !s2_fwd_frm_d_chan_or_mshr &&
                          !s2_full_fwd && !s2_in.nc
+  val s2_bank_conflict_for_query = io.dcache.s2_bank_conflict &&
+                                   !s2_fwd_frm_d_chan_or_mshr &&
+                                   !s2_full_fwd_for_query && !s2_in.nc
 
   val s2_wpu_pred_fail = io.dcache.s2_wpu_pred_fail &&
                         !s2_fwd_frm_d_chan_or_mshr &&
                         !s2_full_fwd && !s2_in.nc
+  val s2_wpu_pred_fail_for_query = io.dcache.s2_wpu_pred_fail &&
+                                  !s2_fwd_frm_d_chan_or_mshr &&
+                                  !s2_full_fwd_for_query && !s2_in.nc
 
   val s2_rar_nack      = io.lsq.ldld_nuke_query.req.valid &&
                          !io.lsq.ldld_nuke_query.req.ready
@@ -1218,6 +1222,21 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   val s2_dcache_should_resp = !(s2_in.tlbMiss || s2_exception || s2_in.delayedLoadError || s2_uncache || s2_prf)
   assert(!(s2_valid && (s2_dcache_should_resp && !io.dcache.resp.valid)), "DCache response got lost")
 
+  // need allocate new entry
+  val s2_dcache_no_query = !s2_dcache_miss_for_query && (s2_bank_conflict_for_query || s2_wpu_pred_fail_for_query)
+  val s2_can_query = !(s2_dcache_no_query || s2_in.rep_info.nuke) && s2_troublem
+  val s2_smbOpportunity = s2_in.uop.loadPred.valid &&
+    s2_in.uop.loadPred.bits.smbProviderHandle.valid &&
+    io.lsq.forward.smbProbeCandidateValid
+  val s2_smbCanConsume = s2_in.uop.loadPred.valid &&
+    s2_in.uop.loadPred.bits.smbEnable &&
+    s2_can_query &&
+    io.lsq.forward.smbCandidateValid &&
+    io.lsq.forward.smbVerifyReady &&
+    io.lsq.forward.smbVerifyPass
+  val s2_mem_amb       = (s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait && ~s2_in.uop.loadPred.bits.static &&
+                          io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid) && !s2_smbCanConsume)
+
   // fast replay require
   val s2_dcache_fast_rep = (s2_mq_nack || !s2_dcache_miss && (s2_bank_conflict || s2_wpu_pred_fail))
   val s2_nuke_fast_rep   = !s2_mq_nack &&
@@ -1232,10 +1251,6 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
                     !s2_fwd_fail &&
                     (s2_dcache_fast_rep || s2_nuke_fast_rep) &&
                     s2_troublem
-
-  // need allocate new entry
-  val s2_dcache_no_query = !s2_dcache_miss && (s2_bank_conflict || s2_wpu_pred_fail)
-  val s2_can_query = !(s2_dcache_no_query || s2_in.rep_info.nuke) && s2_troublem
 
   val s2_data_fwded = s2_dcache_miss && s2_full_fwd
 
@@ -1291,24 +1306,25 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   val s2_fwd_mask = Wire(Vec((VLEN/8), Bool()))
   val s2_fwd_data = Wire(Vec((VLEN/8), UInt(8.W)))
   val s2_smbConsume = s2_smbCanConsume
+  val s2_smbForwardMask = VecInit((0 until VLEN / 8).map(i => io.lsq.forward.smbForwardMask(i) && s2_smbConsume))
   s2_full_fwd := ((~s2_fwd_mask.asUInt).asUInt & s2_in.mask) === 0.U && !io.lsq.forward.dataInvalid
   // generate XLEN/8 Muxs
   for (i <- 0 until VLEN / 8) {
-    s2_fwd_mask(i) := io.lsq.forward.smbForwardMask(i) || io.lsq.forward.forwardMask(i) || io.sbuffer.forwardMask(i) || io.ubuffer.forwardMask(i)
+    s2_fwd_mask(i) := s2_smbForwardMask(i) || io.lsq.forward.forwardMask(i) || io.sbuffer.forwardMask(i) || io.ubuffer.forwardMask(i)
     s2_fwd_data(i) :=
-      Mux(io.lsq.forward.smbForwardMask(i), io.lsq.forward.smbForwardData(i),
+      Mux(s2_smbForwardMask(i), io.lsq.forward.smbForwardData(i),
       Mux(io.lsq.forward.forwardMask(i), io.lsq.forward.forwardData(i),
       Mux(s2_nc_with_data, io.ubuffer.forwardData(i),
       io.sbuffer.forwardData(i))))
   }
 
-  val s2_fwd_mask_no_ubuffer = io.lsq.forward.forwardMask.asUInt | io.lsq.forward.smbForwardMask.asUInt | io.sbuffer.forwardMask.asUInt
+  val s2_fwd_mask_no_ubuffer = io.lsq.forward.forwardMask.asUInt | s2_smbForwardMask.asUInt | io.sbuffer.forwardMask.asUInt
   //来自前递就是mdp预测依赖成功，不来自前递就是mdp预测依赖失败
   val s2_mdpPredictHit = (~s2_fwd_mask_no_ubuffer & s2_in.mask) === 0.U && !io.lsq.forward.dataInvalid
   dontTouch(s2_mdpPredictHit)
   when(s2_fire) {
-    assert(!s2_smbConsume || (!io.lsq.forward.smbVerifyReady || io.lsq.forward.smbVerifyPass),
-      "SMB consume requires either late verify pending or a passing verify result")
+    assert(!s2_smbConsume || (io.lsq.forward.smbVerifyReady && io.lsq.forward.smbVerifyPass),
+      "SMB consume requires a passing verify result")
     assert(!s2_smbConsume || s2_smbOpportunity,
       "SMB consume requires a candidate opportunity in the same cycle")
     assert(!s2_smbConsume || io.lsq.stld_nuke_query.req.valid,
@@ -1612,6 +1628,12 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   XSPerfAccumulate("loadU_smb_predicted", io.mdpUpdate.valid && io.mdpUpdate.bits.smbPredicted)
   XSPerfAccumulate("loadU_smb_opportunity", io.mdpUpdate.valid && io.mdpUpdate.bits.foundBypassOpportunity)
   XSPerfAccumulate("loadU_smb_can_bypass", io.mdpUpdate.valid && io.mdpUpdate.bits.canBypass)
+  XSPerfAccumulate("loadU_smb_blocked_verify_pending",
+    s2_fire && s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.smbEnable &&
+      io.lsq.forward.smbCandidateValid && !io.lsq.forward.smbVerifyReady)
+  XSPerfAccumulate("loadU_smb_blocked_verify_fail",
+    s2_fire && s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.smbEnable &&
+      io.lsq.forward.smbCandidateValid && io.lsq.forward.smbVerifyReady && !io.lsq.forward.smbVerifyPass)
 
   val s3_revoke = s3_exception || io.lsq.ldin.bits.rep_info.need_rep || s3_mis_align || (s3_frm_mabuf && io.misalign_ldout.bits.rep_info.need_rep)
   io.lsq.ldld_nuke_query.revoke := s3_revoke
