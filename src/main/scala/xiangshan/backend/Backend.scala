@@ -46,7 +46,7 @@ import xiangshan.backend.rob.{RobCoreTopDownIO, RobDebugRollingIO, RobLsqIO, Rob
 import xiangshan.backend.trace.TraceCoreInterface
 import xiangshan.backend.vector.{Exu, VecIssueQueue, VecRegionImp, VecRegionModule}
 import xiangshan.frontend.ftq.FtqPtr
-import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
+import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr, StoreQueueDataWrite}
 
 
 class Backend(val params: BackendParams)(implicit p: Parameters) extends LazyModule
@@ -454,12 +454,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
       sink.pdest := source.pdest
       sink.data := source.toV0Rf.map(_.bits).getOrElse(0.U)
   }
-  vecRegion.in.fromMem.vstdWb.flatten zip io.mem.vecStdWriteback.flatten foreach {
-    case (sink: ValidIO[Exu.ToRob], source: DecoupledIO[NewExuOutput]) =>
-      sink.valid := source.valid
-      sink.bits.fromOldExuOutput(source.bits)
-      source.ready := true.B
-  }
+
   vecRegion.in.fromMem.vldS3WakeUp := io.mem.vldS3WakeUp
 
   vecRegion.in.diff.foreach(_.diffVlRat := ctrlBlock.io.diff_vl_rat.get)
@@ -555,13 +550,13 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
 //    connectExuInput(sink, source)
 //  }
   require(
-    io.mem.vstdIssue.flatten.size == vecRegion.out.toMem.ex0.flatten.size,
-    s"sizes are not equal, io.mem.vstdIssue.flatten.size = ${io.mem.vstdIssue.flatten.size}, " +
-      s"vecRegion.out.toMem.ex0.flatten.size = ${vecRegion.out.toMem.ex0.flatten.size}",
+    io.mem.vstdStoreData.flatten.size == vecRegion.out.toMem.vstd.flatten.size,
+    s"sizes are not equal, io.mem.vstdStoreData.flatten.size = ${io.mem.vstdStoreData.flatten.size}, " +
+      s"vecRegion.out.toMem.vstd.flatten.size = ${vecRegion.out.toMem.vstd.flatten.size}",
   )
-  io.mem.vstdIssue.flatten.zip(vecRegion.out.toMem.ex0.flatten).foreach { case (sink: DecoupledIO[ExuInput], source: ValidIO[Exu.InUop]) =>
-    sink.valid := source.valid
-    sink.bits := source.bits.toOldExuInput
+  io.mem.vstdStoreData.flatten.zip(vecRegion.out.toMem.vstd.flatten).foreach {
+    case (sink: ValidIO[StoreQueueDataWrite], source: ValidIO[StoreQueueDataWrite]) =>
+      sink := source
   }
 
   io.mem.tlbCsr := csrio.tlb
@@ -732,14 +727,6 @@ class BackendMemIO(implicit p: Parameters, params: BackendParams) extends XSBund
       Seq(VecData(), V0Data()),
     )
   )
-  val vecStdWriteback: MixedVec[MixedVec[DecoupledIO[NewExuOutput]]] = Flipped(
-    params.genNewExuOutputBundle(
-      DecoupledIO(_),
-      exu => exu.hasVStdFu,
-      Seq(),
-    )
-  )
-
   val stIn = Input(Vec(params.StaExuCnt, ValidIO(new StoreUnitToLFST)))
 
   val memoryViolation = Flipped(ValidIO(new Redirect))
@@ -777,7 +764,8 @@ class BackendMemIO(implicit p: Parameters, params: BackendParams) extends XSBund
   val wfi = new WfiReqBundle
 
   val intIssue: MixedVec[MixedVec[DecoupledIO[ExuInput]]] = intSchdParams.genExuInputBundle(DecoupledIO(_), _.hasMemFu)
-  val vstdIssue: MixedVec[MixedVec[DecoupledIO[ExuInput]]] = vecSchdParams.genExuInputBundle(DecoupledIO(_), _.hasVStdFu)
+  val vstdStoreData: MixedVec[MixedVec[ValidIO[StoreQueueDataWrite]]] =
+    backendParams.getVecRegionParam.genExuBundle(_.hasVStd, ValidIO(new StoreQueueDataWrite))
 
   // store event difftest information
   val storeDebugInfo = Vec(EnsbufferWidth, new Bundle {
