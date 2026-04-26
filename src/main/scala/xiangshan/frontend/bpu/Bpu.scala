@@ -94,7 +94,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   uras.io.enable        := true.B
   if (env.EnableConstantin && !env.FPGAPlatform) {
     ubtb.io.enable   := Mux(constCtrl(0), constCtrl(1), ctrl.ubtbEnable)
-    abtb.io.enable   := Mux(constCtrl(0), constCtrl(2), ctrl.abtbEnable)
+    abtb.io.enable   := false.B // Mux(constCtrl(0), constCtrl(2), ctrl.abtbEnable)
     mbtb.io.enable   := Mux(constCtrl(0), constCtrl(3), ctrl.mbtbEnable)
     tage.io.enable   := Mux(constCtrl(0), constCtrl(4), ctrl.tageEnable)
     sc.io.enable     := Mux(constCtrl(0), constCtrl(5), ctrl.scEnable)
@@ -103,7 +103,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     // utage.io.enable  := Mux(constCtrl(0), constCtrl(8), ctrl.utageEnable)
   } else {
     ubtb.io.enable   := ctrl.ubtbEnable
-    abtb.io.enable   := ctrl.abtbEnable
+    abtb.io.enable   := false.B // ctrl.abtbEnable
     mbtb.io.enable   := ctrl.mbtbEnable
     tage.io.enable   := ctrl.tageEnable
     sc.io.enable     := ctrl.scEnable
