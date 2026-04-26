@@ -1,8 +1,151 @@
 # MemBlock Python Verification Environment CHANGELOG
 
-## 2026-04-24
+## 2026-04-26
 
-### 1. 把 elastic issue 收敛回纯 `valid/ready` 握手语义
+### 5. 修正 4KB MMU 回归中的 fault re-hit 与 Svpbmt translated 期望
+
+本条目记录一次围绕 Sv39 4KB 页表切换后的定向纠偏。此前 fault matrix / pipeline probe 里的 `MmuFaultingScalarLoadSequence` 会在 prime 与正式访问之间无条件重写同一 fault leaf 并再次 `sfence`，把本应保留的 TLB hit 背景主动清掉；同时 uncache/Svpbmt 用例仍按旧的“大页内偏移拼 PA”心智预置 translated 地址，导致 `PBMT=NC/MMIO` load 实际访问的是 4KB leaf 基址，而 scoreboard 和预载内存却落在错误的旧地址上。本轮把 fault sequence 的 mapping/sfence 更新收窄到“PTE 模式真的变化”时才执行，并把 bare 模式下的 Svpbmt 重放与 4KB translated PA 期望重新对齐。
+
+#### 变更摘要
+
+- `src/test/python/MemBlock/sequences/mmu_sequences.py`
+  - `MmuFaultingScalarLoadSequence` 改为先安装初始 fault mapping，只在 prime/main 的 PTE 模式实际切换时才重写 leaf 并 `sfence`
+  - 保留 PMP 切换能力，但不再无条件冲掉同 mapping 的 TLB re-hit 背景
+- `src/test/python/MemBlock/MemBlock_env.py`
+  - `disable_translation()` 进入 bare 模式时不再在 `idle_inputs()` 后重放激活态 Svpbmt 输入
+- `src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py`
+  - translated PA helper 切回 4KB leaf 语义，只保留页内低 12 位偏移
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py -k 'scalar_word_load_tlb_error_tlb_hit_smoke or scalar_mixed_size_fault_matrix'`
+  - 结果：`2 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py -k scalar_aligned_load_fault_matrix_with_pipeline_checks`
+  - 结果：`1 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py -k 'idle_inputs_preserve_svpbmt_state or pbmt_ncio_load_smoke or pbmt_mmio_load_smoke'`
+  - 结果：`2 passed, 1 xfailed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py::test_api_MemBlock_scalar_mixed_size_fault_matrix src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py::test_api_MemBlock_scalar_word_load_tlb_error_tlb_hit_smoke src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py::test_api_MemBlock_scalar_aligned_load_fault_matrix_with_pipeline_checks src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py::test_api_MemBlock_env_mmu_idle_inputs_preserve_svpbmt_state src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py::test_api_MemBlock_sv39_pbmt_ncio_load_smoke src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py::test_api_MemBlock_sv39_pbmt_mmio_load_smoke`
+  - 结果：`5 passed, 1 xfailed`
+
+### 4. 修通 two-stage success path，并纠正 H fence helper 的输入语义
+
+本条目记录一轮围绕 H extension / two-stage MMU 的收口。此前 `test_api_MemBlock_mmu_h_two_stage_sv39_basic_load_smoke` 会在 VS non-leaf PTE 阶段提前落入 guest-fault 族，`hfence.vvma/gvma` smoke 也因为 Python helper 对 `rs1/rs2/hv/hg` 的语义翻译不对而无法稳定复现 flush 行为。本轮同时修正了 G-stage PTE 编码、`LLPTW/L2TLB` 的 VS non-leaf success-path 处理，以及 H fence facade 的 bundle 编码语义，最终把基础 two-stage load、rehit、all-addr hfence.vvma 和 all-addr hfence.gvma 全部转正。
+
+#### 变更摘要
+
+- `src/main/scala/xiangshan/cache/mmu/PageTableWalker.scala`
+  - 修正 LLPTW 对 all-stage VS non-leaf PTE 的处理，不再把合法继续 walk 的场景提前并入 fault
+  - 修正 last-HPTW success path 与地址导出逻辑，避免错误消费无关 `vpn`
+- `src/main/scala/xiangshan/cache/mmu/L2TLB.scala`
+  - 修正 all-stage VS non-leaf 在 merge response 时的 `pf/level` 编码
+  - 保留“继续 VS walk”所需的非叶子语义，而不是把它折叠成 fault-like stage1 response
+- `src/test/python/MemBlock/MemBlock_env.py`
+  - 保留并确认 G-stage leaf PTE 的 `U=1` fix
+  - 修正 `pulse_sfence()` / `pulse_hfence_vvma()` / `pulse_hfence_gvma()` 的 `rs1/rs2` 语义翻译
+  - 修正 `hfence.gvma` 只驱动 `hg=1`
+- `src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py`
+  - 更新 H fence helper 的低层 bundle 期望值
+- `src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py`
+  - 去掉 `basic_load` / `rehit` / `hfence.vvma` / `hfence.gvma` 上已经过时的 `xfail`
+- `src/test/python/MemBlock/docs/mmu_env_design_and_usage.md` / `src/test/python/MemBlock/docs/mmu_h_extension_cases.md`
+  - 同步更新 H fence facade 语义、two-stage success-path 已转正的状态，以及当前唯一剩余 `xfail` 的口径
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_debug_two_stage_basic_load_fault_capture.py -s`
+  - 结果：`1 passed`
+  - 关键现象：已稳定观测到正常 writeback，`debug_paddr=0xa0502008`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py -k 'hfence_helpers' -s`
+  - 结果：`1 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py -s`
+  - 结果：`7 passed, 1 xfailed`
+  - 剩余 `xfail`：G-stage guest fault 下 `gpaddr` 尚未稳定对齐 stage-1 GPA
+
+### 1. 新增 MemBlock AI-UT 验证环境设计文档集
+
+本条目记录一次项目级文档交付。本轮在仓库 `docs/AI-UT/` 下新增分章节 MemBlock 验证环境设计文档，用于系统说明当前 Python AI-UT 环境的构成、测试基础设施、正确性对比机制、测试用例组织方式、已覆盖内容和后续缺口。
+
+#### 变更摘要
+
+- `docs/AI-UT/00_index.md`
+  - 新增文档集入口、阅读路径、术语表和总体架构说明。
+- `docs/AI-UT/01_environment_architecture.md`
+  - 梳理真实 DUT fixture、`MemBlockEnv`、agents、monitors、model、sequence 和 coverage/reporting 的整体架构。
+- `docs/AI-UT/02_test_infrastructure.md`
+  - 说明 backend/vector/MMU facade、transaction/plan、agent、monitor、sequence、WebUI 和 coverage 基础设施。
+- `docs/AI-UT/03_correctness_and_scoreboard.md`
+  - 说明 load commit-boundary compare、store deferred visibility、final drain compare、MMU/vector/ROB 正确性边界。
+- `docs/AI-UT/04_testcase_organization.md`
+  - 说明 pytest 用例、sequence、plan、request API、xfail 与各类场景的组织方式。
+- `docs/AI-UT/05_current_coverage_status.md`
+  - 汇总当前环境、模型、scalar、replay、MMU、uncache、vector、ROB 和 coverage 报告状态。
+- `docs/AI-UT/06_gaps_and_next_steps.md`
+  - 汇总 store misalign、backpressure、RAW/RAR、ROB、MMU、vector、uncache 和报告/协作缺口。
+
+#### 验证情况
+
+- 文档为纯 Markdown 交付，不修改验证代码。
+- `docs/AI-UT/*.md` 总计 7 个章节文件、约 59575 个字符，满足不少于 30000 字的交付要求。
+- `docs/AI-UT/*.md` 共包含 31 个 Mermaid 图块，所有 Markdown code fence 均为偶数闭合。
+- 已用 `rg --no-ignore` 检查 `MemBlockEnv`、`BackendFacade`、`MemoryModel`、`Scoreboard`、`VectorMemoryModel`、`RobAgent`、`coverage_summary`、`coverage_todo` 等关键引用均存在。
+
+### 3. 记录 `two_stage_sv39_basic_load_smoke` 的 `EX_LGPF(21)` 根因
+
+本条目记录一轮围绕 `test_api_MemBlock_mmu_h_two_stage_sv39_basic_load_smoke` 的失效分析。此前文档和 testcase 只把该组 case 记录为“two-stage success path 未稳定正常写回”；本轮通过 `--runxfail` 复现、fault 抓取和 RTL 代码比对，进一步确认当前 real DUT 的真实失败模式并不是单纯 timeout，而是在 two-stage walk 的 VS non-leaf PTE 阶段提前收口为 `loadGuestPageFault(21)`，最终才表现成 success path 没有正常 writeback。
+
+#### 变更摘要
+
+- `docs/mmu_h_extension_cases.md`
+  - 补充 `two_stage_sv39_basic_load_smoke` 的实测现象
+  - 记录 `vaddr=0x40102008`、`debug_paddr=0x88400008` 与 `EX_LGPF(21)` 的对应关系
+  - 增加基于 `PageTableWalker.scala` / `L2TLB.scala` / `TLB.scala` 的 RTL 根因分析
+- `tests/test_MemBlock_mmu_h_extension.py`
+  - 将相关 success-path / hfence case 的 `xfail` 原因文案更新为“VS non-leaf PTE 被过早收口为 fault”，而不再只写泛化的 writeback timeout
+
+#### 验证情况
+
+- `python3 -m pytest -q -s --runxfail src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py -k 'two_stage_sv39_basic_load_smoke'`
+  - 结果：`1 failed`
+  - 直接失败点：等待正常 load writeback 超时
+- 同配置 fault 抓取
+  - 结果：稳定观测到 `exception_bits[21] = 1`
+  - 辅助现象：`debug_paddr = 0x88400008`，指向 VS root PTE 地址
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py -k 'two_stage_sv39_basic_load_smoke'`
+  - 结果：`1 xfailed, 7 deselected`
+
+### 1. 补齐 MemBlock MMU env 的 H extension 最小公开契约
+
+本条目记录一轮围绕 MemBlock Python MMU env 的 H extension 收口。此前 RTL 侧已经导出 `vsatp_*`、`hgatp_*`、`priv_virt`、`gpaddr`，而 `PageTableWalker` / `TLBStorage` / `PageTableCache` 也已经消费这些输入；但 Python env/facade 仍停留在单阶段 `enable_sv39() + pulse_sfence()` 语义，无法稳定组织 VS-only / two-stage translation、H fence、guest fault 与两阶段页表安装。本轮把这些能力收口到 `env.mmu`、`mmu_sequences.py` 和专题 testcase 中，同时把当前 real DUT 的两条已知限制正式文档化：two-stage success path 尚未稳定正常写回，以及 G-stage guest fault 的 `gpaddr` 尚未稳定对齐 stage-1 GPA。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - `MmuFacade` 升级为统一 active-mode 模型，新增 `enable_vs_sv39()` / `enable_two_stage_sv39()`
+  - 新增 `pulse_hfence_vvma()` / `pulse_hfence_gvma()`
+  - 新增 `install_vs_sv39_mapping()` / `install_g_sv39_mapping()`
+  - 新增 `wait_load_fault_observed()` / `sample_mmu_fault_state()`
+- `sequences/mmu_sequences.py` / `sequences/__init__.py`
+  - 新增 `TwoStageSv39AddressSpaceInstallSequence`
+  - 新增 `MmuVsStageLoadSequence` / `MmuTwoStageLoadSequence` / `MmuTwoStageFenceSequence` / `MmuTwoStageFaultSequence`
+  - 新增 VS-stage / G-stage 地址解析结果与两阶段 install result 数据结构
+- `tests/test_MemBlock_env_mmu_smoke.py`
+  - 新增 VS-only state 保活、two-stage reset 后重放、H fence 驱动位、G-stage install/preload API smoke
+- `tests/test_MemBlock_mmu_h_extension.py`
+  - 新增 VS-only load、two-stage guest fault、two-stage PMP access fault 专题 case
+  - 对当前 real DUT 尚未稳定正常写回的 two-stage success-path/hfence case 做精确 `xfail`
+- `docs/mmu_env_design_and_usage.md` / `docs/mmu_env_todo.md` / `docs/coverage_todo.md`
+  - 同步更新 H extension 公开契约、TODO 优先级和 TLB/PTW 两阶段覆盖补强方向
+- `docs/mmu_h_extension_cases.md`
+  - 新增 H extension 专题文档，记录当前 testcase 口径与已知 DUT 限制
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py -k 'enable_vs_sv39 or two_stage_reapply_after_reset or hfence_helpers or install_g_sv39_mapping_and_two_stage_preload'`
+  - 结果：`4 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py`
+  - 结果：`3 passed, 5 xfailed`
+
+### 2. 把 elastic issue 收敛回纯 `valid/ready` 握手语义
 
 本条目记录一次对 `IssueAgent` elastic 路径的语义回退。结合最近对 saturation 日志的复盘，当前验证环境里真正需要由 `IssueAgent` 保证的职责只有“保持请求直到 `valid && ready` 成功握手”；是否被后续 pipe 观察到、何时 writeback，不应再由 issue 层追加一段“确认/重试”状态机代劳。最终实现删除了 elastic 模式下的 `awaiting_confirm` / `retry` 逻辑，恢复为 per-lane 纯握手语义，避免 issue 层与 monitor/scoreboard 的职责继续缠绕。
 
@@ -60,9 +203,75 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'cbo_zero_flush_zeroes_entire_cacheline'`
   - 结果：`1 xfailed, 13 deselected`（`DUTBUG-cbo-zero-missing-wline-drain`）
 
+## 2026-04-23
+
+### 1. 补齐 `dtlb_fill_and_replacement` 的专题说明文档
+
+本条目记录一轮纯文档收口：此前 `dtlb_fill_and_replacement` testcase 与 `MmuDtlbReplacementSequence` 已经落地，但仓库里还缺少一份专门解释该用例目标、地址布局、断言口径和“为什么采用宽扫 + 回探而不是固定 victim”的说明文档。本轮新增单独专题文档，并把它接入现有 MMU 使用说明与 sequence 指南，避免后续维护者只能反向读测试代码猜设计意图。
+
+#### 变更摘要
+
+- `docs/dtlb_fill_and_replacement_cases.md`
+  - 新增 `dtlb_fill_and_replacement` 专题说明
+  - 详细记录场景目标、四阶段执行流程、`miss_observed` 判定口径、当前边界和扩展方向
+- `docs/mmu_env_design_and_usage.md`
+  - 增加新文档入口，并补入相关文件链接
+- `docs/test_sequence_and_extension_guide.md`
+  - 在 MMU 相关参考文档列表中加入新文档
+
+#### 验证情况
+
+- 文档改动，未单独执行额外回归
+
 ## 2026-04-22
 
-### 1. 收紧 elastic issue 的“候选发射/延迟确认”语义，并补足 saturation compare 预算
+### 1. 新增 Sv39 4KB DTLB 容量/替换定向回归
+
+本条目记录一条新的 MMU/TLB directed case：在真实 DUT 下构造跨大范围虚拟地址空间的 4KB translated load，先验证小工作集的 re-hit，再持续扫入更多不同页把 load-side DTLB 填满，并通过回探旧工作集、捕获第一个重新出现 miss/refill 的旧页来证明替换已经发生。实现上没有把 victim-way 这类 DUT 私有细节直接散落到 testcase，而是新增专用 sequence，把每次访问的 PTW trace 增量、可选 `s1_isTlbFirstMiss` / `io_l2_tlb_req_*` 摘要和写回结果统一收口。
+
+#### 变更摘要
+
+- `sequences/mmu_sequences.py`
+  - 新增 `MmuDtlbReplacementSequence`
+  - 新增 `MmuDtlbPageSpec` / `MmuDtlbProbeEvent` / `MmuDtlbAccessResult` / `MmuDtlbReplacementSequenceResult`
+  - sequence 内部统一组织 `prime -> rehit -> overflow -> reprobe-old-pages` 四阶段 translated load，并返回结构化 TLB/PTW 观测结果
+- `sequences/__init__.py`
+  - 导出新的 DTLB capacity/replacement sequence 与结果类型
+- `tests/test_MemBlock_env_mmu_smoke.py`
+  - 新增跨大范围 Sv39 4KB DTLB 填满与替换 smoke
+- `docs/mmu_env_design_and_usage.md` / `docs/coverage_todo.md`
+  - 同步记录新的可复用 MMU sequence 与当前 TLB/PTW 覆盖推进状态
+
+#### 验证情况
+
+- 待执行 `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py -k dtlb_fill_and_replacement`
+
+### 2. 把 MemBlock MMU 地址空间接口切到 Sv39 4KB 页表
+
+本条目记录一次围绕 `env.mmu` 和 MMU reusable sequence 的接口收口。此前 MemBlock Python env 虽然已经能稳定驱动 `enable_sv39()`、PTW responder 和 PMP helper，但 page-table helper 仍停留在 `install_sv39_gigapage_mapping()` 和 `Sv39GigapageMapping` 这条单级 root-leaf 路径上，无法真实建模 Sv39 的 4KB 页表。本轮把主接口切到显式的 4KB 建表模型：env facade 负责组装 non-leaf/leaf PTE，并要求调用方显式给出中间页表页地址池；`MmuSv39AddressSpaceInstallSequence` 与相关 smoke/fault/replay testcase 统一迁移到新的 `install_sv39_mapping(..., page_size="4k", page_table_page_addrs=...)` 入口。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - 新增 `sv39_nonleaf_pte()` / `sv39_leaf_pte()` / `install_sv39_mapping()` / `resolve_sv39_pa()`
+  - 4KB helper 改为按 `vpn2/vpn1/vpn0` 安装 non-leaf + 4KB leaf，并显式消费 `page_table_page_addrs`
+- `sequences/mmu_sequences.py`
+  - `Sv39GigapageMapping` 升级为 `Sv39Mapping`
+  - `MmuSv39AddressSpaceConfig` 新增 `page_table_page_addrs`
+  - address space install / translated preload / fault helper 全部改到 4KB mapping 语义
+- `tests/test_MemBlock_env_mmu_smoke.py`
+  - 基础 MMU smoke 切到真实 4KB 页表
+  - 新增 4KB 页表写入、页表页池不足、translated preload 的直接回归
+- `tests/test_MemBlock_mmu_fault.py` / `tests/test_MemBlock_replay.py` / `tests/test_MemBlock_scalar_load_pipeline_probe.py` / `tests/test_MemBlock_uncache_semantics.py`
+  - MMU 相关调用点统一迁移到新的 4KB 接口
+- `docs/mmu_env_design_and_usage.md` / `docs/test_sequence_and_extension_guide.md` / `docs/coverage_todo.md`
+  - 同步更新当前公开 MMU 接口与 4KB-only 使用口径
+
+#### 验证情况
+
+- 待执行针对 `test_MemBlock_env_mmu_smoke.py`、`test_MemBlock_mmu_fault.py`、`test_MemBlock_replay.py` 的定向回归
+
+### 3. 收紧 elastic issue 的“候选发射/延迟确认”语义，并补足 saturation compare 预算
 
 本条目记录 `IssueCyclePlan(elastic)` 的第二轮收口。第一轮修复已经把“全批次 barrier”拆成了 per-lane backpressure，但真实 DUT 调试显示：在当前 picker/xcomm 语义下，`intIssue.ready` 更接近“允许候选发射”，并不等价于“本拍已经能立刻从白盒 debug 看到这条 load”；如果测试侧在看到 `ready=1` 后马上把 lane 判定为已完成握手，仍会出现请求丢失；如果又因为 debug 延迟而立刻重发，则会制造重复 issue。最终实现改成两阶段语义：`ready` 先把 lane 送入 awaiting-confirm，暂停重发；后续拍再用 `debugLsInfo` 里的 ROB 可见性做确认，超时才回到 pending 重新 drive。同时，`ScalarLoadSaturationSequence` 把 drain 预算提升到 replay 场景同等级，避免满载回放下 compare 预算过短。
 
@@ -87,7 +296,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_random_load.py -k 'three_random_mem_loads_same_cycle_via_sequence or three_random_mem_loads_same_cycle_via_plan'`
   - 结果：`2 passed, 4 deselected`
 
-### 2. 给 `IssueCyclePlan` 引入 strict/elastic 握手模式，并打通饱和 load 的 ready 反压场景
+### 4. 给 `IssueCyclePlan` 引入 strict/elastic 握手模式，并打通饱和 load 的 ready 反压场景
 
 本条目记录一次围绕 `intIssue.ready` 反压语义的主动控制面修复。此前 `IssueCyclePlan` 被实现成“计划内所有 lane 必须同时 ready，整批才能发射”，这会把真实 DUT 的 lane-local `valid/ready` 协议错误收紧成全批次 barrier，也正是 `back_to_back_cacheable_load_saturation` 在 `completed_load_count` 卡不满 24 的直接原因。本轮把 `IssueCyclePlan` 扩展为双模式：默认 `strict` 继续表达“必须同拍一起 fire”的 directed 场景；新增 `elastic` 明确表达“同一 issue 批次、允许在 per-lane ready 反压下跨拍完成握手”。`ScalarLoadSaturationSequence` 切到 `elastic` 后，目标用例恢复为正常通过。
 
@@ -115,7 +324,7 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
   - 结果：通过
 
-### 3. 落地 `MemoryModel` capture/drive phase split，并把单测切到显式相位语义
+### 5. 落地 `MemoryModel` capture/drive phase split，并把单测切到显式相位语义
 
 本条目记录 `MemoryModel` 针对 xcomm/picker 时序语义缺口的首轮代码落地。此前 `MemoryModel.on_memory_edge()` 会在同一次 `StepRis` 回调中同时做请求采样与 transport drive，默认把 `StepRis` 当成 pre-step hook 使用；沿着 commit `f06e7a10c87ea47c0cfd399ce6e46556a87ef092` 复盘后可以确认，这种混用正是 dcache D 通道丢拍类问题容易被掩盖的根源之一。本轮先把 `capture-on-rise` 与 `before-step drive` 两个 phase 从代码上拆开，并把相应单测迁移到显式时序模型。
 
@@ -142,7 +351,7 @@
 - `python3 -m pytest -q --runxfail src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline.py -k 'back_to_back_cacheable_load_saturation'`
   - 结果：仍失败，表现为 `completed_load_count` 未达到 24；结合当前调试结论，可继续归因到真实 DUT 的 saturation 剩余问题，而非本次 phase split 引入的新回归
 
-### 4. 收口 dcache D 通道问题暴露出的 xcomm 时序语义，并补充 `MemoryModel` 重构方案
+### 6. 收口 dcache D 通道问题暴露出的 xcomm 时序语义，并补充 `MemoryModel` 重构方案
 
 本条目记录一次围绕 back-to-back cacheable load saturation 调试的文档收口。沿着 commit `f06e7a10c87ea47c0cfd399ce6e46556a87ef092` 可以确认，当前问题的关键不在于 `TransportResponder` 的 beat 队列算法本身，而在于此前文档没有明确写清楚 xcomm/picker 的 phase 语义：`StepRis` 更接近 capture-on-rise，而不等价于 pre-step drive hook。此前 `MemoryModel.on_memory_edge()` 同时承担请求采样与返回驱动，容易把 capture 与 drive 两个 phase 混在一起。本轮把这层缺失语义补进设计文档，并给出更稳的 `MemoryModel` 重构方向。
 
