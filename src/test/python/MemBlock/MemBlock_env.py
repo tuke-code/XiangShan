@@ -1253,9 +1253,9 @@ class MmuFacade:
     def disable_translation(self) -> None:
         self._active_translation = _ActiveTranslationState(
             mode="bare",
-            pbmte_enabled=self._svpbmt_enabled,
-            pmm_menvcfg=self._pmm_menvcfg,
-            pmm_henvcfg=self._pmm_henvcfg,
+            pbmte_enabled=False,
+            pmm_menvcfg=0,
+            pmm_henvcfg=0,
         )
         self._drive_translation_disabled()
 

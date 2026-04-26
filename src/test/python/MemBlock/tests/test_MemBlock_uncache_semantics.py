@@ -51,8 +51,7 @@ def _reset_env_state(env) -> SequenceState:
 
 
 def _translated_pa(va: int, pa_base: int) -> int:
-    page_offset = (int(va) & ((1 << 30) - 1)) & ~0xFFF
-    return int(pa_base) | page_offset
+    return int(pa_base) | (int(va) & 0xFFF)
 
 
 CACHEABLE_PA = _translated_pa(CACHEABLE_VA, CACHEABLE_PA_BASE)

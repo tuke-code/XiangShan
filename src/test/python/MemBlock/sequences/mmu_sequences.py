@@ -1304,16 +1304,18 @@ class MmuFaultingScalarLoadSequence:
         pmp_mode: str,
         expected_data: int | None,
         required_exception_bits: tuple[int, ...],
+        refresh_fault_mapping: bool,
     ) -> tuple[LoadTxn, dict]:
-        _write_sv39_fault_mapping(
-            env,
-            root_pt_addr=self.root_pt_addr,
-            va=self.va,
-            pa_base=self.pa_base,
-            pte_mode=pte_mode,
-            page_table_page_addrs=self.page_table_page_addrs,
-        )
-        env.mmu.pulse_sfence()
+        if refresh_fault_mapping:
+            _write_sv39_fault_mapping(
+                env,
+                root_pt_addr=self.root_pt_addr,
+                va=self.va,
+                pa_base=self.pa_base,
+                pte_mode=pte_mode,
+                page_table_page_addrs=self.page_table_page_addrs,
+            )
+            env.mmu.pulse_sfence()
         _configure_pmp_mode(env, pmp_mode)
 
         txn = LoadTxn(
@@ -1369,6 +1371,16 @@ class MmuFaultingScalarLoadSequence:
         prime_txn = None
         prime_writeback = None
         prime_trace = ()
+        initial_pte_mode = self.prime_pte_mode if self.prime_req_id is not None else self.main_pte_mode
+
+        _write_sv39_fault_mapping(
+            env,
+            root_pt_addr=self.root_pt_addr,
+            va=self.va,
+            pa_base=self.pa_base,
+            pte_mode=initial_pte_mode,
+            page_table_page_addrs=self.page_table_page_addrs,
+        )
 
         if self.prime_expected_data is not None:
             env.preload_u64(translated_pa, self.prime_expected_data)
@@ -1386,6 +1398,7 @@ class MmuFaultingScalarLoadSequence:
                     pmp_mode=self.prime_pmp_mode,
                     expected_data=self.prime_expected_data,
                     required_exception_bits=(),
+                    refresh_fault_mapping=False,
                 )
                 prime_trace = tuple(list(ptw.trace)[prime_trace_start:])
                 next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
@@ -1400,6 +1413,9 @@ class MmuFaultingScalarLoadSequence:
                 pmp_mode=self.main_pmp_mode,
                 expected_data=None,
                 required_exception_bits=self.required_main_exception_bits,
+                refresh_fault_mapping=(
+                    self.prime_req_id is not None and self.main_pte_mode != self.prime_pte_mode
+                ),
             )
             transport_stats_after_main = _snapshot_transport_stats(env)
             main_trace = tuple(list(ptw.trace)[main_trace_start:])
