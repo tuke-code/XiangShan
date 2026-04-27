@@ -250,8 +250,12 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
           flush := true.B
           confidence := 0.U(1.W)
         }.otherwise {
-          depth := base_depth
-          state := s_buffer
+          when (!at_base_depth) {
+            depth := Mux((depth >> 2) < base_depth, base_depth, depth >> 2)
+            state := s_buffer
+          }.otherwise {
+            depth := depth
+          }
         }
         prev_hit_pf := cur_hit_pf
         prev_late := cur_late
