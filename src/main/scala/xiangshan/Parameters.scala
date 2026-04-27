@@ -161,7 +161,7 @@ case class XSCoreParameters
   VecMemUnitStrideMaxFlowNum: Int = 2,
   VecMemLSQEnqIteratorNumberSeq: Seq[Int] = Seq(16, 16, 16, 16, 16, 16),
   StoreBufferSize: Int = 32,
-  StoreBufferThreshold: Int = 18,
+  StoreBufferThreshold: Int = 14,
   EnsbufferWidth: Int = 2,
   LoadDependencyWidth: Int = 2,
   // ============ VLSU ============
