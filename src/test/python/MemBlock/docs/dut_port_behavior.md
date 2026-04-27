@@ -62,6 +62,8 @@ flowchart LR
 | int writeback | `IntWritebackBundle` | DUT -> Test | 观测 load 写回结果 |
 | mem status | `MemStatusBundle` | DUT -> Test | 观测 dequeue、违例、sbuffer 空状态 |
 | lsq status | `LsqStatusBundle` | DUT -> Test | 观测 LQ/SQ 是否可接收、MMIO 判定 |
+| frontend bridge | `FrontendBridgeFacade` | Test <-> DUT | 驱动/观测 `frontendBridge` 三条 TL 穿桥路径 |
+| fetch_to_mem itlb | `FetchToMemFacade` | Test <-> DUT | 驱动 frontend ITLB request，并观测 MemBlock 返回的 TLB response |
 | store addr/data/mask | `Store*InputBundle` | DUT -> Test | 拼装 store 的地址、数据、mask |
 | SQ shadow | `StoreQueueShadowEntry` | DUT -> Test | 观测每个 store 槽位分配和提交状态 |
 | sbuffer write | `SbufferWriteBundle` | DUT -> Test | 观测 store drain |
@@ -137,6 +139,34 @@ flowchart LR
 - `flushSb` 用来驱动 store buffer 结束态收敛。
 - `sfence_valid` 作为同步配套脉冲，与 `flushSb` 同拍送出。
 - 默认所有 bits 置零，表示“全局且最保守”的 fence/flush 请求。
+
+### 4.4 frontendBridge 与 fetch_to_mem
+
+从 `MemBlock.scala` / `MemBlockTop.scala` 的当前连线关系看，frontend 相关端口在 Python env 中应分成两类，而不要混成“一个大前端接口”：
+
+1. `frontendBridge`
+   - `icache`
+   - `icachectrl`
+   - `instr_uncache`
+2. `fetch_to_mem`
+   - 当前只包含 `itlb`
+
+它们的职责边界不同：
+
+- `frontendBridge` 是三条前端 TileLink 通道的穿桥层。
+  - `*_in_*` 侧代表 frontend-facing 端口。
+  - `*_out_*` 侧代表 mem/L2-facing 端口。
+  - 当前 Python env 通过 `env.frontend_bridge` 暴露三条通路的最小 A/D 驱动与观测 helper，适合做 passthrough smoke，而不是完整 i-cache 功能建模。
+- `fetch_to_mem.itlb` 是 frontend 与 MemBlock/PTW 之间的 TLB/PTW 握手口。
+  - `req` 由 frontend 发起，MemBlock 返回 `ready`。
+  - `resp` 由 MemBlock 发起，frontend 返回 `ready`。
+  - 当前 Python env 通过 `env.fetch_to_mem` 暴露这组信号，适合验证“frontend ITLB 顶层请求口是否可稳定握手”，并在当前 build 下尽量观测后续 PTW/顶层 `resp`。
+
+因此，当前验证口径不是“MemBlock Python env 已经完整支持前端子系统”，而是：
+
+1. 可以对 `frontendBridge` 做最小 TL 往返 smoke；
+2. 可以对 `fetch_to_mem.itlb` 做 request/response/PTW 闭环 smoke；
+3. 仍不在 Python env 内部建模 frontend I-cache 本体、prefetch 行为和完整取指协议。
 
 ## 5. LSQ enqueue 端口行为
 

@@ -59,6 +59,7 @@ from agents.lsq_agent import LsqAgent
 from agents.vector_backend_facade import VectorBackendFacade
 from agents.vector_issue_agent import VectorIssueAgent
 from env_config import DEFAULT_ENV_CONFIG, EnvConfig
+from frontend_facade import FetchToMemFacade, FrontendBridgeFacade
 from memory_model import MemoryModel
 from model.rob_coverage import RobCoverageCollector
 from monitors.mem_status_monitor import MemStatusMonitor
@@ -2126,6 +2127,8 @@ class MemBlockEnv:
         self.vector_monitor = VectorMemMonitor(self, self.vector_writeback)
         self.backend.vector_monitor = self.vector_monitor
         self.mmu = MmuFacade(self)
+        self.frontend_bridge = FrontendBridgeFacade(self)
+        self.fetch_to_mem = FetchToMemFacade(self)
         self._after_step_callbacks = []
         self._last_rar_query_req_by_lane = {}
 
@@ -2175,6 +2178,8 @@ class MemBlockEnv:
             self.dut.io_ooo_to_mem_sfence_bits_hv.value = 0
             self.dut.io_ooo_to_mem_sfence_bits_hg.value = 0
         self.mmu.reapply_inputs()
+        self.frontend_bridge.drive_idle()
+        self.fetch_to_mem.drive_idle()
         self.memory.drive_idle()
         self.vector_monitor.drive_ready()
         self.commit_agent.drive()

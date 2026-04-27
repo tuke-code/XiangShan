@@ -113,6 +113,55 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py -k 'two_stage_sv39_basic_load_smoke'`
   - 结果：`1 xfailed, 7 deselected`
 
+### 1. 补齐 frontendBridge / fetch_to_mem / io_l2_tlb_req 的最小验证入口
+
+本条目记录一轮围绕 frontend/MMU 交界面的收口。此前 Python env 已能稳定覆盖 LSU 侧 PTW / DTLB / replay，但 `frontendBridge` 仍停留在“RTL 已导出、env 未绑定”的状态，`fetch_to_mem.itlb` 也没有单独的顶层测试入口；同时 `io_l2_tlb_req_*` 虽然已经进入 probe trace，却还缺少统一的 testcase 级摘要字段。本轮把这三部分一起补齐：一方面给 frontend bridge 和 frontend ITLB 提供最小 facade/smoke，另一方面把 `io_l2_tlb_req` 的首个有效摘要直接收口到 MMU sequence 结果里。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - 新增 `FrontendBridgeFacade`
+  - 新增 `FetchToMemFacade`
+  - 新增 frontend TL A/D 与 `fetch_to_mem.itlb` 的最小 bundle/helper
+  - `idle_inputs()` 现在会统一清空 frontend bridge 与 `fetch_to_mem` 驱动口
+- `sequences/mmu_sequences.py`
+  - `MmuDtlbAccessResult` 新增 `first_l2_tlb_req`
+  - `MmuDtlbReplacementSequence` 现在会保留首个有效 `io_l2_tlb_req_*` 摘要
+- `tests/test_MemBlock_frontend_bridge.py`
+  - 新增 `icache` / `instr_uncache` / `icachectrl` 三条 frontend bridge passthrough smoke
+- `tests/test_MemBlock_env_mmu_smoke.py`
+  - 新增 `fetch_to_mem.itlb` top-level request handshake smoke，并在当前 build 下尽量观测后续 PTW/顶层 response
+  - DTLB replacement case 现在会校验 `first_l2_tlb_req` 与 `l2_tlb_req_seen` 的一致性，并在端口导出时检查摘要字段形状
+- `docs/dut_port_behavior.md` / `docs/mmu_env_design_and_usage.md` / `docs/coverage_todo.md`
+  - 同步补齐 `frontendBridge`、`fetch_to_mem.itlb` 和 `io_l2_tlb_req` 的职责边界、调试入口与 coverage 计划
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_frontend_bridge.py src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py src/test/python/MemBlock/tests/test_MemBlock_rob_coverage.py`
+  - 结果：`18 passed`
+
+### 2. 把 frontend/fetch facade 从 `MemBlock_env.py` 拆到独立模块
+
+本条目记录一次纯结构整理。上一条新增的 frontend bridge / `fetch_to_mem.itlb` facade 先直接落在了 `MemBlock_env.py`，便于快速验证；但这些 helper 本质上属于独立的 env facade，不应继续堆在顶层 env 文件里。本轮把这批 class 挪到单独文件，保留 `MemBlockEnv` 里的挂接方式和公开接口不变，避免后续在 `MemBlock_env.py` 继续累积与主装配逻辑无关的辅助实现。
+
+#### 变更摘要
+
+- 新增 `frontend_facade.py`
+  - 承载 `FrontendBridgeFacade`
+  - 承载 `FetchToMemFacade`
+  - 承载相关最小 TL/ITLB bundle helper
+- `MemBlock_env.py`
+  - 删除上述 facade/bundle class 的内联定义
+  - 改为从 `frontend_facade.py` import 并在 `MemBlockEnv` 中挂接
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_frontend_bridge.py src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py -k 'frontend_bridge or fetch_to_mem_itlb_ptw_smoke or sv39_dtlb_fill_and_replacement'`
+  - 结果：`5 passed, 10 deselected`
+
+
+## 2026-04-24
+
 ### 1. 补齐 MemBlock MMU env 的 H extension 最小公开契约
 
 本条目记录一轮围绕 MemBlock Python MMU env 的 H extension 收口。此前 RTL 侧已经导出 `vsatp_*`、`hgatp_*`、`priv_virt`、`gpaddr`，而 `PageTableWalker` / `TLBStorage` / `PageTableCache` 也已经消费这些输入；但 Python env/facade 仍停留在单阶段 `enable_sv39() + pulse_sfence()` 语义，无法稳定组织 VS-only / two-stage translation、H fence、guest fault 与两阶段页表安装。本轮把这些能力收口到 `env.mmu`、`mmu_sequences.py` 和专题 testcase 中，同时把当前 real DUT 的两条已知限制正式文档化：two-stage success path 尚未稳定正常写回，以及 G-stage guest fault 的 `gpaddr` 尚未稳定对齐 stage-1 GPA。

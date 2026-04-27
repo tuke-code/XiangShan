@@ -261,6 +261,58 @@ def test_api_MemBlock_env_mmu_sv39_ptw_smoke(env):
     assert env._read_optional_dut_signal("io_dcacheError_ecc_error_valid") == 0
 
 
+def test_api_MemBlock_fetch_to_mem_itlb_ptw_smoke(env):
+    """frontend `fetch_to_mem.itlb` 顶层请求口应可稳定握手，并在当前 build 下尽量观测后续 PTW/response。"""
+
+    env.reset(cycles=1, settle_cycles=0)
+    translated_pa = _sv39_4k_mapping_pa_base(MMU_PA_BASE, MMU_VA)
+    install_result = env.mmu.install_sv39_mapping(
+        root_pt_addr=MMU_ROOT_PT,
+        va=MMU_VA,
+        pa_base=translated_pa,
+        page_table_page_addrs=MMU_PAGE_TABLE_PAGES,
+    )
+    env.preload_u64(
+        install_result["leaf_pte_addr"],
+        env.memory.read(install_result["leaf_pte_addr"], 8) | (1 << 3),
+    )
+    env.mmu.allow_all_smode_access()
+    responses = []
+
+    def _capture_itlb_response():
+        if env.fetch_to_mem.itlb_resp.read("valid", 0) == 0:
+            return
+        if env.fetch_to_mem.itlb_resp.read("ready", 0) == 0:
+            return
+        responses.append(env.fetch_to_mem.itlb_resp.snapshot())
+
+    env.add_after_step_callback(_capture_itlb_response)
+    try:
+        with env.mmu.ptw_responder() as ptw:
+            env.mmu.enable_sv39(root_pt_addr=MMU_ROOT_PT)
+            env.fetch_to_mem.set_resp_ready(1)
+            env.fetch_to_mem.drive_itlb_request(vpn=MMU_VA >> 12, s2xlate=0)
+            request = env.fetch_to_mem.wait_req_fire(max_cycles=64)
+            env.fetch_to_mem.clear_itlb_request()
+            env.advance_cycles(64)
+            response = responses[-1] if responses else None
+            ptw_events = tuple(ptw.trace)
+    finally:
+        env.fetch_to_mem.set_resp_ready(0)
+        env.remove_after_step_callback(_capture_itlb_response)
+
+    assert request["bits_vpn"] == (MMU_VA >> 12)
+    assert request["bits_s2xlate"] == 0
+    assert env.fetch_to_mem.itlb_resp.connected("valid")
+    if ptw_events:
+        assert sum(1 for event in ptw_events if event["event"] == "a_fire") >= 1
+        assert sum(1 for event in ptw_events if event["event"] == "d_fire") >= 1
+    if response is not None:
+        assert response["valid"] == 1
+        assert response["bits_s1_entry_v"] == 1
+        assert response["bits_s2xlate"] == 0
+
+
 def test_api_MemBlock_env_mmu_sv39_dtlb_fill_and_replacement(env):
     """跨大范围 Sv39 4KB 地址空间填满 DTLB，并证明容量溢出后旧项重新 miss/refill。"""
 
@@ -314,6 +366,21 @@ def test_api_MemBlock_env_mmu_sv39_dtlb_fill_and_replacement(env):
     assert all(not access.miss_observed for access in result.reprobe_accesses[:-1])
     assert result.reprobe_access == result.reprobe_accesses[-1]
     assert result.reprobe_access.miss_observed
+    combined_accesses = (*result.prime_accesses, *result.overflow_accesses, *result.reprobe_accesses)
+    assert all(access.l2_tlb_req_seen == (access.first_l2_tlb_req is not None) for access in combined_accesses)
+    l2_tlb_accesses = tuple(
+        access
+        for access in combined_accesses
+        if access.first_l2_tlb_req is not None
+    )
+    if l2_tlb_accesses:
+        first_l2_tlb_req = l2_tlb_accesses[0].first_l2_tlb_req
+        assert first_l2_tlb_req is not None
+        assert first_l2_tlb_req["req_valid"] == 1
+        if first_l2_tlb_req.get("req_memidx_is_ld") is not None:
+            assert first_l2_tlb_req["req_memidx_is_ld"] == 1
+        if first_l2_tlb_req.get("req_memidx_is_st") is not None:
+            assert first_l2_tlb_req["req_memidx_is_st"] == 0
 
 
 def test_api_MemBlock_env_mmu_install_sv39_mapping_writes_expected_4k_tables(env):

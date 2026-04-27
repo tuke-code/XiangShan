@@ -314,7 +314,7 @@ with env.mmu.ptw_responder():
 
 3. `MmuDtlbReplacementSequence`
    - 用于“跨大范围虚拟页填满 DTLB，并通过 overflow + reprobe 证明替换发生”的定向场景。
-   - 对外直接返回每次 translated load 的 PTW trace 增量与可选 TLB 调试摘要，testcase 不必自己散落 callback。
+   - 对外直接返回每次 translated load 的 PTW trace 增量、可选 TLB 调试摘要，以及首个有效 `io_l2_tlb_req_*` 摘要，testcase 不必自己散落 callback。
 
 4. H extension reusable sequence
    - `MmuVsStageLoadSequence`
@@ -348,6 +348,19 @@ with env.mmu.ptw_responder():
 - `ptw_responder.trace`
 - `env.sample_replay_state()`
 - `io_l2_tlb_req_*`
+- `env.fetch_to_mem`
+
+其中当前三类观测口径分别用于回答不同问题：
+
+1. `ptw_responder.trace`
+   - 证明 PTW TileLink A/D 是否真的发出和返回。
+2. `io_l2_tlb_req_*`
+   - 作为 load/store-side TLB miss/refill 的辅助证据。
+   - 当前已在 `MmuDtlbProbeEvent.l2_tlb_port` 中统一收口，`MmuDtlbAccessResult.first_l2_tlb_req` 进一步保留首个有效摘要。
+   - 它仍是“辅助判据”，不是唯一真源；`miss_observed` 仍按 `first_miss/l2_tlb_req/PTW trace` 的并集口径计算。
+3. `env.fetch_to_mem`
+   - 用于 frontend ITLB request/response 的顶层调试。
+   - 它与 `io_l2_tlb_req_*` 不是同一条链路：前者是 `fetch_to_mem.itlb`，后者是 LSU 对 `l2_tlb_req` 的 debug/probe 口。
 
 如果看到长时间 `TM` / TLB replay，通常优先怀疑：
 
@@ -384,6 +397,7 @@ with env.mmu.ptw_responder():
 5. 基于 4KB translated load 的 DTLB fill / re-hit / replacement 定向场景
 6. 基于新 MMU 环境的 `sq dataInvalid + matchInvalid + nuke` replay 场景
 7. H extension 下的 VS-only state/fault facade、two-stage guest fault 与 PMP access-fault directed case
+8. 基于 `env.fetch_to_mem` 的 frontend ITLB top-level request handshake smoke，以及可选的 PTW/顶层 response 观测
 
 当前仍保留两条明确限制：
 

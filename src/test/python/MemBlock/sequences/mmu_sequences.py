@@ -255,6 +255,7 @@ class MmuDtlbAccessResult:
     ptw_d_fire_count: int
     tlb_first_miss_seen: bool
     l2_tlb_req_seen: bool
+    first_l2_tlb_req: dict[str, int | None] | None
 
     @property
     def miss_observed(self) -> bool:
@@ -1036,6 +1037,14 @@ class MmuDtlbReplacementSequence:
         )
         ptw_trace = tuple(list(ptw.trace)[ptw_trace_start:])
         probe_events = tuple(probe_trace)
+        first_l2_tlb_req = next(
+            (
+                dict(event.l2_tlb_port)
+                for event in probe_events
+                if event.l2_tlb_port.get("req_valid") not in (None, 0)
+            ),
+            None,
+        )
 
         return (
             MmuDtlbAccessResult(
@@ -1050,6 +1059,7 @@ class MmuDtlbReplacementSequence:
                 ptw_d_fire_count=sum(1 for event in ptw_trace if event.get("event") == "d_fire"),
                 tlb_first_miss_seen=any(event.first_miss_events for event in probe_events),
                 l2_tlb_req_seen=any(event.l2_tlb_port.get("req_valid") not in (None, 0) for event in probe_events),
+                first_l2_tlb_req=first_l2_tlb_req,
             ),
             ptr_inc(lq_ptr, env.config.sequence.load_queue_size),
             completed_loads,
