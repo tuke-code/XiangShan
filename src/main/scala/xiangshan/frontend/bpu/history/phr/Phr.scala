@@ -84,7 +84,7 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   private val s0_phrValue    = getPhr(s0_phrPtr)                       // debug use it
   private val s0_phrRegValue = getPhr(RegEnable(s0_phrPtr, !s0_stall)) // debug use it
   private val s1_phrValue    = getPhr(s1_phrPtr)
-  s0_pathHist := s1_phrValue(MaxMicroTageHistWidth - 1, 0)
+  s0_pathHist := s1_phrValue(MaxMicroTageHistWidth - 1, 0).asBools
   private val phrValue = getPhr(phrPtr)
 
   private val s1_abtbOverrideData = VecInit.fill(NumAheadBtbPredictionEntries)(0.U.asTypeOf(new PhrUpdateData))

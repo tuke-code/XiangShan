@@ -494,13 +494,14 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   // phr.io.train.s1_valid      := s1_fire
   // phr.io.train.s1_prediction := s1_prediction
   // phr.io.train.s1_startPc    := s1_startPc
-  phr.io.s1Train.valid              := s1_fire
-  phr.io.s1Train.taken              := s1_prediction.taken
-  phr.io.s1Train.startPc            := s1_startPc
-  phr.io.s1Train.abtbValid          := s1_abtbValid
-  phr.io.s1Train.abtbFirstTakenBrOH := s1_abtbFirstTakenBrOH
-  phr.io.s1Train.ubtbPrediction     := s1_ubtbPrediction
-  phr.io.s1Train.abtbPrediction     := s1_abtbPrediction
+  phr.io.s1Train.valid                := s1_fire
+  phr.io.s1Train.taken                := s1_prediction.taken
+  phr.io.s1Train.startPc              := s1_startPc
+  phr.io.s1Train.abtbValid            := s1_abtbValid
+  phr.io.s1Train.abtbFirstTakenBrOH   := s1_abtbFirstTakenBrOH
+  phr.io.s1Train.ubtbPrediction.valid := ubtb.io.prediction.valid
+  phr.io.s1Train.ubtbPrediction.bits  := s1_ubtbPrediction
+  phr.io.s1Train.abtbPrediction       := abtb.io.prediction
 
   phr.io.commit.valid := io.fromFtq.train.fire
   phr.io.commit.bits  := train
