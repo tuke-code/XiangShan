@@ -82,6 +82,12 @@ class TransportResponder:
         self.dcache_b_response_count = 0
         self.dcache_d_response_count = 0
         self.last_dcache_a_request = None
+        self._request_ready_override = {
+            "outer_a": None,
+            "dcache_a": None,
+            "dcache_c": None,
+            "dcache_e": None,
+        }
 
         self.reset_runtime_state()
 
@@ -137,6 +143,7 @@ class TransportResponder:
         self._pending_d = deque()
         self._active_d = None
         self._inflight_grants = {}
+        self.clear_request_ready_overrides()
         self.drive_idle()
 
     def reset(self) -> None:
@@ -156,6 +163,15 @@ class TransportResponder:
         self.outer_d.drive_idle()
         self.dcache_b.drive_idle()
         self.dcache_d.drive_idle()
+
+    def set_request_ready_override(self, channel: str, ready: int | bool | None) -> None:
+        if channel not in self._request_ready_override:
+            raise ValueError(f"未知 request ready channel: {channel}")
+        self._request_ready_override[channel] = None if ready is None else int(bool(ready))
+
+    def clear_request_ready_overrides(self) -> None:
+        for channel in self._request_ready_override:
+            self._request_ready_override[channel] = None
 
     def enqueue_outer_response(
         self,
@@ -281,10 +297,18 @@ class TransportResponder:
         return self._delay_rng.randint(low, high)
 
     def _drive_request_readies(self) -> None:
-        self.outer_a.ready.value = 1
-        self.dcache_a.ready.value = 1
-        self.dcache_c.ready.value = 1
-        self.dcache_e.ready.value = 1
+        self.outer_a.ready.value = (
+            1 if self._request_ready_override["outer_a"] is None else self._request_ready_override["outer_a"]
+        )
+        self.dcache_a.ready.value = (
+            1 if self._request_ready_override["dcache_a"] is None else self._request_ready_override["dcache_a"]
+        )
+        self.dcache_c.ready.value = (
+            1 if self._request_ready_override["dcache_c"] is None else self._request_ready_override["dcache_c"]
+        )
+        self.dcache_e.ready.value = (
+            1 if self._request_ready_override["dcache_e"] is None else self._request_ready_override["dcache_e"]
+        )
 
     def _capture_outer_request(self) -> None:
         if not (self.outer_a.valid.value and self.outer_a.ready.value):

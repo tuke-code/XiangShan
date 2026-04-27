@@ -45,6 +45,9 @@
 4. `scalar_mixed_size_fault_matrix`
    - 对 `byte/half/word/doubleword` 逐个复用同一 fault 骨架
    - 目标是把 fault 行为扩展到不同 size/mask 组合，而不是只盯着 word load
+5. `scalar_mixed_size_permission_fault_tlb_miss_matrix`
+   - 对 `byte/half/word/doubleword` 逐个验证真实 `S-mode -> U-page(sum=0)` permission fault
+   - 目标是把“真实 PF 可构造”从单条 smoke 扩成可回归矩阵
 5. `scalar_load_pmp_deny_region_hit_allow_outside_smoke`
    - 在同一 Sv39/TLB hit 背景下，对比 deny region 内 fault 与 region 外继续成功
    - 目标是证明 PMP 不只是“全开/全关”，而是按地址区域裁剪权限
@@ -59,6 +62,7 @@
 1. fault 发生时不应退化成 `memoryViolation`
 2. 不应新增 outer request / dcache A/D 事务
 3. 不应拉起 `dcacheError`
+4. permission PF 只允许出现真实 `TM` 前置 replay，不应误退化成 `replay_lane` / `nc_out`
 
 因此这一层更像“fault + pipeline 纯度检查”，而不是重复写一遍 MMU smoke。
 
@@ -92,6 +96,14 @@
 
 这组断言比“最终抛异常了”更重要，因为它证明了 fault 不是第一次访问冷态下的偶然结果，而是已经进入 DTLB 命中后的重复行为。
 
+需要单独强调的是：**stage-1 permission fault 不属于这组 TLB hit 骨架**。当前 RTL 中这类 fault 不可 refill，因此 testcase 应把它组织成：
+
+1. 真实 TLB miss / PTW
+2. 允许 `replay_queue(TM)` 作为 miss 前置行为
+3. 最终收口到 `LOAD_PAGE_FAULT_BIT`
+
+如果把 permission PF 硬塞进“prime 一次后 main 不再 PTW”的 hit 骨架，得到的往往只是场景假设错误，而不是 DUT 功能缺陷。
+
 ### 5.2 异常位集合
 
 当前统一通过写回口上的 `exception_bits` 收口，而不是直接信任 testcase 本地推导。
@@ -103,7 +115,10 @@
    - 不强行区分更细的叶子 fault 类型
 2. PMP deny
    - 要求命中 `LOAD_ACCESS_FAULT_BIT`
-3. overlap
+3. permission fault
+   - 当前要求稳定命中 `LOAD_PAGE_FAULT_BIT`
+   - 并且必须发生在 miss/PTW 背景，而不是伪造 TLB hit
+4. overlap
    - 只限制在 translation error 集合内，不额外假设 RTL 会给出哪一个唯一优先级结果
 
 这样做的原因是：当前 env 对 translation fault 的稳定可见语义仍是“translation error 集合”，还没有把更细粒度 fault leaf 完整公开成 testcase 契约。

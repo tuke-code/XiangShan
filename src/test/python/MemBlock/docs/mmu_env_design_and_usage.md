@@ -61,6 +61,7 @@ flowchart LR
 当前 `env.mmu` 主要提供以下 public helper：
 
 - `enable_sv39(root_pt_addr=..., asid=..., settle_cycles=...)`
+- `configure_smode_access(sum=..., mxr=..., persistent=..., vsum=..., vmxr=...)`
 - `enable_vs_sv39(root_pt_addr=..., asid=..., settle_cycles=...)`
 - `enable_two_stage_sv39(vs_root_pt_addr=..., g_root_pt_addr=..., vs_asid=..., vmid=..., settle_cycles=...)`
 - `disable_translation()`
@@ -83,11 +84,12 @@ flowchart LR
 ### 4.1 由 `env.mmu` 负责的事情
 
 1. 驱动 `satp_mode/satp_ppn/priv_imode/priv_dmode` 等 translation 输入。
-2. 在 `idle_inputs()` 之后重新施加活跃的 Sv39 状态。
-3. 在 DUT reset 之后重放持久化的 PMP CSR 写入。
-4. 为 PTW TileLink A 请求返回完整的多拍 D 响应。
-5. 提供 testcase 可直接复用的 page-table helper。
-6. 为 Svpbmt/uncache testcase 提供稳定的 PBMT 控制面。
+2. 为 testcase 显式暴露 `SUM/MXR` 这类权限相关 CSR 背景，而不是让权限场景依赖隐式默认值。
+3. 在 `idle_inputs()` 之后重新施加活跃的 Sv39 状态。
+4. 在 DUT reset 之后重放持久化的 PMP CSR 写入。
+5. 为 PTW TileLink A 请求返回完整的多拍 D 响应。
+6. 提供 testcase 可直接复用的 page-table helper。
+7. 为 Svpbmt/uncache testcase 提供稳定的 PBMT 控制面。
 7. 为 VS-only / two-stage translation 提供统一 active-mode、H fence 与 fault 观测契约。
 
 ### 4.2 不由 `env.mmu` 负责的事情

@@ -67,6 +67,9 @@ PMP_MODE_DENY = "deny"
 
 PTE_MODE_NORMAL = "normal"
 PTE_MODE_PAGE_FAULT = "page_fault"
+PTE_MODE_ACCESS_FAULT = "access_fault"
+PTE_MODE_GUEST_PAGE_FAULT = "guest_page_fault"
+PTE_MODE_PERMISSION_FAULT = "permission_fault"
 
 
 @dataclass(frozen=True)
@@ -333,6 +336,10 @@ class MmuFaultingScalarLoadSequenceResult:
     main_ptw_trace: tuple[dict, ...]
     transport_stats_before_main: dict[str, int]
     transport_stats_after_main: dict[str, int]
+    replay_state_after_main: dict
+    sq_forward_events_after_main: tuple[dict, ...]
+    wakeup_events_after_main: tuple[dict, ...]
+    dcache_error_valid_after_main: int
 
 
 @dataclass(frozen=True)
@@ -1614,6 +1621,26 @@ def _sv39_fault_leaf_pte(*, pa_base: int, pte_mode: str) -> int:
         )
     if pte_mode == PTE_MODE_PAGE_FAULT:
         return 0
+    if pte_mode == PTE_MODE_ACCESS_FAULT:
+        return (
+            ((1 << 36) | (int(pa_base) >> 12)) << 10
+            | SV39_PTE_V
+            | SV39_PTE_R
+            | SV39_PTE_W
+            | SV39_PTE_A
+            | SV39_PTE_D
+        )
+    if pte_mode == PTE_MODE_GUEST_PAGE_FAULT:
+        return 0
+    if pte_mode == PTE_MODE_PERMISSION_FAULT:
+        return (
+            ((int(pa_base) >> 12) << 10)
+            | SV39_PTE_V
+            | SV39_PTE_R
+            | (1 << 4)
+            | SV39_PTE_A
+            | SV39_PTE_D
+        )
     raise ValueError(f"未知 PTE mode: {pte_mode}")
 
 
@@ -1626,6 +1653,35 @@ def _write_sv39_fault_mapping(
     pte_mode: str,
     page_table_page_addrs: tuple[int, ...],
 ) -> None:
+    if pte_mode == PTE_MODE_ACCESS_FAULT:
+        env.mmu.install_sv39_leaf_with_perm(
+            root_pt_addr=int(root_pt_addr),
+            va=int(va) & ~(SV39_PAGE_SIZE_4K - 1),
+            pa_base=int(pa_base),
+            page_size=SV39_PAGE_SIZE_NAME_4K,
+            read=True,
+            write=True,
+            accessed=True,
+            dirty=True,
+            ppn_high=1,
+            page_table_page_addrs=tuple(int(addr) for addr in page_table_page_addrs),
+        )
+        return
+    if pte_mode == PTE_MODE_PERMISSION_FAULT:
+        env.mmu.install_sv39_leaf_with_perm(
+            root_pt_addr=int(root_pt_addr),
+            va=int(va) & ~(SV39_PAGE_SIZE_4K - 1),
+            pa_base=int(pa_base),
+            page_size=SV39_PAGE_SIZE_NAME_4K,
+            read=True,
+            write=False,
+            execute=False,
+            user=True,
+            accessed=True,
+            dirty=True,
+            page_table_page_addrs=tuple(int(addr) for addr in page_table_page_addrs),
+        )
+        return
     install_result = env.mmu.install_sv39_mapping(
         root_pt_addr=int(root_pt_addr),
         va=int(va) & ~(SV39_PAGE_SIZE_4K - 1),
@@ -1644,6 +1700,13 @@ def _configure_pmp_mode(env, pmp_mode: str) -> None:
         env.mmu.program_pmp_entry(index=0, cfg=0, addr=0, persistent=False)
         return
     raise ValueError(f"未知 PMP mode: {pmp_mode}")
+
+
+def _configure_translation_permission_context(env, *, pte_mode: str) -> None:
+    if pte_mode == PTE_MODE_PERMISSION_FAULT:
+        env.mmu.configure_smode_access(sum=False, mxr=False, persistent=False)
+        return
+    env.mmu.configure_smode_access(sum=False, mxr=False, persistent=False)
 
 
 def _wait_load_exception_writeback_observed(
@@ -1715,6 +1778,7 @@ class MmuFaultingScalarLoadSequence:
         prime_pte_mode: str | None = None,
         prime_pmp_mode: str | None = None,
         prime_expected_data: int | None = None,
+        main_expected_data: int | None = None,
         settle_cycles: int = 4,
         response_delay_cycles: int = 1,
         max_cycles: int | None = None,
@@ -1734,10 +1798,28 @@ class MmuFaultingScalarLoadSequence:
         self.prime_pte_mode = self.main_pte_mode if prime_pte_mode is None else str(prime_pte_mode)
         self.prime_pmp_mode = self.main_pmp_mode if prime_pmp_mode is None else str(prime_pmp_mode)
         self.prime_expected_data = None if prime_expected_data is None else int(prime_expected_data)
+        self.main_expected_data = None if main_expected_data is None else int(main_expected_data)
         self.settle_cycles = int(settle_cycles)
         self.response_delay_cycles = int(response_delay_cycles)
         self.max_cycles = max_cycles
         self.required_main_exception_bits = tuple(int(bit) for bit in required_main_exception_bits)
+
+    @staticmethod
+    def _sample_wakeup_events(env) -> tuple[dict, ...]:
+        events = []
+        for lane in range(env.config.load_pipeline_width):
+            valid = env._read_optional_dut_signal(f"io_mem_to_ooo_wakeup_{lane}_valid", 0)
+            if not valid:
+                continue
+            events.append(
+                {
+                    "cycle": env._current_cycle(),
+                    "lane": lane,
+                    "pdest": env._read_optional_dut_signal(f"io_mem_to_ooo_wakeup_{lane}_bits_pdest", 0),
+                    "rf_wen": env._read_optional_dut_signal(f"io_mem_to_ooo_wakeup_{lane}_bits_rfWen", 0),
+                }
+            )
+        return tuple(events)
 
     def _run_one_load(
         self,
@@ -1761,6 +1843,7 @@ class MmuFaultingScalarLoadSequence:
                 page_table_page_addrs=self.page_table_page_addrs,
             )
             env.mmu.pulse_sfence()
+        _configure_translation_permission_context(env, pte_mode=pte_mode)
         _configure_pmp_mode(env, pmp_mode)
 
         txn = LoadTxn(
@@ -1855,7 +1938,7 @@ class MmuFaultingScalarLoadSequence:
                 lq_ptr=next_lq_ptr,
                 pte_mode=self.main_pte_mode,
                 pmp_mode=self.main_pmp_mode,
-                expected_data=None,
+                expected_data=self.main_expected_data,
                 required_exception_bits=self.required_main_exception_bits,
                 refresh_fault_mapping=(
                     self.prime_req_id is not None and self.main_pte_mode != self.prime_pte_mode
@@ -1863,6 +1946,15 @@ class MmuFaultingScalarLoadSequence:
             )
             transport_stats_after_main = _snapshot_transport_stats(env)
             main_trace = tuple(list(ptw.trace)[main_trace_start:])
+            replay_state_after_main = env.sample_replay_state()
+            try:
+                from .memblock_sequences import _sample_sq_forward_events
+
+                sq_forward_events_after_main = tuple(_sample_sq_forward_events(env))
+            except Exception:
+                sq_forward_events_after_main = tuple()
+            wakeup_events_after_main = self._sample_wakeup_events(env)
+            dcache_error_valid_after_main = int(env._read_optional_dut_signal("io_dcacheError_ecc_error_valid", 0))
 
         return MmuFaultingScalarLoadSequenceResult(
             final_state=SequenceState(
@@ -1877,6 +1969,10 @@ class MmuFaultingScalarLoadSequence:
             main_ptw_trace=main_trace,
             transport_stats_before_main=transport_stats_before_main,
             transport_stats_after_main=transport_stats_after_main,
+            replay_state_after_main=replay_state_after_main,
+            sq_forward_events_after_main=sq_forward_events_after_main,
+            wakeup_events_after_main=wakeup_events_after_main,
+            dcache_error_valid_after_main=dcache_error_valid_after_main,
         )
 
 

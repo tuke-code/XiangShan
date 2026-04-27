@@ -272,6 +272,7 @@ env.backend.execute(
 
 - toffee JSON 报告：`src/test/python/MemBlock/data/toffee_report_run/toffee_report.json`
 - DUT line coverage HTML：`src/test/python/MemBlock/data/toffee_report_run/line_dat/index.html`
+- 当 `toffee-report` 未稳定产出 line/json 汇总时，可改用 `docs/coverage_report_workflow.md` 中的 `merged.info -> code_coverage.json` 手工恢复流程
 
 ## 推荐工作方式
 

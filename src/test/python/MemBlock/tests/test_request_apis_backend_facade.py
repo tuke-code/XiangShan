@@ -296,6 +296,7 @@ def test_api_request_apis_enqueue_and_issue_delegate_to_backend():
     assert env.backend.calls[2][0] == "enqueue_scalar_load"
     assert env.backend.calls[3][0] == "enqueue_scalar_store"
     assert env.backend.calls[4][0] == "issue_scalar_load"
+    assert env.backend.calls[4][5]["size"] == 8
     assert env.backend.calls[5] == (
         "issue_scalar_std",
         8,
@@ -322,6 +323,39 @@ def test_api_request_apis_enqueue_and_issue_delegate_to_backend():
             "rob_idx_value": None,
             "ftq_idx_flag": None,
             "ftq_idx_value": None,
+        },
+    )
+
+
+def test_api_request_apis_issue_scalar_load_forwards_size():
+    env = _FakeEnv()
+    lq_ptr = QueuePtr(flag=0, value=2)
+    sq_ptr = QueuePtr(flag=1, value=3)
+
+    issue_scalar_load(env, req_id=0x31, addr=0x2000, lq_ptr=lq_ptr, sq_ptr=sq_ptr, lane=1, size=4)
+
+    assert env.backend.calls[0] == (
+        "issue_scalar_load",
+        0x31,
+        0x2000,
+        lq_ptr,
+        sq_ptr,
+        {
+            "lane": 1,
+            "size": 4,
+            "mask": None,
+            "fp_wen": 0,
+            "store_set_hit": 0,
+            "load_wait_bit": 0,
+            "load_wait_strict": 0,
+            "wait_for_rob_idx_flag": None,
+            "wait_for_rob_idx_value": None,
+            "rob_idx_flag": None,
+            "rob_idx_value": None,
+            "pdest": None,
+            "ftq_idx_flag": None,
+            "ftq_idx_value": None,
+            "pc": None,
         },
     )
 

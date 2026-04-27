@@ -192,7 +192,8 @@
 建议在 env facade 增加：
 
 - `install_invalid_sv39_mapping(...)`
-- `install_sv39_leaf_with_perm(...)`
+- `install_sv39_leaf_with_perm(...)` [done]
+- `configure_smode_access(...)` [done]
 - `wait_load_fault_observed(...)`
 - `wait_store_fault_observed(...)`
 - `wait_no_normal_writeback_for_rob(...)`

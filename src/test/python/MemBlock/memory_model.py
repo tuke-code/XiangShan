@@ -426,6 +426,22 @@ class MemoryModel:
             delay_cycles=delay_cycles,
         )
 
+    def set_dcache_client_ready_override(
+        self,
+        *,
+        a_ready: int | bool | None = None,
+        c_ready: int | bool | None = None,
+        e_ready: int | bool | None = None,
+    ) -> None:
+        self.transport.set_request_ready_override("dcache_a", a_ready)
+        self.transport.set_request_ready_override("dcache_c", c_ready)
+        self.transport.set_request_ready_override("dcache_e", e_ready)
+
+    def clear_dcache_client_ready_override(self) -> None:
+        self.transport.set_request_ready_override("dcache_a", None)
+        self.transport.set_request_ready_override("dcache_c", None)
+        self.transport.set_request_ready_override("dcache_e", None)
+
     def capture_on_rise(self, cycle: int) -> None:
         self._cycle = cycle
         self.scoreboard.set_cycle(cycle)

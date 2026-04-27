@@ -219,7 +219,9 @@ flowchart LR
 验证环境对这些字段的理解偏“最小闭环”：
 
 1. `fuType` 区分 load 与 store。
-2. `fuOpType` 目前按标量 load/store 最小值驱动。
+2. `fuOpType` 会按标量 load/store 的真实宽度驱动：
+   - load 按 `size` 映射 `LB/LH/LW/LD`
+   - store 按 `mask` 映射 `SB/SH/SW/SD`
 3. `rfWen` 对 load 为 1，对 store 为 0。
 4. `pdest` 只在 load 路径中用于后续 writeback compare。
 5. `robIdx` 是测试侧最核心的时序键。
@@ -295,7 +297,7 @@ sequenceDiagram
 
 - `valid = 1`
 - `fuType = FU_TYPE_LDU`
-- `fuOpType = LSU_OP_LD`
+- `fuOpType = 由 load size 映射出的 LB/LH/LW/LD`
 - `src_0 = addr`
 - `robIdx = prepare/send/execute 后绑定的 runtime rob_idx`
 - `sqIdx = 当前 store 边界`

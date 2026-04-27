@@ -27,7 +27,6 @@ from transactions import (
 
 FU_TYPE_LDU = 1 << 16
 FU_TYPE_STU = 1 << 17
-LSU_OP_LD = 0x3
 LSU_OP_SD = 0x3
 
 DEFAULT_RESET_CYCLES = 20

@@ -15,7 +15,7 @@ import os
 import sys
 from collections import defaultdict, deque
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 try:
     import pytest
@@ -1001,6 +1001,10 @@ class _ActiveTranslationState:
     pbmte_enabled: bool = False
     pmm_menvcfg: int = 0
     pmm_henvcfg: int = 0
+    priv_mxr: bool = False
+    priv_sum: bool = False
+    priv_vmxr: bool = False
+    priv_vsum: bool = False
 
 
 class MmuFacade:
@@ -1093,6 +1097,10 @@ class MmuFacade:
         self.env.tlb_csr.priv_virt_changed.value = int(priv_virt_changed)
         self.env.tlb_csr.priv_imode.value = PRIV_MODE_S if mode != "bare" else self.env.csr_agent.MODE_M
         self.env.tlb_csr.priv_dmode.value = PRIV_MODE_S if mode != "bare" else self.env.csr_agent.MODE_M
+        self.env.tlb_csr.priv_mxr.value = int(bool(state.priv_mxr))
+        self.env.tlb_csr.priv_sum.value = int(bool(state.priv_sum))
+        self.env.tlb_csr.priv_vmxr.value = int(bool(state.priv_vmxr))
+        self.env.tlb_csr.priv_vsum.value = int(bool(state.priv_vsum))
 
     def _drive_svpbmt_state(self, *, enabled: bool, pmm_menvcfg: int = 0, pmm_henvcfg: int = 0) -> None:
         self.env.tlb_csr.mPBMTE.value = int(bool(enabled))
@@ -1259,6 +1267,28 @@ class MmuFacade:
             pmm_henvcfg=0,
         )
         self._drive_translation_disabled()
+
+    def configure_smode_access(
+        self,
+        *,
+        sum: bool = False,
+        mxr: bool = False,
+        persistent: bool = True,
+        vsum: bool = False,
+        vmxr: bool = False,
+    ) -> None:
+        self.env.tlb_csr.priv_sum.value = int(bool(sum))
+        self.env.tlb_csr.priv_mxr.value = int(bool(mxr))
+        self.env.tlb_csr.priv_vsum.value = int(bool(vsum))
+        self.env.tlb_csr.priv_vmxr.value = int(bool(vmxr))
+        if persistent:
+            self._active_translation = replace(
+                self._active_translation,
+                priv_sum=bool(sum),
+                priv_mxr=bool(mxr),
+                priv_vsum=bool(vsum),
+                priv_vmxr=bool(vmxr),
+            )
 
     def _drive_translation_disabled(self) -> None:
         self._drive_translation_state(
@@ -1448,6 +1478,41 @@ class MmuFacade:
             | SV39_PTE_D
         )
 
+    def sv39_leaf_pte_with_perm(
+        self,
+        pa_base: int,
+        *,
+        page_size: str | int = "4k",
+        pbmt: str | int = "cacheable",
+        valid: bool = True,
+        read: bool = True,
+        write: bool = True,
+        execute: bool = False,
+        user: bool = False,
+        accessed: bool = True,
+        dirty: bool = True,
+        ppn_high: int = 0,
+    ) -> int:
+        page_size_bytes = self._normalize_sv39_page_size(page_size)
+        if page_size_bytes != SV39_PAGE_SIZE_4K:
+            raise ValueError(f"当前 env 仅支持 Sv39 4KB leaf，收到 page_size={page_size}")
+        self._require_aligned(pa_base, page_size_bytes, "pa_base")
+        if int(ppn_high) < 0:
+            raise ValueError(f"非法 sv39 ppn_high: {ppn_high}")
+        pbmt_bits = self._sv39_pbmt_bits(pbmt)
+        pte_ppn = ((int(ppn_high) << 36) | (int(pa_base) >> SV39_PAGE_SHIFT)) & ((1 << 44) - 1)
+        return (
+            (pte_ppn << 10)
+            | (pbmt_bits << SV39_PTE_PBMT_SHIFT)
+            | (SV39_PTE_V if valid else 0)
+            | (SV39_PTE_R if read else 0)
+            | (SV39_PTE_W if write else 0)
+            | (SV39_PTE_X if execute else 0)
+            | (SV39_PTE_U if user else 0)
+            | (SV39_PTE_A if accessed else 0)
+            | (SV39_PTE_D if dirty else 0)
+        )
+
     def resolve_sv39_pa(
         self,
         va: int,
@@ -1561,6 +1626,50 @@ class MmuFacade:
             "leaf_pte_addr": leaf_pte_addr,
             "allocated_table_addrs": tuple(allocated_table_addrs),
         }
+
+    def install_sv39_leaf_with_perm(
+        self,
+        *,
+        root_pt_addr: int,
+        va: int,
+        pa_base: int,
+        page_size: str | int = "4k",
+        pbmt: str | int = "cacheable",
+        valid: bool = True,
+        read: bool = True,
+        write: bool = True,
+        execute: bool = False,
+        user: bool = False,
+        accessed: bool = True,
+        dirty: bool = True,
+        ppn_high: int = 0,
+        page_table_page_addrs: tuple[int, ...] = (),
+    ) -> dict[str, int | tuple[int, ...]]:
+        install_result = self.install_sv39_mapping(
+            root_pt_addr=root_pt_addr,
+            va=va,
+            pa_base=pa_base,
+            page_size=page_size,
+            pbmt=pbmt,
+            page_table_page_addrs=page_table_page_addrs,
+        )
+        self.env.preload_u64(
+            int(install_result["leaf_pte_addr"]),
+            self.sv39_leaf_pte_with_perm(
+                pa_base=pa_base,
+                page_size=page_size,
+                pbmt=pbmt,
+                valid=valid,
+                read=read,
+                write=write,
+                execute=execute,
+                user=user,
+                accessed=accessed,
+                dirty=dirty,
+                ppn_high=ppn_high,
+            ),
+        )
+        return install_result
 
     def install_vs_sv39_mapping(
         self,
@@ -2234,6 +2343,31 @@ class MemBlockEnv:
         """按 env 统一时钟语义推进若干周期。"""
 
         self._run_async(self._await_cycles(cycles))
+
+    @contextmanager
+    def override_dcache_client_ready(
+        self,
+        *,
+        a_ready: int | bool | None = None,
+        c_ready: int | bool | None = None,
+        e_ready: int | bool | None = None,
+    ):
+        """
+        临时覆盖 dcache client A/C/E ready。
+
+        用于 directed 场景中拉长“请求已经产生，但外部 cache client 尚未接收”的窗口。
+        退出上下文后恢复默认 always-ready 语义。
+        """
+
+        self.memory.set_dcache_client_ready_override(
+            a_ready=a_ready,
+            c_ready=c_ready,
+            e_ready=e_ready,
+        )
+        try:
+            yield
+        finally:
+            self.memory.clear_dcache_client_ready_override()
 
     def wait_until(self, predicate, *, max_cycles: int = 200, timeout_message: str = "等待条件满足超时"):
         """使用 env 统一时钟语义轮询某个条件。"""
@@ -3512,6 +3646,76 @@ class MemBlockEnv:
                 expected_mmio=expected_mmio,
                 expected_nc=expected_nc,
                 require_committed=require_committed,
+                max_cycles=max_cycles,
+            )
+        )
+
+    async def _wait_store_sq_ready_before_sbuffer_async(
+        self,
+        sq_idx: int,
+        *,
+        expected_addr: int,
+        expected_data: int,
+        expected_mmio: bool | None = None,
+        expected_nc: bool | None = None,
+        sbuffer_drain_baseline: int | None = None,
+        require_uncommitted: bool = True,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待 store shadow 收敛，且确认它仍在 SQ 窗口内而未进入 sbuffer。"""
+
+        latest = None
+        for _ in range(max_cycles):
+            latest = self.sample_store_sq_window(sq_idx)
+            store = latest["store"]
+            if store is not None and latest["sbuffer_drain_count"] != int(sbuffer_drain_baseline):
+                raise AssertionError(
+                    "等待 store 进入 SQ-ready 窗口时已先观测到 sbuffer drain: "
+                    f"{latest}"
+                )
+            if (
+                store is not None
+                and store.allocated
+                and store.addr == int(expected_addr)
+                and store.data is not None
+                and (store.data & ((1 << 64) - 1)) == (int(expected_data) & ((1 << 64) - 1))
+                and store.mask != 0
+                and (expected_mmio is None or store.mmio == bool(expected_mmio))
+                and (expected_nc is None or store.nc == bool(expected_nc))
+                and (not require_uncommitted or not store.committed)
+                and not any(latest["sbuffer_fire_mask"])
+            ):
+                return latest
+            await self._step_async(1)
+
+        raise AssertionError(
+            "等待 store 进入 SQ-ready but not sbuffer 窗口超时: "
+            f"{latest}"
+        )
+
+    def wait_store_sq_ready_before_sbuffer(
+        self,
+        sq_idx: int,
+        *,
+        expected_addr: int,
+        expected_data: int,
+        expected_mmio: bool | None = None,
+        expected_nc: bool | None = None,
+        sbuffer_drain_baseline: int | None = None,
+        require_uncommitted: bool = True,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待 store shadow 收敛，且确认它仍在 SQ 窗口内而未进入 sbuffer。"""
+
+        return self._run_async(
+            self._wait_store_sq_ready_before_sbuffer_async(
+                sq_idx=sq_idx,
+                expected_addr=expected_addr,
+                expected_data=expected_data,
+                expected_mmio=expected_mmio,
+                expected_nc=expected_nc,
+                sbuffer_drain_baseline=sbuffer_drain_baseline,
+                require_uncommitted=require_uncommitted,
                 max_cycles=max_cycles,
             )
         )
