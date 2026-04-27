@@ -329,6 +329,16 @@ def _sample_sq_forward_events(env) -> tuple[dict, ...]:
     return tuple(events)
 
 
+def _read_optional_forward_signal(env, dut_prefix: str, internal_prefix: str, suffix: str, default=0):
+    signal = getattr(env.dut, f"{dut_prefix}_{suffix}", None)
+    if signal is not None:
+        return int(signal.value)
+    internal_value = env._read_optional_internal_signal(f"{internal_prefix}_{suffix}", default=None)
+    if internal_value is not None:
+        return int(internal_value)
+    return default
+
+
 def sample_sq_forward_events(env) -> tuple[dict, ...]:
     """采样当前拍所有有效的 SQ/SBuffer forward 响应。"""
 
@@ -340,21 +350,37 @@ def sample_sbuffer_forward_events(env) -> tuple[dict, ...]:
 
     events = []
     for lane in range(env.config.load_pipeline_width):
-        prefix = f"MemBlock_inner_sbuffer_io_forward_{lane}_s2Resp"
-        if not env._read_optional_dut_signal(f"{prefix}_valid"):
+        dut_prefix = f"MemBlock_inner_sbuffer_io_forward_{lane}_s2Resp"
+        internal_prefix = f"inner_sbuffer.io_forward_{lane}_s2Resp"
+        if not _read_optional_forward_signal(env, dut_prefix, internal_prefix, "valid"):
             continue
         events.append(
             {
                 "cycle": env._current_cycle(),
                 "lane": lane,
-                "valid": env._read_optional_dut_signal(f"{prefix}_valid"),
-                "match_invalid": env._read_optional_dut_signal(f"{prefix}_bits_matchInvalid"),
+                "valid": _read_optional_forward_signal(env, dut_prefix, internal_prefix, "valid"),
+                "match_invalid": _read_optional_forward_signal(
+                    env,
+                    dut_prefix,
+                    internal_prefix,
+                    "bits_matchInvalid",
+                ),
                 "forward_mask": tuple(
-                    env._read_optional_dut_signal(f"{prefix}_bits_forwardMask_{index}")
+                    _read_optional_forward_signal(
+                        env,
+                        dut_prefix,
+                        internal_prefix,
+                        f"bits_forwardMask_{index}",
+                    )
                     for index in range(16)
                 ),
                 "forward_data": tuple(
-                    env._read_optional_dut_signal(f"{prefix}_bits_forwardData_{index}")
+                    _read_optional_forward_signal(
+                        env,
+                        dut_prefix,
+                        internal_prefix,
+                        f"bits_forwardData_{index}",
+                    )
                     for index in range(16)
                 ),
             }

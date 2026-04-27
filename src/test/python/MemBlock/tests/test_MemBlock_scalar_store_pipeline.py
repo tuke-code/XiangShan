@@ -3,9 +3,20 @@
 MemBlock 标量 store pipeline 的定向真实 DUT 用例。
 """
 
+from collections import deque
+from contextlib import contextmanager
+
 import pytest
 
-from request_apis import enqueue_scalar_store, expect_load, issue_scalar_sta, issue_scalar_std, send_load
+from request_apis import (
+    enqueue_scalar_load,
+    enqueue_scalar_store,
+    expect_load,
+    issue_scalar_load,
+    issue_scalar_sta,
+    issue_scalar_std,
+    send_load,
+)
 from transactions import LoadTxn, ptr_inc, QueuePtr, StoreTxn
 from sequences import (
     CboZeroFlushSequence,
@@ -13,7 +24,10 @@ from sequences import (
     ResetEnvSequence,
     ScalarLoadSequence,
     ScalarStoreCommitSequence,
+    ScalarStoreSequence,
     SequenceState,
+    sample_sbuffer_forward_events,
+    sample_sq_forward_events,
     wait_sq_forward_event,
 )
 
@@ -36,6 +50,10 @@ PARTIAL_STORE_WINDOW_ADDRS = [
     PARTIAL_STORE_WINDOW_BASE + 0x8,
 ]
 CBO_ZERO_LINE_ADDR = STORE_ADDR_BASE + 0x100
+SBUFFER_FORWARD_LINE_ADDR = STORE_ADDR_BASE + 0x140
+SBUFFER_DATA_OFFSET_LINE_ADDR = STORE_ADDR_BASE + 0x180
+SBUFFER_DATA_BURST_BASE = STORE_ADDR_BASE + 0x400
+SBUFFER_DATA_ENTRY_MATRIX_BASE = STORE_ADDR_BASE + 0x800
 
 
 def _reset_env_and_state(env, *, require_issue_lanes=(), require_lq_ready: bool = False) -> SequenceState:
@@ -55,6 +73,255 @@ def _store_data_low64_matches(store, expected_data: int) -> bool:
 def _apply_store_stimulus_to_ref_memory(refmem, *, addr: int, data: int, mask: int = 0xFF):
     refmem.apply_store(addr=addr, data=data, mask=mask)
     return refmem
+
+
+def _read_sbuffer_probe(env, probe_name: str, *, default: int | None = None) -> int | None:
+    value = env._read_optional_internal_signal(
+        f"inner_sbuffer.{probe_name}",
+        default=None,
+    )
+    if value is not None:
+        return int(value)
+
+    missing = -(1 << 62)
+    value = env._read_optional_dut_signal(
+        f"MemBlock_inner_sbuffer_{probe_name}",
+        missing,
+    )
+    if value != missing:
+        return int(value)
+    return default
+
+
+def _read_sbuffer_any_probe(env, probe_names, *, default: int | None = None) -> int | None:
+    for probe_name in probe_names:
+        value = _read_sbuffer_probe(env, probe_name, default=None)
+        if value is not None:
+            return int(value)
+    return default
+
+
+def _decode_wvec_bits(wvec: int | None) -> set[int]:
+    if wvec is None:
+        return set()
+    value = int(wvec) & 0xFFFF
+    return {bit for bit in range(16) if (value >> bit) & 0x1}
+
+
+def _decode_mask_bits(mask: int | None) -> set[int]:
+    if mask is None:
+        return set()
+    value = int(mask) & 0xFFFF
+    return {bit for bit in range(16) if (value >> bit) & 0x1}
+
+
+@contextmanager
+def _capture_sbuffer_data_activity(env, *, max_events: int = 512):
+    trace = deque(maxlen=max(1, int(max_events)))
+
+    def _sample() -> None:
+        event = {
+            "cycle": env._current_cycle(),
+            "write_req0_valid": _read_sbuffer_probe(env, "dataModule_io_writeReq_0_valid"),
+            "write_req0_addr": _read_sbuffer_probe(env, "io_in_req_0_bits_addr"),
+            "write_req0_wline": _read_sbuffer_probe(env, "io_in_req_0_bits_wline"),
+            "write_req0_wvec": _read_sbuffer_any_probe(
+                env,
+                (
+                    "dataModule_io_writeReq_0_bits_wvec",
+                    "dataModule.io_writeReq_0_bits_wvec",
+                ),
+            ),
+            "write_req0_mask": _read_sbuffer_probe(env, "io_in_req_0_bits_mask"),
+            "write_lane0_valid": _read_sbuffer_probe(env, "accessIdx_0_valid_REG"),
+            "write_lane0_id": _read_sbuffer_probe(env, "accessIdx_0_bits_r"),
+            "write_req1_valid": _read_sbuffer_probe(env, "dataModule_io_writeReq_1_valid"),
+            "write_req1_addr": _read_sbuffer_probe(env, "io_in_req_1_bits_addr"),
+            "write_req1_wline": _read_sbuffer_probe(env, "io_in_req_1_bits_wline"),
+            "write_req1_wvec": _read_sbuffer_any_probe(
+                env,
+                (
+                    "dataModule_io_writeReq_1_bits_wvec",
+                    "dataModule.io_writeReq_1_bits_wvec",
+                ),
+            ),
+            "write_req1_mask": _read_sbuffer_probe(env, "io_in_req_1_bits_mask"),
+            "write_lane1_valid": _read_sbuffer_probe(env, "accessIdx_1_valid_REG"),
+            "write_lane1_id": _read_sbuffer_probe(env, "accessIdx_1_bits_r"),
+            "mask_flush_valid": _read_sbuffer_probe(env, "io_dcache_main_pipe_hit_resp_valid"),
+            "mask_flush_id": _read_sbuffer_probe(env, "io_dcache_main_pipe_hit_resp_bits_id"),
+        }
+        interesting = any(
+            int(event.get(field) or 0)
+            for field in (
+                "write_req0_valid",
+                "write_req1_valid",
+                "write_lane0_valid",
+                "write_lane1_valid",
+                "write_req0_wline",
+                "write_req1_wline",
+                "mask_flush_valid",
+            )
+        )
+        if interesting:
+            trace.append(event)
+
+    env.add_after_step_callback(_sample)
+    try:
+        yield trace
+    finally:
+        env.remove_after_step_callback(_sample)
+
+
+def _summarize_sbuffer_data_activity(trace) -> dict:
+    summary = {
+        "write_event_count": 0,
+        "write_req1_count": 0,
+        "observed_write_offsets": set(),
+        "write_lane_bits": set(),
+        "write_req0_wvec_bits": set(),
+        "write_req1_wvec_bits": set(),
+        "write_req0_mask_bits": set(),
+        "write_req1_mask_bits": set(),
+        "write_req0_wvec_offset_pairs": set(),
+        "write_req1_wvec_offset_pairs": set(),
+        "write_req0_wvec_offset_mask_triples": set(),
+        "write_req1_wvec_offset_mask_triples": set(),
+        "mask_flush_count": 0,
+        "mask_flush_lane_bits": set(),
+        "wline_cycles": [],
+    }
+    for event in trace:
+        if event["write_req0_valid"]:
+            summary["write_event_count"] += 1
+            if event["write_req0_addr"] is not None:
+                offset = (int(event["write_req0_addr"]) >> 4) & 0x3
+                summary["observed_write_offsets"].add(offset)
+            else:
+                offset = None
+            if event["write_req0_wline"]:
+                summary["wline_cycles"].append(int(event["cycle"]))
+            active_bits = _decode_wvec_bits(event["write_req0_wvec"])
+            active_mask_bits = _decode_mask_bits(event["write_req0_mask"])
+            summary["write_req0_wvec_bits"].update(active_bits)
+            summary["write_req0_mask_bits"].update(active_mask_bits)
+            if offset is not None:
+                summary["write_req0_wvec_offset_pairs"].update((bit, offset) for bit in active_bits)
+                summary["write_req0_wvec_offset_mask_triples"].update(
+                    (bit, offset, mask_bit)
+                    for bit in active_bits
+                    for mask_bit in active_mask_bits
+                )
+        if event["write_lane0_valid"] and event["write_lane0_id"] is not None:
+            summary["write_lane_bits"].add(int(event["write_lane0_id"]) & 0xF)
+        if event["write_req1_valid"]:
+            summary["write_event_count"] += 1
+            summary["write_req1_count"] += 1
+            if event["write_req1_addr"] is not None:
+                offset = (int(event["write_req1_addr"]) >> 4) & 0x3
+                summary["observed_write_offsets"].add(offset)
+            else:
+                offset = None
+            if event["write_req1_wline"]:
+                summary["wline_cycles"].append(int(event["cycle"]))
+            active_bits = _decode_wvec_bits(event["write_req1_wvec"])
+            active_mask_bits = _decode_mask_bits(event["write_req1_mask"])
+            summary["write_req1_wvec_bits"].update(active_bits)
+            summary["write_req1_mask_bits"].update(active_mask_bits)
+            if offset is not None:
+                summary["write_req1_wvec_offset_pairs"].update((bit, offset) for bit in active_bits)
+                summary["write_req1_wvec_offset_mask_triples"].update(
+                    (bit, offset, mask_bit)
+                    for bit in active_bits
+                    for mask_bit in active_mask_bits
+                )
+        if event["write_lane1_valid"] and event["write_lane1_id"] is not None:
+            summary["write_lane_bits"].add(int(event["write_lane1_id"]) & 0xF)
+        if event["mask_flush_valid"]:
+            summary["mask_flush_count"] += 1
+            if event["mask_flush_id"] is not None:
+                summary["mask_flush_lane_bits"].add(int(event["mask_flush_id"]) & 0xF)
+    return summary
+
+
+@contextmanager
+def _capture_forward_activity(env, *, max_events: int = 256):
+    trace = deque(maxlen=max(1, int(max_events)))
+
+    def _sample() -> None:
+        for event in sample_sq_forward_events(env):
+            trace.append({"channel": "sq", **event})
+        for event in sample_sbuffer_forward_events(env):
+            trace.append({"channel": "sbuffer", **event})
+
+    env.add_after_step_callback(_sample)
+    try:
+        yield trace
+    finally:
+        env.remove_after_step_callback(_sample)
+
+
+def _find_forward_event(
+    trace,
+    *,
+    channel: str,
+    lane: int,
+    expected_match_invalid: int = 0,
+    require_forward_mask: bool = False,
+):
+    for event in trace:
+        if event["channel"] != channel:
+            continue
+        if int(event["lane"]) != int(lane):
+            continue
+        if int(event.get("match_invalid", 0)) != int(expected_match_invalid):
+            continue
+        if require_forward_mask and not any(int(bit) for bit in event.get("forward_mask", ())):
+            continue
+        return event
+    return None
+
+
+def _summarize_forward_activity(trace) -> dict:
+    summary = {
+        "sq_event_count": 0,
+        "sbuffer_event_count": 0,
+        "sq_lanes": set(),
+        "sbuffer_lanes": set(),
+        "sq_mask_lanes": set(),
+        "sbuffer_mask_lanes": set(),
+        "sq_match_invalid_lanes": set(),
+        "sbuffer_match_invalid_lanes": set(),
+    }
+    for event in trace:
+        channel = event["channel"]
+        lane = int(event["lane"])
+        has_mask = any(int(bit) for bit in event.get("forward_mask", ()))
+        match_invalid = int(event.get("match_invalid", 0))
+        if channel == "sq":
+            summary["sq_event_count"] += 1
+            summary["sq_lanes"].add(lane)
+            if has_mask:
+                summary["sq_mask_lanes"].add(lane)
+            if match_invalid:
+                summary["sq_match_invalid_lanes"].add(lane)
+        elif channel == "sbuffer":
+            summary["sbuffer_event_count"] += 1
+            summary["sbuffer_lanes"].add(lane)
+            if has_mask:
+                summary["sbuffer_mask_lanes"].add(lane)
+            if match_invalid:
+                summary["sbuffer_match_invalid_lanes"].add(lane)
+    return {
+        "sq_event_count": summary["sq_event_count"],
+        "sbuffer_event_count": summary["sbuffer_event_count"],
+        "sq_lanes": sorted(summary["sq_lanes"]),
+        "sbuffer_lanes": sorted(summary["sbuffer_lanes"]),
+        "sq_mask_lanes": sorted(summary["sq_mask_lanes"]),
+        "sbuffer_mask_lanes": sorted(summary["sbuffer_mask_lanes"]),
+        "sq_match_invalid_lanes": sorted(summary["sq_match_invalid_lanes"]),
+        "sbuffer_match_invalid_lanes": sorted(summary["sbuffer_match_invalid_lanes"]),
+    }
 
 
 def _commit_scalar_store(env, sq_ptr: QueuePtr, *, req_id: int, addr: int, data: int, mask: int = 0xFF):
@@ -77,6 +344,128 @@ def _commit_scalar_store(env, sq_ptr: QueuePtr, *, req_id: int, addr: int, data:
     return commit_result, ptr_inc(sq_ptr, env.config.sequence.store_queue_size)
 
 
+def _send_scalar_store_batch_then_commit(
+    env,
+    sq_ptr: QueuePtr,
+    *,
+    store_ops,
+    req_id_base: int = 0,
+    materialize_cycles: int = 300,
+    commit_chunk: int = 2,
+):
+    store_results = []
+    next_sq_ptr = sq_ptr
+    for req_offset, (addr, data, mask) in enumerate(store_ops):
+        store_result = ScalarStoreSequence(
+            StoreTxn(
+                req_id=req_id_base + req_offset,
+                sq_ptr=next_sq_ptr,
+                addr=addr,
+                data=data,
+                mask=mask,
+            ),
+            expected_mmio=False,
+            require_committed=False,
+            materialize_cycles=materialize_cycles,
+        ).run(env)
+        store_results.append(store_result)
+        next_sq_ptr = store_result.next_sq_ptr
+
+    remaining = len(store_results)
+    while remaining > 0:
+        current_chunk = min(max(1, int(commit_chunk)), remaining)
+        env.backend.pulse_store_commit(current_chunk)
+        remaining -= current_chunk
+    env.advance_cycles(env.config.sequence.store_settle_cycles)
+
+    committed_views = []
+    for store_result in store_results:
+        env.wait_store_materialized(
+            store_result.allocated_sq_ptr.value,
+            expected_addr=store_result.txn.addr,
+            expected_data=store_result.txn.data,
+            expected_mmio=False,
+            require_committed=True,
+            max_cycles=materialize_cycles,
+        )
+        committed_view = env.get_store_view(store_result.allocated_sq_ptr.value)
+        assert committed_view is not None and committed_view.committed, (
+            f"batch store req_id={store_result.txn.req_id} 未进入 committed"
+        )
+        committed_views.append(committed_view)
+
+    return tuple(committed_views), next_sq_ptr
+
+
+def _make_sbuffer_data_wave_ops(*, base_addr: int, quarter: int, half: int):
+    ops = []
+    for entry in range(16):
+        addr = base_addr + (entry * 0x40) + (quarter * 0x10) + (half * 0x8)
+        data = (
+            0x0102_0304_0506_0708
+            ^ ((quarter + 1) << 56)
+            ^ ((entry + 1) << 40)
+            ^ (half << 32)
+        )
+        ops.append((addr, data, 0xFF))
+    return tuple(ops)
+
+
+def _extract_singleton_wvec_bit(summary: dict, *, field_name: str, context: str) -> int:
+    bits = summary[field_name]
+    assert len(bits) == 1, f"{context} 期望只命中单个 wvec bit，实际={sorted(bits)}"
+    return next(iter(bits))
+
+
+def _prewarm_sbuffer_entry_map(
+    env,
+    sq_ptr: QueuePtr,
+    *,
+    base_addr: int,
+    line_count: int,
+    req_id_base: int = 0,
+    preload_seed: int = 5,
+):
+    expected_refmem = env.memory.fork_ref_memory()
+    line_to_entry = {}
+    entry_to_line = {}
+    next_sq_ptr = sq_ptr
+
+    for index in range(line_count):
+        line_addr = base_addr + (index * 0x40)
+        preload = bytes((((index + preload_seed) * 19) + byte_idx) & 0xFF for byte_idx in range(64))
+        env.preload_bytes(line_addr, preload)
+
+        with _capture_sbuffer_data_activity(env, max_events=32) as trace:
+            _, next_sq_ptr = _commit_scalar_store(
+                env,
+                next_sq_ptr,
+                req_id=req_id_base + index,
+                addr=line_addr,
+                data=0x1111_2222_3333_4444 ^ (index << 20),
+            )
+        summary = _summarize_sbuffer_data_activity(trace)
+        entry = _extract_singleton_wvec_bit(
+            summary,
+            field_name="write_req0_wvec_bits",
+            context=f"prewarm line_addr={line_addr:#x}",
+        )
+        line_to_entry[line_addr] = entry
+        entry_to_line.setdefault(entry, line_addr)
+        _apply_store_stimulus_to_ref_memory(
+            expected_refmem,
+            addr=line_addr,
+            data=0x1111_2222_3333_4444 ^ (index << 20),
+        )
+
+    return {
+        "next_sq_ptr": next_sq_ptr,
+        "line_to_entry": line_to_entry,
+        "entry_to_line": entry_to_line,
+        "expected_refmem": expected_refmem,
+    }
+
+
 def _assert_forward_response_matches_partial_word(event: dict, *, store_data: int) -> None:
     expected_mask = (1, 1, 1, 1) + (0,) * 12
     expected_bytes = tuple((int(store_data) >> (8 * index)) & 0xFF for index in range(4))
@@ -87,6 +476,195 @@ def _assert_forward_response_matches_partial_word(event: dict, *, store_data: in
     assert tuple(int(byte) for byte in event["forward_data"][:4]) == expected_bytes, (
         f"partial-word forward data 低 4B 异常: actual={tuple(int(byte) for byte in event['forward_data'][:4])}"
     )
+
+
+def _assert_forward_response_matches_expected_merge(
+    event: dict,
+    *,
+    expected_data: int,
+    required_prefix_bytes: int = 4,
+) -> None:
+    expected_bytes = tuple((int(expected_data) >> (8 * index)) & 0xFF for index in range(8))
+    forward_mask = tuple(int(bit) for bit in event["forward_mask"])
+    forward_data = tuple(int(byte) for byte in event["forward_data"])
+
+    assert all(forward_mask[index] == 1 for index in range(required_prefix_bytes)), (
+        f"forward mask 前 {required_prefix_bytes}B 未全部有效: actual={forward_mask}"
+    )
+    for index in range(8):
+        if not forward_mask[index]:
+            continue
+        assert forward_data[index] == expected_bytes[index], (
+            f"forward data byte{index} 异常: actual={forward_data[index]:#x}, "
+            f"expected={expected_bytes[index]:#x}, mask={forward_mask}"
+        )
+    assert not any(forward_mask[index] for index in range(8, 16)), (
+        f"8B 标量 load 的 sbuffer forward mask 不应超出前 8B: actual={forward_mask}"
+    )
+
+
+def _apply_masked_store_to_line_bytes(line_bytes: bytearray, *, line_addr: int, addr: int, data: int, mask: int) -> None:
+    offset = int(addr) - int(line_addr)
+    assert 0 <= offset < len(line_bytes), (
+        f"store addr 越出目标 cacheline: addr={addr:#x}, line_addr={line_addr:#x}"
+    )
+    for byte_idx in range(8):
+        if ((int(mask) >> byte_idx) & 0x1) == 0:
+            continue
+        line_bytes[offset + byte_idx] = (int(data) >> (8 * byte_idx)) & 0xFF
+
+
+def _run_sbuffer_forward_entry_matrix(
+    env,
+    *,
+    load_issue_lane: int,
+    entry_update_specs,
+    base_addr: int,
+    req_id_base: int,
+    preload_seed: int,
+):
+    for index, (target_entry, store_offset) in enumerate(entry_update_specs):
+        state = _reset_env_and_state(
+            env,
+            require_issue_lanes=(0, 1, 2),
+            require_lq_ready=True,
+        )
+        prewarm = _prewarm_sbuffer_entry_map(
+            env,
+            state.sq_ptr,
+            base_addr=base_addr + (index * 0x400),
+            line_count=max(6, int(target_entry) + 1),
+            req_id_base=req_id_base + (index * 0x40),
+            preload_seed=preload_seed + index,
+        )
+        sq_ptr = prewarm["next_sq_ptr"]
+        lq_ptr = state.next_lq_ptr
+        expected_refmem = prewarm["expected_refmem"]
+        entry_to_line = prewarm["entry_to_line"]
+        completed_target = env.get_completed_load_count()
+
+        assert target_entry in entry_to_line, (
+            f"预热阶段未获得 entry{target_entry} 映射: actual={sorted(entry_to_line)}"
+        )
+        target_line_addr = entry_to_line[target_entry]
+        target_line_index = (target_line_addr - (base_addr + (index * 0x400))) // 0x40
+        expected_target_line = bytearray(
+            ((((target_line_index + preload_seed + index) * 19) + byte_idx) & 0xFF)
+            for byte_idx in range(64)
+        )
+        _apply_masked_store_to_line_bytes(
+            expected_target_line,
+            line_addr=target_line_addr,
+            addr=target_line_addr,
+            data=0x1111_2222_3333_4444 ^ (target_line_index << 20),
+            mask=0xFF,
+        )
+        store_addr = target_line_addr + int(store_offset)
+        store_data = 0x91_92_93_94 ^ (int(load_issue_lane) << 24) ^ (int(target_entry) << 8) ^ index
+
+        _, sq_ptr = _commit_scalar_store(
+            env,
+            sq_ptr,
+            req_id=req_id_base + 0x100 + index,
+            addr=store_addr,
+            data=store_data,
+            mask=0x0F,
+        )
+        _apply_masked_store_to_line_bytes(
+            expected_target_line,
+            line_addr=target_line_addr,
+            addr=store_addr,
+            data=store_data,
+            mask=0x0F,
+        )
+
+        load_txn = LoadTxn(
+            req_id=req_id_base + 0x200 + index,
+            addr=store_addr,
+            lq_ptr=lq_ptr,
+            sq_ptr=sq_ptr,
+            issue_lane=load_issue_lane,
+        )
+        env.backend.prepare(load_txn)
+        enqueue_scalar_load(
+            env,
+            req_id=load_txn.req_id,
+            lq_ptr=load_txn.lq_ptr,
+            sq_ptr=load_txn.sq_ptr,
+            enq_port=load_txn.enq_port,
+            rob_idx=load_txn.rob_idx,
+        )
+        expect_load(env, load_txn)
+
+        expected_load_data = int.from_bytes(
+            expected_target_line[int(store_offset):int(store_offset) + 8],
+            "little",
+        )
+        transport_stats_before = env.get_transport_stats()
+        with _capture_forward_activity(env, max_events=128) as trace:
+            issue_scalar_load(
+                env,
+                req_id=load_txn.req_id,
+                addr=load_txn.addr,
+                lq_ptr=load_txn.lq_ptr,
+                sq_ptr=load_txn.sq_ptr,
+                lane=load_txn.issue_lane,
+                store_set_hit=load_txn.store_set_hit,
+                load_wait_bit=load_txn.load_wait_bit,
+                load_wait_strict=load_txn.load_wait_strict,
+                wait_for_rob_idx=load_txn.wait_for_rob_idx,
+                rob_idx=load_txn.rob_idx,
+                pdest=load_txn.resolved_pdest,
+                ftq_idx_flag=load_txn.resolved_ftq_idx_flag,
+                ftq_idx_value=load_txn.resolved_ftq_idx_value,
+                pc=load_txn.resolved_pc,
+            )
+            load_writeback = env.wait_load_writeback_observed(
+                rob_idx=load_txn.rob_idx,
+                data=expected_load_data,
+                max_cycles=200,
+            )
+            completed_loads = env.wait_completed_load_count(completed_target + 1, max_cycles=64)
+        transport_stats_after = env.get_transport_stats()
+
+        sbuffer_forward_event = _find_forward_event(
+            trace,
+            channel="sbuffer",
+            lane=load_issue_lane,
+            expected_match_invalid=0,
+            require_forward_mask=True,
+        )
+        assert sbuffer_forward_event is not None, (
+            f"entry{target_entry} offset={store_offset:#x} 未观测到 lane{load_issue_lane} sbuffer forward: "
+            f"{_summarize_forward_activity(trace)}"
+        )
+        _assert_forward_response_matches_expected_merge(
+            sbuffer_forward_event,
+            expected_data=expected_load_data,
+            required_prefix_bytes=4,
+        )
+        assert load_writeback["data"] == expected_load_data, (
+            f"entry{target_entry} offset={store_offset:#x} sbuffer forward 后的 load 写回数据不匹配"
+        )
+        assert completed_loads == completed_target + 1, (
+            f"entry{target_entry} offset={store_offset:#x} 的 load 未按预期完成 compare"
+        )
+        assert transport_stats_after["outer_request_count"] == transport_stats_before["outer_request_count"], (
+            f"entry{target_entry} offset={store_offset:#x} 的 sbuffer forward 不应退化成 outer/uncache 路径"
+        )
+
+        drain_summary = FlushStoreBuffersSequence(max_cycles=1000).run(env)
+        assert env.read_cacheline(target_line_addr) == bytes(expected_target_line), (
+            f"entry{target_entry} offset={store_offset:#x} 的 cacheline 最终结果不匹配: "
+            f"line_addr={target_line_addr:#x}"
+        )
+        assert drain_summary["drain_event_count"] >= 1, (
+            f"entry{target_entry} offset={store_offset:#x} 场景未记录到 drain 事件"
+        )
+        assert drain_summary["touched_byte_count"] >= 8, (
+            f"entry{target_entry} offset={store_offset:#x} 场景 flush 覆盖字节数不足"
+        )
+        env.assert_no_outstanding()
 
 
 def test_api_MemBlock_two_cacheable_stores_flush_directed(env):
@@ -181,6 +759,503 @@ def test_api_MemBlock_cross_line_two_cacheable_stores_flush_directed(env):
     env.assert_no_outstanding()
 
 
+def test_api_MemBlock_sbuffer_data_vword_offset_matrix_directed(env):
+    """
+    同一 cacheline 上覆盖 `vwordOffset=0/1/2/3` 的 partial-store/writeback 路径。
+
+    检查点：
+      - 四个 16B 分区都能形成真实 committed store
+      - `SbufferData.io_writeReq_*_bits_vwordOffset[1:0]` 观测到 0/1/2/3 全部象限
+      - younger load 在 flush 前能看到 merge 结果
+      - flush 后整条 cacheline 与参考内存一致
+    """
+
+    partial_ops = [
+        (SBUFFER_DATA_OFFSET_LINE_ADDR + 0x00, 0xA1, 0x01),
+        (SBUFFER_DATA_OFFSET_LINE_ADDR + 0x11, 0xB2, 0x01),
+        (SBUFFER_DATA_OFFSET_LINE_ADDR + 0x22, 0xC3C4, 0x03),
+        (SBUFFER_DATA_OFFSET_LINE_ADDR + 0x34, 0xD5D6_D7D8, 0x0F),
+    ]
+    load_addrs = [SBUFFER_DATA_OFFSET_LINE_ADDR + (index * 0x10) for index in range(4)]
+
+    state = _reset_env_and_state(env)
+    env.preload_bytes(
+        SBUFFER_DATA_OFFSET_LINE_ADDR,
+        bytes(((index * 11) + 3) & 0xFF for index in range(64)),
+    )
+    expected_refmem = env.memory.fork_ref_memory()
+
+    with _capture_sbuffer_data_activity(env) as trace:
+        sq_ptr = state.sq_ptr
+        for req_id, (addr, data, mask) in enumerate(partial_ops):
+            _, sq_ptr = _commit_scalar_store(
+                env,
+                sq_ptr,
+                req_id=req_id,
+                addr=addr,
+                data=data,
+                mask=mask,
+            )
+            _apply_store_stimulus_to_ref_memory(
+                expected_refmem,
+                addr=addr,
+                data=data,
+                mask=mask,
+            )
+
+        next_lq_ptr = state.next_lq_ptr
+        for completed_loads, load_addr in enumerate(load_addrs, start=1):
+            load_result = ScalarLoadSequence(
+                LoadTxn(
+                    req_id=len(partial_ops) + completed_loads - 1,
+                    addr=load_addr,
+                    lq_ptr=next_lq_ptr,
+                    sq_ptr=sq_ptr,
+                ),
+                expected_completed_loads=completed_loads,
+            ).run(env)
+            next_lq_ptr = load_result.next_lq_ptr
+
+        drain_summary = FlushStoreBuffersSequence(max_cycles=1000).run(env)
+
+    summary = _summarize_sbuffer_data_activity(trace)
+    assert summary["write_event_count"] >= len(partial_ops), "SbufferData 未记录到足够的 writeReq 活动"
+    assert summary["observed_write_offsets"] == {0, 1, 2, 3}, (
+        f"SbufferData 未覆盖完整 vwordOffset 象限: actual={sorted(summary['observed_write_offsets'])}"
+    )
+    assert env.read_cacheline(SBUFFER_DATA_OFFSET_LINE_ADDR) == expected_refmem.read_cacheline(
+        SBUFFER_DATA_OFFSET_LINE_ADDR,
+        64,
+    ), "vwordOffset 象限覆盖场景的 cacheline 最终结果不匹配"
+    assert drain_summary["drain_event_count"] >= 1, "vwordOffset 象限覆盖场景未记录到 drain 事件"
+    assert drain_summary["touched_byte_count"] >= 8, "vwordOffset 象限覆盖场景 flush 覆盖字节数不足"
+    env.assert_no_outstanding()
+
+
+@pytest.mark.xfail(
+    reason="DUTBUG-sbuffer-entry5-targeted-merge-drain-corruption: targeted entry5 quarter3 byte3 merge hits the real writeReq_0 triple but final drain corrupts a prewarmed cacheline",
+    strict=False,
+)
+def test_api_MemBlock_sbuffer_data_port0_line5_word3_byte3_directed(env):
+    """
+    定向覆盖 port0 在 line5 上的 quarter3 byte3 merge，并保留 line1/line5 的联合搜索入口。
+
+    检查点：
+      - 预热阶段能稳定把目标 cacheline 映射到 `wvec[5]`
+      - 目标 4B store 在真实 `writeReq_0` 上命中 `(entry=5, offset=3, byte=3)`
+      - flush 后所有触及 cacheline 与参考内存一致
+    """
+
+    target_triple = (5, 3, 3)
+    attempt_specs = (
+        {"base": SBUFFER_DATA_ENTRY_MATRIX_BASE + 0x3000, "line_count": 6, "seed": 11},
+        {"base": SBUFFER_DATA_ENTRY_MATRIX_BASE + 0x3400, "line_count": 7, "seed": 13},
+        {"base": SBUFFER_DATA_ENTRY_MATRIX_BASE + 0x3800, "line_count": 8, "seed": 17},
+    )
+    last_failure = None
+
+    for attempt_id, spec in enumerate(attempt_specs):
+        state = _reset_env_and_state(env)
+        prewarm = _prewarm_sbuffer_entry_map(
+            env,
+            state.sq_ptr,
+            base_addr=spec["base"],
+            line_count=spec["line_count"],
+            req_id_base=1000 + (attempt_id * 100),
+            preload_seed=spec["seed"],
+        )
+        sq_ptr = prewarm["next_sq_ptr"]
+        entry_to_line = prewarm["entry_to_line"]
+        expected_refmem = prewarm["expected_refmem"]
+
+        if 5 not in entry_to_line:
+            last_failure = {
+                "attempt": attempt_id,
+                "reason": "missing_prewarm_entry5",
+                "entries": sorted(entry_to_line),
+            }
+            continue
+
+        observed_triples = set()
+        candidate_line_addrs = tuple(line_addr for _, line_addr in sorted(entry_to_line.items()))
+        operation_plans = (
+            (5,),
+            (0, 5),
+            (5, 0),
+            (3, 4, 5),
+        )
+
+        for plan_id, plan_entries in enumerate(operation_plans):
+            plan_line_addrs = tuple(
+                entry_to_line[entry]
+                for entry in plan_entries
+                if entry in entry_to_line
+            )
+            if not plan_line_addrs:
+                continue
+
+            for seq_id, line_addr in enumerate(plan_line_addrs):
+                req_id = 2000 + (attempt_id * 100) + (plan_id * 16) + seq_id
+                store_data = 0xD0_00_00_00 | (req_id & 0xFF)
+                with _capture_sbuffer_data_activity(env, max_events=64) as trace:
+                    _, sq_ptr = _commit_scalar_store(
+                        env,
+                        sq_ptr,
+                        req_id=req_id,
+                        addr=line_addr + 0x30,
+                        data=store_data,
+                        mask=0x0F,
+                    )
+                _apply_store_stimulus_to_ref_memory(
+                    expected_refmem,
+                    addr=line_addr + 0x30,
+                    data=store_data,
+                    mask=0x0F,
+                )
+                summary = _summarize_sbuffer_data_activity(trace)
+                observed_triples.update(summary["write_req0_wvec_offset_mask_triples"])
+                if target_triple in observed_triples:
+                    break
+
+            if target_triple in observed_triples:
+                break
+
+        drain_summary = FlushStoreBuffersSequence(max_cycles=1000).run(env)
+        memory_ok = True
+        for line_addr in candidate_line_addrs:
+            if env.read_cacheline(line_addr) != expected_refmem.read_cacheline(line_addr, 64):
+                memory_ok = False
+                last_failure = {
+                    "attempt": attempt_id,
+                    "reason": "memory_mismatch",
+                    "line_addr": f"{line_addr:#x}",
+                    "observed_triples": sorted(observed_triples),
+                }
+                break
+
+        if target_triple in observed_triples and drain_summary["drain_event_count"] >= 1 and memory_ok:
+            env.assert_no_outstanding()
+            return
+
+        if last_failure is None or last_failure.get("attempt") != attempt_id:
+            last_failure = {
+                "attempt": attempt_id,
+                "reason": "missing_target_triple",
+                "observed_triples": sorted(observed_triples),
+            }
+
+    raise AssertionError(f"未命中 port0 entry5 offset3/byte3 目标组合: {last_failure}")
+
+
+@pytest.mark.xfail(
+    reason="DUTBUG-sbuffer-entry1-target-retention: prewarmed entry1 frequently drains or reallocates before the quarter3 byte3 merge completes; broader retries also expose drain corruption",
+    strict=False,
+)
+def test_api_MemBlock_sbuffer_data_port0_line1_and_line5_word3_byte3_search(env):
+    """
+    预热 sbuffer entry 后，定向覆盖 port0 在 line1/line5 上的 quarter3 byte3 merge。
+
+    检查点：
+      - 预热阶段能稳定把目标 cacheline 映射到 `wvec[1]` 与 `wvec[5]`
+      - 目标 4B store 在真实 `writeReq_0` 上命中 `(entry=1, offset=3, byte=3)` 与 `(entry=5, offset=3, byte=3)`
+      - flush 后所有触及 cacheline 与参考内存一致
+    """
+
+    target_triples = {(1, 3, 3), (5, 3, 3)}
+    attempt_specs = (
+        {"base": SBUFFER_DATA_ENTRY_MATRIX_BASE + 0x3000, "line_count": 6, "seed": 11},
+        {"base": SBUFFER_DATA_ENTRY_MATRIX_BASE + 0x3400, "line_count": 7, "seed": 13},
+        {"base": SBUFFER_DATA_ENTRY_MATRIX_BASE + 0x3800, "line_count": 8, "seed": 17},
+    )
+    last_failure = None
+
+    for attempt_id, spec in enumerate(attempt_specs):
+        state = _reset_env_and_state(env)
+        prewarm = _prewarm_sbuffer_entry_map(
+            env,
+            state.sq_ptr,
+            base_addr=spec["base"],
+            line_count=spec["line_count"],
+            req_id_base=1000 + (attempt_id * 100),
+            preload_seed=spec["seed"],
+        )
+        sq_ptr = prewarm["next_sq_ptr"]
+        entry_to_line = prewarm["entry_to_line"]
+        expected_refmem = prewarm["expected_refmem"]
+
+        if 1 not in entry_to_line or 5 not in entry_to_line:
+            last_failure = {
+                "attempt": attempt_id,
+                "reason": "missing_prewarm_entries",
+                "entries": sorted(entry_to_line),
+            }
+            continue
+
+        observed_triples = set()
+        candidate_line_addrs = tuple(line_addr for _, line_addr in sorted(entry_to_line.items()))
+        operation_plans = (
+            (1, 5),
+            (5, 1),
+            (1, 5, 0, 2, 3, 4, 6, 7, 8),
+            (5, 1, 0, 2, 3, 4, 6, 7, 8),
+        )
+
+        for plan_id, plan_entries in enumerate(operation_plans):
+            plan_line_addrs = tuple(
+                entry_to_line[entry]
+                for entry in plan_entries
+                if entry in entry_to_line
+            )
+            if not plan_line_addrs:
+                continue
+
+            for seq_id, line_addr in enumerate(plan_line_addrs):
+                req_id = 2000 + (attempt_id * 100) + (plan_id * 16) + seq_id
+                store_data = 0xD0_00_00_00 | (req_id & 0xFF)
+                with _capture_sbuffer_data_activity(env, max_events=64) as trace:
+                    _, sq_ptr = _commit_scalar_store(
+                        env,
+                        sq_ptr,
+                        req_id=req_id,
+                        addr=line_addr + 0x30,
+                        data=store_data,
+                        mask=0x0F,
+                    )
+                _apply_store_stimulus_to_ref_memory(
+                    expected_refmem,
+                    addr=line_addr + 0x30,
+                    data=store_data,
+                    mask=0x0F,
+                )
+                summary = _summarize_sbuffer_data_activity(trace)
+                observed_triples.update(summary["write_req0_wvec_offset_mask_triples"])
+                if target_triples <= observed_triples:
+                    break
+
+            if target_triples <= observed_triples:
+                break
+
+        drain_summary = FlushStoreBuffersSequence(max_cycles=1000).run(env)
+        memory_ok = True
+        for line_addr in candidate_line_addrs:
+            if env.read_cacheline(line_addr) != expected_refmem.read_cacheline(line_addr, 64):
+                memory_ok = False
+                last_failure = {
+                    "attempt": attempt_id,
+                    "reason": "memory_mismatch",
+                    "line_addr": f"{line_addr:#x}",
+                    "observed_triples": sorted(observed_triples),
+                }
+                break
+
+        if target_triples <= observed_triples and drain_summary["drain_event_count"] >= 1 and memory_ok:
+            env.assert_no_outstanding()
+            return
+
+        if last_failure is None or last_failure.get("attempt") != attempt_id:
+            last_failure = {
+                "attempt": attempt_id,
+                "reason": "missing_target_triples",
+                "observed_triples": sorted(observed_triples),
+            }
+
+    raise AssertionError(f"未命中 port0 entry1/entry5 offset3/byte3 目标组合: {last_failure}")
+
+
+@pytest.mark.xfail(
+    reason="DUTBUG-sbuffer-targeted-deep-merge-drain-corruption: deep prewarmed entry merge hits targeted wvec pairs but drained cacheline bytes diverge from reference memory",
+    strict=False,
+)
+def test_api_MemBlock_sbuffer_data_targeted_entry_merge_directed(env):
+    """
+    先建立 cacheline->wvec entry 映射，再定向让真实写路径命中 entry0/entry12。
+
+    检查点：
+      - 预热阶段能稳定观察到单发 store 对应的真实 `wvec` entry
+      - 定向深 batch 让真实 `wvec` 命中 `(entry=0, offset=0)` 与 `(entry=12, offset=1)`
+      - 最终 flush 后所有 cacheline 与参考内存一致
+    """
+
+    state = _reset_env_and_state(env)
+    expected_refmem = env.memory.fork_ref_memory()
+    prewarm_base = SBUFFER_DATA_ENTRY_MATRIX_BASE + 0x2000
+    line_to_entry = {}
+    entry_to_line = {}
+    sq_ptr = state.sq_ptr
+
+    for index in range(14):
+        line_addr = prewarm_base + (index * 0x40)
+        env.preload_bytes(
+            line_addr,
+            bytes((((index + 5) * 19) + byte_idx) & 0xFF for byte_idx in range(64)),
+        )
+
+        with _capture_sbuffer_data_activity(env, max_events=32) as trace:
+            _, sq_ptr = _commit_scalar_store(
+                env,
+                sq_ptr,
+                req_id=index,
+                addr=line_addr,
+                data=0x1111_2222_3333_4444 ^ (index << 20),
+            )
+        summary = _summarize_sbuffer_data_activity(trace)
+        entry = _extract_singleton_wvec_bit(
+            summary,
+            field_name="write_req0_wvec_bits",
+            context=f"prewarm line_addr={line_addr:#x}",
+        )
+        line_to_entry[line_addr] = entry
+        entry_to_line.setdefault(entry, line_addr)
+        _apply_store_stimulus_to_ref_memory(
+            expected_refmem,
+            addr=line_addr,
+            data=0x1111_2222_3333_4444 ^ (index << 20),
+        )
+
+    assert 0 in entry_to_line, f"预热阶段未获得 entry0 映射: actual={sorted(entry_to_line)}"
+    assert 12 in entry_to_line, f"预热阶段未获得 entry12 映射: actual={sorted(entry_to_line)}"
+
+    entry0_line = entry_to_line[0]
+    entry12_line = entry_to_line[12]
+    helper_line = prewarm_base + 0x1000
+    env.preload_bytes(
+        helper_line,
+        bytes(((0xA5 + byte_idx) & 0xFF) for byte_idx in range(64)),
+    )
+    batch_ops = (
+        (helper_line + 0x00, 0xABCD_0000_0000_0001, 0xFF),
+        (entry0_line + 0x00, 0x2233_4455_6677_8899, 0xFF),
+        (helper_line + 0x10, 0xABCD_0000_0000_1001, 0xFF),
+        (entry12_line + 0x10, 0x8899_AABB_CCDD_EEFF, 0xFF),
+        (entry_to_line[1] + 0x00, 0x0101_0202_0303_0404, 0xFF),
+        (entry_to_line[2] + 0x10, 0x0505_0606_0707_0808, 0xFF),
+        (entry_to_line[3] + 0x00, 0x1111_1212_1313_1414, 0xFF),
+        (entry_to_line[4] + 0x10, 0x1515_1616_1717_1818, 0xFF),
+        (entry_to_line[5] + 0x00, 0x2121_2222_2323_2424, 0xFF),
+        (entry_to_line[6] + 0x10, 0x2525_2626_2727_2828, 0xFF),
+        (entry_to_line[7] + 0x00, 0x3131_3232_3333_3434, 0xFF),
+        (entry_to_line[8] + 0x10, 0x3535_3636_3737_3838, 0xFF),
+        (entry_to_line[9] + 0x00, 0x4141_4242_4343_4444, 0xFF),
+        (entry_to_line[10] + 0x10, 0x4545_4646_4747_4848, 0xFF),
+        (entry_to_line[11] + 0x00, 0x5151_5252_5353_5454, 0xFF),
+        (entry_to_line[13] + 0x10, 0x5555_5656_5757_5858, 0xFF),
+    )
+
+    with _capture_sbuffer_data_activity(env, max_events=1024) as trace:
+        _, sq_ptr = _send_scalar_store_batch_then_commit(
+            env,
+            sq_ptr,
+            store_ops=batch_ops,
+            req_id_base=200,
+            commit_chunk=16,
+        )
+        for addr, data, mask in batch_ops:
+            _apply_store_stimulus_to_ref_memory(
+                expected_refmem,
+                addr=addr,
+                data=data,
+                mask=mask,
+            )
+
+        drain_summary = FlushStoreBuffersSequence(max_cycles=1600).run(env)
+
+    summary = _summarize_sbuffer_data_activity(trace)
+    observed_pairs = summary["write_req0_wvec_offset_pairs"] | summary["write_req1_wvec_offset_pairs"]
+    assert (0, 0) in observed_pairs, (
+        f"未观测到 targeted entry0 offset0 命中: actual={sorted(observed_pairs)}"
+    )
+    assert (12, 1) in observed_pairs, (
+        f"未观测到 targeted entry12 offset1 命中: actual={sorted(observed_pairs)}"
+    )
+    assert drain_summary["drain_event_count"] >= 1, "targeted entry merge 场景未记录到 drain 事件"
+
+    touched_lines = {entry0_line, entry12_line, helper_line}
+    for line_addr in touched_lines:
+        assert env.read_cacheline(line_addr) == expected_refmem.read_cacheline(line_addr, 64), (
+            f"targeted entry merge 场景的 cacheline {line_addr:#x} 最终结果不匹配"
+        )
+    env.assert_no_outstanding()
+
+
+@pytest.mark.xfail(
+    reason="DUTBUG-sbuffer-batched-commit-drain-corruption: wide multi-entry batched store commit corrupts drained cacheline bytes before flush convergence",
+    strict=False,
+)
+def test_api_MemBlock_sbuffer_data_entry_quarter_matrix_batched_commit(env):
+    """
+    分 4 个 quarter 波次批量 commit 16 个 cacheline entry，补齐 SbufferData 的 entry/quarter/byte 组合。
+
+    检查点：
+      - 每个 sub-wave 中 16 笔 store 都能在统一 commit 后进入 committed
+      - `SbufferData.io_writeReq_*_bits_wvec` 覆盖更宽的真实 entry 集合，`vwordOffset` 覆盖 0/1/2/3
+      - 批量 commit 场景中第二写口 `writeReq_1` 出现真实活动
+      - 每个 wave flush 后，16 条 cacheline 与参考内存一致
+    """
+
+    state = _reset_env_and_state(env)
+    expected_refmem = env.memory.fork_ref_memory()
+
+    line_addrs = [SBUFFER_DATA_ENTRY_MATRIX_BASE + (entry * 0x40) for entry in range(16)]
+    for entry, line_addr in enumerate(line_addrs):
+        env.preload_bytes(
+            line_addr,
+            bytes((((entry + 3) * 17) + byte_idx) & 0xFF for byte_idx in range(64)),
+        )
+
+    summary = {}
+    with _capture_sbuffer_data_activity(env, max_events=8192) as trace:
+        try:
+            sq_ptr = state.sq_ptr
+            req_id_base = 0
+
+            for quarter in range(4):
+                for half in range(2):
+                    wave_ops = _make_sbuffer_data_wave_ops(
+                        base_addr=SBUFFER_DATA_ENTRY_MATRIX_BASE,
+                        quarter=quarter,
+                        half=half,
+                    )
+                    committed_views, sq_ptr = _send_scalar_store_batch_then_commit(
+                        env,
+                        sq_ptr,
+                        store_ops=wave_ops,
+                        req_id_base=req_id_base,
+                    )
+                    req_id_base += len(wave_ops)
+
+                    assert len(committed_views) == len(wave_ops), "batch commit 后 committed store 数量异常"
+                    for store, (addr, data, _) in zip(committed_views, wave_ops):
+                        assert store.addr == addr, "batch commit store 地址不匹配"
+                        assert _store_data_low64_matches(store, data), "batch commit store 数据不匹配"
+                        _apply_store_stimulus_to_ref_memory(
+                            expected_refmem,
+                            addr=addr,
+                            data=data,
+                        )
+
+                    drain_summary = FlushStoreBuffersSequence(max_cycles=1600).run(env)
+                    assert drain_summary["drain_event_count"] >= 1, (
+                        f"quarter={quarter}, half={half} flush 未记录到 drain 事件"
+                    )
+        finally:
+            summary = _summarize_sbuffer_data_activity(trace)
+
+    for line_addr in line_addrs:
+        assert env.read_cacheline(line_addr) == expected_refmem.read_cacheline(line_addr, 64), (
+            f"entry/quarter batched commit 场景的 cacheline {line_addr:#x} 最终结果不匹配"
+        )
+
+    assert summary["observed_write_offsets"] == {0, 1, 2, 3}, (
+        f"entry/quarter batched commit 未覆盖完整 vwordOffset 象限: actual={sorted(summary['observed_write_offsets'])}"
+    )
+    observed_write_entries = summary["write_req0_wvec_bits"] | summary["write_req1_wvec_bits"]
+    assert len(observed_write_entries) >= 8, (
+        f"entry/quarter batched commit 真实 wvec entry 覆盖不足: actual={sorted(observed_write_entries)}"
+    )
+    assert summary["write_req1_count"] > 0, "entry/quarter batched commit 未观测到第二写口活动"
+    env.assert_no_outstanding()
+
+
 @pytest.mark.xfail(
     reason="DUTBUG-cbo-zero-missing-wline-drain: cbo.zero reaches completed but does not emit observable wline drain within the current flush window",
     strict=False,
@@ -198,23 +1273,87 @@ def test_api_MemBlock_cbo_zero_flush_zeroes_entire_cacheline(env):
     state = _reset_env_and_state(env)
     env.preload_bytes(CBO_ZERO_LINE_ADDR, bytes(((index * 5) + 1) & 0xFF for index in range(64)))
 
-    result = CboZeroFlushSequence(
-        StoreTxn.cbo_zero(
-            req_id=0,
-            sq_ptr=state.sq_ptr,
-            addr=CBO_ZERO_LINE_ADDR,
-        ),
-        assert_no_outstanding=True,
-    ).run(env)
+    with _capture_sbuffer_data_activity(env) as trace:
+        result = CboZeroFlushSequence(
+            StoreTxn.cbo_zero(
+                req_id=0,
+                sq_ptr=state.sq_ptr,
+                addr=CBO_ZERO_LINE_ADDR,
+            ),
+            assert_no_outstanding=True,
+        ).run(env)
 
     store_view = result.store_result.store_view
+    summary = _summarize_sbuffer_data_activity(trace)
 
     assert store_view is not None and store_view.completed, "`cbo.zero` 未进入 completed"
     assert store_view.is_cbo_zero, "store view 未标记为 `cbo.zero`"
     assert store_view.addr == CBO_ZERO_LINE_ADDR, "`cbo.zero` 地址不匹配"
+    assert summary["wline_cycles"], "`cbo.zero` 未观测到 SbufferData.wline=1"
     assert result.drain_summary["drain_event_count"] >= 1, "`cbo.zero` flush 未记录到 drain 事件"
     assert any(event.get("wline") for event in env.memory.drain_log), "`cbo.zero` 未记录到 wline drain"
     assert env.read_cacheline(CBO_ZERO_LINE_ADDR) == bytes(64), "`cbo.zero` 未把整条 cacheline 清零"
+
+
+@pytest.mark.xfail(
+    reason="DUTBUG-cbo-zero-multi-entry-drain: multi-entry cbo.zero reaches committed/wline activity but flush does not fully converge to zeroed drain output",
+    strict=False,
+)
+def test_api_MemBlock_sbuffer_data_cbo_zero_entry_matrix_directed(env):
+    """
+    16 条唯一 cacheline 的 `cbo.zero` 累积驻留在 sbuffer 中，覆盖 SbufferData 的多 entry `wline` 路径。
+
+    检查点：
+      - 16 条 `cbo.zero` 都能进入 committed
+      - `SbufferData.wline` 与写 lane 覆盖扩展到完整 16 entry
+      - flush 后整批 cacheline 应被清零
+    """
+
+    line_addrs = [SBUFFER_DATA_ENTRY_MATRIX_BASE + 0x1000 + (entry * 0x40) for entry in range(16)]
+    state = _reset_env_and_state(env)
+
+    for entry, line_addr in enumerate(line_addrs):
+        env.preload_bytes(
+            line_addr,
+            bytes((((entry + 9) * 13) + byte_idx) & 0xFF for byte_idx in range(64)),
+        )
+
+    summary = {}
+    with _capture_sbuffer_data_activity(env, max_events=2048) as trace:
+        try:
+            sq_ptr = state.sq_ptr
+            committed_views = []
+            for req_id, line_addr in enumerate(line_addrs):
+                commit_result = ScalarStoreCommitSequence(
+                    StoreTxn.cbo_zero(
+                        req_id=req_id,
+                        sq_ptr=sq_ptr,
+                        addr=line_addr,
+                    ),
+                    expected_mmio=False,
+                    require_committed=True,
+                    materialize_cycles=300,
+                ).run(env)
+                committed_views.append(commit_result.committed_store_view)
+                sq_ptr = ptr_inc(sq_ptr, env.config.sequence.store_queue_size)
+
+            drain_summary = FlushStoreBuffersSequence(max_cycles=2000).run(env)
+        finally:
+            summary = _summarize_sbuffer_data_activity(trace)
+
+    for idx, (store, line_addr) in enumerate(zip(committed_views, line_addrs)):
+        assert store is not None and store.committed, f"第 {idx} 条 cbo.zero 未进入 committed"
+        assert store.is_cbo_zero, f"第 {idx} 条 store 未标记为 cbo.zero"
+        assert store.addr == line_addr, f"第 {idx} 条 cbo.zero 地址不匹配"
+
+    assert summary["wline_cycles"], "multi-entry cbo.zero 未观测到 SbufferData.wline=1"
+    observed_write_entries = summary["write_req0_wvec_bits"] | summary["write_req1_wvec_bits"]
+    assert len(observed_write_entries) >= 8, (
+        f"multi-entry cbo.zero 真实 wvec entry 覆盖不足: actual={sorted(observed_write_entries)}"
+    )
+    assert drain_summary["drain_event_count"] >= 1, "multi-entry cbo.zero flush 未记录到 drain 事件"
+    for line_addr in line_addrs:
+        assert env.read_cacheline(line_addr) == bytes(64), f"multi-entry cbo.zero 未把 cacheline {line_addr:#x} 清零"
 
 
 def test_api_MemBlock_misaligned_store_dual_overlap_loads_directed(env):
@@ -427,6 +1566,375 @@ def test_api_MemBlock_partial_word_store_then_aligned_load_directed(env, load_is
     ), "partial word store merge 结果不匹配"
     assert drain_summary["touched_byte_count"] >= 4, "partial word store flush 覆盖字节数不足"
     env.assert_no_outstanding()
+
+
+@pytest.mark.parametrize("load_issue_lane", (1, 2), ids=("lane1", "lane2"))
+def test_api_MemBlock_sbuffer_forward_committed_partial_word_quarter_matrix_directed(
+    env,
+    load_issue_lane: int,
+):
+    """
+    committed 但尚未 flush 的 partial-word store，在 lane1/lane2 上命中真实 sbuffer forward。
+
+    检查点：
+      - 4 个 quarter 的 committed partial-word store 都留在 sbuffer 中
+      - younger load 在 `lane=1/2` 上命中 `MemBlock_inner_sbuffer_io_forward_*_s2Resp`
+      - sbuffer forward 的 mask/data 与 4B partial-store 语义一致
+      - load 完成前不走 outer drain，最终 flush 后 cacheline 与参考内存一致
+    """
+
+    line_addr = SBUFFER_FORWARD_LINE_ADDR + ((load_issue_lane - 1) * 0x80)
+    initial_line = bytes(((0x31 + (index * 7)) & 0xFF) for index in range(64))
+    quarter_store_data = (
+        0xA1A2_A3A4,
+        0xB1B2_B3B4,
+        0xC1C2_C3C4,
+        0xD1D2_D3D4,
+    )
+    delay_candidates = tuple(range(12))
+    failure_records = []
+
+    for quarter, store_data in enumerate(quarter_store_data):
+        addr = line_addr + (quarter * 0x10)
+        quarter_succeeded = False
+        quarter_failures = []
+
+        for commit_to_load_delay in delay_candidates:
+            state = _reset_env_and_state(
+                env,
+                require_issue_lanes=(0, 1, 2),
+                require_lq_ready=True,
+            )
+            env.preload_bytes(line_addr, initial_line)
+            expected_refmem = env.memory.predict_store(addr, store_data, mask=0x0F)
+            completed_before = env.get_completed_load_count()
+
+            store_result = ScalarStoreSequence(
+                StoreTxn(
+                    req_id=quarter,
+                    sq_ptr=state.sq_ptr,
+                    addr=addr,
+                    data=store_data,
+                    mask=0x0F,
+                ),
+                expected_mmio=False,
+                require_committed=False,
+                materialize_cycles=300,
+            ).run(env)
+            assert store_result.store_view is not None, (
+                f"quarter {quarter} partial-word store 未形成可观测 store 视图"
+            )
+            assert int(store_result.store_view.mask) == 0x0F, (
+                f"quarter {quarter} partial-word store 未保持 4B mask"
+            )
+
+            load_txn = LoadTxn(
+                req_id=0x80 + load_issue_lane * 0x10 + quarter,
+                addr=addr,
+                lq_ptr=state.next_lq_ptr,
+                sq_ptr=store_result.next_sq_ptr,
+                issue_lane=load_issue_lane,
+            )
+            env.backend.prepare(load_txn)
+            enqueue_scalar_load(
+                env,
+                req_id=load_txn.req_id,
+                lq_ptr=load_txn.lq_ptr,
+                sq_ptr=load_txn.sq_ptr,
+                enq_port=load_txn.enq_port,
+                rob_idx=load_txn.rob_idx,
+            )
+            expect_load(env, load_txn)
+            expected_load_data = expected_refmem.read(addr, 8)
+            transport_stats_before = env.get_transport_stats()
+
+            try:
+                with _capture_forward_activity(env, max_events=128) as trace:
+                    env.backend.pulse_store_commit(1)
+                    if commit_to_load_delay > 0:
+                        env.advance_cycles(commit_to_load_delay)
+                    issue_scalar_load(
+                        env,
+                        req_id=load_txn.req_id,
+                        addr=load_txn.addr,
+                        lq_ptr=load_txn.lq_ptr,
+                        sq_ptr=load_txn.sq_ptr,
+                        lane=load_txn.issue_lane,
+                        store_set_hit=load_txn.store_set_hit,
+                        load_wait_bit=load_txn.load_wait_bit,
+                        load_wait_strict=load_txn.load_wait_strict,
+                        wait_for_rob_idx=load_txn.wait_for_rob_idx,
+                        rob_idx=load_txn.rob_idx,
+                        pdest=load_txn.resolved_pdest,
+                        ftq_idx_flag=load_txn.resolved_ftq_idx_flag,
+                        ftq_idx_value=load_txn.resolved_ftq_idx_value,
+                        pc=load_txn.resolved_pc,
+                    )
+                    load_writeback = env.wait_load_writeback_observed(
+                        rob_idx=load_txn.rob_idx,
+                        data=expected_load_data,
+                        max_cycles=200,
+                    )
+                    completed_loads = env.wait_completed_load_count(completed_before + 1, max_cycles=64)
+                transport_stats_after = env.get_transport_stats()
+            except TimeoutError as exc:
+                quarter_failures.append(
+                    {
+                        "quarter": quarter,
+                        "delay": commit_to_load_delay,
+                        "error": str(exc),
+                        "trace": _summarize_forward_activity(trace),
+                    }
+                )
+                continue
+
+            sbuffer_forward_event = _find_forward_event(
+                trace,
+                channel="sbuffer",
+                lane=load_issue_lane,
+                expected_match_invalid=0,
+                require_forward_mask=True,
+            )
+            if sbuffer_forward_event is None:
+                quarter_failures.append(
+                    {
+                        "quarter": quarter,
+                        "delay": commit_to_load_delay,
+                        "error": "missing sbuffer forward event",
+                        "trace": _summarize_forward_activity(trace),
+                    }
+                )
+                continue
+
+            committed_store = env.wait_store_materialized(
+                store_result.allocated_sq_ptr.value,
+                expected_addr=addr,
+                expected_data=store_data,
+                expected_mmio=False,
+                require_committed=True,
+                max_cycles=300,
+            )
+            drain_summary = FlushStoreBuffersSequence(max_cycles=800).run(env)
+
+            assert sbuffer_forward_event["lane"] == load_issue_lane, "sbuffer forward 未命中目标 load lane"
+            assert sbuffer_forward_event["valid"] == 1, "sbuffer forward 响应无效"
+            assert sbuffer_forward_event["match_invalid"] == 0, "正常 sbuffer forward 不应退化为 matchInvalid"
+            assert any(int(bit) for bit in sbuffer_forward_event["forward_mask"]), (
+                "sbuffer forward 未返回有效 forward mask"
+            )
+            _assert_forward_response_matches_partial_word(
+                sbuffer_forward_event,
+                store_data=store_data,
+            )
+            assert load_writeback["data"] == expected_load_data, "sbuffer forward 后的 load 写回数据不匹配"
+            assert completed_loads == completed_before + 1, "sbuffer forward 后的 load 未按预期完成 compare"
+            assert committed_store is not None and committed_store.committed, (
+                "sbuffer forward 命中后，store 未进入 committed"
+            )
+            assert transport_stats_after["outer_request_count"] == transport_stats_before["outer_request_count"], (
+                "sbuffer forward load 不应退化成 outer/uncache 路径"
+            )
+            assert env.read_cacheline(line_addr) == expected_refmem.read_cacheline(line_addr, 64), (
+                "sbuffer forward quarter 场景的 cacheline 最终结果不匹配"
+            )
+            assert drain_summary["drain_event_count"] >= 1, "sbuffer forward quarter 场景未记录到 drain 事件"
+            assert drain_summary["touched_byte_count"] >= 4, "sbuffer forward quarter 场景 flush 覆盖字节数不足"
+            env.assert_no_outstanding()
+
+            quarter_succeeded = True
+            break
+
+        failure_records.extend(quarter_failures)
+        assert quarter_succeeded, (
+            f"quarter {quarter} 未找到稳定的 sbuffer forward 窗口: "
+            f"{quarter_failures}"
+        )
+
+
+@pytest.mark.parametrize("load_issue_lane", (1, 2), ids=("lane1", "lane2"))
+def test_api_MemBlock_sbuffer_forward_entry2_partial_word_targeted(
+    env,
+    load_issue_lane: int,
+):
+    """
+    先把目标 cacheline 真实预热到 sbuffer entry2，再在 lane1/lane2 上定向命中 entry2 forward。
+
+    检查点：
+      - 预热阶段能稳定拿到 `entry2 -> line_addr` 映射
+      - 目标 quarter0 partial-word store 继续命中 `wvec[2]`
+      - younger load 在 `lane=1/2` 上命中真实 sbuffer forward，覆盖 entry2 的 `vtag_matches`
+    """
+
+    prewarm_base = SBUFFER_FORWARD_LINE_ADDR + 0x200 + ((load_issue_lane - 1) * 0x400)
+    preload_seed = 29 + load_issue_lane
+    state = _reset_env_and_state(
+        env,
+        require_issue_lanes=(0, 1, 2),
+        require_lq_ready=True,
+    )
+    prewarm = _prewarm_sbuffer_entry_map(
+        env,
+        state.sq_ptr,
+        base_addr=prewarm_base,
+        line_count=6,
+        req_id_base=4000 + (load_issue_lane * 0x100),
+        preload_seed=preload_seed,
+    )
+    sq_ptr = prewarm["next_sq_ptr"]
+    entry_to_line = prewarm["entry_to_line"]
+
+    assert 2 in entry_to_line, f"预热阶段未获得 entry2 映射: actual={sorted(entry_to_line)}"
+
+    target_line_addr = entry_to_line[2]
+    target_line_index = (target_line_addr - prewarm_base) // 0x40
+    expected_target_line = bytearray(
+        (((target_line_index + preload_seed) * 19) + byte_idx) & 0xFF
+        for byte_idx in range(64)
+    )
+    _apply_masked_store_to_line_bytes(
+        expected_target_line,
+        line_addr=target_line_addr,
+        addr=target_line_addr,
+        data=0x1111_2222_3333_4444 ^ (target_line_index << 20),
+        mask=0xFF,
+    )
+    store_data = 0x91_92_93_94
+    completed_before = env.get_completed_load_count()
+    addr = target_line_addr
+    with _capture_sbuffer_data_activity(env, max_events=64) as trace:
+        _, sq_ptr = _commit_scalar_store(
+            env,
+            sq_ptr,
+            req_id=0x5000 + (load_issue_lane * 0x100),
+            addr=addr,
+            data=store_data,
+            mask=0x0F,
+        )
+    _apply_masked_store_to_line_bytes(
+        expected_target_line,
+        line_addr=target_line_addr,
+        addr=addr,
+        data=store_data,
+        mask=0x0F,
+    )
+    summary = _summarize_sbuffer_data_activity(trace)
+    observed_wvec_bits = summary["write_req0_wvec_bits"] | summary["write_req1_wvec_bits"]
+    observed_triples = (
+        summary["write_req0_wvec_offset_mask_triples"]
+        | summary["write_req1_wvec_offset_mask_triples"]
+    )
+    assert 2 in observed_wvec_bits, (
+        f"entry2 partial-word merge 未观测到 entry2: actual={sorted(observed_wvec_bits)}"
+    )
+    assert (2, 0, 3) in observed_triples, (
+        f"entry2 partial-word merge 未命中 entry2 quarter0 byte3: actual={sorted(observed_triples)}"
+    )
+
+    load_txn = LoadTxn(
+        req_id=0x5800 + (load_issue_lane * 0x100),
+        addr=addr,
+        lq_ptr=state.next_lq_ptr,
+        sq_ptr=sq_ptr,
+        issue_lane=load_issue_lane,
+    )
+    env.backend.prepare(load_txn)
+    enqueue_scalar_load(
+        env,
+        req_id=load_txn.req_id,
+        lq_ptr=load_txn.lq_ptr,
+        sq_ptr=load_txn.sq_ptr,
+        enq_port=load_txn.enq_port,
+        rob_idx=load_txn.rob_idx,
+    )
+    expect_load(env, load_txn)
+
+    expected_load_data = int.from_bytes(expected_target_line[:8], "little")
+    transport_stats_before = env.get_transport_stats()
+
+    with _capture_forward_activity(env, max_events=128) as trace:
+        issue_scalar_load(
+            env,
+            req_id=load_txn.req_id,
+            addr=load_txn.addr,
+            lq_ptr=load_txn.lq_ptr,
+            sq_ptr=load_txn.sq_ptr,
+            lane=load_txn.issue_lane,
+            store_set_hit=load_txn.store_set_hit,
+            load_wait_bit=load_txn.load_wait_bit,
+            load_wait_strict=load_txn.load_wait_strict,
+            wait_for_rob_idx=load_txn.wait_for_rob_idx,
+            rob_idx=load_txn.rob_idx,
+            pdest=load_txn.resolved_pdest,
+            ftq_idx_flag=load_txn.resolved_ftq_idx_flag,
+            ftq_idx_value=load_txn.resolved_ftq_idx_value,
+            pc=load_txn.resolved_pc,
+        )
+        load_writeback = env.wait_load_writeback_observed(
+            rob_idx=load_txn.rob_idx,
+            data=expected_load_data,
+            max_cycles=200,
+        )
+        completed_loads = env.wait_completed_load_count(completed_before + 1, max_cycles=64)
+    transport_stats_after = env.get_transport_stats()
+
+    sbuffer_forward_event = _find_forward_event(
+        trace,
+        channel="sbuffer",
+        lane=load_issue_lane,
+        expected_match_invalid=0,
+        require_forward_mask=True,
+    )
+    assert sbuffer_forward_event is not None, (
+        f"entry2 定向场景未观测到 lane{load_issue_lane} sbuffer forward: "
+        f"{_summarize_forward_activity(trace)}"
+    )
+    _assert_forward_response_matches_expected_merge(
+        sbuffer_forward_event,
+        expected_data=expected_load_data,
+    )
+    assert load_writeback["data"] == expected_load_data, "entry2 sbuffer forward 后的 load 写回数据不匹配"
+    assert completed_loads == completed_before + 1, "entry2 sbuffer forward 后的 load 未按预期完成 compare"
+    assert transport_stats_after["outer_request_count"] == transport_stats_before["outer_request_count"], (
+        "entry2 sbuffer forward load 不应退化成 outer/uncache 路径"
+    )
+
+    drain_summary = FlushStoreBuffersSequence(max_cycles=1000).run(env)
+
+    assert env.read_cacheline(target_line_addr) == bytes(expected_target_line), (
+        f"entry2 定向 sbuffer forward 场景的目标 cacheline 最终结果不匹配: line_addr={target_line_addr:#x}"
+    )
+    assert drain_summary["drain_event_count"] >= 1, "entry2 定向 sbuffer forward 场景未记录到 drain 事件"
+    assert drain_summary["touched_byte_count"] >= 8, "entry2 定向 sbuffer forward 场景 flush 覆盖字节数不足"
+    env.assert_no_outstanding()
+
+
+@pytest.mark.parametrize("load_issue_lane", (1, 2), ids=("lane1", "lane2"))
+def test_api_MemBlock_sbuffer_forward_multi_entry_matrix_directed(
+    env,
+    load_issue_lane: int,
+):
+    """
+    单次预热 16 个 sbuffer entry，并在 lane1/lane2 上定向命中多个 entry 的 sbuffer forward。
+
+    检查点：
+      - 预热阶段能稳定建立 `entry -> line_addr` 映射
+      - 多个目标 entry 都能在真实 DUT 上形成 committed update + younger load 的 sbuffer forward
+      - 低半与高半窗口都被覆盖，避免 `forward_mask_candidate_reg_*` 只停留在单一字节分布
+    """
+
+    _run_sbuffer_forward_entry_matrix(
+        env,
+        load_issue_lane=load_issue_lane,
+        entry_update_specs=(
+            (2, 0x0),
+            (3, 0x10),
+            (4, 0x20),
+            (5, 0x30),
+        ),
+        base_addr=SBUFFER_FORWARD_LINE_ADDR + 0x800 + ((load_issue_lane - 1) * 0x800),
+        req_id_base=0x7000 + (load_issue_lane * 0x400),
+        preload_seed=41 + load_issue_lane,
+    )
 
 
 def test_api_MemBlock_partial_byte_store_high_offset_directed(env):
@@ -886,4 +2394,74 @@ def test_api_MemBlock_store_burst_then_interleaved_load_before_flush(env):
     )
     assert drain_summary["drain_event_count"] >= 1, "store burst 统一 flush 后未记录到 drain 事件"
     assert drain_summary["touched_byte_count"] >= 32, "store burst 统一 flush 覆盖字节数不足"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_sbuffer_data_wide_burst_mask_flush_directed(env):
+    """
+    宽 sbuffer burst 后穿插 younger load，覆盖多 lane writeReq 与 mask-flush。
+
+    检查点：
+      - 多条不同 cacheline 的 store 能在 flush 前同时留在 sbuffer 中
+      - `accessIdx_*` 与 `io_dcache_main_pipe_hit_resp_bits_id` 能覆盖较宽的 lane 集合
+      - younger load 与最终 flush 后的内存结果保持一致
+    """
+
+    burst_ops = [
+        (
+            SBUFFER_DATA_BURST_BASE + (index * 0x40) + ((index % 4) * 0x10),
+            0x0101_0101_0101_0101 * (index + 1),
+        )
+        for index in range(12)
+    ]
+
+    state = _reset_env_and_state(env)
+    expected_refmem = env.memory.fork_ref_memory()
+
+    with _capture_sbuffer_data_activity(env, max_events=1024) as trace:
+        sq_ptr = state.sq_ptr
+        for req_id, (addr, data) in enumerate(burst_ops):
+            _, sq_ptr = _commit_scalar_store(
+                env,
+                sq_ptr,
+                req_id=req_id,
+                addr=addr,
+                data=data,
+            )
+            _apply_store_stimulus_to_ref_memory(
+                expected_refmem,
+                addr=addr,
+                data=data,
+            )
+
+        next_lq_ptr = state.next_lq_ptr
+        for completed_loads, (addr, _) in enumerate(burst_ops, start=1):
+            load_result = ScalarLoadSequence(
+                LoadTxn(
+                    req_id=len(burst_ops) + completed_loads - 1,
+                    addr=addr,
+                    lq_ptr=next_lq_ptr,
+                    sq_ptr=sq_ptr,
+                ),
+                expected_completed_loads=completed_loads,
+            ).run(env)
+            next_lq_ptr = load_result.next_lq_ptr
+
+        drain_summary = FlushStoreBuffersSequence(max_cycles=1200).run(env)
+
+    summary = _summarize_sbuffer_data_activity(trace)
+
+    for addr, _ in burst_ops:
+        assert env.memory.read(addr, 8) == expected_refmem.read(addr, 8), (
+            f"wide sbuffer burst 场景的地址 {addr:#x} 最终结果不匹配"
+        )
+
+    assert len(summary["write_lane_bits"]) >= 8, (
+        f"wide sbuffer burst 写 lane 覆盖不足: actual={sorted(summary['write_lane_bits'])}"
+    )
+    assert summary["mask_flush_count"] > 0, "wide sbuffer burst 未观测到 mask-flush 活动"
+    assert len(summary["mask_flush_lane_bits"]) >= 4, (
+        f"wide sbuffer burst mask-flush lane 覆盖不足: actual={sorted(summary['mask_flush_lane_bits'])}"
+    )
+    assert drain_summary["drain_event_count"] >= 1, "wide sbuffer burst flush 未记录到 drain 事件"
     env.assert_no_outstanding()

@@ -159,6 +159,168 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_frontend_bridge.py src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py -k 'frontend_bridge or fetch_to_mem_itlb_ptw_smoke or sv39_dtlb_fill_and_replacement'`
   - 结果：`5 passed, 10 deselected`
 
+### 4. 追加 `Sbuffer` multi-entry forward directed，用真实 entry 矩阵点亮 lane1/lane2 新缺口
+
+本条目记录一轮继续围绕 `Sbuffer.sv` `Load Data Forward` 子块的 line coverage 补强。在前一轮 `entry2` 定向场景已经证明 `lane1/lane2` 能真实打到 sbuffer forward 的基础上，本轮新增一条 multi-entry directed case，把覆盖目标从单一 `entry2` 扩展到 `entry2/3/4/5`，并把每个 target entry 放到不同 `quarter` 上，优先点亮 `lane1/lane2` 的新增 `vtag_matches_*` 与对应 `forward_mask_candidate_reg_*`。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 新增 `_run_sbuffer_forward_entry_matrix()`
+  - 新增 `test_api_MemBlock_sbuffer_forward_multi_entry_matrix_directed`
+- testcase 设计收口
+  - 初版尝试过“单次预热 16 个 entry 后连续命中多 entry”的更激进方案
+  - 真实 DUT 上该方案在第一笔 update 上就暴露出稳定性/最终态观测问题，因此收紧为“每个 target entry 独立 reset + 独立预热到刚好够深度”
+  - 每个 subcase 继续复用已证明稳定的 `partial-word committed update + younger load` 模式，避免把覆盖补强建立在不稳定 overwrite 行为上
+
+#### 验证情况
+
+- `python3 -m pytest -q -s src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'sbuffer_forward_multi_entry_matrix_directed'`
+  - 结果：`2 passed, 25 deselected`
+- `python3 -m pytest -q tests/test_MemBlock_scalar_store_pipeline.py -k 'sbuffer_forward_multi_entry_matrix_directed or sbuffer_forward_entry2_partial_word_targeted or sbuffer_forward_committed_partial_word_quarter_matrix_directed' --toffee-report --report-dir ./data/toffee_report_sbuffer_forward_multi_entry --report-name sbuffer_forward_multi_entry_cov.html --report-dump-json`
+  - 结果：`6 passed, 21 deselected`
+  - focused report：`data/toffee_report_sbuffer_forward_multi_entry/line_dat/merged.info`
+
+#### focused coverage 结果
+
+- `Sbuffer.sv` focused line hit 证据：
+  - `DA:6383,2`
+  - `DA:6384,1`
+  - `DA:6385,1`
+  - `DA:6386,1`
+  - `DA:7318,2`
+  - `DA:7319,1`
+  - `DA:7320,1`
+  - `DA:7321,1`
+  - `DA:6624,6`
+  - `DA:7527,6`
+  - `DA:7543,6`
+  - `DA:7559,6`
+- 说明
+  - `lane1` 的 `entry3/4/5` 对应 `vtag_matches_1_*` 已在 focused report 中新增点亮
+  - `lane2` 的 `entry3/4/5` 对应 `vtag_matches_2_*` 也已新增点亮
+  - 这轮 focused 仍未完全覆盖更深的 `entry6+` 与部分高字节 `forward_mask_candidate_reg_*`，因此后续优先级仍在“继续扩 entry 矩阵”而不是重新追 `entry2`
+
+### 3. 改以 `Sbuffer` forward 主线为覆盖率补强重点
+
+本条目记录一轮从 `SbufferData` 转向 `Sbuffer.sv` 本体的 line coverage 分析与 testcase 补强。重新检查 `merged.info` 后，当前 `Sbuffer.sv` 已有 `90.64% (6307 / 6958)` 的 line coverage，主要缺口不在 enqueue/drain 主线，而集中在 `Load Data Forward` 子块，尤其是 `forward[1]` 与 `forward[2]` 的 `vtag/ptag compare`、`matchInvalid`、以及 `forward_mask_candidate` 相关逻辑。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 新增 `SBUFFER_FORWARD_LINE_ADDR`
+  - 新增 `test_api_MemBlock_sbuffer_forward_committed_partial_word_quarter_matrix_directed`
+  - 把 testcase 改成“store 先 materialize、load 预 enqueue、commit 后按窗口 issue”的定向 `sbuffer forward` 验证
+- `sequences/memblock_sequences.py`
+  - `sample_sbuffer_forward_events()` 不再只依赖顶层 `MemBlock_inner_sbuffer_*` DPI 导出
+  - 新增对 `inner_sbuffer.io_forward_*_s2Resp_*` 内部层级信号的回退读取，避免把“未导出”误判成“无事件”
+- 本轮 testcase 设计重点
+  - 对每个 `quarter=0/1/2/3`，构造一条 `mask=0x0F` 的 partial-word store
+  - younger load 先 enqueue，再在 store commit 后按延迟窗口 issue，定向命中真实 `sbuffer forward`
+  - 在 `lane1` 与 `lane2` 上分别证明 `mask/data` 与 partial-store merge 一致
+
+#### 验证情况
+
+- `python3 -m pytest -q -s src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'sbuffer_forward_committed_partial_word_quarter_matrix_directed'`
+  - 结果：`2 passed, 21 deselected`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'sbuffer_forward_committed_partial_word_quarter_matrix_directed or partial_word_store_then_aligned_load_directed'`
+  - 结果：`5 passed, 18 deselected`
+- `make report`
+  - 报告时间戳：
+    - `data/toffee_report_full/line_dat/merged.info` -> `2026-04-26 17:31`
+    - `data/toffee_report_full/line_dat/index.html` -> `2026-04-26 17:32`
+  - 当前 `Sbuffer.sv` line coverage 仍为 `90.64%`（`6307 / 6958`）
+  - 说明这轮主要收敛的是 `lane1/lane2 sbuffer forward` 的真实观测与 testcase 稳定性；总体覆盖率未继续上升，下一步仍需定向命中残余 `vtag_matches_*` 与更细的 `forward_mask_candidate_reg_*` 组合
+
+#### 结果说明
+
+- 前两轮定向 testcase 失败的主因不是 DUT 缺少 `sbuffer forward`
+- 根因是旧 helper 只读取顶层 DPI 导出的 `MemBlock_inner_sbuffer_*` 信号，而当前仿真环境并未稳定导出这组 `inner_sbuffer` forward 端口
+- 修正为“顶层导出优先，`inner_sbuffer.*` 内部信号回退”后，真实 `lane1/lane2` `sbuffer forward` 事件可以被稳定观测到
+
+### 2. 追加 `SbufferData` port0 `byte3` 定向搜索，并把新确认的 DUT 缺陷收敛为精确 `xfail`
+
+本条目记录在真实 `wvec` 追踪基础上继续推进 `SbufferData` 行覆盖时，对 `port0 / quarter3 / byte3` 缺口的进一步收敛。围绕 `11905` 与 `12929` 对应的 `line_write_buffer_data_X[31:24]` 路径，本轮把 testcase 观测从 `(entry, offset)` 进一步收紧到 `(entry, offset, byte-lane)`，并把目标 store 由 `1B` 改成 `4B @ +0x30`，确保 `mask(3)` 与 `data[31:24]` 的命中条件真实成立。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 为 `_capture_sbuffer_data_activity()` 增加 `io_in_req_{0,1}_bits_mask` 采样
+  - 在汇总逻辑里新增 `write_req{0,1}_mask_bits` 与 `write_req{0,1}_wvec_offset_mask_triples`
+  - 新增并收敛两个 `port0 quarter3 byte3` 定向场景：
+    - `test_api_MemBlock_sbuffer_data_port0_line5_word3_byte3_directed`
+    - `test_api_MemBlock_sbuffer_data_port0_line1_and_line5_word3_byte3_search`
+- 新确认的 DUT 行为
+  - `entry5` 上的 `(entry=5, offset=3, byte=3)` 已能在真实 `writeReq_0` 中稳定观测到
+  - 但在该 targeted merge 之后，flush/drain 会破坏预热 cacheline 的最终字节结果
+  - `entry1` 上的 `(entry=1, offset=3, byte=3)` 仍不稳定，预热得到的 entry1 常在目标 merge 前被 drain 或重分配
+
+#### 验证情况
+
+- `python3 -m pytest -q -s src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'sbuffer_data_port0_line5_word3_byte3_directed or sbuffer_data_port0_line1_and_line5_word3_byte3_search'`
+  - 结果：`2 xfailed, 19 deselected`
+
+### 1. 把 `SbufferData` 白盒观测切换到真实 `wvec`
+
+本条目记录一轮围绕 `SbufferData` line coverage 的继续追踪。前一轮 testcase 虽然在 `accessIdx`、`mask-flush` 和 `vwordOffset` 上表现出较宽活动，但重新跑完整 `make report` 后，`SbufferData.sv` 的 line coverage 仍停在 `62.39%`（`8857 / 14196`），说明先前把 `accessIdx_*` 当成真实 entry 命中的代理是错误的。本轮因此把 testcase 局部白盒采样切换到 `inner_sbuffer.dataModule_io_writeReq_{0,1}_bits_wvec`，并据此重新收敛 testcase 设计与 DUT bug 结论。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 为 `_capture_sbuffer_data_activity()` 增加 `io_writeReq_{0,1}_bits_wvec` 采样与 `wvec -> entry bit` 解码
+  - 在汇总逻辑里新增 `write_req{0,1}_wvec_bits`、`write_req{0,1}_wvec_offset_pairs`
+  - 新增 `test_api_MemBlock_sbuffer_data_targeted_entry_merge_directed`
+  - 保留并细化两个已有 `xfail`：
+    - `test_api_MemBlock_sbuffer_data_entry_quarter_matrix_batched_commit`
+    - `test_api_MemBlock_sbuffer_data_cbo_zero_entry_matrix_directed`
+- 新确认的 DUT 行为
+  - wide batched commit 确实能把 `port1` 的真实 `wvec` 扩到 `{0..11,13,15}`，但稳定缺少 `wvec[12]`
+  - 深预热后的 targeted merge 能稳定命中 `(entry=0, offset=0)` 与 `(entry=12, offset=1)`，但 flush 后 cacheline 数据与独立参考内存不一致
+  - multi-entry `cbo.zero` 仍然没有形成可采到的 `SbufferData writeReq` 活动
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'sbuffer_data_targeted_entry_merge_directed or sbuffer_data_entry_quarter_matrix_batched_commit or sbuffer_data_cbo_zero_entry_matrix_directed or sbuffer_data_vword_offset_matrix_directed or sbuffer_data_wide_burst_mask_flush_directed'`
+  - 结果：`2 passed, 3 xfailed, 14 deselected`
+- `make report`
+  - 报告时间戳：
+    - `data/toffee_report_full/line_dat/merged.info` -> `2026-04-26 16:01:36 +0800`
+    - `data/toffee_report_full/line_dat/index.html` -> `2026-04-26 16:02:22 +0800`
+  - 当前 `SbufferData.sv` line coverage 仍为 `62.39%`（`8857 / 14196`）
+  - 目标缺口行仍未被点亮：
+    - `11443=0`
+    - `11905=0`
+    - `12929=0`
+    - `14515=0`
+    - `14593=0`
+    - `15635=0`
+    - `15641=5`
+    - `15707=0`
+
+## 2026-04-25
+
+### 1. 补强 `SbufferData` 的 store-side line coverage 场景
+
+本条目记录一次围绕 `SbufferData` line coverage 的 testcase 定向补强。结合当前覆盖率报告，`SbufferData.sv` 的主要缺口集中在四类重复模板：`vwordOffset=1/2/3` 的写路径、较宽的 sbuffer lane 分布、load 命中后的 mask-flush 传播，以及 `cbo.zero` 对 `wline=1` 的真实写入口。本轮保持主改动边界在 `tests/test_MemBlock_scalar_store_pipeline.py`，通过真实 DUT store/load/flush 场景去自然点亮这些路径，同时把新增白盒采样限制在 testcase 局部，避免扩散到 env/facade 层。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 新增 `test_api_MemBlock_sbuffer_data_vword_offset_matrix_directed`
+  - 新增 `test_api_MemBlock_sbuffer_data_wide_burst_mask_flush_directed`
+  - 为 `cbo.zero` directed 用例补充 `wline` 白盒观测
+  - 新增局部 `Sbuffer`/`SbufferData` activity capture helper，基于 `inner_sbuffer` 级别的 `addr/wline/accessIdx/hit_resp_id` 稳定标量采样
+- 覆盖策略
+  - 用同一 cacheline 上的 `+0x0/+0x10/+0x20/+0x30` partial-store 矩阵覆盖 `vwordOffset[1:0]=0/1/2/3`
+  - 用 12 条不同 cacheline 的 cacheable store burst 扩宽 `accessIdx` / mask-flush lane 分布
+  - 保持 `cbo.zero` 的已知 DUT bug 为精确 `xfail`，但确认其 `wline=1` 入口已被真实激活
+
+#### 验证情况
+
+- `python3 -m pytest -q -s src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'sbuffer_data_vword_offset_matrix_directed or sbuffer_data_wide_burst_mask_flush_directed or cbo_zero_flush_zeroes_entire_cacheline'`
+  - 结果：`2 passed, 1 xfailed, 13 deselected`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py`
+  - 结果：`15 passed, 1 xfailed`
 
 ## 2026-04-24
 
