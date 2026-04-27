@@ -58,6 +58,10 @@ class MdpPrediction(implicit p: Parameters)  extends Prediction{
   val cfiPosition = UInt(CfiPositionWidth.W)
 }
 
+object SmbWrongBypassReason {
+  val none :: verifyFail :: lateMismatch :: Nil = Enum(3)
+}
+
 class LoadInfo(implicit p: Parameters) extends XSBundle with HasMdpParameters{
   val updateType  = UInt(MdpUpdateType.width.W)
   val cfiPosition = UInt(CfiPositionWidth.W)
@@ -66,6 +70,7 @@ class LoadInfo(implicit p: Parameters) extends XSBundle with HasMdpParameters{
   val foundBypassOpportunity = Bool()
   val canBypass = Bool()
   val wrongBypass = Bool()
+  val smbWrongBypassReason = UInt(2.W)
   val smbProviderHandle = new MdpSmbProviderHandle
   def misdependence: Bool = this.updateType === MdpUpdateType.M_WZ || this.updateType === MdpUpdateType.M_AS
   /* three type for misdependence(type: M_WZ、M_AS)
@@ -131,6 +136,7 @@ class MdpUpdate(implicit p: Parameters) extends XSBundle with HasMdpParameters w
   val foundBypassOpportunity = Bool()
   val canBypass = Bool()
   val wrongBypass = Bool()
+  val smbWrongBypassReason = UInt(2.W)
   val smbProviderHandle = new MdpSmbProviderHandle
   def getDistance[T <: CircularQueuePtr[T]](enq_ptr: T, deq_ptr: T): UInt = 
     distanceBetween(enq_ptr, deq_ptr)

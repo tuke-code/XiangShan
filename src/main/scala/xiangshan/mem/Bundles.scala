@@ -265,6 +265,8 @@ object Bundles {
     val is_nc = Bool()
     // this load consumed speculative SMB candidate data and needs late verify tracking
     val smbConsumed = Bool()
+    val smbVerifyReadyAtConsume = Bool()
+    val smbVerifyPassAtConsume = Bool()
   }
 
   class LoadNukeQueryRespBundle(implicit p: Parameters) extends XSBundle {

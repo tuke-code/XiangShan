@@ -69,6 +69,7 @@ class MdpResolveQueue(implicit p: Parameters) extends XSModule with HasMdpParame
     entry.bits.foundBypassOpportunity := io.toMdpResolveUpdate(i).bits.foundBypassOpportunity
     entry.bits.canBypass := io.toMdpResolveUpdate(i).bits.canBypass
     entry.bits.wrongBypass := io.toMdpResolveUpdate(i).bits.wrongBypass
+    entry.bits.smbWrongBypassReason := io.toMdpResolveUpdate(i).bits.smbWrongBypassReason
     entry.bits.smbProviderHandle := io.toMdpResolveUpdate(i).bits.smbProviderHandle
     when(entry.valid) {
       assert(!entry.bits.smbPredicted || entry.bits.distance.orR,
@@ -128,6 +129,7 @@ class MdpResolveQueue(implicit p: Parameters) extends XSModule with HasMdpParame
       loadSlot.bits.foundBypassOpportunity := load.bits.foundBypassOpportunity
       loadSlot.bits.canBypass := load.bits.canBypass
       loadSlot.bits.wrongBypass := load.bits.wrongBypass
+      loadSlot.bits.smbWrongBypassReason := load.bits.smbWrongBypassReason
       loadSlot.bits.smbProviderHandle := load.bits.smbProviderHandle
       assert(!loadSlot.bits.smbPredicted || loadSlot.bits.smbProviderHandle.valid,
         s"MdpResolveQueue slot ${i} predicted SMB requires provider handle")

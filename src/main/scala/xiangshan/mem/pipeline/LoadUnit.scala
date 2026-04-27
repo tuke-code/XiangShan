@@ -34,7 +34,7 @@ import xiangshan.backend.fu.NewCSR._
 import xiangshan.backend.fu.util.SdtrigExt
 import xiangshan.backend.exu.ExeUnitParams
 import xiangshan.mem.Bundles._
-import xiangshan.mem.mdp.NewMdp.{MdpUpdateType,MdpUpdate,MdpPredictStatuses,HasNewMdp}
+import xiangshan.mem.mdp.NewMdp.{MdpUpdateType, MdpUpdate, MdpPredictStatuses, HasNewMdp, SmbWrongBypassReason}
 import xiangshan.cache._
 import xiangshan.cache.wpu.ReplayCarry
 import xiangshan.cache.mmu._
@@ -1231,9 +1231,9 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   val s2_smbCanConsume = s2_in.uop.loadPred.valid &&
     s2_in.uop.loadPred.bits.smbEnable &&
     s2_can_query &&
-    io.lsq.forward.smbCandidateValid &&
-    io.lsq.forward.smbVerifyReady &&
-    io.lsq.forward.smbVerifyPass
+    io.lsq.forward.smbCandidateValid
+  val s2_smbVerifyReadyAtConsume = io.lsq.forward.smbVerifyReady
+  val s2_smbVerifyPassAtConsume = io.lsq.forward.smbVerifyPass
   val s2_mem_amb       = (s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.loadWait && ~s2_in.uop.loadPred.bits.static &&
                           io.lsq.forward.addrInvalid && RegNext(io.lsq.forward.valid) && !s2_smbCanConsume)
 
@@ -1291,6 +1291,8 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   io.lsq.ldld_nuke_query.req.bits.data_valid := Mux(s2_full_fwd || s2_fwd_data_valid || s2_nc_with_data, true.B, !s2_dcache_miss)
   io.lsq.ldld_nuke_query.req.bits.is_nc := s2_nc_with_data
   io.lsq.ldld_nuke_query.req.bits.smbConsumed := false.B
+  io.lsq.ldld_nuke_query.req.bits.smbVerifyReadyAtConsume := false.B
+  io.lsq.ldld_nuke_query.req.bits.smbVerifyPassAtConsume := false.B
 
   // st-ld violation require
   io.lsq.stld_nuke_query.req.valid           := s2_valid && s2_can_query
@@ -1300,6 +1302,8 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   io.lsq.stld_nuke_query.req.bits.data_valid := Mux(s2_full_fwd || s2_fwd_data_valid || s2_nc_with_data, true.B, !s2_dcache_miss)
   io.lsq.stld_nuke_query.req.bits.is_nc := s2_nc_with_data
   io.lsq.stld_nuke_query.req.bits.smbConsumed := s2_smbCanConsume
+  io.lsq.stld_nuke_query.req.bits.smbVerifyReadyAtConsume := s2_smbCanConsume && s2_smbVerifyReadyAtConsume
+  io.lsq.stld_nuke_query.req.bits.smbVerifyPassAtConsume := s2_smbCanConsume && s2_smbVerifyPassAtConsume
 
   // merge forward result
   // lsq has higher priority than sbuffer
@@ -1323,12 +1327,14 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   val s2_mdpPredictHit = (~s2_fwd_mask_no_ubuffer & s2_in.mask) === 0.U && !io.lsq.forward.dataInvalid
   dontTouch(s2_mdpPredictHit)
   when(s2_fire) {
-    assert(!s2_smbConsume || (io.lsq.forward.smbVerifyReady && io.lsq.forward.smbVerifyPass),
-      "SMB consume requires a passing verify result")
+    assert(!s2_smbConsume || io.lsq.forward.smbCandidateValid,
+      "SMB consume requires an SMB candidate")
     assert(!s2_smbConsume || s2_smbOpportunity,
       "SMB consume requires a candidate opportunity in the same cycle")
-    assert(!s2_smbConsume || io.lsq.stld_nuke_query.req.valid,
-      "Speculative SMB consume must retain a stld late-verify tracking entry")
+    assert(!s2_smbConsume || ((io.lsq.forward.smbForwardMask.asUInt & s2_in.mask) === s2_in.mask),
+      "SMB consume requires full-width SMB forwarding coverage")
+    assert(!s2_smbConsume || io.lsq.stld_nuke_query.req.fire,
+      "Speculative SMB consume must complete a stld late-verify tracking handshake")
     assert(!io.lsq.stld_nuke_query.req.bits.smbConsumed || s2_in.uop.loadPred.bits.smbEnable,
       "SMB-consumed late-verify tracking requires smbEnable")
     assert(!s2_smbConsume || io.lsq.forward.smbProbeHit,
@@ -1606,6 +1612,7 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   io.mdpUpdate.bits.foundBypassOpportunity := RegEnable(s2_smbOpportunity, s2_fire)
   io.mdpUpdate.bits.canBypass := RegEnable(s2_smbConsume, s2_fire)
   io.mdpUpdate.bits.wrongBypass := false.B
+  io.mdpUpdate.bits.smbWrongBypassReason := SmbWrongBypassReason.none
   io.mdpUpdate.bits.smbProviderHandle := s3_out.bits.uop.loadPred.bits.smbProviderHandle
   when(io.mdpUpdate.valid && io.mdpUpdate.bits.smbPredicted) {
     assert(io.mdpUpdate.bits.distance.orR, "LoadUnit SMB prediction feedback requires dependent distance")
@@ -1628,12 +1635,14 @@ class LoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModul
   XSPerfAccumulate("loadU_smb_predicted", io.mdpUpdate.valid && io.mdpUpdate.bits.smbPredicted)
   XSPerfAccumulate("loadU_smb_opportunity", io.mdpUpdate.valid && io.mdpUpdate.bits.foundBypassOpportunity)
   XSPerfAccumulate("loadU_smb_can_bypass", io.mdpUpdate.valid && io.mdpUpdate.bits.canBypass)
-  XSPerfAccumulate("loadU_smb_blocked_verify_pending",
-    s2_fire && s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.smbEnable &&
-      io.lsq.forward.smbCandidateValid && !io.lsq.forward.smbVerifyReady)
-  XSPerfAccumulate("loadU_smb_blocked_verify_fail",
-    s2_fire && s2_in.uop.loadPred.valid && s2_in.uop.loadPred.bits.smbEnable &&
-      io.lsq.forward.smbCandidateValid && io.lsq.forward.smbVerifyReady && !io.lsq.forward.smbVerifyPass)
+  XSPerfAccumulate("loadU_smb_candidate_seen",
+    s2_fire && s2_in.uop.loadPred.valid && io.lsq.forward.smbCandidateValid)
+  XSPerfAccumulate("loadU_smb_consumed_verify_pending",
+    s2_fire && s2_smbCanConsume && !io.lsq.forward.smbVerifyReady)
+  XSPerfAccumulate("loadU_smb_consumed_verify_pass",
+    s2_fire && s2_smbCanConsume && io.lsq.forward.smbVerifyReady && io.lsq.forward.smbVerifyPass)
+  XSPerfAccumulate("loadU_smb_consumed_verify_fail",
+    s2_fire && s2_smbCanConsume && io.lsq.forward.smbVerifyReady && !io.lsq.forward.smbVerifyPass)
 
   val s3_revoke = s3_exception || io.lsq.ldin.bits.rep_info.need_rep || s3_mis_align || (s3_frm_mabuf && io.misalign_ldout.bits.rep_info.need_rep)
   io.lsq.ldld_nuke_query.revoke := s3_revoke

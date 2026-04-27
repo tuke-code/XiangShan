@@ -713,12 +713,12 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       !nc(s2_smbTargetIdx) &&
       !hasException(s2_smbTargetIdx) &&
       !isVec(s2_smbTargetIdx)
-    val s2_smbCandidateReady = s2_smbProbeCandidateReady && s2_smbTargetHit
+    val s2_smbDataCover = ((s2_smbEntryData.mask & s2_smbLoadMask) === s2_smbLoadMask) &&
+      s2_smbLoadMask.orR
+    val s2_smbCandidateReady = s2_smbProbeCandidateReady && s2_smbTargetHit && s2_smbDataCover
     val s2_smbVerifyReady = s2_smbCandidateReady && addrvalid(s2_smbTargetIdx)
     val s2_smbVerifyPass = s2_smbVerifyReady &&
-      s2_smbEntryPaddr === s2_smbLoadPaddr &&
-      ((s2_smbEntryData.mask & s2_smbLoadMask) === s2_smbLoadMask) &&
-      s2_smbLoadMask.orR
+      s2_smbEntryPaddr === s2_smbLoadPaddr
 
     val forwardMask1 = Mux(differentFlag, ~deqMask, deqMask ^ forwardMask)
     val forwardMask2 = Mux(differentFlag, forwardMask, 0.U(StoreQueueSize.W))
@@ -788,6 +788,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
         s"SMB candidate for load pipe ${i} must originate from a probe candidate")
       assert(s2_smbTargetHit,
         s"SMB candidate for load pipe ${i} must preserve the predicted target owner")
+      assert(s2_smbDataCover,
+        s"SMB candidate for load pipe ${i} must fully cover the load mask before consume")
       assert(s2_smbTargetSqIdx === uop(s2_smbTargetIdx).sqIdx,
         s"SMB candidate for load pipe ${i} must preserve the target SQ owner")
     }

@@ -636,6 +636,10 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
         assert(load.bits.smbPredicted, s"Load ${i} wrongBypass requires SMB prediction")
         assert(load.bits.smbProviderHandle.valid, s"Load ${i} wrongBypass requires provider handle")
       }
+      when(load.valid && load.bits.smbWrongBypassReason =/= SmbWrongBypassReason.none) {
+        assert(load.bits.wrongBypass,
+          s"Load ${i} SMB wrong-bypass reason requires wrongBypass feedback")
+      }
       when(load.valid && load.bits.updateType === MdpUpdateType.M_AW) {
         assert(load.bits.distance.orR, s"Load ${i} M_AW retraining should preserve the predicted dependent distance")
       }
@@ -1406,6 +1410,14 @@ class MdpTage(implicit p: Parameters) extends XSModule with TopHelper{
   XSPerfAccumulate("mdp_tage_train_smb_owner_stale_drop", mdpTageTrainSmbOwnerStaleDropCnt)
   XSPerfAccumulate("mdp_tage_train_smb_owner_ndep_drop", mdpTageTrainSmbOwnerNdepDropCnt)
   XSPerfAccumulate("mdp_tage_train_smb_from_wrong_bypass", mdpTageTrainSmbFromWrongBypass)
+  XSPerfAccumulate("mdp_tage_train_smb_wrong_bypass_verify_fail", PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.wrongBypass &&
+      load.bits.smbWrongBypassReason === SmbWrongBypassReason.verifyFail
+  )))
+  XSPerfAccumulate("mdp_tage_train_smb_wrong_bypass_late_mismatch", PopCount(t2_loads.map(load =>
+    load.valid && t2_fire && load.bits.wrongBypass &&
+      load.bits.smbWrongBypassReason === SmbWrongBypassReason.lateMismatch
+  )))
   XSPerfAccumulate("mdp_tage_train_smb_found_can_bypass", mdpTageTrainSmbFoundCanBypass)
   XSPerfAccumulate("mdp_tage_train_smb_found_cannot_bypass", mdpTageTrainSmbFoundCannotBypass)
   XSPerfAccumulate("mdp_tage_train_need_write", PopCount(mdpTageTrainNeedWrite))
