@@ -60,6 +60,8 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val s1_fire = io.stageCtrl.s1_fire && io.enable
   private val s2_fire = io.stageCtrl.s2_fire && io.enable
 
+  private val flushCnt = RegInit(0.U(4.W))
+  private val flush    = RegInit(false.B)
   /*
    *  instantiate tables
    */
@@ -143,28 +145,28 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val s2_bwIdx = s1_bwIdx.map(RegEnable(_, s1_fire)) // for debug
 
   pathTable.zip(s0_pathIdx).foreach { case (table, idx) =>
-    table.io.predictReadReq.valid         := s0_fire && PathEnable.B
+    table.io.predictReadReq.valid         := s0_fire && PathEnable.B && !flush
     table.io.predictReadReq.bits.setIdx   := idx
     table.io.predictReadReq.bits.bankMask := s0_bankMask
   }
 
   globalTable.zip(s0_globalIdx).foreach { case (table, idx) =>
-    table.io.predictReadReq.valid := s0_fire && s0_commonHR.valid && GlobalEnable.B // if ghr invalid not request global table
+    table.io.predictReadReq.valid := s0_fire && s0_commonHR.valid && GlobalEnable.B && !flush // if ghr invalid not request global table
     table.io.predictReadReq.bits.setIdx   := idx
     table.io.predictReadReq.bits.bankMask := s0_bankMask
   }
 
   bwTable.zip(s0_bwIdx).foreach { case (table, idx) =>
-    table.io.predictReadReq.valid         := s0_fire && s0_commonHR.valid && BWEnable.B
+    table.io.predictReadReq.valid         := s0_fire && s0_commonHR.valid && BWEnable.B && !flush
     table.io.predictReadReq.bits.setIdx   := idx
     table.io.predictReadReq.bits.bankMask := s0_bankMask
   }
 
-  imliTable.io.predictReadReq.valid         := s0_fire && ImliEnable.B
+  imliTable.io.predictReadReq.valid         := s0_fire && ImliEnable.B && !flush
   imliTable.io.predictReadReq.bits.setIdx   := s0_imliIdx
   imliTable.io.predictReadReq.bits.bankMask := s0_bankMask
 
-  biasTable.io.predictReadReq.valid         := s0_fire && BiasEnable.B
+  biasTable.io.predictReadReq.valid         := s0_fire && BiasEnable.B && !flush
   biasTable.io.predictReadReq.bits.setIdx   := s0_biasIdx
   biasTable.io.predictReadReq.bits.bankMask := s0_bankMask
 
@@ -410,7 +412,17 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
           t0_meta.tagePredValid(predIdx) && t0_meta.scPred(predIdx) === t0_meta.tagePred(predIdx)))
     })
   private val t0_needWrite    = t0_writeValidVec.reduce(_ || _)
-  private val t0_bankConflict = t0_needWrite && s0_fire && t0_bankMask === s0_bankMask
+  private val t0_bankConflict = t0_needWrite && s0_fire && !flush && t0_bankMask === s0_bankMask
+
+  when(t0_bankConflict && flushCnt === 8.U) {
+    flushCnt := 0.U
+    flush    := true.B
+  }.elsewhen(t0_bankConflict) {
+    flushCnt := flushCnt + 1.U
+  }.elsewhen(!t0_bankConflict) {
+    flushCnt := 0.U
+    flush    := false.B
+  }
   io.trainReady := !t0_bankConflict
   pathTable.zip(t0_pathIdx).foreach { case (table, idx) =>
     table.io.trainReadReq.valid         := t0_fire && t0_needWrite && PathEnable.B
@@ -481,6 +493,17 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
     VecInit.fill(BiasTableNumWays)(0.U.asTypeOf(new ScEntry()))
   )
   private val t1_oldBiasLowBits = RegEnable(t0_meta.scBiasLowerBits, t0_fire)
+
+  private val t1_biasPercsum = VecInit(t1_oldBiasEntries.map(entry => getPercsum(getPercsum(entry.ctr.value))))
+  private val t1_mergeResp =
+    VecInit(t1_oldPathEntries ++ t1_oldGlobalEntries ++ t1_oldBWEntries ++ Seq(t1_oldImliEntries))
+  private val t1_mergePercsum = VecInit(t1_mergeResp.map(entries =>
+    VecInit(entries.map(entry => getPercsum(entry.ctr.value)))
+  ))
+  private val t1_sumPercsum = VecInit.tabulate(NumWays)(j => ParallelSingedExpandingAdd(t1_mergePercsum.map(_(j))))
+
+  dontTouch(t1_biasPercsum)
+  dontTouch(t1_sumPercsum)
 
   private val t1_branchesWayIdxVec   = VecInit(t1_branches.map(b => getWayIdx(b.bits.cfiPosition)))
   private val t1_branchesScIdxHitVec = RegEnable(t0_branchesScIdxHitVec, t0_fire)
