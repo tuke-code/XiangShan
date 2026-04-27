@@ -219,6 +219,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   val validVecRegNext = VecInit(entries.io.validRegNext.asBools)
   val issuedVecRegNext = VecInit(entries.io.issuedRegNext.asBools)
   val cancelSourceVec = entries.io.debugCancelSourceVec.get
+  val debugSrcReadyVec = entries.io.debugSrcReadyVec.get
   val robIdxVec = entries.io.debugRobIdxVec.get
   io.validVec := validVec
   io.issuedVec := issuedVec
@@ -226,10 +227,11 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   io.srcReadyVec := srcReadyVec
   io.debugRobIdxVec.foreach(_ := entries.io.debugRobIdxVec.get)
   io.topdownIQInfoVec.foreach{ case infoVec =>
-    infoVec.zip(cancelSourceVec).zip(validVec).zip(robIdxVec).foreach{ case (((sink, cancel),valid),robIdx) =>
+    infoVec.zip(cancelSourceVec).zip(validVec).zip(robIdxVec).zip(debugSrcReadyVec).foreach{ case ((((sink, cancel),valid),robIdx), srcReady) =>
       sink.valid := valid
       sink.bits.robIdx := robIdx
       sink.bits.cancelSource := cancel
+      sink.bits.srcReady := srcReady
     }
   }
   dontTouch(canIssueVec)

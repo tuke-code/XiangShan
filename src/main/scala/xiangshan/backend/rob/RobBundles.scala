@@ -180,6 +180,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robEntry.topdownIssued.foreach(_ := false.B)
     robEntry.topdownCanceled.foreach(_ := false.B)
     robEntry.topdownRobHead.foreach(_ := false.B)
+    robEntry.topdownSrcReady.foreach(_ := false.B)
     robEntry.topdownIssueTime.foreach(_ := 0.U)
     robEntry.topdownLastIssueTime.foreach(_ := 0.U)
     robEntry.topdownRobHeadTime.foreach(_ := 0.U)
