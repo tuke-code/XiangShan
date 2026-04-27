@@ -302,3 +302,39 @@ def test_api_issue_agent_elastic_mode_does_not_retry_after_successful_handshake(
         (0, 0, 0x8000),
     ]
     assert env.backend.load_issued == [(0, 0)]
+
+
+def test_api_issue_agent_load_drives_fp_wen_and_size_specific_fu_op():
+    env = _FakeIssueEnv({0: [1, 1]})
+    prefix = "io_ooo_to_mem_intIssue_0_0_bits_"
+    setattr(env.dut, f"{prefix}rfWen", _FakeSignal(0))
+    setattr(env.dut, f"{prefix}fpWen", _FakeSignal(0))
+    setattr(env.dut, f"{prefix}pdest", _FakeSignal(0))
+    setattr(env.dut, f"{prefix}pc", _FakeSignal(0))
+    setattr(env.dut, f"{prefix}ftqIdx_flag", _FakeSignal(0))
+    setattr(env.dut, f"{prefix}ftqIdx_value", _FakeSignal(0))
+    setattr(env.dut, f"{prefix}lqIdx_flag", _FakeSignal(0))
+    setattr(env.dut, f"{prefix}lqIdx_value", _FakeSignal(0))
+    agent = IssueAgent(env)
+
+    op = IssueOp.load(
+        req_id=1,
+        addr=0x1000,
+        lq_ptr=QueuePtr(flag=0, value=1),
+        sq_ptr=QueuePtr(flag=0, value=2),
+        lane=0,
+        size=4,
+        fp_wen=1,
+        rob_idx=RobIndex(flag=0, value=3),
+        pdest=5,
+        ftq_idx_flag=0,
+        ftq_idx_value=7,
+        pc=0x80000020,
+    )
+    agent._drive_issue_op(op)
+
+    assert env.issue[0].bits_fuOpType.value == 0x2
+    assert getattr(env.dut, f"{prefix}rfWen").value == 0
+    assert getattr(env.dut, f"{prefix}fpWen").value == 1
+    assert getattr(env.dut, f"{prefix}pdest").value == 5
+    assert getattr(env.dut, f"{prefix}lqIdx_value").value == 1

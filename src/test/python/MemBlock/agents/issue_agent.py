@@ -6,9 +6,6 @@ Issue active agent.
 from transactions import IssueCyclePlan, IssueOp
 
 
-LSU_OP_LD = 0x3
-
-
 def _set_optional_signal(dut, signal_name: str, value: int) -> None:
     signal = getattr(dut, signal_name, None)
     if signal is not None:
@@ -135,7 +132,7 @@ class IssueAgent:
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        issue.bits_fuOpType.value = LSU_OP_LD
+        issue.bits_fuOpType.value = op.load_fu_op_type
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
         issue.bits_robIdx_value.value = op.resolved_rob_idx_value
@@ -144,7 +141,8 @@ class IssueAgent:
 
         _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
         _set_optional_signal(self.env.dut, f"{prefix}pdest", op.resolved_pdest)
-        _set_optional_signal(self.env.dut, f"{prefix}rfWen", 1)
+        _set_optional_signal(self.env.dut, f"{prefix}rfWen", 0 if int(op.fp_wen) else 1)
+        _set_optional_signal(self.env.dut, f"{prefix}fpWen", int(op.fp_wen))
         _set_optional_signal(self.env.dut, f"{prefix}pc", op.resolved_pc)
         _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_flag", op.resolved_ftq_idx_flag)
         _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_value", op.resolved_ftq_idx_value)

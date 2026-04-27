@@ -321,7 +321,7 @@ class IntWritebackBundle:
         "ready": ("ready",),
         "valid": ("valid",),
         "bits_toRob_valid": ("bits_toRob_valid",),
-        "bits_data_0": ("bits_data_0", "bits_toIntRf_bits"),
+        "bits_data_0": ("bits_data_0", "bits_toIntRf_bits", "bits_toFpRf_bits"),
         "bits_pdest": ("bits_pdest",),
         "bits_intWen": ("bits_intWen", "bits_toIntRf_valid"),
         "bits_fpWen": ("bits_fpWen", "bits_toFpRf_valid"),
@@ -2346,6 +2346,7 @@ class MemBlockEnv:
         pdest: int | None = None,
         size: int = 8,
         mask: int = 0xFF,
+        fp_wen: int = 0,
         req_id: int | None = None,
         rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
@@ -2370,6 +2371,7 @@ class MemBlockEnv:
             addr=addr,
             size=size,
             mask=mask,
+            fp_wen=fp_wen,
         )
 
     async def _wait_load_writeback_observed_async(
@@ -2379,6 +2381,7 @@ class MemBlockEnv:
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         data: int | None = None,
+        expected_fp_wen: bool | None = None,
         expected_mmio: bool | None = None,
         expected_ncio: bool | None = None,
         max_cycles: int = 200,
@@ -2412,17 +2415,20 @@ class MemBlockEnv:
                     "pdest": bundle.read("pdest", 0),
                     "data": bundle.read("data_0", 0),
                     "int_wen": bundle.read("intWen", 0),
+                    "fp_wen": bundle.read("fpWen", 0),
                     "debug_vaddr": bundle.read("debug_vaddr", 0) if bundle.connected("debug_vaddr") else None,
                     "debug_paddr": bundle.read("debug_paddr", 0) if bundle.connected("debug_paddr") else None,
                     "debug_is_mmio": bundle.read("debug_isMMIO", 0) if bundle.connected("debug_isMMIO") else None,
                     "debug_is_ncio": bundle.read("debug_isNCIO", 0) if bundle.connected("debug_isNCIO") else None,
                     "exception_bits": bundle.read_exception_bits() if hasattr(bundle, "read_exception_bits") else None,
                 }
-                if event["int_wen"] == 0:
+                if event["int_wen"] == 0 and event["fp_wen"] == 0:
                     continue
                 if not self._event_matches_rob_idx(event, normalized_rob_idx):
                     continue
                 if data is not None and event["data"] != int(data):
+                    continue
+                if expected_fp_wen is not None and bool(event["fp_wen"]) != bool(expected_fp_wen):
                     continue
                 if expected_mmio is not None and bool(event["debug_is_mmio"]) != bool(expected_mmio):
                     continue
@@ -2444,6 +2450,7 @@ class MemBlockEnv:
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         data: int | None = None,
+        expected_fp_wen: bool | None = None,
         expected_mmio: bool | None = None,
         expected_ncio: bool | None = None,
         max_cycles: int = 200,
@@ -2456,6 +2463,7 @@ class MemBlockEnv:
                 rob_idx_flag=rob_idx_flag,
                 rob_idx_value=rob_idx_value,
                 data=data,
+                expected_fp_wen=expected_fp_wen,
                 expected_mmio=expected_mmio,
                 expected_ncio=expected_ncio,
                 max_cycles=max_cycles,

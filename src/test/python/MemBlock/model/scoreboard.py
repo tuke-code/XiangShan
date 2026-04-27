@@ -18,6 +18,11 @@ from transactions import (
 
 
 STORE_DATA_WIDTH_BYTES = 16
+FP_LOAD_BOX_FILL_BY_SIZE = {
+    2: (48, 0xFFFF),
+    4: (32, 0xFFFFFFFF),
+    8: (0, 0xFFFFFFFFFFFFFFFF),
+}
 
 
 def _normalized_store_window(addr: int | None, mask: int, width_bytes: int) -> tuple[int, int, frozenset[int]] | None:
@@ -56,6 +61,7 @@ class ExpectedLoad:
     mask: int
     expected_data: int | None = None
     expected_int_wen: int = 1
+    expected_fp_wen: int = 0
     expect_exception: bool = False
 
 
@@ -66,6 +72,7 @@ class ObservedLoadWriteback:
     data: int
     pdest: int
     int_wen: int
+    fp_wen: int
     exception_bits: list[int]
 
 
@@ -179,15 +186,21 @@ class Scoreboard:
         addr: int,
         size: int = 8,
         mask: int | None = None,
+        fp_wen: int = 0,
     ) -> ExpectedLoad:
         width_mask = (1 << size) - 1
         effective_mask = width_mask if mask is None else mask
+        normalized_fp_wen = int(fp_wen)
+        if normalized_fp_wen not in (0, 1):
+            raise ValueError(f"fp_wen must be 0 or 1, got {fp_wen}")
         expected = ExpectedLoad(
             rob_idx=RobIndex(flag=rob_idx_flag, value=rob_idx_value),
             pdest=pdest,
             addr=addr,
             size=size,
             mask=effective_mask,
+            expected_int_wen=0 if normalized_fp_wen else 1,
+            expected_fp_wen=normalized_fp_wen,
         )
         self._expected_loads[expected.rob_idx].append(expected)
         return expected
@@ -229,12 +242,13 @@ class Scoreboard:
         data: int,
         pdest: int,
         int_wen: int,
+        fp_wen: int,
         rob_idx_flag: int,
         rob_idx_value: int,
         exception_bits: list[int],
     ) -> None:
         self.writeback_events += 1
-        if int_wen == 0:
+        if int_wen == 0 and fp_wen == 0:
             return
 
         rob_idx = RobIndex(flag=rob_idx_flag, value=rob_idx_value)
@@ -249,11 +263,30 @@ class Scoreboard:
                 data=data,
                 pdest=pdest,
                 int_wen=int_wen,
+                fp_wen=fp_wen,
                 exception_bits=exception_bits,
             )
         )
         self._completed_rob_indices.append(rob_idx)
         self._try_complete_loads(rob_idx)
+
+    def _expected_load_data(self, expected: ExpectedLoad) -> int:
+        raw_data = (
+            expected.expected_data
+            if expected.expected_data is not None
+            else self.ref_memory.read_masked(expected.addr, expected.mask, width_bytes=expected.size)
+        )
+        if not expected.expected_fp_wen:
+            return raw_data
+
+        if expected.size not in FP_LOAD_BOX_FILL_BY_SIZE:
+            raise AssertionError(
+                f"fp load compare 不支持的 size: robIdx={expected.rob_idx}, size={expected.size}"
+            )
+        fill_bits, low_mask = FP_LOAD_BOX_FILL_BY_SIZE[expected.size]
+        if fill_bits == 0:
+            return int(raw_data) & low_mask
+        return ((1 << fill_bits) - 1) << (expected.size * 8) | (int(raw_data) & low_mask)
 
     def observe_store_writeback(
         self,
@@ -490,11 +523,7 @@ class Scoreboard:
                 del self._committed_load_budget[rob_idx]
 
             self._retire_stores_before_boundary(expected.rob_idx)
-            expected_data = (
-                expected.expected_data
-                if expected.expected_data is not None
-                else self.ref_memory.read_masked(expected.addr, expected.mask, width_bytes=expected.size)
-            )
+            expected_data = self._expected_load_data(expected)
             if observed.pdest != expected.pdest:
                 raise AssertionError(
                     f"load writeback pdest 不匹配: robIdx={rob_idx}, expected={expected.pdest}, observed={observed.pdest}"
@@ -503,6 +532,11 @@ class Scoreboard:
                 raise AssertionError(
                     "load writeback intWen 不匹配: "
                     f"robIdx={rob_idx}, expected={expected.expected_int_wen}, observed={observed.int_wen}"
+                )
+            if observed.fp_wen != expected.expected_fp_wen:
+                raise AssertionError(
+                    "load writeback fpWen 不匹配: "
+                    f"robIdx={rob_idx}, expected={expected.expected_fp_wen}, observed={observed.fp_wen}"
                 )
             if observed.data != expected_data:
                 raise AssertionError(

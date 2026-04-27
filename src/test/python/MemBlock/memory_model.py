@@ -248,6 +248,7 @@ class MemoryModel:
         addr: int,
         size: int = 8,
         mask: int | None = None,
+        fp_wen: int = 0,
     ) -> ExpectedLoad:
         return self.scoreboard.expect_load(
             rob_idx_flag=rob_idx_flag,
@@ -256,6 +257,7 @@ class MemoryModel:
             addr=addr,
             size=size,
             mask=mask,
+            fp_wen=fp_wen,
         )
 
     def note_load_issued(self, rob_idx_flag: int, rob_idx_value: int) -> None:

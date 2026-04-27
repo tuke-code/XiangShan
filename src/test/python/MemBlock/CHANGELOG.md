@@ -1,5 +1,34 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-27
+
+### 1. 补齐标量 `fpWen` load 的 env/monitor/model 闭环
+
+本条目记录一轮围绕 `intIssue.fpWen` 的补全。此前 Python 环境虽然已经能从 writeback 口读到 `fpWen/toFpRf_valid`，但请求侧没有能力主动驱动 scalar `fpWen` load，scoreboard 也只按整数写回口径做 compare，导致 `fpWen` 在 MemBlock 环境里始终停留在“端口导出了、验证没有闭环”的状态。本轮把补全范围限定在标量 load：一方面把 `fp_wen` 从事务对象一路下沉到 issue 驱动；另一方面把 writeback monitor、`expect_scalar_load()` 和 scoreboard 统一扩成 bit-pattern 级 `fp` compare，并新增真实 DUT 的 `half/word/doubleword` directed case。
+
+#### 变更摘要
+
+- `transactions.py` / `request_apis.py` / `agents/backend_facade.py` / `agents/issue_agent.py`
+  - `LoadTxn` / `IssueOp` 新增 `fp_wen`
+  - load issue 路径新增 `size/fp_wen` 下沉
+  - `intIssue.bits_fpWen` 现在会被显式驱动
+  - 标量 `fpWen` load 会按 `lh/lw/ld` 选择对应 `fuOpType`
+  - 普通整数 load 继续维持既有 `LD` 发射契约，避免在同一补丁里扩大整数 load 语义面
+- `MemBlock_env.py` / `memory_model.py` / `monitors/writeback_monitor.py` / `model/scoreboard.py`
+  - `expect_scalar_load()` / `MemoryModel.expect_load()` 新增 `fp_wen`
+  - `wait_load_writeback_observed()` 新增 `fp_wen` 观测与过滤
+  - writeback monitor 现在会识别 `fpWen/toFpRf_valid`，并兼容 `toFpRf_bits` 数据别名
+  - scoreboard 新增 `fpWen` compare，并按 NaN-box bit-pattern 校验 `half/word/doubleword` 标量 fp load 写回
+- `tests/test_request_apis_backend_facade.py` / `tests/test_issue_agent.py` / `tests/test_memory_model_store_logic.py`
+  - 新增 `fp_wen` 请求路径、issue 驱动和 scoreboard boxing 单测
+- `tests/test_MemBlock_fp_load.py`
+  - 新增真实 DUT 标量 `fpWen` directed，用例覆盖 `half/word/doubleword`
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py src/test/python/MemBlock/tests/test_issue_agent.py src/test/python/MemBlock/tests/test_memory_model_store_logic.py src/test/python/MemBlock/tests/test_MemBlock_fp_load.py src/test/python/MemBlock/tests/test_MemBlock_random_load.py -k 'single_preloaded_load_data_check or test_MemBlock_fp_load or test_request_apis_backend_facade or test_issue_agent or test_memory_model_store_logic'`
+  - 结果：`53 passed, 5 deselected`
+
 ## 2026-04-26
 
 ### 5. 修正 4KB MMU 回归中的 fault re-hit 与 Svpbmt translated 期望

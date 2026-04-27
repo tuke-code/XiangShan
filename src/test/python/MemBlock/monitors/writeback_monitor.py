@@ -42,7 +42,6 @@ class WritebackMonitor:
             if (
                 not bundle.connected("data_0")
                 or not bundle.connected("pdest")
-                or not bundle.connected("intWen")
                 or not bundle.connected("robIdx_flag")
                 or not bundle.connected("robIdx_value")
             ):
@@ -60,7 +59,8 @@ class WritebackMonitor:
             self.scoreboard.observe_load_writeback(
                 data=bundle.read("data_0", 0),
                 pdest=bundle.read("pdest", 0),
-                int_wen=bundle.read("intWen", 0),
+                int_wen=bundle.read("intWen", 0) if bundle.connected("intWen") else 0,
+                fp_wen=bundle.read("fpWen", 0) if bundle.connected("fpWen") else 0,
                 rob_idx_flag=bundle.read("robIdx_flag", 0),
                 rob_idx_value=bundle.read("robIdx_value", 0),
                 exception_bits=bundle.read_exception_bits(),

@@ -357,6 +357,49 @@ def test_api_request_apis_send_txns_delegate_to_backend():
     assert cbo_result == QueuePtr(flag=1, value=11)
 
 
+def test_api_request_apis_issue_scalar_load_forwards_size_and_fp_wen():
+    env = _FakeEnv()
+    lq_ptr = QueuePtr(flag=0, value=2)
+    sq_ptr = QueuePtr(flag=1, value=3)
+
+    issue_scalar_load(
+        env,
+        req_id=7,
+        addr=0x1000,
+        lq_ptr=lq_ptr,
+        sq_ptr=sq_ptr,
+        lane=4,
+        size=4,
+        fp_wen=1,
+    )
+
+    assert env.backend.calls == [
+        (
+            "issue_scalar_load",
+            7,
+            0x1000,
+            lq_ptr,
+            sq_ptr,
+            {
+                "lane": 4,
+                "size": 4,
+                "fp_wen": 1,
+                "store_set_hit": 0,
+                "load_wait_bit": 0,
+                "load_wait_strict": 0,
+                "wait_for_rob_idx_flag": None,
+                "wait_for_rob_idx_value": None,
+                "rob_idx_flag": None,
+                "rob_idx_value": None,
+                "pdest": None,
+                "ftq_idx_flag": None,
+                "ftq_idx_value": None,
+                "pc": None,
+            },
+        )
+    ]
+
+
 def test_api_request_apis_send_vector_txns_delegate_to_vector_backend():
     env = _FakeEnv()
     load_txn = VectorMemTxn(
@@ -634,6 +677,53 @@ def test_api_backend_facade_prepare_binds_load_txn_before_send():
     assert txn.rob_idx == RobIndex(flag=0, value=0)
     assert txn.resolved_pdest == 0
     assert prepared.rob_idx_of(txn) == prepared.rob_idx_of(txn.req_id)
+
+
+def test_api_issue_op_load_from_txn_preserves_fp_wen_and_size():
+    txn = LoadTxn(
+        req_id=0x61,
+        addr=0x1234,
+        lq_ptr=QueuePtr(flag=0, value=1),
+        sq_ptr=QueuePtr(flag=0, value=2),
+        size=4,
+        mask=0x0F,
+        fp_wen=1,
+    )
+
+    op = IssueOp.load_from_txn(txn)
+
+    assert op.size == 4
+    assert op.mask == 0x0F
+    assert op.fp_wen == 1
+    assert op.load_fu_op_type == 0x2
+
+
+def test_api_backend_facade_issue_scalar_load_preserves_fp_contract():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+
+    backend.issue_scalar_load(
+        req_id=0x62,
+        addr=0x5678,
+        lq_ptr=QueuePtr(flag=0, value=3),
+        sq_ptr=QueuePtr(flag=0, value=4),
+        lane=2,
+        size=2,
+        fp_wen=1,
+        rob_idx=RobIndex(flag=0, value=9),
+        pdest=11,
+        ftq_idx_flag=0,
+        ftq_idx_value=5,
+        pc=0x80000010,
+    )
+
+    issued_plan = env.issue_agent.calls[0][1]
+    op = issued_plan.ops[0]
+    assert op.kind == "load"
+    assert op.size == 2
+    assert op.fp_wen == 1
+    assert op.load_fu_op_type == 0x1
+    assert op.resolved_rob_idx == RobIndex(flag=0, value=9)
 
 
 def test_api_transactions_require_runtime_binding_before_access():
