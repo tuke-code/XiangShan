@@ -2,6 +2,37 @@
 
 ## 2026-04-27
 
+### 1. 推进 `NewStoreQueue` 覆盖率到 `77.1%`，并确认 `>80%` 剩余瓶颈
+
+本条目记录一轮围绕 `NewStoreQueue.sv` 的定向 coverage push。目标原本是把该模块 line coverage 直接推过 `80%`，因此本轮先从 testcase 侧补最缺的 SQ 深状态：一条两波 `store commit frontier` 停留窗口用例，用来证明“第一波 committed、第二波仍保留在 SQ 中”时 younger load 的 delayed-flush 行为；再补一条 batched cross-16B partial-store 场景，用来把 split store + batch commit + delayed flush 路径重新送进真实 DUT。与此同时，为了验证剩余缺口是不是“只是没把 campaign 跑宽”，又额外补入两条 vector-store control-path regression（masked inactive / nonzero `vstart`），专门去碰 `vecInactive` / `vecMbCommit` 一类 `NewStoreQueue` 控制流。
+
+最终量化结果表明：这轮补强确实把 `NewStoreQueue` 从历史文档中的 `58.4%` 级别推到了当前 campaign 的 `77.1%` 左右，但即便叠加 replay / ordering / uncache / vector-store case，仍没有越过 `80%`。这说明剩余 gap 已经不再是“再补几条标量 partial-store smoke”问题，而是收敛到 vector control-path、非 `cbo.zero` CBO 状态机，以及若干已知 `flushSb` stall 类 DUT 缺口。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 新增 `_enqueue_scalar_store_batch()` helper
+  - 新增 `test_api_MemBlock_store_queue_two_wave_commit_frontier_residency_directed`
+  - 新增 `test_api_MemBlock_cross16b_partial_store_burst_batched_commit_directed`
+  - 为 batched cross-16B flush stall 增补精确 `xfail`
+- `tests/test_MemBlock_vector_store.py`
+  - 把已知 vector-store drain bug helper 泛化到任意目标地址
+  - 新增 masked inactive vector store regression
+  - 新增 nonzero `vstart` vector store regression
+- `docs/coverage_summary.md` / `docs/coverage_todo.md`
+  - 记录 `2026-04-27` 定向 campaign 的实测覆盖率
+  - 明确 `NewStoreQueue >80%` 的剩余 blocker 已转向 vector/CBO/known-bug gating path
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py`
+  - 结果：`22 passed, 7 xfailed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_vector_store.py`
+  - 结果：`3 xfailed`
+- 手工 LCOV 合并结果：
+  - store/replay/uncache/order campaign：`NewStoreQueue.sv` line `77.1043%`（`9362 / 12142`）
+  - 再叠加新增 vector-store control-path xfail：`NewStoreQueue.sv` line `77.1207%`（`9364 / 12142`）
+
 ### 1. 放宽 MMU fault sequence 的 prime writeback 等待条件，兼容窄宽度真实写回
 
 本条目记录一轮围绕 `MmuFaultingScalarLoadSequence` 的纠偏。标量 load width 语义修正后，MMU fault 和 pipeline probe 里的 prime load 已经会按真实 `lb/lh/lw/ld` 发射，但 sequence 仍然把 `prime_expected_data` 当成完整 64-bit preload 去过滤 `wait_load_writeback_observed()`，这会让 `byte/half/word` prime 在真实 DUT 上因为写回位型不同而超时。本轮把 prime 正常 load 的等待条件收窄成“按 `rob_idx` 等到写回即可”，把数据正确性交给已登记的 scoreboard compare，从而与新的 width 语义保持一致。

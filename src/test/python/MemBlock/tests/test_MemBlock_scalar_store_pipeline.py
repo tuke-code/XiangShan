@@ -54,6 +54,13 @@ SBUFFER_FORWARD_LINE_ADDR = STORE_ADDR_BASE + 0x140
 SBUFFER_DATA_OFFSET_LINE_ADDR = STORE_ADDR_BASE + 0x180
 SBUFFER_DATA_BURST_BASE = STORE_ADDR_BASE + 0x400
 SBUFFER_DATA_ENTRY_MATRIX_BASE = STORE_ADDR_BASE + 0x800
+STORE_RESIDENCY_TWO_WAVE_BASE = STORE_ADDR_BASE + 0xC00
+STORE_CROSS16B_BURST_BASE = STORE_ADDR_BASE + 0x1000
+DUTBUG_SQ_CROSS16B_BATCH_FLUSH_STALL = "DUTBUG-sq-cross16b-batch-flush-stall"
+DUTBUG_SQ_CROSS16B_BATCH_FLUSH_STALL_XFAIL_REASON = (
+    f"{DUTBUG_SQ_CROSS16B_BATCH_FLUSH_STALL}: "
+    "batched committed cross-16B scalar stores reach sbuffer writeReq activity, but flushSb cannot drain sbuffer to empty"
+)
 
 
 def _reset_env_and_state(env, *, require_issue_lanes=(), require_lq_ready: bool = False) -> SequenceState:
@@ -395,6 +402,34 @@ def _send_scalar_store_batch_then_commit(
         committed_views.append(committed_view)
 
     return tuple(committed_views), next_sq_ptr
+
+
+def _enqueue_scalar_store_batch(
+    env,
+    sq_ptr: QueuePtr,
+    *,
+    store_ops,
+    req_id_base: int = 0,
+    materialize_cycles: int = 300,
+):
+    store_results = []
+    next_sq_ptr = sq_ptr
+    for req_offset, (addr, data, mask) in enumerate(store_ops):
+        store_result = ScalarStoreSequence(
+            StoreTxn(
+                req_id=req_id_base + req_offset,
+                sq_ptr=next_sq_ptr,
+                addr=addr,
+                data=data,
+                mask=mask,
+            ),
+            expected_mmio=False,
+            require_committed=False,
+            materialize_cycles=materialize_cycles,
+        ).run(env)
+        store_results.append(store_result)
+        next_sq_ptr = store_result.next_sq_ptr
+    return tuple(store_results), next_sq_ptr
 
 
 def _make_sbuffer_data_wave_ops(*, base_addr: int, quarter: int, half: int):
@@ -2464,4 +2499,222 @@ def test_api_MemBlock_sbuffer_data_wide_burst_mask_flush_directed(env):
         f"wide sbuffer burst mask-flush lane 覆盖不足: actual={sorted(summary['mask_flush_lane_bits'])}"
     )
     assert drain_summary["drain_event_count"] >= 1, "wide sbuffer burst flush 未记录到 drain 事件"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_store_queue_two_wave_commit_frontier_residency_directed(env):
+    """
+    先入队两波 store，只提交第一波并先执行 younger load，再提交第二波统一 flush。
+
+    检查点：
+      - 第一波 committed 时，第二波 store 仍保留在 SQ 中但未 committed
+      - younger load 能在 delayed-flush 窗口内完成第一波 compare
+      - 第二波提交后，新增 cacheline 与 cross-16B partial 路径都能闭环到最终 drain
+    """
+
+    first_line = STORE_RESIDENCY_TWO_WAVE_BASE
+    second_line = STORE_RESIDENCY_TWO_WAVE_BASE + 0x40
+    preload_first_line = bytes(((index * 7) + 0x11) & 0xFF for index in range(64))
+    preload_second_line = bytes(((index * 9) + 0x33) & 0xFF for index in range(64))
+    wave1_ops = (
+        (first_line + 0x00, 0x1112_1314_1516_1718, 0xFF),
+        (first_line + 0x18, 0xA1A2_A3A4, 0x0F),
+        (first_line + 0x30, 0x3132_3334_3536_3738, 0xFF),
+    )
+    wave2_ops = (
+        (second_line + 0x08, 0x4142_4344_4546_4748, 0xFF),
+        (second_line + 0x0D, 0xB1B2_B3B4, 0x0F),
+        (second_line + 0x2F, 0xC5C6, 0x03),
+    )
+    sampled_first_wave_loads = (
+        first_line + 0x00,
+        first_line + 0x18,
+        first_line + 0x30,
+    )
+    sampled_second_wave_loads = (
+        second_line + 0x08,
+        second_line + 0x10,
+        second_line + 0x28,
+        second_line + 0x30,
+    )
+
+    state = _reset_env_and_state(env)
+    env.preload_bytes(first_line, preload_first_line)
+    env.preload_bytes(second_line, preload_second_line)
+    expected_first_wave_refmem = env.memory.fork_ref_memory()
+    expected_final_refmem = env.memory.fork_ref_memory()
+
+    for addr, data, mask in wave1_ops:
+        _apply_store_stimulus_to_ref_memory(
+            expected_first_wave_refmem,
+            addr=addr,
+            data=data,
+            mask=mask,
+        )
+        _apply_store_stimulus_to_ref_memory(
+            expected_final_refmem,
+            addr=addr,
+            data=data,
+            mask=mask,
+        )
+    for addr, data, mask in wave2_ops:
+        _apply_store_stimulus_to_ref_memory(
+            expected_final_refmem,
+            addr=addr,
+            data=data,
+            mask=mask,
+        )
+
+    store_results, sq_ptr = _enqueue_scalar_store_batch(
+        env,
+        state.sq_ptr,
+        store_ops=(*wave1_ops, *wave2_ops),
+        req_id_base=0,
+    )
+    env.backend.pulse_store_commit(len(wave1_ops))
+    env.advance_cycles(env.config.sequence.store_settle_cycles)
+
+    for store_result, (addr, data, _) in zip(store_results[: len(wave1_ops)], wave1_ops):
+        env.wait_store_materialized(
+            store_result.allocated_sq_ptr.value,
+            expected_addr=addr,
+            expected_data=data,
+            expected_mmio=False,
+            require_committed=True,
+            max_cycles=env.config.sequence.store_materialize_cycles,
+        )
+    for store_result in store_results[len(wave1_ops) :]:
+        pending_store = env.get_store_view(store_result.allocated_sq_ptr.value)
+        assert pending_store is not None and pending_store.allocated, "第二波 store 未保留在 SQ 中"
+        assert not pending_store.committed, "第二波 store 在第一波提交窗口内不应已 committed"
+
+    with _capture_forward_activity(env, max_events=256) as trace:
+        next_lq_ptr = state.next_lq_ptr
+        for completed_loads, load_addr in enumerate(sampled_first_wave_loads, start=1):
+            load_result = ScalarLoadSequence(
+                LoadTxn(
+                    req_id=100 + completed_loads - 1,
+                    addr=load_addr,
+                    lq_ptr=next_lq_ptr,
+                    sq_ptr=sq_ptr,
+                ),
+                expected_completed_loads=completed_loads,
+            ).run(env)
+            next_lq_ptr = load_result.next_lq_ptr
+
+    forward_summary = _summarize_forward_activity(trace)
+    assert forward_summary["sq_event_count"] + forward_summary["sbuffer_event_count"] > 0, (
+        f"第一波 committed/residency 场景未观测到任何 forward 活动: {forward_summary}"
+    )
+
+    env.backend.pulse_store_commit(len(wave2_ops))
+    env.advance_cycles(env.config.sequence.store_settle_cycles)
+
+    for store_result, (addr, data, _) in zip(store_results[len(wave1_ops) :], wave2_ops):
+        env.wait_store_materialized(
+            store_result.allocated_sq_ptr.value,
+            expected_addr=addr,
+            expected_data=data,
+            expected_mmio=False,
+            require_committed=True,
+            max_cycles=env.config.sequence.store_materialize_cycles,
+        )
+
+    for completed_loads, load_addr in enumerate(
+        sampled_second_wave_loads,
+        start=len(sampled_first_wave_loads) + 1,
+    ):
+        load_result = ScalarLoadSequence(
+            LoadTxn(
+                req_id=100 + completed_loads - 1,
+                addr=load_addr,
+                lq_ptr=next_lq_ptr,
+                sq_ptr=sq_ptr,
+            ),
+            expected_completed_loads=completed_loads,
+        ).run(env)
+        next_lq_ptr = load_result.next_lq_ptr
+
+    drain_summary = FlushStoreBuffersSequence(max_cycles=1200).run(env)
+
+    assert sq_ptr == ptr_inc(state.sq_ptr, env.config.sequence.store_queue_size, step=len(store_results)), (
+        "两波 residency 场景的 SQ 指针推进异常"
+    )
+    assert env.read_cacheline(first_line) == expected_final_refmem.read_cacheline(first_line, 64), (
+        "第一条 cacheline 的 delayed-flush 最终结果不匹配"
+    )
+    assert env.read_cacheline(second_line) == expected_final_refmem.read_cacheline(second_line, 64), (
+        "第二条 cacheline 的 delayed-flush 最终结果不匹配"
+    )
+    assert env.memory.read(first_line, 8) == expected_first_wave_refmem.read(first_line, 8), (
+        "第一波 residency 的头部 dword 最终值与首波预期不一致"
+    )
+    assert drain_summary["drain_event_count"] >= 1, "两波 residency 场景 flush 后未记录到 drain 事件"
+    assert drain_summary["touched_byte_count"] >= 28, "两波 residency 场景 flush 覆盖字节数不足"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_cross16b_partial_store_burst_batched_commit_directed(env):
+    """
+    多条 cross-16B partial store 先批量入队/提交，再统一 delayed flush。
+
+    检查点：
+      - 多个 split store 能在同一 delayed-flush 窗口中稳定进入 committed
+      - sbuffer data path 能观测到真实 writeReq 活动
+      - 最终两条 cacheline 与参考内存完全一致
+    """
+
+    first_line = STORE_CROSS16B_BURST_BASE
+    second_line = STORE_CROSS16B_BURST_BASE + 0x40
+    env.preload_bytes(first_line, bytes(((index * 5) + 0x21) & 0xFF for index in range(64)))
+    env.preload_bytes(second_line, bytes(((index * 13) + 0x07) & 0xFF for index in range(64)))
+    expected_refmem = env.memory.fork_ref_memory()
+    store_ops = (
+        (first_line + 0x00, 0x5152_5354_5556_5758, 0xFF),
+        (first_line + 0x0D, 0xA1A2_A3A4, 0x0F),
+        (second_line + 0x00, 0x6162_6364_6566_6768, 0xFF),
+        (second_line + 0x0E, 0xC1C2_C3C4_C5C6_C7C8, 0xFF),
+    )
+    state = _reset_env_and_state(env)
+    for addr, data, mask in store_ops:
+        _apply_store_stimulus_to_ref_memory(
+            expected_refmem,
+            addr=addr,
+            data=data,
+            mask=mask,
+        )
+
+    with _capture_sbuffer_data_activity(env, max_events=512) as trace:
+        committed_views, sq_ptr = _send_scalar_store_batch_then_commit(
+            env,
+            state.sq_ptr,
+            store_ops=store_ops,
+            req_id_base=200,
+            commit_chunk=2,
+        )
+        try:
+            drain_summary = FlushStoreBuffersSequence(max_cycles=1200).run(env)
+        except TimeoutError:
+            pytest.xfail(DUTBUG_SQ_CROSS16B_BATCH_FLUSH_STALL_XFAIL_REASON)
+
+    sbuffer_summary = _summarize_sbuffer_data_activity(trace)
+
+    assert len(committed_views) == len(store_ops), "cross-16B 批量提交的 committed store 数量异常"
+    assert all(store is not None and store.committed for store in committed_views), (
+        "cross-16B 批量提交后存在未 committed 的 store"
+    )
+    assert sq_ptr == ptr_inc(state.sq_ptr, env.config.sequence.store_queue_size, step=len(store_ops)), (
+        "cross-16B 批量提交场景的 SQ 指针推进异常"
+    )
+    assert sbuffer_summary["write_event_count"] >= len(store_ops), (
+        f"cross-16B 批量提交场景的 sbuffer writeReq 活动不足: {sbuffer_summary}"
+    )
+    assert env.read_cacheline(first_line) == expected_refmem.read_cacheline(first_line, 64), (
+        "cross-16B 批量提交后的第一条 cacheline 结果不匹配"
+    )
+    assert env.read_cacheline(second_line) == expected_refmem.read_cacheline(second_line, 64), (
+        "cross-16B 批量提交后的第二条 cacheline 结果不匹配"
+    )
+    assert drain_summary["drain_event_count"] >= 1, "cross-16B 批量提交 flush 后未记录到 drain 事件"
+    assert drain_summary["touched_byte_count"] >= 24, "cross-16B 批量提交 flush 覆盖字节数不足"
     env.assert_no_outstanding()

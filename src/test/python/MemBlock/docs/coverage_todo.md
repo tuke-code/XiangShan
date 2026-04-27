@@ -17,6 +17,35 @@
 
 ## 3. P0：store 深状态与 sbuffer/drain 补强
 
+### 3.0 2026-04-27 NewStoreQueue 定向 campaign 快照
+
+本轮已经新增并验证的 directed case：
+
+1. `store_queue_two_wave_commit_frontier_residency_directed`
+2. `cross16b_partial_store_burst_batched_commit_directed`
+3. `vector_unit_stride_store_masked_inactive_flush_regression`
+4. `vector_unit_stride_store_nonzero_vstart_flush_regression`
+
+配套量化结果（采用 `coverage_report_workflow.md` 中的手工 LCOV 合并口径）：
+
+- `NewStoreQueue.sv` line `77.1043%`（store/replay/uncache/order campaign）
+- `NewStoreQueue.sv` line `77.1207%`（再叠加新增 vector-store control-path xfail）
+
+这说明当前 `>80%` 的剩余缺口已经基本不是“再补几条标量 partial-store”问题，而是下面 3 类特定路径：
+
+1. vector store control-path
+   - `vecInactive`
+   - `vecMbCommit`
+   - split dequeue / pointer move
+2. 已知 DUT flush stall
+   - batched cross-16B scalar store
+   - vector store drain
+   - cross-page scalar store-misalign
+3. 非 `cbo.zero` 的 CBO 状态机
+   - `flushSb -> sendReq -> waitResp -> writeback`
+
+因此本清单从本轮开始需要把“vector/CBO/known-bug gating path”放到和标量 partial-store 同级的优先级，而不是继续默认 `NewStoreQueue` 的主瓶颈仍在基础 byte-mask 矩阵。
+
 ### 3.0 2026-04-11 进展快照
 
 本轮已经落地并验证通过的 directed case：
@@ -83,6 +112,36 @@
   - cross-16B / cross-beat partial-store
   - 更深的多 store 并存与 merge 顺序
   - 与 backpressure / delayed drain 叠加的 partial-store
+
+### P0-0 vector store control-path / CBO non-zero 状态机
+
+#### 目标模块
+
+- `NewStoreQueue.sv`
+
+#### 当前动机
+
+`2026-04-27` 的实测结果表明，标量 store/replay/uncache/order 已经把 `NewStoreQueue.sv` 推到 `77.1%` 左右，但继续加标量 case 收益已经明显变小。剩余缺口更像是：
+
+- vector store 的 `vecInactive` / `vecMbCommit` 控制流没有被真正打热；
+- 非 `cbo.zero` 的 CBO 状态机还没有 directed case；
+- 一部分路径虽然“已经触达”，但最终卡在已知 `flushSb` stall，导致覆盖提升受限。
+
+#### 建议新增用例
+
+1. masked inactive vector unit-stride store
+2. nonzero `vstart` vector unit-stride store
+3. multi-uop / larger `numLsElem` vector store
+4. 非 `cbo.zero` 的 `cbo.clean/flush/inval` directed case
+
+#### 当前状态
+
+- 前两条 vector case 已新增，但目前都只稳定推进到已知 vector drain bug 前的精确 `xfail`
+- 这说明 testcase 入口已经具备，但 DUT 对最终 drain 的支持仍不足
+- 因而下一步优先级应从“继续扩大标量 partial 矩阵”转向：
+  - 提高 vector control-path 的可观测性
+  - 为非 `cbo.zero` 构建 testcase 入口
+  - 把当前 `flushSb` stall 类缺口拆成独立 DUT bug 跟踪项
 
 ### P0-2 cross-line / cross-beat scalar store
 

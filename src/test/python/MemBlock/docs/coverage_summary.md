@@ -65,6 +65,46 @@ python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_store_misalign
 
 这说明当前环境对 **cross-page 正常路径的刺激与基础观测** 已经够用，至少能证明“不是 testcase 完全没打到路径”；但当前 DUT 仍未把 cross-page scalar store-misalign 的 drain/收口走通，所以它还不能被算作一个已经闭环的 coverage 补点。
 
+### 2.3 2026-04-27 NewStoreQueue 定向补强快照（仍未达到 80%）
+
+本轮围绕 `NewStoreQueue.sv` 做了一次更聚焦的 directed campaign，目标不是重跑整套 MemBlock，而是验证“补更多 SQ 深状态 testcase 后，这个模块到底能推到哪里”。本轮新增并验证的 testcase 主要包括：
+
+- `test_api_MemBlock_store_queue_two_wave_commit_frontier_residency_directed`
+- `test_api_MemBlock_cross16b_partial_store_burst_batched_commit_directed`
+- `test_api_MemBlock_vector_unit_stride_store_masked_inactive_flush_regression`
+- `test_api_MemBlock_vector_unit_stride_store_nonzero_vstart_flush_regression`
+
+其中：
+
+- `scalar_store_pipeline.py` 聚焦回归结果：`22 passed, 7 xfailed`
+- `vector_store.py` 聚焦回归结果：`3 xfailed`
+
+覆盖率统计采用 `docs/coverage_report_workflow.md` 中记录的手工 LCOV 合并口径，而不是等待 `toffee-report` 末尾的 HTML 收口：
+
+- store/replay/uncache/order campaign 手工合并产物：
+  - `src/test/python/MemBlock/data/toffee_report_sq_push_extended_manual_20260427/line_dat/merged.info`
+- 再叠加本轮新增 vector-store testcase 后的合并产物：
+  - `src/test/python/MemBlock/data/toffee_report_sq_push_extended_plus_vector_newcases_manual_20260427/line_dat/merged.info`
+
+量化结果如下：
+
+- store/replay/uncache/order campaign：
+  - 全局 line `67.4589%`（`188721 / 279757`）
+  - `NewStoreQueue.sv` line `77.1043%`（`9362 / 12142`）
+  - `NewStoreQueue.sv` branch `67.8647%`（`35084 / 51697`）
+- 再叠加 2 条新增 vector-store control-path xfail 后：
+  - 全局 line `67.6630%`（`189292 / 279757`）
+  - `NewStoreQueue.sv` line `77.1207%`（`9364 / 12142`）
+
+这一轮结论很明确：
+
+1. 仅靠标量 partial-store / delayed-flush / replay / ordering 补强，`NewStoreQueue` 已经能从历史文档里的 `58.4%` 级别推进到当前 campaign 的 `77.1%` 左右。
+2. 但要继续冲过 `80%`，剩余缺口已经不再是“再堆几条标量 partial smoke”能解决的问题。
+3. 当前平台的主要瓶颈已经收敛为：
+   - vector-store 控制路径（`vecInactive` / `vecMbCommit` / split dequeue）覆盖不足；
+   - 部分 cross-16B / cross-page / vector drain 在真实 DUT 上仍会卡在 `flushSb -> sbIsEmpty`；
+   - 非 `cbo.zero` 的 CBO 状态机路径仍缺 directed 入口。
+
 ## 3. 覆盖率执行命令与产物
 
 ### 3.1 pytest + toffee 报告命令
