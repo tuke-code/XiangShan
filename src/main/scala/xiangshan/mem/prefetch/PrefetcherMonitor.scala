@@ -210,7 +210,7 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   val window_end = sent_cnt === param.WINDOW_SIZE.U
   val window_fire = window_end && enable
   sent_cnt := Mux(window_end, 0.U, sent_cnt + total_prefetch)
-  cur_late := Mux(window_end, 0.U, cur_late + pf_late)
+  cur_late := Mux(window_end, 0.U, cur_late + pf_late + hit_pf_in_mshr)
   cur_hit_pf := Mux(window_end, 0.U, cur_hit_pf + hit_pf)
   cur_useless := Mux(window_end, 0.U, cur_useless + pf_useless)
 
@@ -296,7 +296,7 @@ abstract class PrefetcherMonitorParam {
   val WINDOW_SIZE = 1000
   val VALIDITY_CHECK_INTERVAL = 1000
   val DISABLE_THRESHOLD = 900
-  val LATE_HIT_THRESHOLD = 500
+  val LATE_HIT_THRESHOLD = 200
   val HIT_MARGIN = 50
 
   val BACK_OFF_INTERVAL = 100000
