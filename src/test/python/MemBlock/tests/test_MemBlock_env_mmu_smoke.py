@@ -39,6 +39,8 @@ PMP_DENY_NAPOT_CFG = 0x18
 PMP_ALLOW_RWX_NAPOT_CFG = 0x1F
 PMP_REGION_BASE = 0x80004000
 PMP_REGION_SIZE = 0x1000
+PMP_REAL_ENTRY_COUNT = 32
+PMP_CFG_SLOTS_PER_WORD = 8
 MEMBLOCK_PADDR_BITS = 48
 MMU_DTLB_REPLACEMENT_ROOT_PT = 0x88100000
 MMU_DTLB_CAPACITY = 4
@@ -488,3 +490,42 @@ def test_api_MemBlock_env_mmu_program_pmp_deny_region_smoke(env):
     assert (PMP_CFG_CSR_BASE, PMP_DENY_NAPOT_CFG) in writes
     assert (PMP_ADDR_CSR_BASE + 1, expected_allow_all_addr) in writes
     assert (PMP_CFG_CSR_BASE, (PMP_ALLOW_RWX_NAPOT_CFG << 8) | PMP_DENY_NAPOT_CFG) in writes
+
+
+def test_api_MemBlock_env_mmu_program_pmp_all_real_entries_smoke(env):
+    """`program_pmp_entry()` 应覆盖 32 个 real entry，并正确跨 `pmpcfg` 字打包。"""
+
+    cfg_values = tuple((0x10 | index) & 0xFF for index in range(PMP_REAL_ENTRY_COUNT))
+    addr_values = tuple(0x80010000 + index * 0x1000 for index in range(PMP_REAL_ENTRY_COUNT))
+
+    def _program_all_entries():
+        for index, (cfg, addr) in enumerate(zip(cfg_values, addr_values)):
+            env.mmu.program_pmp_entry(index=index, cfg=cfg, addr=addr, persistent=False)
+
+    writes = _capture_distributed_csr_writes(env, _program_all_entries)
+
+    expected_cfg_words = {}
+    for index, cfg in enumerate(cfg_values):
+        cfg_addr = PMP_CFG_CSR_BASE + (index // PMP_CFG_SLOTS_PER_WORD) * 2
+        cfg_shift = (index % PMP_CFG_SLOTS_PER_WORD) * 8
+        cfg_word = int(expected_cfg_words.get(cfg_addr, 0))
+        cfg_word &= ~(0xFF << cfg_shift)
+        cfg_word |= int(cfg) << cfg_shift
+        expected_cfg_words[cfg_addr] = cfg_word
+
+    for index, addr in enumerate(addr_values):
+        assert (PMP_ADDR_CSR_BASE + index, addr) in writes, f"entry{index} 未写入 pmpaddr"
+    for cfg_addr, cfg_word in expected_cfg_words.items():
+        assert (cfg_addr, cfg_word) in writes, f"cfg word 0x{cfg_addr:x} 未形成预期 packed 值"
+
+    observed_cfg_addrs = {addr for addr, _data in writes if PMP_CFG_CSR_BASE <= addr <= PMP_CFG_CSR_BASE + 6}
+    assert observed_cfg_addrs == {PMP_CFG_CSR_BASE, PMP_CFG_CSR_BASE + 2, PMP_CFG_CSR_BASE + 4, PMP_CFG_CSR_BASE + 6}
+    assert (PMP_ADDR_CSR_BASE + (PMP_REAL_ENTRY_COUNT - 1), addr_values[-1]) in writes
+
+
+@pytest.mark.parametrize("invalid_index", (-1, PMP_REAL_ENTRY_COUNT))
+def test_api_MemBlock_env_mmu_program_pmp_entry_rejects_non_real_index(env, invalid_index):
+    """`program_pmp_entry()` 只允许 `0..31` real entry。"""
+
+    with pytest.raises(ValueError, match="非法 PMP entry 索引"):
+        env.mmu.program_pmp_entry(index=invalid_index, cfg=0, addr=0, persistent=False)

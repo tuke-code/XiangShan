@@ -18,6 +18,43 @@
 - `suspected`
   - 已有稳定 testcase 签名，静态 RTL 检查也能看到可疑点，但还需要进一步波形或更小粒度 probe 来最终闭环。
 
+## DUTBUG-store-side-pmp-deny-missing-fault
+
+- 状态：suspected
+- 当前 pytest 处置：精确条件 `strict xfail`
+- DUT `src/main/` commit hash：`03bc924c72cb055ccb8146a2eecd750ead0b4d7b`
+- DUT `src/main/` commit 摘要：`03bc924c72cb055ccb8146a2eecd750ead0b4d7b 2026-03-31 13:50:09 +0800 top: make MemBlockTop wrapper for memblock only`
+- 关联 testcase：
+  - `src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py`
+- 关联场景：
+  - `test_api_MemBlock_pmp_runtime_reprogram_all_entries_store`
+  - `test_api_MemBlock_pmp_napot_boundary_store`
+  - `test_api_MemBlock_pmp_tor_boundary_store`
+- 关联 RTL 位置：
+  - `src/main/scala/xiangshan/mem/pipeline/StoreUnit.scala`
+  - `src/main/scala/xiangshan/mem/MemBlock.scala`
+
+问题描述：
+
+- 当前 translated store 在 `PMP allow` 背景下可以稳定 materialize，说明 Sv39/PTW/PMP 编程链路和 store requestor 本身已打通。
+- 但同一条地址空间在运行时切到 `PMP off`、`NAPOT deny` 或 `TOR deny` 后，store 仍会继续表现为普通 shadow：
+  - `allocated = 1`
+  - `completed = 1`
+  - `has_exception = 0`
+  - 既没有稳定 fault 标记，也没有被拦在 materialize 之前
+- 与之对照，load-side 在同样的 reprogram/boundary 背景下可以稳定收口到 `LOAD_ACCESS_FAULT_BIT`，因此当前缺口更像 store-side fault 收口没有真正穿出，而不是 testcase 本地配置错误。
+
+验证口径：
+
+- testcase 不把整个 `test_MemBlock_pmp_runtime.py` 无差别挂起。
+- 只有 store-side PMP deny/off/TOR 边界这三组 directed case 按精确条件 `strict xfail`。
+- load-side all-entry/runtime/lock/boundary 仍保持硬断言，以避免把 PMP 控制面本身的回归能力一起掩盖。
+
+后续动作：
+
+- 继续补最小波形/白盒观测，确认 store-side `pmp.st`、exception propagation 和 store shadow `hasException` 之间哪一段丢失。
+- 若后续 DUT 修复该问题，移除对应 testcase 上的 `xfail`，恢复 store-side PMP deny 为普通 real-DUT regression。
+
 ## DUTBUG-cbo-zero-missing-wline-drain
 
 - 状态：open

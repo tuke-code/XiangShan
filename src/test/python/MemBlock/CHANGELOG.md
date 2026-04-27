@@ -41,6 +41,30 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k store_queue_two_wave_commit_frontier_residency_directed`
   - 结果：`1 passed`
 
+### 2. 收紧 PMA runtime store matrix 的前置等待后复测，确认失败不由 testcase 提前改写属性导致
+
+本条目记录一轮围绕 `test_api_MemBlock_pma_runtime_store_matrix` 的假设验证。用户怀疑 testcase 在前一条 translated store 尚未真正收口时就改写了 PMA，从而把旧请求和新属性混在一起，甚至可能打断 PTW / 提交流程。为验证这一点，本轮没有继续沿用只等待 `allocated + data + mask` 的轻量观测，而是把 runtime store case 改成在每次 PMA reprogram 之前，先显式等待 `store shadow` 收敛到期望的 `translated_pa / mmio / nc / committed`，并在 cacheable 与 mmio 两个阶段之间增加 `wait_memory_quiesce()`。
+
+复测结果表明，失败不仅没有消失，反而被收紧成了更直接的签名：第一笔 `cacheable_store` 在任何后续 PMA 改写发生之前，就已经无法收敛到期望的 `translated_pa`。24 个 runtime entry 全部在 `wait_store_materialized()` 超时，最终观测到的 store shadow 仍稳定表现为 `addr=0x1A0`、`mmio=0`、`has_exception=0`，且 `committed` 也没有拉高。这说明当前失败不能归因于 testcase 先改 PMA 打断旧请求；相反，更像 DUT/store-path 自身没有把 translated paddr / PMA 分类稳定合流到 SQ shadow。
+
+在此基础上，本轮又进一步做了一个更细的提交边界实验：把第一笔 `cacheable_store` 改成“先 `send_store()`、先等待 uncommitted shadow materialize，再脉冲 `pulse_store_commit(1)`”。结果失败签名完全不变，依旧在 commit 之前就超时，且末态仍是 `addr=0x1A0`、`nc=1`、`mem_back_type_mm=0`、`completed=1`、`committed=0`。因此当前缺口比“commit 脉冲过早”更早，已经发生在 store address / PMA 分类写入 SQ shadow 的阶段。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_pmp_runtime.py`
+  - 把 PMA runtime store case 从 `_wait_any_store_view()` 改为 `env.wait_store_materialized()`
+  - 新增对 `expected_addr / expected_mmio / expected_nc / require_committed` 的严格等待
+  - 在前两次 PMA 属性改写之间插入 `env.wait_memory_quiesce()`，排除 testcase 提前切换属性的干扰
+  - 对第一笔 `cacheable_store` 额外改成先 materialize、后 `pulse_store_commit(1)`，排除 commit-boundary 过早推进的干扰
+
+#### 验证情况
+
+- `python3 -m pytest -q -rx -s src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py -k 'test_api_MemBlock_pma_runtime_load_matrix or test_api_MemBlock_pma_runtime_store_matrix'`
+  - 结果：`1 passed, 1 xfailed, 11 deselected`
+- `python3 -m pytest -q -rx -s src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py -k test_api_MemBlock_pma_runtime_store_matrix`
+  - 结果：`1 xfailed, 12 deselected`
+
+
 ## 2026-04-27
 
 ### 1. 推进 `NewStoreQueue` 覆盖率到 `77.1%`，并确认 `>80%` 剩余瓶颈
@@ -73,6 +97,55 @@
 - 手工 LCOV 合并结果：
   - store/replay/uncache/order campaign：`NewStoreQueue.sv` line `77.1043%`（`9362 / 12142`）
   - 再叠加新增 vector-store control-path xfail：`NewStoreQueue.sv` line `77.1207%`（`9364 / 12142`）
+
+### 2. 补齐 PMP all-entry runtime/lock/boundary directed，并精确挂起 store-side deny 缺口
+
+本条目记录一轮围绕 PMP 动态编程能力的 testcase 收口。此前 MemBlock 环境已经能稳定做 `allow_all`、`deny_region` 和 load-side fault baseline，但还没有把“所有 real entry 的运行时改写”“锁定位生效”“NAPOT/TOR 边界语义”系统性打透。本轮把 `env.mmu.program_pmp_entry()` 的 real-entry 边界收紧到 `0..31`，在 `env_mmu_smoke` 补齐 32-entry CSR 编程与 `pmpcfg` 打包检查，并新增 `tests/test_MemBlock_pmp_runtime.py`，覆盖 `entry0..31` 的 runtime `allow/off/allow` load directed、`entry0..31` 的 locked-allow overwrite load/store directed，以及跨 `pmpcfg` 字边界 entry 的 `NAPOT` / `TOR` load boundary directed。
+
+同时，这轮也明确暴露出一个新的 store-side capability gap：translated store 在 `PMP off`、`NAPOT deny` 和 `TOR deny` 背景下，当前 DUT 仍会继续 materialize 成普通 store shadow，缺少稳定 `has_exception` 收口。按 MemBlock 规则，这部分没有把整文件无差别挂起，而是拆成三组精确 `strict xfail`，并同步登记到 `docs/BUGS.md`。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - `program_pmp_entry()` 现在显式拒绝非 real entry，索引边界固定为 `0..31`
+  - 补入 `PMP_CFG_SLOTS_PER_WORD` / `PMP_REAL_ENTRY_COUNT` 常量，收敛 `pmpcfg` 打包边界
+- `tests/test_MemBlock_env_mmu_smoke.py`
+  - 新增 32-entry PMP CSR 编程 smoke
+  - 新增 `program_pmp_entry()` 的 `-1/32` 边界拒绝用例
+- `tests/test_MemBlock_pmp_runtime.py`
+  - 新增 `entry0..31` runtime `allow/off/allow` load directed
+  - 新增 `entry0..31` locked-allow overwrite load/store directed
+  - 新增 `NAPOT` / `TOR` load boundary directed，并覆盖 `0/7/15/23/29/30` 等 cfg-word 边界 entry
+  - 新增 store-side runtime/boundary deny `strict xfail`
+- `docs/coverage_todo.md` / `docs/BUGS.md`
+  - 更新 PMP 覆盖状态与 store-side deny 缺口说明
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py -k pmp`
+  - 结果：`4 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py::test_api_MemBlock_pmp_runtime_reprogram_all_entries_load[0] src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py::test_api_MemBlock_pmp_lock_freezes_all_entries_load_store[0] src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py::test_api_MemBlock_pmp_napot_boundary_load[0] src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py::test_api_MemBlock_pmp_tor_boundary_load[0]`
+  - 结果：`4 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py::test_api_MemBlock_pmp_runtime_reprogram_all_entries_store[0] src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py::test_api_MemBlock_pmp_napot_boundary_store[0] src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py::test_api_MemBlock_pmp_tor_boundary_store[0]`
+  - 结果：`3 xfailed`
+
+### 3. 在 `test_MemBlock_pmp_runtime.py` 并入 PMA runtime/boundary matrix，补 `PMP.sv` 的 PMA 侧覆盖入口
+
+本条目记录一轮围绕 `PMP.sv` 内 PMA 编程路径的 testcase 补强。此前 `tests/test_MemBlock_pmp_runtime.py` 已经把 PMP 的 runtime reprogram、lock、NAPOT/TOR boundary 走通，但同一模块内的 PMA entry 输出、`pmacfg/pmaaddr` 打包写入、以及 PMA mask 更新逻辑仍缺少真实 DUT 场景触发。本轮保持 testcase 数量压缩策略不变，继续沿用 grouped matrix 组织方式，在同一文件中补入 PMA 的 runtime `cacheable -> mmio -> cacheable` 切换矩阵，以及 `NAPOT` / `TOR` boundary 的 translated load/store 分类矩阵。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_pmp_runtime.py`
+  - 新增 PMA CSR 本地 helper，覆盖 `pmacfg0..3` 与 `pmaaddr0..31` 的 runtime 编程
+  - 新增 `entry0..31` 的 PMA runtime load/store 切换矩阵
+  - 新增跨 cfg-word 边界 entry 的 PMA `NAPOT` boundary load/store 矩阵
+  - 新增跨 cfg-word 边界 entry 的 PMA `TOR` boundary load/store 矩阵
+  - 保持 grouped failure / grouped testcase 组织，不重新展开成大批同名 `parametrize` item
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py`
+  - 本条目提交时已执行聚焦回归，结果见本轮提交说明
 
 ### 1. 放宽 MMU fault sequence 的 prime writeback 等待条件，兼容窄宽度真实写回
 

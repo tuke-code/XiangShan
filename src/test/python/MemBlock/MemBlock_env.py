@@ -115,6 +115,8 @@ PMP_CFG_RWX_NAPOT = 0x1F
 PMP_CFG_DENY_NAPOT = 0x18
 PMP_CFG_CSR_BASE = 0x3A0
 PMP_ADDR_CSR_BASE = 0x3B0
+PMP_CFG_SLOTS_PER_WORD = 8
+PMP_REAL_ENTRY_COUNT = 32
 MEMBLOCK_PADDR_BITS = 48
 HGATP_SV39X4_MODE = 8
 LOAD_ACCESS_FAULT_BIT = 5
@@ -1755,10 +1757,10 @@ class MmuFacade:
         }
 
     def program_pmp_entry(self, *, index: int, cfg: int, addr: int, persistent: bool = True) -> None:
-        if int(index) < 0:
+        if int(index) < 0 or int(index) >= PMP_REAL_ENTRY_COUNT:
             raise ValueError(f"非法 PMP entry 索引: {index}")
-        cfg_addr = PMP_CFG_CSR_BASE + (int(index) // 8) * 2
-        cfg_shift = (int(index) % 8) * 8
+        cfg_addr = PMP_CFG_CSR_BASE + (int(index) // PMP_CFG_SLOTS_PER_WORD) * 2
+        cfg_shift = (int(index) % PMP_CFG_SLOTS_PER_WORD) * 8
         cfg_word = int(self._pmp_cfg_words.get(cfg_addr, 0))
         cfg_word &= ~(0xFF << cfg_shift)
         cfg_word |= (int(cfg) & 0xFF) << cfg_shift
