@@ -197,7 +197,8 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
 
   // DynamicPrefetcher
   val base_depth = Constantin.createRecord(s"${param.name}_depth${p(XSCoreParamsKey).HartId}", initValue = 4)
-  val max_depth = (1 << (DEPTH_BITS - 1)).U(DEPTH_BITS.W)
+  val MAX_BITS = 6
+  val max_depth = (1 << MAX_BITS).U(DEPTH_BITS.W)
   val at_base_depth = depth === base_depth
 
   val sent_cnt = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
@@ -277,9 +278,9 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   XSPerfAccumulate(s"l1prefetchUseless${param.name}", pf_useless)
   XSPerfAccumulate(s"l1prefetchDropByNack${param.name}", nack_prefetch)
   XSPerfAccumulate(s"mshr_count_Prefetch${param.name}", prefetch_miss)
-  for(i <- (0 until DEPTH_BITS)) {
+  for(i <- (0 until MAX_BITS)) {
     val t = (1 << i)
-    XSPerfAccumulate(s"${param.name}_depth${t}", depth === t.U)
+    XSPerfAccumulate(s"${param.name}_depth${t}", depth === t.U && total_prefetch)
   }
   XSPerfAccumulate(s"${param.name}_trigger_disable", trigger_disable)
   XSPerfAccumulate(s"${param.name}_disable_time", !enable)
