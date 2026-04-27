@@ -150,6 +150,39 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_tlbfa.py src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py -k 'hfence or tlbfa'`
   - 结果：`11 passed, 2 xfailed`
 
+### 5. 新增 LLPTW 多波次 directed case，并更新当前覆盖率口径
+
+本条目记录一次围绕 `LLPTW.sv` 的专题 testcase / coverage 收口。此前 `mmu_llptw_todo.md` 已经明确指出真正缺口集中在多 entry、duplicate waiting、allStage first-stage/last-stage HPTW 串行状态以及 bitmap 相关控制逻辑，但 testcase 侧仍只有串行单请求 helper，难以把这些状态机真实打热。本轮在 sequence 层新增多波次 two-stage load 能力，并补入 LLPTW 专题用例，覆盖 six-entry queue pressure、duplicate wait/merge、high-slot duplicate chain、first-stage guest/page fault、last-stage guest/page fault、final-stage PMP deny 与 bitmap capability probe。定向覆盖结果把 `LLPTW` 从旧本地基线 `line 49.68% / branch 56.89%` 抬升到 `line 69.73% / branch 69.16%`；组合 `env_mmu_smoke + mmu_fault + mmu_h_extension + mmu_tlbfa + mmu_llptw` 后为 `line 70.02% / branch 70.36%`。进一步对未覆盖区段量化后确认，当前仍未过 `80%` 的主因是 `2440-3499` 的 bitmap/high-slot 组合逻辑和 `3500-3809` 的状态迁移块，其中 bitmap 主路径在当前 4KB-only env 下仍属 capability gap。
+
+#### 变更摘要
+
+- `src/test/python/MemBlock/sequences/mmu_sequences.py`
+  - 新增 `MmuAccessWave`
+  - 新增 `MmuTwoStageWaveLoadSequence` / `MmuTwoStageWaveLoadSequenceResult`
+  - `MmuTwoStageFaultSequence` 新增 `fault_target_gpa`，允许把 G-stage fault 精确打在 VS root / page-table GPA 上
+- `src/test/python/MemBlock/sequences/__init__.py`
+  - 导出新的 LLPTW wave sequence / result 类型
+- `src/test/python/MemBlock/tests/test_MemBlock_mmu_llptw.py`
+  - 新增 six-entry queue pressure
+  - 新增 duplicate wait/merge
+  - 新增 high-slot duplicate chain
+  - 新增 first-stage / last-stage guest-page-fault
+  - 新增 final-stage PMP access fault
+  - 新增 `mbmc.BME` bitmap capability probe
+- `src/test/python/MemBlock/docs/mmu_llptw_todo.md`
+  - 更新 2026-04-27 定向回归口径
+  - 记录当前已落地 case 与 `69.73% / 69.16%` 的真实结果
+  - 明确 `80%+` 仍受 bitmap/superpage env 能力限制
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_llptw.py`
+  - 结果：`7 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_llptw.py --toffee-report --report-dir src/test/python/MemBlock/data/toffee_report_llptw_v2 --report-name mmu_llptw_cov_v2.html --report-dump-json`
+  - `LLPTW.sv`: line `69.73%`, branch `69.16%`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_mmu_smoke.py src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py src/test/python/MemBlock/tests/test_MemBlock_mmu_tlbfa.py src/test/python/MemBlock/tests/test_MemBlock_mmu_llptw.py --toffee-report --report-dir src/test/python/MemBlock/data/toffee_report_llptw_suite --report-name mmu_llptw_suite_cov.html --report-dump-json`
+  - `LLPTW.sv`: line `70.02%`, branch `70.36%`
+
 ## 2026-04-26
 
 ### 5. 修正 4KB MMU 回归中的 fault re-hit 与 Svpbmt translated 期望

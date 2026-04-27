@@ -15,6 +15,8 @@ from request_apis import send_load
 
 from .memblock_sequences import (
     SequenceState,
+    ScalarLoadBatchSameCycleSequence,
+    _capture_writeback_trace,
     _resolve_replay_drain_cycles,
     _sample_l2_tlb_port,
     _sample_tlb_debug,
@@ -217,6 +219,12 @@ class MmuAccessSpec:
 
 
 @dataclass(frozen=True)
+class MmuAccessWave:
+    access_specs: tuple[MmuAccessSpec, ...]
+    wait_cycles_before_issue: int = 0
+
+
+@dataclass(frozen=True)
 class MmuSv39ActivateSequenceResult:
     final_state: SequenceState
     completed_load_count: int
@@ -301,6 +309,17 @@ class MmuTwoStageFenceMatrixSequenceResult:
     install_result: InstallSequenceResult
     warmup_accesses: tuple[TwoStageLoadAccessResult, ...]
     reprobe_accesses: tuple[TwoStageLoadAccessResult, ...]
+
+
+@dataclass(frozen=True)
+class MmuTwoStageWaveLoadSequenceResult:
+    final_state: SequenceState
+    install_result: InstallSequenceResult
+    accesses: tuple[TwoStageLoadAccessResult, ...]
+    ptw_trace: tuple[dict, ...]
+    transport_stats_before: dict[str, int]
+    transport_stats_after: dict[str, int]
+    completed_load_count: int
 
 
 @dataclass(frozen=True)
@@ -1016,6 +1035,132 @@ class MmuTwoStageFenceMatrixSequence:
         )
 
 
+class MmuTwoStageWaveLoadSequence:
+    def __init__(
+        self,
+        *,
+        config: TwoStageSv39AddressSpaceConfig,
+        initial_state: SequenceState,
+        access_waves: tuple[MmuAccessWave, ...],
+        vs_asid: int = 0,
+        vmid: int = 0,
+        settle_cycles: int = 4,
+        response_delay_cycles: int = 1,
+        max_cycles: int | None = None,
+    ) -> None:
+        self.config = config
+        self.initial_state = initial_state
+        self.access_waves = tuple(access_waves)
+        self.vs_asid = int(vs_asid)
+        self.vmid = int(vmid)
+        self.settle_cycles = int(settle_cycles)
+        self.response_delay_cycles = int(response_delay_cycles)
+        self.max_cycles = max_cycles
+
+        if not self.access_waves:
+            raise ValueError("MmuTwoStageWaveLoadSequence 至少需要一组 access_waves")
+
+    def run(self, env) -> MmuTwoStageWaveLoadSequenceResult:
+        install_result = TwoStageSv39AddressSpaceInstallSequence(self.config).run(env)
+        next_lq_ptr = self.initial_state.next_lq_ptr
+        access_specs = []
+        max_cycles = _resolve_replay_drain_cycles(env, self.max_cycles)
+        batch_width = min(int(env.config.load_pipeline_width), int(env.config.lsq_enq_ports))
+        completed_before = env.get_completed_load_count()
+        transport_stats_before = _snapshot_transport_stats(env)
+
+        env.mmu.allow_all_smode_access(persistent=False)
+        with env.mmu.ptw_responder(response_delay_cycles=self.response_delay_cycles) as ptw:
+            env.mmu.enable_two_stage_sv39(
+                vs_root_pt_addr=int(self.config.vs_root_pt_addr),
+                g_root_pt_addr=int(self.config.g_root_pt_addr),
+                vs_asid=self.vs_asid,
+                vmid=self.vmid,
+                settle_cycles=self.settle_cycles,
+            )
+            with _capture_writeback_trace(env, max_events=max(256, sum(len(w.access_specs) for w in self.access_waves) * 16)) as writeback_trace:
+                for wave in self.access_waves:
+                    if not wave.access_specs:
+                        raise ValueError("MmuAccessWave.access_specs 不能为空")
+                    if len(wave.access_specs) > batch_width:
+                        raise ValueError(
+                            f"MmuAccessWave 单拍 load 数超过 backend 支持宽度: "
+                            f"{len(wave.access_specs)} > {batch_width}"
+                        )
+                    if wave.wait_cycles_before_issue > 0:
+                        env.advance_cycles(int(wave.wait_cycles_before_issue))
+
+                    wave_txns = []
+                    for slot, spec in enumerate(wave.access_specs):
+                        txn = LoadTxn(
+                            req_id=int(spec.req_id),
+                            addr=int(spec.va),
+                            lq_ptr=next_lq_ptr,
+                            sq_ptr=self.initial_state.sq_ptr,
+                            enq_port=slot,
+                            issue_lane=slot,
+                        )
+                        env.backend.prepare(txn)
+                        expected_pa = install_result.resolve_two_stage_pa(int(spec.va))
+                        env.expect_scalar_load(
+                            rob_idx=txn.rob_idx,
+                            pdest=txn.resolved_pdest,
+                            addr=expected_pa,
+                            size=txn.size,
+                            mask=txn.mask,
+                        )
+                        wave_txns.append((txn, spec, expected_pa))
+                        access_specs.append((txn, spec, expected_pa))
+                        next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
+
+                    ScalarLoadBatchSameCycleSequence(
+                        tuple(txn for txn, _spec, _expected_pa in wave_txns),
+                        max_cycles=max_cycles,
+                    ).run(env)
+
+                completed_load_count = _wait_completed_load_count(
+                    env,
+                    completed_before + len(access_specs),
+                    max_cycles=max_cycles,
+                )
+            env.drain_writebacks(max_cycles=max_cycles)
+
+        writeback_events = {}
+        for event in writeback_trace:
+            if event.get("int_wen") == 0 or event.get("is_from_load") == 0 or event.get("to_rob_valid") == 0:
+                continue
+            writeback_events[(int(event["rob_idx_flag"]), int(event["rob_idx_value"]))] = dict(event)
+
+        accesses = []
+        for txn, spec, expected_pa in access_specs:
+            rob_key = (int(txn.rob_idx.flag), int(txn.rob_idx.value))
+            if rob_key not in writeback_events:
+                raise AssertionError(f"未捕获到 two-stage wave load writeback: rob={rob_key}, va=0x{int(spec.va):x}")
+            accesses.append(
+                TwoStageLoadAccessResult(
+                    txn=txn,
+                    va=int(spec.va),
+                    expected_gpa=install_result.resolve_vs_stage_gpa(int(spec.va)),
+                    expected_pa=int(expected_pa),
+                    writeback=writeback_events[rob_key],
+                    ptw_trace=(),
+                    transport_stats_before={},
+                    transport_stats_after={},
+                    fault_event=None,
+                )
+            )
+
+        return MmuTwoStageWaveLoadSequenceResult(
+            final_state=SequenceState(next_lq_ptr=next_lq_ptr, sq_ptr=self.initial_state.sq_ptr),
+            install_result=install_result,
+            accesses=tuple(accesses),
+            ptw_trace=tuple(ptw.trace),
+            transport_stats_before=transport_stats_before,
+            transport_stats_after=_snapshot_transport_stats(env),
+            completed_load_count=completed_load_count,
+        )
+
+
 class MmuTwoStageFaultSequence:
     def __init__(
         self,
@@ -1031,6 +1176,7 @@ class MmuTwoStageFaultSequence:
         required_exception_bits: tuple[int, ...] = (),
         pmp_mode: str = PMP_MODE_ALLOW,
         fault_stage: str | None = None,
+        fault_target_gpa: int | None = None,
     ) -> None:
         self.config = config
         self.va = int(va)
@@ -1043,6 +1189,7 @@ class MmuTwoStageFaultSequence:
         self.required_exception_bits = tuple(int(bit) for bit in required_exception_bits)
         self.pmp_mode = str(pmp_mode)
         self.fault_stage = None if fault_stage is None else str(fault_stage)
+        self.fault_target_gpa = None if fault_target_gpa is None else int(fault_target_gpa)
 
     def run(self, env) -> MmuTwoStageFaultSequenceResult:
         install_result = TwoStageSv39AddressSpaceInstallSequence(self.config).run(env)
@@ -1064,7 +1211,11 @@ class MmuTwoStageFaultSequence:
                 else:
                     raise KeyError(f"未找到 va=0x{self.va:x} 对应的 VS-stage mapping")
             elif self.fault_stage == "g":
-                target_gpa = install_result.resolve_vs_stage_gpa(self.va)
+                target_gpa = (
+                    install_result.resolve_vs_stage_gpa(self.va)
+                    if self.fault_target_gpa is None
+                    else self.fault_target_gpa
+                )
                 for mapping in self.config.g_mappings:
                     if (int(mapping.gpa) >> 12) != (target_gpa >> 12):
                         continue
