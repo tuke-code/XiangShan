@@ -338,3 +338,31 @@ def test_api_issue_agent_load_drives_fp_wen_and_size_specific_fu_op():
     assert getattr(env.dut, f"{prefix}fpWen").value == 1
     assert getattr(env.dut, f"{prefix}pdest").value == 5
     assert getattr(env.dut, f"{prefix}lqIdx_value").value == 1
+
+
+def test_api_issue_agent_integer_load_drives_size_specific_fu_op():
+    env = _FakeIssueEnv({0: [1, 1]})
+    prefix = "io_ooo_to_mem_intIssue_0_0_bits_"
+    setattr(env.dut, f"{prefix}rfWen", _FakeSignal(0))
+    setattr(env.dut, f"{prefix}fpWen", _FakeSignal(0))
+    agent = IssueAgent(env)
+
+    op = IssueOp.load(
+        req_id=2,
+        addr=0x2000,
+        lq_ptr=QueuePtr(flag=0, value=2),
+        sq_ptr=QueuePtr(flag=0, value=3),
+        lane=0,
+        size=2,
+        mask=0x03,
+        rob_idx=RobIndex(flag=0, value=4),
+        pdest=6,
+        ftq_idx_flag=0,
+        ftq_idx_value=8,
+        pc=0x80000024,
+    )
+    agent._drive_issue_op(op)
+
+    assert env.issue[0].bits_fuOpType.value == 0x1
+    assert getattr(env.dut, f"{prefix}rfWen").value == 1
+    assert getattr(env.dut, f"{prefix}fpWen").value == 0

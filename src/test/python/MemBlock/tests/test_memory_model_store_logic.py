@@ -616,3 +616,41 @@ def test_scoreboard_supports_fp_load_writeback_boxing():
 
     assert scoreboard.completed_loads == 1
     assert scoreboard.outstanding_expected_count == 0
+
+
+def test_scoreboard_sign_extends_narrow_scalar_loads():
+    writeback = FakeWriteback(
+        valid=1,
+        ready=1,
+        data_0=0xFFFFFFFFD566F788,
+        pdest=10,
+        intWen=1,
+        fpWen=0,
+        robIdx_flag=0,
+        robIdx_value=3,
+        isFromLoadUnit=1,
+        exception_bits=[0] * 24,
+    )
+    refmem = RefMemory()
+    scoreboard = Scoreboard(
+        refmem,
+        rob_size=512,
+        store_queue_size=56,
+    )
+
+    refmem.preload_u64(0x3000, 0x11223344D566F788)
+    scoreboard.expect_load(rob_idx_flag=0, rob_idx_value=3, pdest=10, addr=0x3000, size=4, mask=0x0F)
+    scoreboard.note_load_issued(0, 3)
+    scoreboard.note_load_commits(1)
+    scoreboard.observe_load_writeback(
+        data=writeback.read("data_0", 0),
+        pdest=writeback.read("pdest", 0),
+        int_wen=writeback.read("intWen", 0),
+        fp_wen=writeback.read("fpWen", 0),
+        rob_idx_flag=writeback.read("robIdx_flag", 0),
+        rob_idx_value=writeback.read("robIdx_value", 0),
+        exception_bits=writeback.read_exception_bits(),
+    )
+
+    assert scoreboard.completed_loads == 1
+    assert scoreboard.outstanding_expected_count == 0

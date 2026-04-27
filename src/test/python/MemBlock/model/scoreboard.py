@@ -25,6 +25,15 @@ FP_LOAD_BOX_FILL_BY_SIZE = {
 }
 
 
+def _sign_extend_to_xlen(value: int, bits: int, xlen: int = 64) -> int:
+    sign_bit = 1 << (int(bits) - 1)
+    mask = (1 << int(bits)) - 1
+    normalized = int(value) & mask
+    if normalized & sign_bit:
+        normalized |= ((1 << int(xlen)) - 1) ^ mask
+    return normalized & ((1 << int(xlen)) - 1)
+
+
 def _normalized_store_window(addr: int | None, mask: int, width_bytes: int) -> tuple[int, int, frozenset[int]] | None:
     if addr is None or width_bytes <= 0:
         return None
@@ -277,7 +286,7 @@ class Scoreboard:
             else self.ref_memory.read_masked(expected.addr, expected.mask, width_bytes=expected.size)
         )
         if not expected.expected_fp_wen:
-            return raw_data
+            return _sign_extend_to_xlen(raw_data, expected.size * 8)
 
         if expected.size not in FP_LOAD_BOX_FILL_BY_SIZE:
             raise AssertionError(

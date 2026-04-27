@@ -383,6 +383,7 @@ def test_api_request_apis_issue_scalar_load_forwards_size_and_fp_wen():
             {
                 "lane": 4,
                 "size": 4,
+                "mask": None,
                 "fp_wen": 1,
                 "store_set_hit": 0,
                 "load_wait_bit": 0,
@@ -698,6 +699,34 @@ def test_api_issue_op_load_from_txn_preserves_fp_wen_and_size():
     assert op.load_fu_op_type == 0x2
 
 
+def test_api_issue_op_integer_load_uses_size_specific_fu_op_type():
+    txn = LoadTxn(
+        req_id=0x63,
+        addr=0x1234,
+        lq_ptr=QueuePtr(flag=0, value=1),
+        sq_ptr=QueuePtr(flag=0, value=2),
+        size=2,
+        mask=0x03,
+    )
+
+    op = IssueOp.load_from_txn(txn)
+
+    assert op.fp_wen == 0
+    assert op.load_fu_op_type == 0x1
+
+
+def test_api_load_txn_rejects_inconsistent_size_and_mask():
+    with pytest.raises(ValueError, match="scalar load size/mask mismatch"):
+        LoadTxn(
+            req_id=0x64,
+            addr=0x1234,
+            lq_ptr=QueuePtr(flag=0, value=1),
+            sq_ptr=QueuePtr(flag=0, value=2),
+            size=4,
+            mask=0xFF,
+        )
+
+
 def test_api_backend_facade_issue_scalar_load_preserves_fp_contract():
     env = _FakeFacadeEnv()
     backend = BackendFacade(env)
@@ -721,6 +750,7 @@ def test_api_backend_facade_issue_scalar_load_preserves_fp_contract():
     op = issued_plan.ops[0]
     assert op.kind == "load"
     assert op.size == 2
+    assert op.mask == 0x03
     assert op.fp_wen == 1
     assert op.load_fu_op_type == 0x1
     assert op.resolved_rob_idx == RobIndex(flag=0, value=9)

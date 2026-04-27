@@ -29,6 +29,12 @@ SCALAR_LOAD_SIZE_BYTES_TO_FU_OP_TYPE = {
     4: 0x2,
     8: 0x3,
 }
+SCALAR_LOAD_SIZE_BYTES_TO_MASK = {
+    1: 0x01,
+    2: 0x03,
+    4: 0x0F,
+    8: 0xFF,
+}
 VECTOR_OPCODE_CLASS_TO_LOAD_FU_OP_TYPE = {
     "unit_stride": 0b01_00_00000,
     "stride": 0b01_10_00000,
@@ -65,6 +71,23 @@ def scalar_load_fu_op_type_from_size(size: int) -> int:
         return SCALAR_LOAD_SIZE_BYTES_TO_FU_OP_TYPE[int(size)]
     except KeyError as exc:
         raise ValueError(f"unsupported scalar load size: {size!r}") from exc
+
+
+def scalar_load_mask_from_size(size: int) -> int:
+    try:
+        return SCALAR_LOAD_SIZE_BYTES_TO_MASK[int(size)]
+    except KeyError as exc:
+        raise ValueError(f"unsupported scalar load size: {size!r}") from exc
+
+
+def validate_scalar_load_size_and_mask(*, size: int, mask: int) -> None:
+    expected_mask = scalar_load_mask_from_size(size)
+    normalized_mask = int(mask) & 0xFF
+    if normalized_mask != expected_mask:
+        raise ValueError(
+            "scalar load size/mask mismatch: "
+            f"size={int(size)}, mask={int(mask):#x}, expected_mask={expected_mask:#x}"
+        )
 
 
 def normalized_store_opcode(opcode: str) -> str:
@@ -236,6 +259,7 @@ class LoadTxn:
 
     def __post_init__(self) -> None:
         scalar_load_fu_op_type_from_size(self.size)
+        validate_scalar_load_size_and_mask(size=self.size, mask=self.mask)
         self.fp_wen = int(self.fp_wen)
         if self.fp_wen not in (0, 1):
             raise ValueError(f"fp_wen must be 0 or 1, got {self.fp_wen}")
@@ -854,6 +878,7 @@ class IssueOp:
             if self.addr is None or self.lq_ptr is None:
                 raise ValueError("load issue op requires `addr` and `lq_ptr`")
             scalar_load_fu_op_type_from_size(self.size)
+            validate_scalar_load_size_and_mask(size=self.size, mask=self.mask)
             if int(self.fp_wen) not in (0, 1):
                 raise ValueError(f"load issue op fp_wen must be 0 or 1, got {self.fp_wen}")
         elif self.kind == "sta":
@@ -980,7 +1005,7 @@ class IssueOp:
         sq_ptr: QueuePtr | StoreRef,
         lane: int = 0,
         size: int = 8,
-        mask: int = 0xFF,
+        mask: int | None = None,
         fp_wen: int = 0,
         store_set_hit: int = 0,
         load_wait_bit: int = 0,
@@ -1009,6 +1034,7 @@ class IssueOp:
             rob_idx_flag=wait_for_rob_idx_flag,
             rob_idx_value=wait_for_rob_idx_value,
         )
+        normalized_mask = scalar_load_mask_from_size(size) if mask is None else int(mask)
         return cls(
             kind="load",
             req_id=req_id,
@@ -1017,7 +1043,7 @@ class IssueOp:
             addr=addr,
             lq_ptr=lq_ptr,
             size=size,
-            mask=mask,
+            mask=normalized_mask,
             fp_wen=fp_wen,
             store_set_hit=store_set_hit,
             load_wait_bit=load_wait_bit,
@@ -1097,13 +1123,7 @@ class IssueOp:
 
     @property
     def load_fu_op_type(self) -> int:
-        # Existing scalar integer-load tests were authored around the legacy
-        # "always issue as LD" contract. Restrict size-specific fuOpType to the
-        # new fpWen path so we can cover lh/lw/ld boxing without broadening the
-        # integer-load behavior surface in the same patch.
-        if int(self.fp_wen):
-            return scalar_load_fu_op_type_from_size(self.size)
-        return scalar_load_fu_op_type_from_size(8)
+        return scalar_load_fu_op_type_from_size(self.size)
 
 
 @dataclass(frozen=True)

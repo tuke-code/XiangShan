@@ -2,7 +2,45 @@
 
 ## 2026-04-27
 
-### 1. 补齐标量 `fpWen` load 的 env/monitor/model 闭环
+### 1. 放宽 MMU fault sequence 的 prime writeback 等待条件，兼容窄宽度真实写回
+
+本条目记录一轮围绕 `MmuFaultingScalarLoadSequence` 的纠偏。标量 load width 语义修正后，MMU fault 和 pipeline probe 里的 prime load 已经会按真实 `lb/lh/lw/ld` 发射，但 sequence 仍然把 `prime_expected_data` 当成完整 64-bit preload 去过滤 `wait_load_writeback_observed()`，这会让 `byte/half/word` prime 在真实 DUT 上因为写回位型不同而超时。本轮把 prime 正常 load 的等待条件收窄成“按 `rob_idx` 等到写回即可”，把数据正确性交给已登记的 scoreboard compare，从而与新的 width 语义保持一致。
+
+#### 变更摘要
+
+- `sequences/mmu_sequences.py`
+  - `MmuFaultingScalarLoadSequence._run_one_load()` 的正常 prime 路径不再用原始 `expected_data` 过滤写回
+  - prime load 仍会登记 `expect_scalar_load()`，数据正确性继续由 scoreboard 在 commit 边界校验
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py::test_api_MemBlock_scalar_word_load_pmp_access_fault_tlb_hit_smoke src/test/python/MemBlock/tests/test_MemBlock_mmu_fault.py::test_api_MemBlock_scalar_mixed_size_fault_matrix src/test/python/MemBlock/tests/test_MemBlock_scalar_load_pipeline_probe.py::test_api_MemBlock_scalar_aligned_load_fault_matrix_with_pipeline_checks`
+  - 结果：`3 passed`
+
+### 2. 修正标量 load 的 width/mask 契约并补齐窄宽度回归
+
+本条目记录一轮围绕标量 load 宽度语义的收口。上一条补齐 `fpWen` 时虽然已经把 `size` 下沉到了 issue 路径，但整数 load 仍保留了一个临时 fallback，会把 `byte/half/word` 继续按 `LD` 发射；同时 scoreboard 对非 8B 标量 load 也没有做 sign-extension compare，导致环境层面对 `width/mask` 的表达与真实 RTL 行为并不一致。本轮把这两处一起修正：恢复整数 load 按 `size` 选择 `lb/lh/lw/ld` 的真实 `fuOpType`，在事务/helper 层显式校验 `size/mask` 一致性，并补上真实 DUT 的 `byte/half/word/doubleword` 定向回归。
+
+#### 变更摘要
+
+- `transactions.py` / `request_apis.py` / `agents/backend_facade.py`
+  - 标量整数 load 不再强制 fallback 到 `LD`
+  - `IssueOp.load()` / `issue_scalar_load()` 现在按 `size` 推导默认 load mask
+  - `LoadTxn` / `IssueOp` 新增 `size/mask` 一致性校验，拒绝不匹配组合
+- `model/scoreboard.py`
+  - 普通标量 `lb/lh/lw/ld` compare 现在按位宽做 sign-extension
+  - `fpWen` boxing compare 语义保持不变
+- `tests/test_request_apis_backend_facade.py` / `tests/test_issue_agent.py` / `tests/test_memory_model_store_logic.py`
+  - 新增整数 load `fuOpType`、默认 mask、`size/mask` 校验与 sign-extension 单测
+- `tests/test_MemBlock_scalar_load_width.py`
+  - 新增真实 DUT `byte/half/word/doubleword` 标量 load 写回位型定向
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py src/test/python/MemBlock/tests/test_issue_agent.py src/test/python/MemBlock/tests/test_memory_model_store_logic.py src/test/python/MemBlock/tests/test_MemBlock_fp_load.py src/test/python/MemBlock/tests/test_MemBlock_scalar_load_width.py src/test/python/MemBlock/tests/test_MemBlock_random_load.py -k 'single_preloaded_load_data_check or test_MemBlock_fp_load or test_MemBlock_scalar_load_width or test_request_apis_backend_facade or test_issue_agent or test_memory_model_store_logic'`
+  - 结果：`61 passed, 5 deselected`
+
+### 3. 补齐标量 `fpWen` load 的 env/monitor/model 闭环
 
 本条目记录一轮围绕 `intIssue.fpWen` 的补全。此前 Python 环境虽然已经能从 writeback 口读到 `fpWen/toFpRf_valid`，但请求侧没有能力主动驱动 scalar `fpWen` load，scoreboard 也只按整数写回口径做 compare，导致 `fpWen` 在 MemBlock 环境里始终停留在“端口导出了、验证没有闭环”的状态。本轮把补全范围限定在标量 load：一方面把 `fp_wen` 从事务对象一路下沉到 issue 驱动；另一方面把 writeback monitor、`expect_scalar_load()` 和 scoreboard 统一扩成 bit-pattern 级 `fp` compare，并新增真实 DUT 的 `half/word/doubleword` directed case。
 

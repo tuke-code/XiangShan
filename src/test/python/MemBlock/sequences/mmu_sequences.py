@@ -1353,7 +1353,6 @@ class MmuFaultingScalarLoadSequence:
             env.backend.execute(prepared)
             writeback = env.wait_load_writeback_observed(
                 rob_idx=txn.rob_idx,
-                data=expected_data,
                 max_cycles=max_cycles,
             )
             _wait_completed_load_count(env, completed_before + 1, max_cycles=max_cycles)

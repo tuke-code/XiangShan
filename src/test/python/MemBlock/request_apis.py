@@ -308,6 +308,7 @@ def issue_scalar_load(
     sq_ptr: QueuePtr,
     lane: int = DEFAULT_LOAD_ISSUE_LANE,
     size: int = 8,
+    mask: int | None = None,
     fp_wen: int = 0,
     store_set_hit: int = 0,
     load_wait_bit: int = 0,
@@ -329,6 +330,7 @@ def issue_scalar_load(
         kwargs = {
             "lane": lane,
             "size": size,
+            "mask": mask,
             "fp_wen": fp_wen,
             "store_set_hit": store_set_hit,
             "load_wait_bit": load_wait_bit,
@@ -363,6 +365,7 @@ def issue_scalar_load(
             sq_ptr,
             lane=lane,
             size=size,
+            mask=mask,
             fp_wen=fp_wen,
             store_set_hit=store_set_hit,
             load_wait_bit=load_wait_bit,
