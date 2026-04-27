@@ -210,6 +210,13 @@ class MmuPrimeLoadSpec:
 
 
 @dataclass(frozen=True)
+class MmuAccessSpec:
+    req_id: int
+    va: int
+    expected_data: int
+
+
+@dataclass(frozen=True)
 class MmuSv39ActivateSequenceResult:
     final_state: SequenceState
     completed_load_count: int
@@ -278,6 +285,22 @@ class MmuDtlbReplacementSequenceResult:
     overflow_accesses: tuple[MmuDtlbAccessResult, ...]
     reprobe_accesses: tuple[MmuDtlbAccessResult, ...]
     reprobe_access: MmuDtlbAccessResult
+
+
+@dataclass(frozen=True)
+class MmuSv39FenceMatrixSequenceResult:
+    final_state: SequenceState
+    install_result: MmuSv39AddressSpaceInstallSequenceResult
+    warmup_accesses: tuple[MmuDtlbAccessResult, ...]
+    reprobe_accesses: tuple[MmuDtlbAccessResult, ...]
+
+
+@dataclass(frozen=True)
+class MmuTwoStageFenceMatrixSequenceResult:
+    final_state: SequenceState
+    install_result: InstallSequenceResult
+    warmup_accesses: tuple[TwoStageLoadAccessResult, ...]
+    reprobe_accesses: tuple[TwoStageLoadAccessResult, ...]
 
 
 @dataclass(frozen=True)
@@ -430,6 +453,92 @@ class MmuSv39ActivateSequence:
             completed_load_count=completed_loads,
             prime_loads=tuple(prime_txns),
             prime_writebacks=tuple(prime_writebacks),
+        )
+
+
+class MmuSv39FenceMatrixSequence:
+    def __init__(
+        self,
+        *,
+        config: MmuSv39AddressSpaceConfig,
+        initial_state: SequenceState,
+        warmup_specs: tuple[MmuAccessSpec, ...],
+        reprobe_specs: tuple[MmuAccessSpec, ...],
+        asid: int = 0,
+        settle_cycles: int = 4,
+        response_delay_cycles: int = 1,
+        fence_addr: int | None = None,
+        fence_asid: int | None = None,
+        max_cycles: int | None = None,
+    ) -> None:
+        self.config = config
+        self.initial_state = initial_state
+        self.warmup_specs = tuple(warmup_specs)
+        self.reprobe_specs = tuple(reprobe_specs)
+        self.asid = int(asid)
+        self.settle_cycles = int(settle_cycles)
+        self.response_delay_cycles = int(response_delay_cycles)
+        self.fence_addr = None if fence_addr is None else int(fence_addr)
+        self.fence_asid = None if fence_asid is None else int(fence_asid)
+        self.max_cycles = max_cycles
+
+    def run(self, env) -> MmuSv39FenceMatrixSequenceResult:
+        install_result = MmuSv39AddressSpaceInstallSequence(self.config).run(env)
+        next_lq_ptr = self.initial_state.next_lq_ptr
+        warmup_accesses = []
+        reprobe_accesses = []
+
+        env.mmu.allow_all_smode_access(persistent=False)
+        with env.mmu.ptw_responder(response_delay_cycles=self.response_delay_cycles) as ptw:
+            env.mmu.enable_sv39(
+                root_pt_addr=int(self.config.root_pt_addr),
+                asid=self.asid,
+                settle_cycles=self.settle_cycles,
+            )
+            for spec in self.warmup_specs:
+                access = _run_one_sv39_access(
+                    env,
+                    ptw=ptw,
+                    install_result=install_result,
+                    va=spec.va,
+                    expected_data=spec.expected_data,
+                    lq_ptr=next_lq_ptr,
+                    sq_ptr=self.initial_state.sq_ptr,
+                    req_id=spec.req_id,
+                    max_cycles=self.max_cycles,
+                )
+                warmup_accesses.append(access)
+                next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
+
+            env.mmu.pulse_sfence(
+                rs1=self.fence_addr is not None,
+                rs2=self.fence_asid is not None,
+                addr=0 if self.fence_addr is None else self.fence_addr,
+                id=0 if self.fence_asid is None else self.fence_asid,
+            )
+            if self.settle_cycles > 0:
+                env.advance_cycles(self.settle_cycles)
+
+            for spec in self.reprobe_specs:
+                access = _run_one_sv39_access(
+                    env,
+                    ptw=ptw,
+                    install_result=install_result,
+                    va=spec.va,
+                    expected_data=spec.expected_data,
+                    lq_ptr=next_lq_ptr,
+                    sq_ptr=self.initial_state.sq_ptr,
+                    req_id=spec.req_id,
+                    max_cycles=self.max_cycles,
+                )
+                reprobe_accesses.append(access)
+                next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
+
+        return MmuSv39FenceMatrixSequenceResult(
+            final_state=SequenceState(next_lq_ptr=next_lq_ptr, sq_ptr=self.initial_state.sq_ptr),
+            install_result=install_result,
+            warmup_accesses=tuple(warmup_accesses),
+            reprobe_accesses=tuple(reprobe_accesses),
         )
 
 
@@ -737,6 +846,7 @@ class MmuTwoStageFenceSequence:
         vmid: int = 0,
         settle_cycles: int = 4,
         response_delay_cycles: int = 1,
+        fence_addr: int | None = None,
         fence_specific_id: int | None = None,
     ) -> None:
         self.config = config
@@ -749,6 +859,7 @@ class MmuTwoStageFenceSequence:
         self.vmid = int(vmid)
         self.settle_cycles = int(settle_cycles)
         self.response_delay_cycles = int(response_delay_cycles)
+        self.fence_addr = None if fence_addr is None else int(fence_addr)
         self.fence_specific_id = None if fence_specific_id is None else int(fence_specific_id)
 
     def run(self, env) -> MmuTwoStageFenceSequenceResult:
@@ -769,16 +880,22 @@ class MmuTwoStageFenceSequence:
         with env.mmu.ptw_responder(response_delay_cycles=self.response_delay_cycles) as ptw:
             if self.fence_kind == "hfence_vvma":
                 env.mmu.pulse_hfence_vvma(
+                    rs1=self.fence_addr is not None,
                     rs2=self.fence_specific_id is not None,
+                    addr=0 if self.fence_addr is None else self.fence_addr,
                     asid=0 if self.fence_specific_id is None else self.fence_specific_id,
                 )
             elif self.fence_kind == "hfence_gvma":
                 env.mmu.pulse_hfence_gvma(
+                    rs1=self.fence_addr is not None,
                     rs2=self.fence_specific_id is not None,
+                    addr=0 if self.fence_addr is None else self.fence_addr,
                     vmid=0 if self.fence_specific_id is None else self.fence_specific_id,
                 )
             else:
                 raise ValueError(f"未知 two-stage fence kind: {self.fence_kind}")
+            if self.settle_cycles > 0:
+                env.advance_cycles(self.settle_cycles)
             reprobe_access = _run_one_two_stage_access(
                 env,
                 ptw=ptw,
@@ -798,6 +915,104 @@ class MmuTwoStageFenceSequence:
             install_result=load_result.install_result,
             warmup_access=warmup_access,
             reprobe_access=reprobe_access,
+        )
+
+
+class MmuTwoStageFenceMatrixSequence:
+    def __init__(
+        self,
+        *,
+        config: TwoStageSv39AddressSpaceConfig,
+        initial_state: SequenceState,
+        warmup_specs: tuple[MmuAccessSpec, ...],
+        reprobe_specs: tuple[MmuAccessSpec, ...],
+        fence_kind: str,
+        vs_asid: int = 0,
+        vmid: int = 0,
+        settle_cycles: int = 4,
+        response_delay_cycles: int = 1,
+        fence_addr: int | None = None,
+        fence_specific_id: int | None = None,
+    ) -> None:
+        self.config = config
+        self.initial_state = initial_state
+        self.warmup_specs = tuple(warmup_specs)
+        self.reprobe_specs = tuple(reprobe_specs)
+        self.fence_kind = str(fence_kind)
+        self.vs_asid = int(vs_asid)
+        self.vmid = int(vmid)
+        self.settle_cycles = int(settle_cycles)
+        self.response_delay_cycles = int(response_delay_cycles)
+        self.fence_addr = None if fence_addr is None else int(fence_addr)
+        self.fence_specific_id = None if fence_specific_id is None else int(fence_specific_id)
+
+    def run(self, env) -> MmuTwoStageFenceMatrixSequenceResult:
+        install_result = TwoStageSv39AddressSpaceInstallSequence(self.config).run(env)
+        next_lq_ptr = self.initial_state.next_lq_ptr
+        warmup_accesses = []
+        reprobe_accesses = []
+
+        env.mmu.allow_all_smode_access(persistent=False)
+        with env.mmu.ptw_responder(response_delay_cycles=self.response_delay_cycles) as ptw:
+            env.mmu.enable_two_stage_sv39(
+                vs_root_pt_addr=int(self.config.vs_root_pt_addr),
+                g_root_pt_addr=int(self.config.g_root_pt_addr),
+                vs_asid=self.vs_asid,
+                vmid=self.vmid,
+                settle_cycles=self.settle_cycles,
+            )
+            for spec in self.warmup_specs:
+                access = _run_one_two_stage_access(
+                    env,
+                    ptw=ptw,
+                    install_result=install_result,
+                    va=spec.va,
+                    lq_ptr=next_lq_ptr,
+                    sq_ptr=self.initial_state.sq_ptr,
+                    req_id=spec.req_id,
+                    expected_data=spec.expected_data,
+                )
+                warmup_accesses.append(access)
+                next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
+
+            if self.fence_kind == "hfence_vvma":
+                env.mmu.pulse_hfence_vvma(
+                    rs1=self.fence_addr is not None,
+                    rs2=self.fence_specific_id is not None,
+                    addr=0 if self.fence_addr is None else self.fence_addr,
+                    asid=0 if self.fence_specific_id is None else self.fence_specific_id,
+                )
+            elif self.fence_kind == "hfence_gvma":
+                env.mmu.pulse_hfence_gvma(
+                    rs1=self.fence_addr is not None,
+                    rs2=self.fence_specific_id is not None,
+                    addr=0 if self.fence_addr is None else self.fence_addr,
+                    vmid=0 if self.fence_specific_id is None else self.fence_specific_id,
+                )
+            else:
+                raise ValueError(f"未知 two-stage fence kind: {self.fence_kind}")
+            if self.settle_cycles > 0:
+                env.advance_cycles(self.settle_cycles)
+
+            for spec in self.reprobe_specs:
+                access = _run_one_two_stage_access(
+                    env,
+                    ptw=ptw,
+                    install_result=install_result,
+                    va=spec.va,
+                    lq_ptr=next_lq_ptr,
+                    sq_ptr=self.initial_state.sq_ptr,
+                    req_id=spec.req_id,
+                    expected_data=spec.expected_data,
+                )
+                reprobe_accesses.append(access)
+                next_lq_ptr = ptr_inc(next_lq_ptr, env.config.sequence.load_queue_size)
+
+        return MmuTwoStageFenceMatrixSequenceResult(
+            final_state=SequenceState(next_lq_ptr=next_lq_ptr, sq_ptr=self.initial_state.sq_ptr),
+            install_result=install_result,
+            warmup_accesses=tuple(warmup_accesses),
+            reprobe_accesses=tuple(reprobe_accesses),
         )
 
 
@@ -962,6 +1177,75 @@ def _capture_tlb_probe_events(env, *, max_events: int = 64):
         yield trace
     finally:
         env.remove_after_step_callback(_sample)
+
+
+def _run_one_sv39_access(
+    env,
+    *,
+    ptw,
+    install_result: MmuSv39AddressSpaceInstallSequenceResult,
+    va: int,
+    expected_data: int,
+    lq_ptr,
+    sq_ptr,
+    req_id: int,
+    max_cycles: int | None = None,
+) -> MmuDtlbAccessResult:
+    load_va = int(va)
+    expected_pa = int(install_result.translated_pa_for(load_va))
+    txn = LoadTxn(req_id=int(req_id), addr=load_va, lq_ptr=lq_ptr, sq_ptr=sq_ptr)
+    max_cycles = _resolve_replay_drain_cycles(env, max_cycles)
+    completed_before = env.get_completed_load_count()
+    env.backend.prepare(txn)
+
+    expected = env.expect_scalar_load(
+        rob_idx=txn.rob_idx,
+        pdest=txn.resolved_pdest,
+        addr=expected_pa,
+        size=txn.size,
+        mask=txn.mask,
+    )
+    expected.expected_data = int(expected_data)
+
+    ptw_trace_start = len(ptw.trace)
+    with _capture_tlb_probe_events(env) as probe_trace:
+        send_load(env, txn)
+        writeback = env.wait_load_writeback_observed(
+            rob_idx=txn.rob_idx,
+            data=int(expected_data),
+            max_cycles=max_cycles,
+        )
+
+    _wait_completed_load_count(
+        env,
+        completed_before + 1,
+        max_cycles=max_cycles,
+    )
+    ptw_trace = tuple(list(ptw.trace)[ptw_trace_start:])
+    probe_events = tuple(probe_trace)
+    first_l2_tlb_req = next(
+        (
+            dict(event.l2_tlb_port)
+            for event in probe_events
+            if event.l2_tlb_port.get("req_valid") not in (None, 0)
+        ),
+        None,
+    )
+
+    return MmuDtlbAccessResult(
+        txn=txn,
+        va=load_va,
+        expected_pa=expected_pa,
+        expected_data=int(expected_data),
+        writeback=writeback,
+        ptw_trace=ptw_trace,
+        probe_events=probe_events,
+        ptw_a_fire_count=sum(1 for event in ptw_trace if event.get("event") == "a_fire"),
+        ptw_d_fire_count=sum(1 for event in ptw_trace if event.get("event") == "d_fire"),
+        tlb_first_miss_seen=any(event.first_miss_events for event in probe_events),
+        l2_tlb_req_seen=any(event.l2_tlb_port.get("req_valid") not in (None, 0) for event in probe_events),
+        first_l2_tlb_req=first_l2_tlb_req,
+    )
 
 
 class MmuDtlbReplacementSequence:

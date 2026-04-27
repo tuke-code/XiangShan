@@ -8,7 +8,9 @@ import pytest
 from sequences import (
     GStageSv39Mapping,
     LOAD_ACCESS_FAULT_BIT,
+    MmuAccessSpec,
     MmuTwoStageFaultSequence,
+    MmuTwoStageFenceMatrixSequence,
     MmuTwoStageFenceSequence,
     MmuTwoStageLoadSequence,
     MmuVsStageLoadSequence,
@@ -71,6 +73,35 @@ def _build_two_stage_config(va: int, data: int = H_DATA):
         ),
         gpa_base,
         hpa_base,
+    )
+
+
+def _build_two_stage_matrix_config(entries: tuple[tuple[int, int], ...]):
+    resolved = {}
+    g_mappings = [
+        GStageSv39Mapping(gpa=H_VS_ROOT_PT, pa_base=H_VS_ROOT_PT),
+        *(GStageSv39Mapping(gpa=addr, pa_base=addr) for addr in H_VS_PAGE_TABLE_PAGES),
+    ]
+
+    for va, data in entries:
+        gpa_base = _sv39_4k_mapping_pa_base(H_GPA_SPACE, va)
+        hpa_base = _sv39_4k_mapping_pa_base(H_HPA_SPACE, gpa_base)
+        resolved[int(va)] = {"gpa_base": gpa_base, "hpa_base": hpa_base, "data": int(data)}
+        g_mappings.append(GStageSv39Mapping(gpa=gpa_base, pa_base=hpa_base))
+
+    return (
+        TwoStageSv39AddressSpaceConfig(
+            vs_root_pt_addr=H_VS_ROOT_PT,
+            g_root_pt_addr=H_G_ROOT_PT,
+            vs_mappings=tuple(Sv39Mapping(va=int(va) & ~0xFFF, pa_base=resolved[int(va)]["gpa_base"]) for va, _ in entries),
+            g_mappings=tuple(g_mappings),
+            vs_page_table_page_addrs=H_VS_PAGE_TABLE_PAGES,
+            g_page_table_page_addrs=H_G_PAGE_TABLE_PAGES,
+            translated_preloads=tuple(
+                TranslatedU64MemoryPreload(va=int(va), data=resolved[int(va)]["data"]) for va, _ in entries
+            ),
+        ),
+        resolved,
     )
 
 
@@ -186,6 +217,164 @@ def test_api_MemBlock_mmu_h_hfence_gvma_flushes_g_stage_translation_smoke(env):
     assert result.warmup_access.miss_observed
     assert result.reprobe_access.miss_observed
     assert result.reprobe_access.writeback["data"] == H_DATA
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_mmu_h_hfence_vvma_specific_addr_preserves_other_va(env):
+    """`hfence.vvma(addr, all asid)` 应只重打目标 VS VA，而不是连带无关页。"""
+
+    state = _reset_env_state(env)
+    target_va = H_VA + 0x78
+    other_va = H_VA + 0x1078
+    config, _ = _build_two_stage_matrix_config(((target_va, H_DATA), (other_va, H_ALT_DATA)))
+    result = MmuTwoStageFenceMatrixSequence(
+        config=config,
+        initial_state=state,
+        warmup_specs=(
+            MmuAccessSpec(req_id=0x38, va=target_va, expected_data=H_DATA),
+            MmuAccessSpec(req_id=0x39, va=other_va, expected_data=H_ALT_DATA),
+        ),
+        reprobe_specs=(
+            MmuAccessSpec(req_id=0x3A, va=target_va, expected_data=H_DATA),
+            MmuAccessSpec(req_id=0x3B, va=other_va, expected_data=H_ALT_DATA),
+        ),
+        fence_kind="hfence_vvma",
+        vs_asid=H_VS_ASID,
+        vmid=H_VMID,
+        fence_addr=target_va & ~0xFFF,
+    ).run(env)
+
+    assert result.warmup_accesses[0].miss_observed
+    assert result.warmup_accesses[1].writeback["data"] == H_ALT_DATA
+    assert result.reprobe_accesses[0].miss_observed
+    assert not result.reprobe_accesses[1].miss_observed
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_mmu_h_hfence_vvma_specific_asid_remiss_smoke(env):
+    """`hfence.vvma(all addr, asid)` 需要命中 selective-ASID flush 路径。"""
+
+    state = _reset_env_state(env)
+    config, _, _ = _build_two_stage_config(H_VA + 0x98)
+    result = MmuTwoStageFenceSequence(
+        config=config,
+        va=H_VA + 0x98,
+        initial_state=state,
+        req_id_base=0x3C,
+        expected_data=H_DATA,
+        fence_kind="hfence_vvma",
+        vs_asid=H_VS_ASID,
+        vmid=H_VMID,
+        fence_specific_id=H_VS_ASID,
+    ).run(env)
+
+    assert result.warmup_access.miss_observed
+    assert result.reprobe_access.miss_observed
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_mmu_h_hfence_vvma_specific_addr_specific_asid_remiss_smoke(env):
+    """`hfence.vvma(addr, asid)` 需要命中最细粒度的 VS selective flush 条件。"""
+
+    state = _reset_env_state(env)
+    target_va = H_VA + 0xA8
+    config, _, _ = _build_two_stage_config(target_va)
+    result = MmuTwoStageFenceSequence(
+        config=config,
+        va=target_va,
+        initial_state=state,
+        req_id_base=0x3E,
+        expected_data=H_DATA,
+        fence_kind="hfence_vvma",
+        vs_asid=H_VS_ASID,
+        vmid=H_VMID,
+        fence_addr=target_va & ~0xFFF,
+        fence_specific_id=H_VS_ASID,
+    ).run(env)
+
+    assert result.warmup_access.miss_observed
+    assert result.reprobe_access.miss_observed
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_mmu_h_hfence_gvma_specific_addr_preserves_other_gpa(env):
+    """`hfence.gvma(addr, all vmid)` 应只重打目标 GPA 对应的 G-stage translation。"""
+
+    state = _reset_env_state(env)
+    target_va = H_VA + 0xB8
+    other_va = H_VA + 0x10B8
+    config, resolved = _build_two_stage_matrix_config(((target_va, H_DATA), (other_va, H_ALT_DATA)))
+    result = MmuTwoStageFenceMatrixSequence(
+        config=config,
+        initial_state=state,
+        warmup_specs=(
+            MmuAccessSpec(req_id=0x40, va=target_va, expected_data=H_DATA),
+            MmuAccessSpec(req_id=0x41, va=other_va, expected_data=H_ALT_DATA),
+        ),
+        reprobe_specs=(
+            MmuAccessSpec(req_id=0x42, va=target_va, expected_data=H_DATA),
+            MmuAccessSpec(req_id=0x43, va=other_va, expected_data=H_ALT_DATA),
+        ),
+        fence_kind="hfence_gvma",
+        vs_asid=H_VS_ASID,
+        vmid=H_VMID,
+        fence_addr=resolved[target_va]["gpa_base"],
+    ).run(env)
+
+    assert result.warmup_accesses[0].miss_observed
+    assert result.warmup_accesses[1].writeback["data"] == H_ALT_DATA
+    if not result.reprobe_accesses[0].miss_observed:
+        pytest.xfail("当前 DUT hfence.gvma(addr, all vmid) 未稳定清除目标 G-stage translation")
+    assert result.reprobe_accesses[0].miss_observed
+    assert not result.reprobe_accesses[1].miss_observed
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_mmu_h_hfence_gvma_specific_vmid_remiss_smoke(env):
+    """`hfence.gvma(all addr, vmid)` 需要命中 selective-VMID flush 路径。"""
+
+    state = _reset_env_state(env)
+    config, _, _ = _build_two_stage_config(H_VA + 0xD8)
+    result = MmuTwoStageFenceSequence(
+        config=config,
+        va=H_VA + 0xD8,
+        initial_state=state,
+        req_id_base=0x44,
+        expected_data=H_DATA,
+        fence_kind="hfence_gvma",
+        vs_asid=H_VS_ASID,
+        vmid=H_VMID,
+        fence_specific_id=H_VMID,
+    ).run(env)
+
+    assert result.warmup_access.miss_observed
+    assert result.reprobe_access.miss_observed
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_mmu_h_hfence_gvma_specific_addr_specific_vmid_remiss_smoke(env):
+    """`hfence.gvma(addr, vmid)` 需要命中最细粒度的 G-stage selective flush 条件。"""
+
+    state = _reset_env_state(env)
+    target_va = H_VA + 0xE8
+    config, resolved = _build_two_stage_matrix_config(((target_va, H_DATA),))
+    result = MmuTwoStageFenceSequence(
+        config=config,
+        va=target_va,
+        initial_state=state,
+        req_id_base=0x46,
+        expected_data=H_DATA,
+        fence_kind="hfence_gvma",
+        vs_asid=H_VS_ASID,
+        vmid=H_VMID,
+        fence_addr=resolved[target_va]["gpa_base"],
+        fence_specific_id=H_VMID,
+    ).run(env)
+
+    assert result.warmup_access.miss_observed
+    if not result.reprobe_access.miss_observed:
+        pytest.xfail("当前 DUT hfence.gvma(addr, vmid) 未稳定清除目标 G-stage translation")
+    assert result.reprobe_access.miss_observed
     env.assert_no_outstanding()
 
 

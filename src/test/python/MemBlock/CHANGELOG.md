@@ -67,6 +67,89 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py src/test/python/MemBlock/tests/test_issue_agent.py src/test/python/MemBlock/tests/test_memory_model_store_logic.py src/test/python/MemBlock/tests/test_MemBlock_fp_load.py src/test/python/MemBlock/tests/test_MemBlock_random_load.py -k 'single_preloaded_load_data_check or test_MemBlock_fp_load or test_request_apis_backend_facade or test_issue_agent or test_memory_model_store_logic'`
   - 结果：`53 passed, 5 deselected`
 
+### 1. 校正 `mmu_test_todo.md` 中 `TLBFA_1 / TLBFA_2` 的归因与后续优先级
+
+本条目记录一次针对 MMU 规划文档的口径校正。此前 `mmu_test_todo.md` 虽然已经给出 `TLBFA*` 的大方向，但对 `TLBFA_1` 与 `TLBFA_2` 的真实 requestor 归属仍不够精确，容易把 frontend ITLB 流量误当成 `TLBFA_1` 的主要补强方向。结合本轮 testcase 落地和 RTL 连接复核，现已明确：`TLBFA_1` 挂在 store-side DTLB，对应两个 `StoreUnit` requestor；`TLBFA_2` 挂在 load-side DTLB，对应 `LoadUnit0/1/2` 三个 requestor。文档因此同步调整为“先按真实 requestor 家族补流量，再继续做 refill 元数据/fault/prefetch/frontend 交叉”的优先级。
+
+#### 变更摘要
+
+- `src/test/python/MemBlock/docs/mmu_test_todo.md`
+  - 增补 `TLBFA_1 = store-side`、`TLBFA_2 = load-side 3 requestor` 的连接说明
+  - 补记截至 `2026-04-27` 已落地的 `TLBFA*` directed 矩阵
+  - 重写 `P2` 多来源 / 多读口章节，把 `load-side`、`store-side`、`frontend/ITLB` 三类来源拆开描述
+  - 在 `P1` refill 编码章节补充“已打通 requestor 家族后，后续应转向元数据/fault/flush 交叉”的说明
+
+#### 验证情况
+
+- 本轮为文档口径更新，未新增 pytest / real DUT 回归。
+
+### 2. 补齐 TLBFA_1 / TLBFA_2 的 store-side 与 multi-lane MMU directed 用例
+
+本条目记录一次针对 `TLBFA_1.sv` 与 `TLBFA_2.sv` 遗留 coverage 缺口的 testcase 收口。HTML 报告显示此前 selective-flush 矩阵已经把基础 miss/hit/flush 路径打热，但 `TLBFA_1` 仍明显缺少 store-side translated traffic，而 `TLBFA_2` 仍缺少 3-lane 同拍与 two-stage `s2xlate` 组合。进一步对 RTL 连接关系排查后确认：`TLBFA_1` 挂在 `inner_dtlb_st_tlb_st`，对应两个 `StoreUnit` requestor；`TLBFA_2` 挂在 load-side DTLB，三个 requestor 对应 `LoadUnit0/1/2`。本轮据此把 testcase 从“继续加 fence 组合”切到“直接补 store/load requestor 家族流量”，新增单阶段 store 双单元、two-stage store 双单元、单阶段 3-lane 同拍 load 矩阵以及 two-stage 3-lane 同拍 load 矩阵。
+
+#### 变更摘要
+
+- `src/test/python/MemBlock/tests/test_MemBlock_mmu_tlbfa.py`
+  - 新增 translated store helper，覆盖两个 store issue 单元的 Sv39 / two-stage store traffic
+  - 新增 Sv39 store dual-unit directed case，命中 `TLBFA_1` 的双 requestor refill 路径
+  - 新增 two-stage store dual-unit directed case，补齐 `TLBFA_1` 的 `VMID/s2xlate` 相关写入背景
+  - 新增 Sv39 3-lane 同拍 load miss/hit 矩阵，覆盖 `TLBFA_2` 的 `requestor_2`
+  - 新增 two-stage 3-lane 同拍 load miss/hit 矩阵，补强 `TLBFA_2` 的 `s2xlate` 维度
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_tlbfa.py`
+  - 结果：`9 passed`
+
+### 3. 新增 MMU testcase 计划，并补齐对应的 env 调整路线
+
+本条目记录一次 MMU 规划文档补强。此前 `mmu_env_todo.md` 已经覆盖了大方向，但 testcase 侧仍缺少一份独立的“场景矩阵计划”，而 env 侧也还没有把“为了执行这些 testcase 需要补哪些能力”拆成显式条目；同时文档里仍保留着一处已经过时的 H extension 状态描述。本轮新增独立的 `mmu_test_todo.md`，并把 `mmu_env_todo.md` 扩展为与 testcase 计划一一对应的 env 调整清单，同时修正 two-stage success path 已转正的现状。
+
+#### 变更摘要
+
+- `src/test/python/MemBlock/docs/mmu_test_todo.md`
+  - 新增独立 MMU testcase 计划文档
+  - 按 `P0/P1/P2` 收口 `TLB miss/refill/re-hit/flush`、fault/recovery、refill 编码多样性、H extension selective flush、PBMT/PMP、多来源流量与 replay/nuke 交叉场景
+- `src/test/python/MemBlock/docs/mmu_env_todo.md`
+  - 增补“为执行 testcase 计划所需的 env 调整”章节
+  - 收口 hit/miss/refill/flush 观测、自定义页表编码 helper、selective flush facade、fault/recovery 观测、多来源流量入口等基础设施计划
+  - 修正 H extension / two-stage success-path 已转正的状态描述
+
+#### 验证情况
+
+- 本轮为纯文档更新，未运行 pytest / real DUT 回归。
+
+### 4. 新增 TLBFA 定向 MMU selective-flush 用例矩阵
+
+本条目记录一轮围绕 `TLBFA*` 覆盖短板的 testcase / sequence 补强。此前 MMU 回归已经有 `Sv39 basic/rehit`、`DTLB replacement`、`hfence(all-addr)` 和 fault smoke，但 `sfence/hfence` 的 `specific addr / specific asid(vmid)` 维度仍没有组织成稳定矩阵，难以系统命中 `TLBFA*` 的 selective invalidate 路径。本轮新增单阶段 `sfence.vma` 定向用例、扩展两阶段 `hfence.vvma/gvma` selective-flush 矩阵，并在 sequence 层补齐 fence 后 settle 与多访问矩阵封装。
+
+#### 变更摘要
+
+- `src/test/python/MemBlock/sequences/mmu_sequences.py`
+  - 新增 `MmuAccessSpec`
+  - 新增 `MmuSv39FenceMatrixSequence` / `MmuSv39FenceMatrixSequenceResult`
+  - 新增 `MmuTwoStageFenceMatrixSequence` / `MmuTwoStageFenceMatrixSequenceResult`
+  - `MmuTwoStageFenceSequence` 新增 `fence_addr` 支持
+  - `sfence/hfence` matrix sequence 在 fence 后统一追加 settle 周期，避免过早观测
+- `src/test/python/MemBlock/sequences/__init__.py`
+  - 导出上述新 MMU sequence / result 类型
+- `src/test/python/MemBlock/tests/test_MemBlock_mmu_tlbfa.py`
+  - 新增单阶段 `TLBFA` 定向回归
+  - 覆盖 `sfence.vma(all/all)`、`sfence.vma(addr/all)`、`sfence.vma(all/asid)`、`sfence.vma(addr/asid)` 以及 root switch reload
+- `src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py`
+  - 新增 `hfence.vvma(addr/all asid)`、`hfence.vvma(all addr/asid)`、`hfence.vvma(addr/asid)` directed case
+  - 新增 `hfence.gvma(addr/all vmid)`、`hfence.gvma(all addr/vmid)`、`hfence.gvma(addr/vmid)` directed case
+  - 对当前 RTL 尚未稳定清空目标 G-stage translation 的 `hfence.gvma(addr, ...)` 两条路径挂精确 `xfail`
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_tlbfa.py`
+  - 结果：`5 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py -k 'hfence'`
+  - 结果：`6 passed, 2 xfailed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_tlbfa.py src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py -k 'hfence or tlbfa'`
+  - 结果：`11 passed, 2 xfailed`
+
 ## 2026-04-26
 
 ### 5. 修正 4KB MMU 回归中的 fault re-hit 与 Svpbmt translated 期望
