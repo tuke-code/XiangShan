@@ -326,7 +326,7 @@ class MemBlockTopImp(wrapper: MemBlockTop) extends LazyRawModuleImp(wrapper) {
   val inner_hartId = IO(chiselTypeOf(wrapper.memBlock.module.io.inner_hartId))
   val inner_reset_vector = IO(chiselTypeOf(wrapper.memBlock.module.io.inner_reset_vector))
   val outer_reset_vector = IO(chiselTypeOf(wrapper.memBlock.module.io.outer_reset_vector))
-  val outer_cpu_halt = IO(chiselTypeOf(wrapper.memBlock.module.io.outer_cpu_halt))
+  val outer_cpu_wfi = IO(chiselTypeOf(wrapper.memBlock.module.io.outer_cpu_wfi))
   val outer_l2_flush_en = IO(chiselTypeOf(wrapper.memBlock.module.io.outer_l2_flush_en))
   val outer_power_down_en = IO(chiselTypeOf(wrapper.memBlock.module.io.outer_power_down_en))
   val outer_cpu_critical_error = IO(chiselTypeOf(wrapper.memBlock.module.io.outer_cpu_critical_error))
@@ -376,7 +376,7 @@ class MemBlockTopImp(wrapper: MemBlockTop) extends LazyRawModuleImp(wrapper) {
   inner_hartId <> wrapper.memBlock.module.io.inner_hartId
   inner_reset_vector <> wrapper.memBlock.module.io.inner_reset_vector
   wrapper.memBlock.module.io.outer_reset_vector <> outer_reset_vector
-  outer_cpu_halt <> wrapper.memBlock.module.io.outer_cpu_halt
+  outer_cpu_wfi <> wrapper.memBlock.module.io.outer_cpu_wfi
   outer_l2_flush_en <> wrapper.memBlock.module.io.outer_l2_flush_en
   outer_power_down_en <> wrapper.memBlock.module.io.outer_power_down_en
   outer_cpu_critical_error <> wrapper.memBlock.module.io.outer_cpu_critical_error
