@@ -408,8 +408,7 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
     VecInit(t0_branches.zip(t0_branchesScIdxHitVec).zip(t0_branchesScIdxVec).zip(t0_writeTakenVec).map {
       case (((b, hit), predIdx), taken) =>
         b.valid && b.bits.attribute.isConditional && hit && t0_meta.tagePredValid(predIdx) &&
-        (!(t0_meta.useScPred(predIdx) && t0_meta.scPred(predIdx) === taken) || !(t0_meta.useScPred(predIdx) &&
-          t0_meta.tagePredValid(predIdx) && t0_meta.scPred(predIdx) === t0_meta.tagePred(predIdx)))
+        (t0_meta.scPred(predIdx) =/= taken || !t0_meta.sumAboveThres(predIdx))
     })
   private val t0_needWrite    = t0_writeValidVec.reduce(_ || _)
   private val t0_bankConflict = t0_needWrite && s0_fire && !flush && t0_bankMask === s0_bankMask
@@ -494,17 +493,6 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   )
   private val t1_oldBiasLowBits = RegEnable(t0_meta.scBiasLowerBits, t0_fire)
 
-  private val t1_biasPercsum = VecInit(t1_oldBiasEntries.map(entry => getPercsum(getPercsum(entry.ctr.value))))
-  private val t1_mergeResp =
-    VecInit(t1_oldPathEntries ++ t1_oldGlobalEntries ++ t1_oldBWEntries ++ Seq(t1_oldImliEntries))
-  private val t1_mergePercsum = VecInit(t1_mergeResp.map(entries =>
-    VecInit(entries.map(entry => getPercsum(entry.ctr.value)))
-  ))
-  private val t1_sumPercsum = VecInit.tabulate(NumWays)(j => ParallelSingedExpandingAdd(t1_mergePercsum.map(_(j))))
-
-  dontTouch(t1_biasPercsum)
-  dontTouch(t1_sumPercsum)
-
   private val t1_branchesWayIdxVec   = VecInit(t1_branches.map(b => getWayIdx(b.bits.cfiPosition)))
   private val t1_branchesScIdxHitVec = RegEnable(t0_branchesScIdxHitVec, t0_fire)
   private val t1_branchesScIdxVec    = RegEnable(t0_branchesScIdxVec, t0_fire)
@@ -520,6 +508,52 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
       s"should be the same as log2Ceil(NumWays): ${log2Ceil(NumWays)}"
   )
 
+  private val t1_mergeResp =
+    VecInit(t1_oldPathEntries ++ t1_oldGlobalEntries ++ t1_oldBWEntries ++ Seq(t1_oldImliEntries))
+  private val t1_mergePercsum = VecInit(t1_mergeResp.map(entries =>
+    VecInit(entries.map(entry => getPercsum(entry.ctr.value)))
+  ))
+  private val t1_biasPercsum = VecInit(t1_oldBiasEntries.map(entry => getPercsum(entry.ctr.value)))
+
+  private val t1_sumPercsum = VecInit.tabulate(NumWays)(j => ParallelSingedExpandingAdd(t1_mergePercsum.map(_(j))))
+
+  private val t1_totalPercsum = VecInit(t1_branchesWayIdxVec.zip(t1_branchesScIdxVec).map {
+    case (wayIdx, oldIdx) =>
+      t1_sumPercsum(wayIdx) +& t1_biasPercsum(Cat(wayIdx, t1_oldBiasLowBits(oldIdx)))
+  })
+  private val t1_scPred        = WireInit(VecInit.fill(ResolveEntryBranchNumber)(false.B))
+  private val t1_useScPred     = WireInit(VecInit.fill(ResolveEntryBranchNumber)(false.B))
+  private val t1_sumAboveThres = WireInit(VecInit.fill(ResolveEntryBranchNumber)(false.B))
+
+  t1_writeValidVec.zip(t1_writeTakenVec).zip(t1_branchesWayIdxVec).zip(t1_branchesScIdxVec).zipWithIndex.foreach {
+    case ((((valid, taken), writeIdx), oldIdx), i) =>
+      val predValid = valid && t1_meta.tagePredValid(oldIdx)
+      val sum       = t1_totalPercsum(i)
+      val thres     = scThreshold(writeIdx).value >> 3
+
+      val tageConfHigh = true.B
+      val tageConfMid  = false.B
+      val tageConfLow  = false.B
+      val conf = MuxCase(
+        false.B,
+        Seq(
+          (predValid && tageConfHigh) -> aboveThreshold(sum, thres >> 1),
+          (predValid && tageConfMid)  -> aboveThreshold(sum, thres >> 2),
+          (predValid && tageConfLow)  -> aboveThreshold(sum, thres >> 3)
+        )
+      )
+      t1_scPred(i)        := sum >= 0.S
+      t1_useScPred(i)     := conf
+      t1_sumAboveThres(i) := Mux(predValid, conf, true.B)
+      // dontTouch(tageConfHigh)
+      // dontTouch(tageConfMid)
+      // dontTouch(tageConfLow)
+      dontTouch(conf)
+  }
+
+  dontTouch(t1_biasPercsum)
+  dontTouch(t1_sumPercsum)
+
   /************ get new threshold************/
   private val t1_thresholdOverflowVec  = WireInit(VecInit.fill(NumWays)(false.B))
   private val t1_thresholdUnderflowVec = WireInit(VecInit.fill(NumWays)(false.B))
@@ -532,9 +566,9 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
     VecInit(Seq.fill(ResolveEntryBranchNumber)(VecInit(Seq.fill(NumWays)(false.B))))
   t1_writeValidVec.zip(t1_writeTakenVec).zip(t1_branchesWayIdxVec).zip(t1_branchesScIdxVec).zipWithIndex.foreach {
     case ((((valid, taken), writeIdx), oldIdx), i) =>
-      val scWrong = taken =/= t1_meta.scPred(oldIdx)
-      val needUpdate = valid && t1_meta.tagePredValid(oldIdx) &&
-        (scWrong || !t1_meta.sumAboveThres(oldIdx))
+      val scWrong = taken =/= t1_scPred(i)
+      val needUpdate = valid && t1_meta.tagePredValid(oldIdx) && t1_useScPred(i) &&
+        (scWrong || !t1_sumAboveThres(i))
       thresholdWayMask(i)(writeIdx) := needUpdate
       thresholdDirMask(i)(writeIdx) := scWrong
   }
@@ -564,6 +598,8 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
         oldEntries,
         t1_writeValidVec,
         t1_writeTakenVec,
+        t1_scPred,
+        t1_sumAboveThres,
         t1_branchesWayIdxVec,
         t1_branchesScIdxVec,
         t1_meta
@@ -581,6 +617,8 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
         oldEntries,
         t1_writeValidVec,
         t1_writeTakenVec,
+        t1_scPred,
+        t1_sumAboveThres,
         t1_branchesWayIdxVec,
         t1_branchesScIdxVec,
         t1_meta
@@ -596,6 +634,8 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
         oldEntries,
         t1_writeValidVec,
         t1_writeTakenVec,
+        t1_scPred,
+        t1_sumAboveThres,
         t1_branchesWayIdxVec,
         t1_branchesScIdxVec,
         t1_meta
@@ -606,6 +646,8 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
     t1_oldImliEntries,
     t1_writeValidVec,
     t1_writeTakenVec,
+    t1_scPred,
+    t1_sumAboveThres,
     t1_branchesWayIdxVec,
     t1_branchesScIdxVec,
     t1_meta
@@ -623,7 +665,7 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
     case ((((valid, taken), writeIdx), oldIdx), i) =>
       val biasWayIdx = Cat(writeIdx, t1_oldBiasLowBits(oldIdx))
       val needUpdate = valid && t1_meta.tagePredValid(oldIdx) &&
-        (t1_meta.scPred(oldIdx) =/= taken || !t1_meta.sumAboveThres(oldIdx))
+        (t1_scPred(i) =/= taken || !t1_sumAboveThres(i))
       writeBiasWayMask(i)(biasWayIdx) := needUpdate
       writeBiasDirMask(i)(biasWayIdx) := taken
   }

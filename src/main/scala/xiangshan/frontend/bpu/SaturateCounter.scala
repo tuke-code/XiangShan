@@ -55,7 +55,7 @@ class SaturateCounter(width: Int) extends Bundle { // scalastyle:ignore number.o
   def isWeak: Bool = isWeakPositive || isWeakNegative
   // medium
   def isMid: Bool = {
-    require(width >= 3, "SaturateCounter width must be at least 3 to have mid states")
+    require(width >= 3, s"SaturateCounter width must be at least 3 to have mid states, but got $width")
     !isSaturate && !isWeak
   }
 

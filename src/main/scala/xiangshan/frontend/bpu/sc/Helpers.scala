@@ -64,6 +64,8 @@ trait Helpers extends HasScParameters with PhrHelper {
       oldEntries:    Vec[ScEntry],
       writeValidVec: Vec[Bool],
       takenMask:     Vec[Bool],
+      scPred:        Vec[Bool],
+      sumAbove:      Vec[Bool],
       wayIdxVec:     Vec[UInt],
       branchIdxVec:  Vec[UInt],
       metaData:      ScMeta
@@ -81,7 +83,7 @@ trait Helpers extends HasScParameters with PhrHelper {
     writeValidVec.zip(takenMask).zip(wayIdxVec).zip(branchIdxVec).zipWithIndex.foreach {
       case ((((valid, taken), writeIdx), oldIdx), i) =>
         val needUpdate = valid && metaData.tagePredValid(oldIdx) &&
-          (metaData.scPred(oldIdx) =/= taken || !metaData.sumAboveThres(oldIdx))
+          (scPred(i) =/= taken || !sumAbove(i))
         writeNeedMask(i)(writeIdx) := needUpdate
         writeDirMask(i)(writeIdx)  := taken
     }
