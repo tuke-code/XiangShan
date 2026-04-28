@@ -187,6 +187,16 @@ class Scoreboard:
     def outstanding_expected_count(self) -> int:
         return sum(len(items) for items in self._expected_loads.values())
 
+    def peek_expected_load(self, rob_idx) -> ExpectedLoad | None:
+        if rob_idx is None:
+            return None
+        target_flag = int(getattr(rob_idx, "flag"))
+        target_value = int(getattr(rob_idx, "value"))
+        for key, queue in self._expected_loads.items():
+            if int(key.flag) == target_flag and int(key.value) == target_value:
+                return queue[0] if queue else None
+        return None
+
     def expect_load(
         self,
         rob_idx_flag: int,
@@ -320,6 +330,7 @@ class Scoreboard:
 
     def mark_store_completed(self, sq_idx: int) -> None:
         store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
+        store.committed = True
         store.completed = True
 
     def observe_sq_shadow_entry(
@@ -344,10 +355,12 @@ class Scoreboard:
         store.allocated = allocated
         if allocated:
             store.rob_idx = rob_idx
-            store.addr_valid = bool(addrvalid)
-            store.data_valid = bool(datavalid)
-            store.committed = bool(committed)
-            store.completed = bool(completed)
+            store.addr_valid = store.addr_valid or bool(addrvalid)
+            store.data_valid = store.data_valid or bool(datavalid)
+            # 新 DUT 下 shadow 的 committed 位可能弱于 deq / writeback 事实源；
+            # 一旦 store 被观测为 committed 或 completed，就不应再回退。
+            store.committed = store.committed or bool(committed) or bool(completed)
+            store.completed = store.completed or bool(completed)
             store.nc = bool(nc)
 
     def observe_store_addr(

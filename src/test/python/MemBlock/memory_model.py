@@ -151,6 +151,14 @@ class MemoryModel:
     def drain_log(self) -> list[dict]:
         return self.scoreboard.drain_log
 
+    def peek_expected_load_addr(self, rob_idx: RobIndex | None) -> int | None:
+        if rob_idx is None:
+            return None
+        expected = self.scoreboard.peek_expected_load(rob_idx)
+        if expected is None:
+            return None
+        return int(expected.addr)
+
     @property
     def strict_writeback_check(self) -> bool:
         return self.scoreboard.strict_writeback_check

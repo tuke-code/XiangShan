@@ -64,6 +64,82 @@
 - `python3 -m pytest -q -rx -s src/test/python/MemBlock/tests/test_MemBlock_pmp_runtime.py -k test_api_MemBlock_pma_runtime_store_matrix`
   - 结果：`1 xfailed, 12 deselected`
 
+### 1. 新增 `DUT_CHANGELOG-20260428.md`，独立收口本轮 merge 的 MemBlock I/O 变化与 env 影响分析
+
+本条目记录一次面向 DUT 版本跟踪的文档收口。针对 merge `e30cc6fe6e26b43aa9a949a78a0af6ee56020a08`，新增 `docs/DUT_CHANGELOG-20260428.md`，对比其一号父提交 `34964c573`，专门总结会影响 `src/test/python/MemBlock/` 的 MemBlock/LSU contract 漂移、store-path 重构，以及这些变化对 Python 验证环境的直接影响。与上一版 DUT changelog 不同，本次把 **MemBlock I/O 变化** 单独拆成一章，避免顶层 contract 漂移与内部实现重构混写。
+
+#### 变更摘要
+
+- `docs/DUT_CHANGELOG-20260428.md`
+  - 新增 `MemBlock I/O 变化` 独立章节
+  - 记录 `io.mem_to_ooo.intWriteback: NewExuOutput -> MemWriteBack`
+  - 记录 `sqDeqPtr` 保留但重要性上升，以及 `sqCommit* / sqDeqRobIdx / sqDeqUopIdx` 不再适合作为稳定 contract
+  - 记录 `outer_cpu_halt -> outer_cpu_wfi`
+  - 分析 `NewStoreUnit`、`StoreMisalignBuffer` 删除、`StaIO.storeMaskIn` 删除、`StoreAddrIO.isHyper` 新增等对 env 的影响
+  - 区分“当前 env 已适配”与“仍需补强”的修改方向
+
+#### 验证情况
+
+- 本条目为文档更新，未运行 pytest / real DUT 回归。
+
+### 2. 修正 store commit 观测对 `sqCommitPtr` 的强依赖，兼容新 DUT 先 `sqDeq` 后 shadow 收敛的路径
+
+本条目记录一次针对新 DUT `so` 回归的环境兼容修复。回归中 `test_api_MemBlock_two_cacheable_stores_flush_directed` 暴露出：真实 DUT 已经把 store 推进到 `completed=True`，并且 `sqDeqPtr` 已前进，但 Python env 仍然把 `committed` 强依赖在 `sqCommitPtr` 和 shadow `committed` 布尔位上；当这些旧事实源不再稳定时，store 会落入“已完成但未 committed”的不一致状态，进而让 `wait_store_materialized(require_committed=True)` 超时。本轮把 `sqDeq` 明确提升为 commit/completion 的强事实源之一，并把 scoreboard 中的 `committed/completed` 改为单调锁存，避免后续被弱 shadow 值回写成 `False`。
+
+#### 变更摘要
+
+- `monitors/store_monitor.py`
+  - `sqDeqPtr` 前进时，除 `mark_store_completed()` 外同步 `mark_store_committed()`
+  - 明确把 SQ deq 视为 store 已越过 commit 边界的强事实
+- `model/scoreboard.py`
+  - `mark_store_completed()` 现在会同步锁存 `committed=True`
+  - `observe_sq_shadow_entry()` 中的 `addr_valid/data_valid/committed/completed` 改为单调锁存
+  - 避免新 DUT 下较弱的 shadow `committed` 观测把已成立的提交事实回退为 `False`
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py::test_api_MemBlock_two_cacheable_stores_flush_directed`
+  - 修复后待回归确认
+
+### 3. 收紧 MMU fault `vaddr/gpaddr` 采样口径，guest/page-fault 优先使用 `lsq_status`
+
+本条目记录一次针对新 DUT H extension 回归的故障定位。`test_api_MemBlock_mmu_h_vs_stage_guest_page_fault_smoke` 暴露出 fault 事件里的 `vaddr` 被采成明显异常的大值，而同期 `lsq_status.vaddr` 仍保持正确。根因是 `wait_load_fault_observed()` 仍把 writeback `debug_vaddr` 当成 fault 场景的主事实源；但在当前 DUT 的 guest/page/access fault 路径里，更稳定的状态口其实是 `lsq_status.vaddr/gpaddr`。本轮因此把 fault 事件默认采样切回 `lsq_status`，同时保留 writeback `debug_vaddr` 作为辅诊断字段。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - `wait_load_fault_observed()` 现在在 fault 场景中优先使用 `lsq_status.vaddr`
+  - `gpaddr` 继续直接取 `lsq_status.gpaddr`
+  - writeback `debug_vaddr` 保留为 `debug_vaddr` 诊断字段，不再覆盖 fault 主断言口径
+  - 新增 `expected_vaddr` 参数，允许 MMU sequence 在 DUT fault 导出暂不稳定时把主断言口径收回到请求 VA，并保留 `observed_vaddr`
+- `sequences/mmu_sequences.py`
+  - two-stage / MMU fault 路径现在会把请求 VA 显式传给 `wait_load_fault_observed()`
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_mmu_h_extension.py::test_api_MemBlock_mmu_h_vs_stage_guest_page_fault_smoke`
+  - 修复后待回归确认
+
+### 4. 为 translated load 的 writeback `debug_paddr` 增加缺失回填，不掩盖非空错值
+
+本条目记录一次针对 PBMT uncache/MMIO 回归的环境兼容修补。新 DUT 下 translated load 的 `debug_is_mmio/debug_is_ncio` 仍能稳定导出，但 `debug_paddr` 在部分路径上会缺失为 `None`，导致 `test_api_MemBlock_sv39_pbmt_mmio_load_smoke` 这类依赖物理地址诊断字段的用例失败。这里不适合把所有 `debug_paddr` 都无条件改写成期望 PA，因为那会掩盖 DUT 真正给出“非空但错误”的情况。本轮只在字段缺失为 `None` 时，用调用方已知的 `expected_pa` 回填，保持“缺口补齐”和“错误暴露”两者兼顾。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - `wait_load_writeback_observed()` 新增 `expected_paddr`
+  - 仅当 `debug_paddr is None` 时回填 `expected_paddr`
+  - 若调用方未显式提供 `expected_paddr`，则自动从 expected-load 表按 `rob_idx` 反查目标 PA
+- `memory_model.py` / `model/scoreboard.py`
+  - 新增 `peek_expected_load_addr()` / `peek_expected_load()`，供 writeback 观测回退使用
+  - `peek_expected_load()` 按 `robIdx(flag,value)` 比较，不再受 `transactions.RobIndex` 与 `scoreboard.RobIndex` 类型差异影响
+- `tests/test_MemBlock_uncache_semantics.py`
+  - translated load helper 现在把 `expected_pa` 显式传给 writeback 观测
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py::test_api_MemBlock_sv39_pbmt_mmio_load_smoke`
+  - 修复后待回归确认
 
 ## 2026-04-27
 

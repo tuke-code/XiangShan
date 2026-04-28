@@ -89,6 +89,8 @@ class StoreMonitor:
             return
         if curr != self._prev_sq_deq_ptr:
             for sq_idx in self._ptr_iter(self._prev_sq_deq_ptr, curr, self.store_queue_size):
+                # 对标量 store 来说，能从 SQ deq 说明它已经越过 commit 边界。
+                self.scoreboard.mark_store_committed(sq_idx)
                 self.scoreboard.mark_store_completed(sq_idx)
         self._prev_sq_deq_ptr = curr
 

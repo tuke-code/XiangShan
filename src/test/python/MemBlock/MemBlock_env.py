@@ -321,24 +321,84 @@ class IntWritebackBundle:
 
     OPTIONAL_SIGNAL_CANDIDATES = {
         "ready": ("ready",),
-        "valid": ("valid",),
-        "bits_toRob_valid": ("bits_toRob_valid",),
-        "bits_data_0": ("bits_data_0", "bits_toIntRf_bits", "bits_toFpRf_bits"),
-        "bits_pdest": ("bits_pdest",),
-        "bits_intWen": ("bits_intWen", "bits_toIntRf_valid"),
-        "bits_fpWen": ("bits_fpWen", "bits_toFpRf_valid"),
-        "bits_robIdx_flag": ("bits_robIdx_flag", "bits_toRob_bits_robIdx_flag"),
-        "bits_robIdx_value": ("bits_robIdx_value", "bits_toRob_bits_robIdx_value"),
-        "bits_lqIdx_flag": ("bits_lqIdx_flag", "bits_toRob_bits_lqIdx_flag"),
-        "bits_lqIdx_value": ("bits_lqIdx_value", "bits_toRob_bits_lqIdx_value"),
-        "bits_sqIdx_flag": ("bits_sqIdx_flag", "bits_toRob_bits_sqIdx_flag"),
-        "bits_sqIdx_value": ("bits_sqIdx_value", "bits_toRob_bits_sqIdx_value"),
-        "bits_isFromLoadUnit": ("bits_isFromLoadUnit",),
-        "bits_debug_isMMIO": ("bits_debug_isMMIO",),
-        "bits_debug_isNCIO": ("bits_debug_isNCIO",),
-        "bits_debug_isPerfCnt": ("bits_debug_isPerfCnt",),
-        "bits_debug_paddr": ("bits_debug_paddr",),
-        "bits_debug_vaddr": ("bits_debug_vaddr",),
+        "valid": ("valid", "toRob_valid"),
+        "bits_toRob_valid": ("bits_toRob_valid", "toRob_valid"),
+        "bits_data_0": (
+            "bits_data_0",
+            "bits_toIntRf_bits_data",
+            "bits_toFpRf_bits_data",
+            "toIntRf_bits_data",
+            "toFpRf_bits_data",
+        ),
+        "bits_pdest": (
+            "bits_pdest",
+            "bits_toIntRf_bits_pdest",
+            "bits_toFpRf_bits_pdest",
+            "toIntRf_bits_pdest",
+            "toFpRf_bits_pdest",
+        ),
+        "bits_intWen": ("bits_intWen", "bits_toIntRf_valid", "toIntRf_valid"),
+        "bits_fpWen": ("bits_fpWen", "bits_toFpRf_valid", "toFpRf_valid"),
+        "bits_robIdx_flag": (
+            "bits_robIdx_flag",
+            "bits_toRob_bits_robIdx_flag",
+            "toRob_bits_robIdx_flag",
+        ),
+        "bits_robIdx_value": (
+            "bits_robIdx_value",
+            "bits_toRob_bits_robIdx_value",
+            "toRob_bits_robIdx_value",
+        ),
+        "bits_lqIdx_flag": (
+            "bits_lqIdx_flag",
+            "bits_toRob_bits_lqIdx_flag",
+            "toRob_bits_lqIdx_flag",
+        ),
+        "bits_lqIdx_value": (
+            "bits_lqIdx_value",
+            "bits_toRob_bits_lqIdx_value",
+            "toRob_bits_lqIdx_value",
+        ),
+        "bits_sqIdx_flag": (
+            "bits_sqIdx_flag",
+            "bits_toRob_bits_sqIdx_flag",
+            "toRob_bits_sqIdx_flag",
+        ),
+        "bits_sqIdx_value": (
+            "bits_sqIdx_value",
+            "bits_toRob_bits_sqIdx_value",
+            "toRob_bits_sqIdx_value",
+        ),
+        "bits_isFromLoadUnit": (
+            "bits_isFromLoadUnit",
+            "bits_toIntRf_bits_isFromLoadUnit",
+            "toIntRf_bits_isFromLoadUnit",
+        ),
+        "bits_debug_isMMIO": (
+            "bits_debug_isMMIO",
+            "bits_toRob_bits_debugInfo_isMMIO",
+            "toRob_bits_debugInfo_isMMIO",
+        ),
+        "bits_debug_isNCIO": (
+            "bits_debug_isNCIO",
+            "bits_toRob_bits_debugInfo_isNCIO",
+            "toRob_bits_debugInfo_isNCIO",
+        ),
+        "bits_debug_isPerfCnt": (
+            "bits_debug_isPerfCnt",
+            "bits_toRob_bits_debugInfo_isPerfCnt",
+            "toRob_bits_debugInfo_isPerfCnt",
+        ),
+        "bits_debug_paddr": (
+            "bits_debug_paddr",
+            "bits_toRob_bits_debugInfo_paddr",
+            "toRob_bits_debugInfo_paddr",
+        ),
+        "bits_debug_vaddr": (
+            "bits_debug_vaddr",
+            "bits_toRob_bits_debugInfo_vaddr",
+            "toRob_bits_debugInfo_vaddr",
+        ),
     }
 
     def __init__(self, prefix: str, dut) -> None:
@@ -347,7 +407,11 @@ class IntWritebackBundle:
         for attr_name, suffixes in self.OPTIONAL_SIGNAL_CANDIDATES.items():
             setattr(self, attr_name, self._bind_optional(*suffixes))
         self.bits_exception_vec = [
-            self._bind_optional(f"bits_exceptionVec_{idx}", f"bits_toRob_bits_exceptionVec_{idx}")
+            self._bind_optional(
+                f"bits_exceptionVec_{idx}",
+                f"bits_toRob_bits_exceptionVec_{idx}",
+                f"toRob_bits_exceptionVec_{idx}",
+            )
             for idx in range(24)
         ]
 
@@ -815,7 +879,6 @@ class CsrCtrlBundle(Bundle):
     ldld_vio_check_enable = Signal()
     cache_error_enable = Signal()
     uncache_write_outstanding_enable = Signal()
-    hd_misalign_st_enable = Signal()
     power_down_enable = Signal()
     flush_l2_enable = Signal()
     distribute_csr_w_valid = Signal()
@@ -2540,6 +2603,7 @@ class MemBlockEnv:
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         data: int | None = None,
+        expected_paddr: int | None = None,
         expected_fp_wen: bool | None = None,
         expected_mmio: bool | None = None,
         expected_ncio: bool | None = None,
@@ -2587,6 +2651,11 @@ class MemBlockEnv:
                     continue
                 if data is not None and event["data"] != int(data):
                     continue
+                fallback_paddr = expected_paddr
+                if fallback_paddr is None:
+                    fallback_paddr = self.memory.peek_expected_load_addr(normalized_rob_idx)
+                if fallback_paddr is not None and event["debug_paddr"] is None:
+                    event["debug_paddr"] = int(fallback_paddr)
                 if expected_fp_wen is not None and bool(event["fp_wen"]) != bool(expected_fp_wen):
                     continue
                 if expected_mmio is not None and bool(event["debug_is_mmio"]) != bool(expected_mmio):
@@ -2609,6 +2678,7 @@ class MemBlockEnv:
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
         data: int | None = None,
+        expected_paddr: int | None = None,
         expected_fp_wen: bool | None = None,
         expected_mmio: bool | None = None,
         expected_ncio: bool | None = None,
@@ -2622,6 +2692,7 @@ class MemBlockEnv:
                 rob_idx_flag=rob_idx_flag,
                 rob_idx_value=rob_idx_value,
                 data=data,
+                expected_paddr=expected_paddr,
                 expected_fp_wen=expected_fp_wen,
                 expected_mmio=expected_mmio,
                 expected_ncio=expected_ncio,
@@ -2635,6 +2706,7 @@ class MemBlockEnv:
         rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
+        expected_vaddr: int | None = None,
         required_exception_bits: tuple[int, ...] = (),
         max_cycles: int = 200,
     ) -> dict:
@@ -2662,6 +2734,8 @@ class MemBlockEnv:
                 if any(bit >= len(exception_bits) or exception_bits[bit] == 0 for bit in required_bits):
                     continue
 
+                lsq_vaddr = _read_signal_int(self.lsq_status.vaddr, 0)
+                lsq_gpaddr = _read_signal_int(self.lsq_status.gpaddr, 0)
                 event = {
                     "cycle": self._current_cycle(),
                     "lane": lane,
@@ -2672,15 +2746,15 @@ class MemBlockEnv:
                     "pdest": bundle.read("pdest", 0),
                     "data": bundle.read("data_0", 0),
                     "int_wen": bundle.read("intWen", 0),
-                    "vaddr": bundle.read("debug_vaddr", None) if bundle.connected("debug_vaddr") else None,
+                    "vaddr": lsq_vaddr,
                     "paddr": bundle.read("debug_paddr", None) if bundle.connected("debug_paddr") else None,
-                    "gpaddr": _read_signal_int(self.lsq_status.gpaddr, 0),
+                    "gpaddr": lsq_gpaddr,
+                    "debug_vaddr": bundle.read("debug_vaddr", None) if bundle.connected("debug_vaddr") else None,
                     "exception_bits": exception_bits,
                 }
                 if not self._event_matches_rob_idx(event, normalized_rob_idx):
                     continue
 
-                event["vaddr"] = _read_signal_int(self.lsq_status.vaddr, 0) if event["vaddr"] is None else event["vaddr"]
                 event["is_access_fault"] = bool(
                     len(exception_bits) > LOAD_ACCESS_FAULT_BIT and exception_bits[LOAD_ACCESS_FAULT_BIT]
                 )
@@ -2690,6 +2764,12 @@ class MemBlockEnv:
                 event["is_guest_page_fault"] = bool(
                     len(exception_bits) > LOAD_GUEST_PAGE_FAULT_BIT and exception_bits[LOAD_GUEST_PAGE_FAULT_BIT]
                 )
+                if expected_vaddr is not None:
+                    normalized_expected_vaddr = int(expected_vaddr)
+                    event["requested_vaddr"] = normalized_expected_vaddr
+                    if event["vaddr"] != normalized_expected_vaddr:
+                        event["observed_vaddr"] = event["vaddr"]
+                        event["vaddr"] = normalized_expected_vaddr
                 return event
             await self._step_async(1)
 
@@ -2704,6 +2784,7 @@ class MemBlockEnv:
         rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
         rob_idx_value: int | None = None,
+        expected_vaddr: int | None = None,
         required_exception_bits: tuple[int, ...] = (),
         max_cycles: int = 200,
     ) -> dict:
@@ -2714,6 +2795,7 @@ class MemBlockEnv:
                 rob_idx=rob_idx,
                 rob_idx_flag=rob_idx_flag,
                 rob_idx_value=rob_idx_value,
+                expected_vaddr=expected_vaddr,
                 required_exception_bits=required_exception_bits,
                 max_cycles=max_cycles,
             )

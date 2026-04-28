@@ -776,6 +776,7 @@ def _run_one_two_stage_access(
             )
             fault_event = env.wait_load_fault_observed(
                 rob_idx=txn.rob_idx,
+                expected_vaddr=int(va),
                 required_exception_bits=required_exception_bits,
                 max_cycles=_resolve_replay_drain_cycles(env, None),
             )

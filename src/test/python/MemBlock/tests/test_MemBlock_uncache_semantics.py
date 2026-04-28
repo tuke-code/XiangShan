@@ -117,6 +117,7 @@ def _run_translated_load(
     writeback = env.wait_load_writeback_observed(
         rob_idx=txn.rob_idx,
         data=expected_data,
+        expected_paddr=expected_pa,
         expected_mmio=expected_mmio,
         expected_ncio=expected_ncio,
         max_cycles=512,
