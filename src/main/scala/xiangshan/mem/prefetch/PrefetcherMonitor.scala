@@ -197,25 +197,25 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
 
   // DynamicPrefetcher
   val base_depth = Constantin.createRecord(s"${param.name}_depth${p(XSCoreParamsKey).HartId}", initValue = 4)
-  val MAX_BITS = 6
-  val max_depth = (1 << MAX_BITS).U(DEPTH_BITS.W)
+  val MAX_BITS = 7
+  val max_depth = (1 << (MAX_BITS-1)).U(DEPTH_BITS.W)
   val at_base_depth = depth === base_depth
+  val at_max_depth = depth === max_depth
 
   val sent_cnt = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
-  val cur_late = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
+  val cur_late = RegInit(0.U((log2Up(4*param.WINDOW_SIZE)).W))
   val cur_hit_pf = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
   val cur_useless = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
-  val prev_late = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
   val prev_hit_pf = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
 
   val window_end = sent_cnt === param.WINDOW_SIZE.U
   val window_fire = window_end && enable
   sent_cnt := Mux(window_end, 0.U, sent_cnt + total_prefetch)
-  cur_late := Mux(window_end, 0.U, cur_late + pf_late + hit_pf_in_mshr)
+  cur_late := Mux(window_end, 0.U, cur_late + (pf_late << 1) + hit_pf_in_mshr)
   cur_hit_pf := Mux(window_end, 0.U, cur_hit_pf + hit_pf)
   cur_useless := Mux(window_end, 0.U, cur_useless + pf_useless)
 
-  val cur_late_high = cur_late >= param.LATE_HIT_THRESHOLD.U
+  val cur_late_high = cur_late >= (2 * param.LATE_HIT_THRESHOLD).U
   val good_return = cur_hit_pf + param.HIT_MARGIN.U >= prev_hit_pf
 
   val disable_request = RegInit(false.B)
@@ -224,10 +224,19 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
 
   val validity_check = validity_cnt >= param.VALIDITY_CHECK_INTERVAL.U
   val trigger_disable = validity_check && useless_cnt >= param.DISABLE_THRESHOLD.U
+  
+  val old_depth = RegNext(depth, init = base_depth)
+  val depth_change_fire = old_depth =/= depth
 
-  validity_cnt := Mux(validity_check, 0.U, validity_cnt + hit_pf + pf_useless)
-  useless_cnt := Mux(validity_check, 0.U, useless_cnt + pf_useless)
-  disable_request := Mux(validity_check, trigger_disable, disable_request)
+  when(depth_change_fire) {
+    validity_cnt := 0.U
+    useless_cnt := 0.U
+    disable_request := false.B
+  }.otherwise {
+    validity_cnt := Mux(validity_check, 0.U, validity_cnt + hit_pf + pf_useless)
+    useless_cnt := Mux(validity_check, 0.U, useless_cnt + pf_useless)
+    disable_request := Mux(validity_check, trigger_disable, disable_request)
+  }
 
   // State
   // s_decision evaluates a completed sent window.
@@ -238,30 +247,30 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   when(window_fire) {
     switch(state) {
       is(s_decision) {
-        when(good_return) {
-          when(cur_late_high) {
+        when(cur_late_high) {
+          when (!at_max_depth) {
             depth := Mux(depth === max_depth, max_depth, depth << 1)
             state := s_buffer
-          }.otherwise {
-            depth := depth
           }
-        }.elsewhen(at_base_depth && disable_request) {
+        }.elsewhen(good_return && !disable_request) {
+          depth := depth
+          state := s_decision
+        }.elsewhen(!at_base_depth) {
+          depth := Mux(
+            disable_request,
+            Mux((depth >> 2) < base_depth, base_depth, depth >> 2),
+            Mux((depth >> 1) < base_depth, base_depth, depth >> 1)
+          )
+          state := s_buffer
+        }.elsewhen(disable_request) {
           enable := false.B
           flush := true.B
           confidence := 0.U(1.W)
-        }.otherwise {
-          when (!at_base_depth) {
-            depth := Mux((depth >> 2) < base_depth, base_depth, depth >> 2)
-            state := s_buffer
-          }.otherwise {
-            depth := depth
-          }
+          state := s_decision
         }
         prev_hit_pf := cur_hit_pf
-        prev_late := cur_late
       }
       is(s_buffer) {
-        prev_late := cur_late
         prev_hit_pf := prev_hit_pf
         state := s_decision
       }
@@ -288,8 +297,8 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   }
   XSPerfAccumulate(s"${param.name}_trigger_disable", trigger_disable)
   XSPerfAccumulate(s"${param.name}_disable_time", !enable)
-  XSPerfAccumulate(s"${param.name}_trigger_depth_up", window_fire && state === s_decision && good_return && cur_late_high)
-  XSPerfAccumulate(s"${param.name}_trigger_depth_down", window_fire && state === s_decision && !good_return && !at_base_depth)
+  XSPerfAccumulate(s"${param.name}_trigger_depth_up", old_depth < depth)
+  XSPerfAccumulate(s"${param.name}_trigger_depth_down", old_depth > depth)
 
   assert(depth =/= 0.U, s"${param.name}_depth should not be zero")
 }
@@ -298,11 +307,12 @@ abstract class PrefetcherMonitorParam {
   val name: String
   def isMyType(value: UInt): Bool
 
-  val WINDOW_SIZE = 1000
   val VALIDITY_CHECK_INTERVAL = 1000
   val DISABLE_THRESHOLD = 900
-  val LATE_HIT_THRESHOLD = 200
-  val HIT_MARGIN = 50
+
+  val WINDOW_SIZE = 512
+  val LATE_HIT_THRESHOLD = 100
+  val HIT_MARGIN = 30
 
   val BACK_OFF_INTERVAL = 100000
   val LOW_CONF_INTERVAL = 200000
