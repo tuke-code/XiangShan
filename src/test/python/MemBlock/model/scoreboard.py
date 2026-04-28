@@ -235,9 +235,13 @@ class Scoreboard:
         rob_idx_value: int,
     ) -> None:
         del sq_idx_flag
-        store = self.pending_stores.setdefault(sq_idx_value, PendingStore(sq_idx=sq_idx_value))
+        rob_idx = RobIndex(flag=rob_idx_flag, value=rob_idx_value)
+        store = self.pending_stores.get(sq_idx_value)
+        if store is None or store.rob_idx != rob_idx:
+            store = PendingStore(sq_idx=sq_idx_value, rob_idx=rob_idx)
+            self.pending_stores[sq_idx_value] = store
         store.allocated = True
-        store.rob_idx = RobIndex(flag=rob_idx_flag, value=rob_idx_value)
+        store.rob_idx = rob_idx
 
     def note_store_request(self, *, sq_idx: int, addr: int, data: int, mask: int, opcode: str = SCALAR_STORE_OPCODE) -> None:
         store = self.pending_stores.setdefault(sq_idx, PendingStore(sq_idx=sq_idx))
@@ -346,22 +350,27 @@ class Scoreboard:
         completed: bool,
         nc: bool,
     ) -> None:
+        del addrvalid
+        del datavalid
+        del committed
+        del completed
+        del nc
         rob_idx = RobIndex(flag=rob_idx_flag, value=rob_idx_value)
+        if not allocated:
+            return
         store = self.pending_stores.get(sq_idx)
-        if store is None or (allocated and store.rob_idx is not None and store.rob_idx != rob_idx):
-            store = PendingStore(sq_idx=sq_idx, rob_idx=rob_idx if allocated else None)
-            self.pending_stores[sq_idx] = store
-
-        store.allocated = allocated
-        if allocated:
+        # 新实现下，shadow 不再驱动核心 store 生命周期；
+        # 这里只保留一个最薄的 legacy fallback，避免少数单测或旧路径
+        # 在未显式调用 note_store_allocated() 时完全丢失 sq_idx->rob_idx 关联。
+        if store is None:
+            self.pending_stores[sq_idx] = PendingStore(
+                sq_idx=sq_idx,
+                rob_idx=rob_idx,
+                allocated=True,
+            )
+            return
+        if store.rob_idx is None:
             store.rob_idx = rob_idx
-            store.addr_valid = store.addr_valid or bool(addrvalid)
-            store.data_valid = store.data_valid or bool(datavalid)
-            # 新 DUT 下 shadow 的 committed 位可能弱于 deq / writeback 事实源；
-            # 一旦 store 被观测为 committed 或 completed，就不应再回退。
-            store.committed = store.committed or bool(committed) or bool(completed)
-            store.completed = store.completed or bool(completed)
-            store.nc = bool(nc)
 
     def observe_store_addr(
         self,

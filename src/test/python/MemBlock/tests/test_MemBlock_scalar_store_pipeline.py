@@ -1212,10 +1212,6 @@ def test_api_MemBlock_sbuffer_data_targeted_entry_merge_directed(env):
     env.assert_no_outstanding()
 
 
-@pytest.mark.xfail(
-    reason="DUTBUG-sbuffer-batched-commit-drain-corruption: wide multi-entry batched store commit corrupts drained cacheline bytes before flush convergence",
-    strict=False,
-)
 def test_api_MemBlock_sbuffer_data_entry_quarter_matrix_batched_commit(env):
     """
     分 4 个 quarter 波次批量 commit 16 个 cacheline entry，补齐 SbufferData 的 entry/quarter/byte 组合。

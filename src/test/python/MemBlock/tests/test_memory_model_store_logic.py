@@ -184,16 +184,6 @@ def test_memory_model_defers_load_compare_until_commit_boundary():
         isFromLoadUnit=1,
         exception_bits=[0] * 24,
     )
-    sq_shadow = FakeReadBundle(
-        allocated=1,
-        addrvalid=1,
-        datavalid=1,
-        committed=1,
-        completed=0,
-        nc=0,
-        robIdx_flag=0,
-        robIdx_value=0,
-    )
     store_addr = FakeReadBundle(valid=1, sqIdx_value=0, paddr=0x1000, miss=0, nc=0)
     store_mask = FakeReadBundle(valid=1, sqIdx_value=0, mask=0x00FF)
     store_data = FakeReadBundle(valid=1, sqIdx_value=0, fuType=1 << 17, fuOpType=0x3, data=0x8877665544332211)
@@ -203,10 +193,12 @@ def test_memory_model_defers_load_compare_until_commit_boundary():
         store_addr_inputs=[store_addr],
         store_mask_inputs=[store_mask],
         store_data_inputs=[store_data],
-        sq_shadow_entries=[sq_shadow],
     )
 
     model.preload_u64(0x1000, 0x1122334455667788)
+    model.note_store_allocated(sq_idx_flag=0, sq_idx_value=0, rob_idx_flag=0, rob_idx_value=0)
+    model.note_store_request(sq_idx=0, addr=0x1000, data=0x8877665544332211, mask=0xFF)
+    model.scoreboard.mark_store_committed(0)
     model.expect_load(rob_idx_flag=0, rob_idx_value=1, pdest=7, addr=0x1000, size=8, mask=0xFF)
     model.note_load_issued(0, 1)
 
@@ -235,16 +227,6 @@ def test_memory_model_defers_load_compare_until_commit_boundary():
 
 
 def test_memory_model_finalize_checks_sbuffer_drain_against_goldenmem():
-    sq_shadow = FakeReadBundle(
-        allocated=1,
-        addrvalid=1,
-        datavalid=1,
-        committed=1,
-        completed=1,
-        nc=0,
-        robIdx_flag=0,
-        robIdx_value=3,
-    )
     store_addr = FakeReadBundle(valid=1, sqIdx_value=0, paddr=0x2000, miss=0, nc=0)
     store_mask = FakeReadBundle(valid=1, sqIdx_value=0, mask=0x00FF)
     store_data = FakeReadBundle(valid=1, sqIdx_value=0, fuType=1 << 17, fuOpType=0x3, data=0xAABBCCDDEEFF0011)
@@ -262,10 +244,12 @@ def test_memory_model_finalize_checks_sbuffer_drain_against_goldenmem():
         store_addr_inputs=[store_addr],
         store_mask_inputs=[store_mask],
         store_data_inputs=[store_data],
-        sq_shadow_entries=[sq_shadow],
         sbuffer_writes=[sbuffer_write],
     )
 
+    model.note_store_allocated(sq_idx_flag=0, sq_idx_value=0, rob_idx_flag=0, rob_idx_value=3)
+    model.note_store_request(sq_idx=0, addr=0x2000, data=0xAABBCCDDEEFF0011, mask=0xFF)
+    model.scoreboard.mark_store_completed(0)
     model.after_cycle()
     result = model.finalize_and_check_drain()
 
@@ -274,16 +258,6 @@ def test_memory_model_finalize_checks_sbuffer_drain_against_goldenmem():
 
 
 def test_memory_model_finalize_accepts_cbo_zero_wline_drain_and_zeroes_cacheline():
-    sq_shadow = FakeReadBundle(
-        allocated=1,
-        addrvalid=1,
-        datavalid=1,
-        committed=1,
-        completed=1,
-        nc=0,
-        robIdx_flag=0,
-        robIdx_value=4,
-    )
     store_addr = FakeReadBundle(valid=1, sqIdx_value=0, paddr=0x2040, miss=0, nc=0)
     store_mask = FakeReadBundle(valid=1, sqIdx_value=0, mask=0xFFFF)
     store_data = FakeReadBundle(valid=1, sqIdx_value=0, fuType=1 << 17, fuOpType=0x7, data=0)
@@ -301,11 +275,13 @@ def test_memory_model_finalize_accepts_cbo_zero_wline_drain_and_zeroes_cacheline
         store_addr_inputs=[store_addr],
         store_mask_inputs=[store_mask],
         store_data_inputs=[store_data],
-        sq_shadow_entries=[sq_shadow],
         sbuffer_writes=[sbuffer_write],
     )
     model.preload_bytes(0x2040, bytes(range(64)))
 
+    model.note_store_allocated(sq_idx_flag=0, sq_idx_value=0, rob_idx_flag=0, rob_idx_value=4)
+    model.note_store_request(sq_idx=0, addr=0x2040, data=0, mask=0xFF, opcode="cbo_zero")
+    model.scoreboard.mark_store_completed(0)
     model.after_cycle()
     result = model.finalize_and_check_drain()
 
@@ -337,26 +313,6 @@ def test_memory_model_records_outer_put_partial_as_drain_event():
 
 
 def test_memory_model_finalize_ignores_mmio_outer_drain_in_golden_compare():
-    mmio_shadow = FakeReadBundle(
-        allocated=1,
-        addrvalid=1,
-        datavalid=1,
-        committed=1,
-        completed=1,
-        nc=0,
-        robIdx_flag=0,
-        robIdx_value=2,
-    )
-    cacheable_shadow = FakeReadBundle(
-        allocated=1,
-        addrvalid=1,
-        datavalid=1,
-        committed=1,
-        completed=1,
-        nc=0,
-        robIdx_flag=0,
-        robIdx_value=3,
-    )
     mmio_addr = FakeReadBundle(valid=1, sqIdx_value=0, paddr=0x1000, miss=0, nc=0)
     cacheable_addr = FakeReadBundle(valid=1, sqIdx_value=1, paddr=0x2000, miss=0, nc=0)
     mmio_addr_re = FakeReadBundle(updateAddrValid=1, sqIdx_value=0, nc=0, mmio=1, memBackTypeMM=0, hasException=0)
@@ -380,10 +336,15 @@ def test_memory_model_finalize_ignores_mmio_outer_drain_in_golden_compare():
         store_addr_re_inputs=[mmio_addr_re],
         store_mask_inputs=[mmio_mask, cacheable_mask],
         store_data_inputs=[mmio_data, cacheable_data],
-        sq_shadow_entries=[mmio_shadow, cacheable_shadow],
         sbuffer_writes=[sbuffer_write],
     )
 
+    model.note_store_allocated(sq_idx_flag=0, sq_idx_value=0, rob_idx_flag=0, rob_idx_value=2)
+    model.note_store_request(sq_idx=0, addr=0x1000, data=0x1020304050607080, mask=0xFF)
+    model.scoreboard.mark_store_completed(0)
+    model.note_store_allocated(sq_idx_flag=0, sq_idx_value=1, rob_idx_flag=0, rob_idx_value=3)
+    model.note_store_request(sq_idx=1, addr=0x2000, data=0xAABBCCDDEEFF0011, mask=0xFF)
+    model.scoreboard.mark_store_completed(1)
     model.drive_pre_step(0)
     model.after_cycle()
     model.outer_a.valid.value = 1

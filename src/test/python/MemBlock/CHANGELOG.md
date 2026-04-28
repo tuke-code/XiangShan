@@ -141,6 +141,42 @@
 - `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py::test_api_MemBlock_sv39_pbmt_mmio_load_smoke`
   - 修复后待回归确认
 
+### 5. 进一步收缩 scoreboard 对 SQ shadow 的依赖，改为事件化 store 生命周期重建
+
+本条目记录一次针对 `pending_stores` 的语义瘦身。此前虽然 `committed/completed` 已经开始优先依赖 `sqCommitPtr/sqDeqPtr/writeback`，但 `scoreboard.observe_sq_shadow_entry()` 仍会继续消费 shadow 的 `allocated/addrvalid/datavalid/committed/completed/nc` 并回写核心状态，导致模型层仍保留一条弱 shadow 回灌路径。本轮把 store 生命周期的主事实源进一步收紧到：enqueue 时的 `note_store_allocated()`、运行期的 `store_addr/store_addr_re/store_mask/store_data`、以及 `sqCommitPtr/sqDeqPtr/store writeback`。`sq_shadow` 仅保留为最薄的 legacy fallback，用于极少数未显式登记 allocation 的旧路径补 `sq_idx -> rob_idx` 关联，不再驱动核心状态。
+
+#### 变更摘要
+
+- `model/scoreboard.py`
+  - `note_store_allocated()` 现在在 `sq_idx` reuse 且 `rob_idx` 改变时重建 `PendingStore`
+  - `observe_sq_shadow_entry()` 不再更新 `allocated/addr_valid/data_valid/committed/completed/nc`
+  - `observe_sq_shadow_entry()` 仅在 legacy fallback 场景下补 `sq_idx -> rob_idx`
+- `tests/test_memory_model_store_logic.py`
+  - 相关单测改为显式调用 `note_store_allocated()` / `note_store_request()` / `mark_store_committed()` / `mark_store_completed()`
+  - 不再用弱 shadow 值驱动 ready-for-retire 语义
+- `docs/memory_model_design.md`
+  - 同步更新 store 观测来源说明，明确 `sq_shadow` 已降级为 fallback
+
+#### 验证情况
+
+- 聚焦与完整回归待本轮测试结果确认
+
+### 6. 去除 `test_api_MemBlock_sbuffer_data_entry_quarter_matrix_batched_commit` 的过期 `xfail`
+
+本条目记录一次针对全量回归 `xpass` 的口径收口。`test_api_MemBlock_sbuffer_data_entry_quarter_matrix_batched_commit` 原先带着 `DUTBUG-sbuffer-batched-commit-drain-corruption` 的非严格 `xfail`，理由是“wide multi-entry batched store commit 会在 flush 前破坏最终 cacheline”。但在当前 DUT `so` 与最新 environment 下，这条用例在聚焦回归和 3 次单独重跑中都稳定通过，说明此前的 defect 口径已经过期。为避免“test 已通过但文档仍宣称是已知 DUT bug”的状态不一致，本轮直接移除该 `xfail`，把该场景恢复为普通硬断言。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_scalar_store_pipeline.py`
+  - 移除 `test_api_MemBlock_sbuffer_data_entry_quarter_matrix_batched_commit` 的 `pytest.mark.xfail`
+- `CHANGELOG.md`
+  - 追加当前条目，明确该 `xpass` 已按稳定转正处理
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py::test_api_MemBlock_sbuffer_data_entry_quarter_matrix_batched_commit -rxX`
+  - 结果：连续 3 次 `XPASS`
+
 ## 2026-04-27
 
 ### 1. 推进 `NewStoreQueue` 覆盖率到 `77.1%`，并确认 `>80%` 剩余瓶颈

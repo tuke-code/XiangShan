@@ -237,8 +237,10 @@ load compare 分三步完成：
 
 store 的完整信息来自多个入口拼装：
 
-- `_observe_sq_shadow()`
-  - 读取分配、提交、完成等持久状态。
+- `note_store_allocated()`
+  - 在 enqueue 成功后登记 `sq_idx -> rob_idx`，并负责 slot reuse 时的状态重置。
+- `_observe_sq_commit_ptr()` / `_observe_sq_deq_ptr()` / store writeback
+  - 读取 committed / completed 的强事实源。
 - `_observe_store_addr()`
   - 读取地址、miss、NC 属性。
 - `_observe_store_addr_re()`
@@ -247,6 +249,8 @@ store 的完整信息来自多个入口拼装：
   - 读取字节掩码。
 - `_observe_store_data()`
   - 读取数据。
+- `_observe_sq_shadow()`
+  - 当前仅保留为 legacy fallback，不再驱动 `allocated/addrvalid/datavalid/committed/completed` 等核心状态。
 - `_observe_sbuffer_writes()`
   - 记录最终 sbuffer drain。
 
