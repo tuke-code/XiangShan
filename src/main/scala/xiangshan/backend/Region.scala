@@ -23,7 +23,7 @@ import xiangshan.backend.Bundles._
 import xiangshan.backend.datapath.DataConfig._
 import xiangshan.backend.datapath._
 import xiangshan.backend.datapath.WbConfig._
-import xiangshan.backend.fu.{CSRFileIO, FenceIO, FuType}
+import xiangshan.backend.fu.{CSRFileIO, FenceIO, FuConfig, FuType}
 import xiangshan.backend.regfile.RfWritePortBundle
 import xiangshan.backend.exu.ExuBlock
 import xiangshan.mem._
@@ -401,6 +401,9 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     io.toFrontendBJUResolve.get := exuBlock.io.toFrontendBJUResolve.get
     issueQueues.zipWithIndex.foreach { case (iq, i) =>
       iq.io.wbBusyTableRead := wbFuBusyTable.io.out.intRespRead(i)
+      val f2iIndex = backendParams.fpSchdParams.get.issueBlockParams.indexWhere(x => x.getFuCfgs.contains(FuConfig.FcvtCfg))
+      val wbFuBusyTableFormF2I = wbFuBusyTable.io.in.fpSchdBusyTable(f2iIndex).head.intWbBusyTable.get
+      iq.io.busyTableFormF2I.foreach(_ := wbFuBusyTableFormF2I)
     }
     io.vlWriteBackInfoOut.vlFromIntIsZero := exuBlock.io.vlIsZero.get
     io.vlWriteBackInfoOut.vlFromIntIsVlmax := exuBlock.io.vlIsVlmax.get
@@ -529,6 +532,9 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
   else if (params.isFpSchd) {
     issueQueues.zipWithIndex.foreach { case (iq, i) =>
       iq.io.wbBusyTableRead := wbFuBusyTable.io.out.fpRespRead(i)
+      val i2fIndex = backendParams.intSchdParams.get.issueBlockParams.indexWhere(x => x.getFuCfgs.contains(FuConfig.I2fCfg))
+      val wbFuBusyTableFormI2F = wbFuBusyTable.io.in.intSchdBusyTable(i2fIndex).head.fpWbBusyTable.get
+      iq.io.busyTableFormI2F.foreach(_ := wbFuBusyTableFormI2F)
     }
     io.cross.F2IWakeupOut.get := exuBlock.io.cross.F2IWakeupOut.get
     io.cross.F2IDataOut.get   := exuBlock.io.cross.F2IDataOut.get

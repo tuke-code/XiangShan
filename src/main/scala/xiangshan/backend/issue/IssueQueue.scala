@@ -32,6 +32,8 @@ class IssueQueueIO()(implicit p: Parameters, params: IssueBlockParams) extends X
   val wakeupFromExu: Option[MixedVec[DecoupledIO[IssueQueueIQWakeUpBundle]]] = Option.when(params.needUncertainWakeupFromExu)(Flipped(params.genExuWakeUpOutValidBundle))
   val wakeupFromI2F: Option[ValidIO[IssueQueueIQWakeUpBundle]] = Option.when(params.needWakeupFromI2F)(Flipped(ValidIO(new IssueQueueIQWakeUpBundle(params.backendParam.getExuIdxI2F, params.backendParam))))
   val wakeupFromF2I: Option[ValidIO[IssueQueueIQWakeUpBundle]] = Option.when(params.needWakeupFromF2I)(Flipped(ValidIO(new IssueQueueIQWakeUpBundle(params.backendParam.getExuIdxF2I, params.backendParam))))
+  val busyTableFormI2F = Option.when(params.needWakeupFromI2F)(Input(UInt((params.exuBlockParams.head.fpLatencyValMax + 1).W)))
+  val busyTableFormF2I = Option.when(params.needWakeupFromF2I)(Input(UInt((params.exuBlockParams.head.intLatencyValMax + 1).W)))
   val wakeupFromWBDelayed: MixedVec[ValidIO[IssueQueueWBWakeUpBundle]] = Flipped(params.genWBWakeUpSinkValidBundle)
   val wakeupFromIQDelayed: MixedVec[ValidIO[IssueQueueIQWakeUpBundle]] = Flipped(params.genIQWakeUpSinkValidBundle)
   val vlFromIntIsZero = Input(Bool())
@@ -443,8 +445,15 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     }
   }
 
+  // when wakeupFormOtherRegion, don't pick this iq oldest entry, ALU latency = 0, FALU latency = 1
+  val busyTableBlock = Wire(Bool())
+  busyTableBlock := (if (io.busyTableFormI2F.nonEmpty) io.busyTableFormI2F.get(1)
+                     else if (io.busyTableFormF2I.nonEmpty) io.busyTableFormF2I.get(0)
+                     else false.B)
+  dontTouch(busyTableBlock)
   if (params.enableOldestIssueBypass) {
-    val rawCanIssue = canIssueVec.asUInt & VecInit(deqCanAcceptVec.head).asUInt
+    val rawCanIssue = Mux(busyTableBlock, 0.U, canIssueVec.asUInt & VecInit(deqCanAcceptVec.head).asUInt)
+    dontTouch(rawCanIssue)
     val rawEnqEntryOldestSel = NewAgeDetector(
       numEntries = params.numEnq,
       enq = VecInit(s0_doEnqSelValidVec),
