@@ -1,5 +1,88 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-30
+
+### 1. 补齐 single-uop AMO 的 backend/env 闭环，并新增 real-DUT smoke
+
+本条目记录一轮围绕 atomic memory operation 的环境补强。此前 `transactions.py` 已经开始承载 AMO opcode/fu-op 编码，但 backend facade、issue driver 和 env writeback 观测还没有把 AMO 当作 `MOU + AtomicsUnit` 单独建模，仍容易误走普通 LSQ store 路径。本轮把支持范围限定在 current RTL 已经稳定存在的 single-uop AMO（非 LR/SC、非 AMOCAS），并明确采用“AMO writeback 返回旧值 + 后续真实 load 验证提交后新值”的收口方式。
+
+#### 变更摘要
+
+- `transactions.py`
+  - 补齐 `AtomicTxn` 的 runtime binding、预测旧值/新值辅助与 `fuType/fuOpType` 编码
+- `agents/issue_agent.py` / `agents/backend_facade.py`
+  - issue lane 现可显式驱动 `fuType`
+  - 新增 `prepare_atomic()/issue_atomic_*/send_atomic()`，并避免把 AMO 误记入普通 store replay/credit 跟踪
+- `MemBlock_env.py`
+  - 新增按 `robIdx + pdest` 等待整数 writeback 的 helper，用于 AMO 返回值校验
+- `sequences/atomic_sequences.py`
+  - 新增 `AtomicSequence`，统一封装 AMO 发射、旧值写回校验和后续 load 验证
+- `tests/test_MemBlock_amo.py`
+  - 新增 `amoadd.w` / `amoswap.d` / `amoxor.w` real-DUT directed smoke
+- `tests/test_request_apis_backend_facade.py` / `tests/test_issue_agent.py`
+  - 补齐 atomic wrapper、prepare/send 绑定和 issue 驱动单测
+
+#### 验证情况
+
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_issue_agent.py`
+  - 结果：`8 passed`
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：`45 passed`
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_amo.py`
+  - 结果：`3 xfailed`
+  - 说明：当前 standalone `intIssue` AMO 驱动在真实 DUT 上仍未产生下游 TL/writeback 活动；用例按“`dcache_a_request_count == 0 && writeback_events == 0`”定向记录该 contract gap，而不是误报通过
+
+### 2. 用 `GetInternalSignal` 收缩 single-uop AMO 在 dcache atomic 口被 ready 反压的真实原因
+
+本条目记录一轮面向 real DUT 的白盒诊断补强。此前 single-uop AMO smoke 在当前 DUT 上表现为“没有后续 TL/writeback 活动”，仅从黑盒统计无法判断是 sbuffer、probe/refill 仲裁、mainPipe pipeline 冲突，还是 dcache 内部数组自身没有 ready。本轮沿 `dut.GetInternalSignal()` 增加了 atomic 相关采样，并把真实观察结果固化成诊断测试。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - 新增 `sample_atomic_mainpipe_state()` / `collect_atomic_mainpipe_trace()`
+  - 采样 `mainPipe.io_atomic_req_*`、`req_ready`、`tag/meta/data read`、`s1/s2/s3 ready`、set-conflict、sbuffer 状态
+  - 进一步采样 `mainPipe.io_tag_write_intend` 与 `tagArray.io_read_3_ready/io_write_valid/rst_cnt/wen`
+- `tests/test_MemBlock_amo_diagnostics.py`
+  - 新增 real-DUT 诊断用例，确认 `atomic_req.valid=1` 时并非 store/probe/refill/sbuffer 抢占
+  - 新增白盒断言，确认当前反压点落在 `tagArray` 初始化写窗口：`tag_write_intend=0`、`tagArray.io_write_valid=0`、但 `tagArray bank0 wen=1` 且 `rst_cnt` 单调递增
+  - 新增恢复用例，确认等待 `tagArray.io_read_3_ready` 拉高后，single-uop AMO 会重新获得 dcache 请求握手并产生真实下游活动
+
+#### 验证情况
+
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_amo_diagnostics.py`
+  - 结果：`4 passed`
+  - 说明：当前 single-uop AMO 在 reset 后早期被反压的直接原因不是 sbuffer 或 mainPipe tag-write 冲突，而是 dcache `tagArray` 初始化期间 `read.ready=0`
+
+
+### 3. 将 AMO white-box 观测收缩到诊断测试，smoke 与公共 env 不再依赖内部信号
+
+本条目记录一轮边界收紧。上一条修复为了让 single-uop AMO smoke 转绿，把 `tagArray ready` 等待做进了公共 env / sequence 层；这虽然能工作，但把 `GetInternalSignal` 依赖扩散到了 smoke 与公共 helper。现在按“white-box 只留在诊断测试”的原则，把内部信号读取重新收回到 `tests/test_MemBlock_amo_diagnostics.py`，而 smoke 侧改用固定的 post-reset settle 拍数绕过 dcache `tagArray` 初始化窗口。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_amo.py`
+  - 新增固定 `AMO_POST_RESET_SETTLE_CYCLES`
+  - 通过 `ResetEnvSequence(..., settle_cycles=...)` 绕过 dcache `tagArray` 初始化窗口，不再通过 env/sequence helper 读内部信号
+- `request_apis.py`
+  - 将 `reset_env_and_wait_backend()` 调整为“先同步 backend reset，再消耗 settle 拍数”
+  - 避免较大的 `settle_cycles` 把 `io_reset_backend` 的 assert/deassert 观测窗口直接跨过去
+- `tests/test_MemBlock_amo_diagnostics.py`
+  - 本地实现 `GetInternalSignal` 采样、trace 收集和 `tagArray ready` 等待
+  - 白盒依赖仅保留在诊断测试文件中
+- `sequences/atomic_sequences.py`
+  - 删除 `tag_array_ready_wait_cycles` / `wait_for_tag_array_ready`
+  - `AtomicSequence` 恢复为纯功能序列，不再耦合 dcache 私有初始化状态
+- `MemBlock_env.py`
+  - 删除这轮为 AMO 诊断新增的 `sample_atomic_mainpipe_state()` / `collect_atomic_mainpipe_trace()` / `wait_dcache_tag_array_ready()`
+
+#### 验证情况
+
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_amo.py`
+  - 结果：`3 passed`
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_amo_diagnostics.py`
+  - 结果：`4 passed`
+
+
 ## 2026-04-29
 ### 1. 统一 DCache 覆盖率文档口径，区分当前 full 主报告与历史定向快照
 

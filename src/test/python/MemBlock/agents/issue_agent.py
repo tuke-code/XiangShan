@@ -12,6 +12,12 @@ def _set_optional_signal(dut, signal_name: str, value: int) -> None:
         signal.value = value
 
 
+def _set_optional_bundle_signal(bundle, signal_name: str, value: int) -> None:
+    signal = getattr(bundle, signal_name, None)
+    if signal is not None:
+        signal.value = value
+
+
 class IssueAgent:
     """负责 issue lane 握手与驱动。"""
 
@@ -76,8 +82,7 @@ class IssueAgent:
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        if hasattr(issue, "bits_fuType"):
-            issue.bits_fuType.value = op.issue_fu_type
+        _set_optional_bundle_signal(issue, "bits_fuType", op.issue_fu_type)
         issue.bits_fuOpType.value = op.issue_fu_op_type
         issue.bits_src_0.value = data
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
@@ -138,8 +143,7 @@ class IssueAgent:
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        if hasattr(issue, "bits_fuType"):
-            issue.bits_fuType.value = op.issue_fu_type
+        _set_optional_bundle_signal(issue, "bits_fuType", op.issue_fu_type)
         issue.bits_fuOpType.value = op.issue_fu_op_type
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
@@ -186,8 +190,7 @@ class IssueAgent:
         rf_wen = 1 if op.pdest is not None else 0
         pdest = 0 if op.pdest is None else op.resolved_pdest
         issue.valid.value = 1
-        if hasattr(issue, "bits_fuType"):
-            issue.bits_fuType.value = op.issue_fu_type
+        _set_optional_bundle_signal(issue, "bits_fuType", op.issue_fu_type)
         issue.bits_fuOpType.value = op.issue_fu_op_type
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag

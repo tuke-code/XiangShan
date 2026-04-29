@@ -4,7 +4,7 @@
 from collections import deque
 from dataclasses import dataclass, replace
 
-from agents.issue_agent import _set_optional_signal
+from agents.issue_agent import _set_optional_bundle_signal, _set_optional_signal
 
 from transactions import (
     AtomicTxn,
@@ -249,8 +249,7 @@ class _BackendReplayCreditModel:
             ftq_idx_value=entry.ftq_idx_value,
         )
         issue.valid.value = 1
-        if hasattr(issue, "bits_fuType"):
-            issue.bits_fuType.value = replay_op.issue_fu_type
+        _set_optional_bundle_signal(issue, "bits_fuType", replay_op.issue_fu_type)
         issue.bits_fuOpType.value = replay_op.store_fu_op_type
         issue.bits_src_0.value = int(entry.addr)
         issue.bits_robIdx_flag.value = int(entry.rob_idx.flag)
