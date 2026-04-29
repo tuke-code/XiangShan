@@ -1,5 +1,46 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-28
+
+### 1. 补齐标量 `STA` backend 反馈闭环，新增 `staIqFeedback + deqPtr` 半模型与自动重发
+
+本条目记录一轮围绕 backend 半模型的补强。此前 MemBlock Python env 已经能稳定建模 `pendingPtr/pendingPtrNext/lcommit/scommit` 和 store `addr/data` readiness，但对 `mem_to_ooo` 返回 backend 的那一半闭环仍停留在“只观察、不消费”的状态：`staIqFeedback` 没有被 backend 吸收成真实 replay 决策，`lqDeqPtr/sqDeqPtr` 也只被 coverage 记录，没有形成软件 credit 视图。因此一旦 store 发生 `TLB miss -> feedbackSlow -> reissue`，测试环境只能看到“最终 store 有没有 materialize”，无法表达 backend 为什么会重发、何时重发，以及 deqPtr 是否真的释放了资源。
+
+本轮把实现范围限定在“标量 STA + LSQ credit”，并保持 testcase 默认透明兼容。env 侧新增 `staIqFeedback[*].feedbackSlow` bundle 绑定；backend facade 侧新增一个 runtime half-model，用于跟踪每笔已分配 store/load 的 LSQ occupancy、消费 `sqDeqPtr/lqDeqPtr` 释放 credit，并对白盒可见的 `STA tlbMiss feedback` 生成自动 replay。时序上，`MemBlockEnv._step_async()` 现在会在每拍 `commit.drive` 之后、时钟推进之前调用 `backend.drive_pre_step()` 驱动待重发的 `STA`，在组合刷新后采样握手，再在拍后通过 `backend.after_cycle()` 消化 `staIqFeedback` 与 deqPtr 反馈，从而形成“本拍观察 miss，下一拍自动重发”的稳定闭环。
+
+与此同时，这轮还把 direct API 的 backend 跟踪补齐到了 `issue_std()/issue_sta()/issue_load_batch_with_sta_same_cycle()`，不再只有 `execute(BackendSendPlan)` 这一路会更新 store readiness / replay 元数据。这样无论 testcase 走老的 helper API，还是走新的 prepared plan，都能进入同一套 backend 半模型。
+
+#### 变更摘要
+
+- `agents/backend_facade.py`
+  - 新增 backend replay/credit runtime half-model
+  - 消费 `staIqFeedback` 的 `tlbMiss hit/miss`
+  - 跟踪 `lq/sq` occupancy 与 `deqPtr` 释放
+  - 为 pending replay store 在下一拍自动驱动 `STA` 重发
+  - 新增 `backend_state()` / `wait_replay_idle()` / `assert_credit_consistent()`
+- `MemBlock_env.py`
+  - 新增 `MemRSFeedbackBundle`
+  - 绑定 `sta_iq_feedback`
+  - 在 `_step_async()` 中接入 backend `drive_pre_step()` / `capture_pre_step_handshake()` / `after_cycle()`
+- `model/rob_coverage.py`
+  - `known_gap_backend_feedback_credit_not_modelled` 改为按能力条件化
+  - 新增 `sta feedback / retry / sq credit release` 相关覆盖观测点
+- `tests/test_request_apis_backend_facade.py`
+  - 新增 direct `STA` 跟踪和 fake backend 自动 replay/credit 单测
+- `tests/test_MemBlock_env_fixture.py` / `tests/test_MemBlock_rob_coverage.py`
+  - 同步更新 env 能力与 coverage 断言
+
+#### 验证情况
+
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：`32 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py -k 'create or backend_facade_wires_existing_agents or has_core_bundles or backend_note_load_completed_advances_pending_ptr or backend_note_store_allocated_updates_state or backend_mark_store_commit_ready_updates_rob'`
+  - 结果：`6 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_rob_coverage.py`
+  - 结果：`3 passed`
+- `python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k store_queue_two_wave_commit_frontier_residency_directed`
+  - 结果：`1 passed`
+
 ## 2026-04-27
 
 ### 1. 推进 `NewStoreQueue` 覆盖率到 `77.1%`，并确认 `>80%` 剩余瓶颈

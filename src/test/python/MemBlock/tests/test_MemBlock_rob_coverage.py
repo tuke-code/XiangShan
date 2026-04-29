@@ -29,7 +29,7 @@ def test_api_MemBlock_rob_coverage_smoke_sample(env):
     assert reports[3]["name"] == "MemBlock.ROB.KnownModelGaps"
     known_gap_names = {point["name"] for point in reports[3]["points"]}
     assert "known_gap_redirect_cancel_not_modelled" in known_gap_names
-    assert "known_gap_backend_feedback_credit_not_modelled" in known_gap_names
+    assert "known_gap_backend_feedback_credit_not_modelled" not in known_gap_names
     if env.commit_agent.models_pending_ptr_next:
         assert "known_gap_pending_ptr_next_not_modelled" not in known_gap_names
     else:

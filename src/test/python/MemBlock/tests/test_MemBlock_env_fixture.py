@@ -42,6 +42,7 @@ def test_api_MemBlock_env_create(env):
     assert env.issue_agent is not None
     assert env.rob_agent is not None
     assert env.backend is not None
+    assert env.backend.models_feedback_credit_replay is True
     assert env.config.rob_size == 512
     assert env.config.transport.outer_delay == 4
     assert env.config.transport.grant_delay_min == 2
@@ -75,6 +76,7 @@ def test_api_MemBlock_env_has_core_bundles(env):
     assert hasattr(env, "vector_issue")
     assert hasattr(env, "writeback")
     assert hasattr(env, "vector_writeback")
+    assert hasattr(env, "sta_iq_feedback")
     assert hasattr(env, "store_data_inputs")
     assert hasattr(env, "store_addr_inputs")
     assert hasattr(env, "store_mask_inputs")
@@ -96,6 +98,7 @@ def test_api_MemBlock_env_has_core_bundles(env):
     assert len(env.vector_issue) == 2
     assert len(env.writeback) == env.config.int_writeback_ports
     assert len(env.vector_writeback) == 2
+    assert len(env.sta_iq_feedback) == env.config.store_pipeline_width
     assert len(env.store_data_inputs) == env.config.store_pipeline_width
     assert len(env.store_addr_inputs) == env.config.store_pipeline_width
     assert len(env.store_mask_inputs) == env.config.store_pipeline_width

@@ -1,9 +1,10 @@
 # coding=utf-8
-"""
-Unified backend-facing facade for MemBlock env.
-"""
+"""Unified backend-facing facade for MemBlock env."""
 
-from dataclasses import replace
+from collections import deque
+from dataclasses import dataclass, replace
+
+from agents.issue_agent import _set_optional_signal
 
 from transactions import (
     BackendPreparedPlan,
@@ -31,6 +32,362 @@ from transactions import (
 )
 
 
+RS_FEEDBACK_TYPE_TLB_MISS = 1
+
+
+@dataclass
+class _TrackedStoreReplay:
+    sq_ptr: QueuePtr
+    rob_idx: RobIndex | None = None
+    req_id: int | None = None
+    addr: int | None = None
+    lane: int | None = None
+    mask: int = 0xFF
+    store_opcode: str = "scalar"
+    ftq_idx_flag: int | None = None
+    ftq_idx_value: int | None = None
+    awaiting_feedback: bool = False
+    replay_pending: bool = False
+    auto_replay_count: int = 0
+    released: bool = False
+    cancelled: bool = False
+
+
+class _BackendReplayCreditModel:
+    """Backend half-model for scalar STA replay and LSQ credit tracking."""
+
+    def __init__(self, env) -> None:
+        self.env = env
+        self._sq_size = int(getattr(env.config, "store_queue_size", 56))
+        self._lq_size = int(getattr(getattr(env.config, "sequence", object()), "load_queue_size", 72))
+        self.reset_runtime_state()
+
+    @property
+    def stats(self) -> dict[str, int]:
+        lq_occ = len(self._tracked_loads)
+        sq_occ = len(self._tracked_stores)
+        return {
+            "backend_feedback_observed_count": self.feedback_observed_count,
+            "backend_feedback_tlb_miss_count": self.feedback_tlb_miss_count,
+            "backend_retry_issue_count": self.retry_issue_count,
+            "backend_retry_success_count": self.retry_success_count,
+            "backend_sq_credit_release_count": self.sq_credit_release_count,
+            "backend_lq_credit_release_count": self.lq_credit_release_count,
+            "backend_replay_deferred_lane_busy_count": self.replay_deferred_lane_busy_count,
+            "backend_replay_cancelled_count": self.replay_cancelled_count,
+            "backend_replay_pending_count": len(self._replay_queue),
+            "backend_active_store_count": len(self._tracked_stores),
+            "backend_active_load_count": len(self._tracked_loads),
+            "backend_sq_occupancy": sq_occ,
+            "backend_lq_occupancy": lq_occ,
+            "backend_sq_credits": max(0, self._sq_size - sq_occ),
+            "backend_lq_credits": max(0, self._lq_size - lq_occ),
+            "backend_credit_inconsistency_count": len(self._credit_errors),
+        }
+
+    def reset_runtime_state(self) -> None:
+        self._tracked_stores: dict[tuple[int, int], _TrackedStoreReplay] = {}
+        self._tracked_loads: dict[tuple[int, int], RobIndex | None] = {}
+        self._replay_queue: deque[tuple[int, int]] = deque()
+        self._replay_queued = set()
+        self._owned_lane_signatures: dict[int, tuple[int, int, int, int, int, int, int]] = {}
+        self._driven_replay_by_lane: dict[int, tuple[int, int]] = {}
+        self._predicted_replay_fires: dict[int, tuple[int, int]] = {}
+        self._prev_lq_deq_ptr: tuple[int, int] | None = None
+        self._prev_sq_deq_ptr: tuple[int, int] | None = None
+        self._credit_errors: list[str] = []
+        self.feedback_observed_count = 0
+        self.feedback_tlb_miss_count = 0
+        self.retry_issue_count = 0
+        self.retry_success_count = 0
+        self.sq_credit_release_count = 0
+        self.lq_credit_release_count = 0
+        self.replay_deferred_lane_busy_count = 0
+        self.replay_cancelled_count = 0
+
+    def note_load_allocated(self, lq_ptr: QueuePtr, rob_idx: RobIndex | None = None) -> None:
+        self._tracked_loads[self._ptr_key(lq_ptr.flag, lq_ptr.value)] = rob_idx
+
+    def note_store_allocated(self, sq_ptr: QueuePtr, rob_idx: RobIndex | None = None) -> None:
+        entry = self._tracked_stores.setdefault(self._ptr_key(sq_ptr.flag, sq_ptr.value), _TrackedStoreReplay(sq_ptr=sq_ptr))
+        entry.rob_idx = rob_idx
+        entry.released = False
+        entry.cancelled = False
+
+    def note_store_sta_issue(self, op: IssueOp) -> None:
+        if not isinstance(op.sq_ptr, QueuePtr):
+            raise TypeError(f"store STA issue requires a resolved SQ pointer, got {op.sq_ptr!r}")
+        key = self._ptr_key(op.sq_ptr.flag, op.sq_ptr.value)
+        entry = self._tracked_stores.setdefault(key, _TrackedStoreReplay(sq_ptr=op.sq_ptr))
+        entry.rob_idx = make_rob_index(rob_idx_flag=op.resolved_rob_idx_flag, rob_idx_value=op.resolved_rob_idx_value)
+        entry.req_id = int(op.req_id)
+        entry.addr = int(op.addr)
+        entry.lane = int(op.lane)
+        entry.mask = int(op.mask)
+        entry.store_opcode = str(op.store_opcode)
+        entry.ftq_idx_flag = int(op.ftq_idx_flag) if op.ftq_idx_flag is not None else None
+        entry.ftq_idx_value = int(op.ftq_idx_value) if op.ftq_idx_value is not None else None
+        entry.awaiting_feedback = True
+        entry.replay_pending = False
+        self._drop_replay_key(key)
+
+    def drive_pre_step(self) -> None:
+        self._clear_owned_replay_lanes()
+        self._driven_replay_by_lane = {}
+        self._predicted_replay_fires = {}
+        busy_lanes = set()
+        for key in tuple(self._replay_queue):
+            entry = self._tracked_stores.get(key)
+            if entry is None or entry.released or entry.cancelled:
+                self._drop_replay_key(key)
+                continue
+            if entry.addr is None or entry.lane is None or entry.rob_idx is None:
+                continue
+            lane = int(entry.lane)
+            if lane in busy_lanes:
+                continue
+            if not self._lane_is_available(lane):
+                self.replay_deferred_lane_busy_count += 1
+                continue
+            self._drive_sta_replay(entry)
+            busy_lanes.add(lane)
+            self._driven_replay_by_lane[lane] = key
+
+    def capture_pre_step_handshake(self) -> None:
+        self._predicted_replay_fires = {}
+        for lane, key in tuple(self._driven_replay_by_lane.items()):
+            issue = self.env.issue[int(lane)]
+            if int(issue.valid.value) and int(issue.ready.value):
+                self._predicted_replay_fires[int(lane)] = key
+
+    def after_cycle(self) -> None:
+        for lane, key in tuple(self._predicted_replay_fires.items()):
+            del lane
+            entry = self._tracked_stores.get(key)
+            if entry is None or entry.released or entry.cancelled:
+                self._drop_replay_key(key)
+                continue
+            entry.awaiting_feedback = True
+            entry.replay_pending = False
+            entry.auto_replay_count += 1
+            self.retry_issue_count += 1
+            self._drop_replay_key(key)
+        self._predicted_replay_fires = {}
+        self._driven_replay_by_lane = {}
+        self._observe_feedback()
+        self._observe_deq_ptrs()
+
+    def is_idle(self) -> bool:
+        return not self._replay_queue and not self._driven_replay_by_lane
+
+    def assert_consistent(self) -> None:
+        errors = list(self._credit_errors)
+        if len(self._tracked_loads) > self._lq_size:
+            errors.append(f"LQ occupancy overflow: active={len(self._tracked_loads)}, size={self._lq_size}")
+        if len(self._tracked_stores) > self._sq_size:
+            errors.append(f"SQ occupancy overflow: active={len(self._tracked_stores)}, size={self._sq_size}")
+        if errors:
+            raise AssertionError("; ".join(errors))
+
+    def snapshot(self) -> dict:
+        tracked_stores = []
+        for key, entry in sorted(self._tracked_stores.items()):
+            tracked_stores.append(
+                {
+                    "sq_idx_flag": key[0],
+                    "sq_idx_value": key[1],
+                    "rob_idx_flag": None if entry.rob_idx is None else int(entry.rob_idx.flag),
+                    "rob_idx_value": None if entry.rob_idx is None else int(entry.rob_idx.value),
+                    "req_id": entry.req_id,
+                    "addr": entry.addr,
+                    "lane": entry.lane,
+                    "awaiting_feedback": bool(entry.awaiting_feedback),
+                    "replay_pending": bool(entry.replay_pending),
+                    "auto_replay_count": int(entry.auto_replay_count),
+                    "released": bool(entry.released),
+                    "cancelled": bool(entry.cancelled),
+                }
+            )
+        return {
+            "lq_credits": max(0, self._lq_size - len(self._tracked_loads)),
+            "sq_credits": max(0, self._sq_size - len(self._tracked_stores)),
+            "lq_occupancy": len(self._tracked_loads),
+            "sq_occupancy": len(self._tracked_stores),
+            "replay_queue": list(self._replay_queue),
+            "driven_replay_by_lane": dict(self._driven_replay_by_lane),
+            "tracked_stores": tracked_stores,
+            "credit_errors": list(self._credit_errors),
+            "stats": self.stats,
+        }
+
+    def _clear_owned_replay_lanes(self) -> None:
+        for lane, signature in tuple(self._owned_lane_signatures.items()):
+            issue = self.env.issue[int(lane)]
+            if self._issue_signature(issue) == signature:
+                issue.drive_idle()
+                self._clear_sta_optional_fields(int(lane))
+            del self._owned_lane_signatures[lane]
+
+    def _lane_is_available(self, lane: int) -> bool:
+        issue = self.env.issue[int(lane)]
+        return int(issue.valid.value) == 0
+
+    def _drive_sta_replay(self, entry: _TrackedStoreReplay) -> None:
+        lane = int(entry.lane)
+        issue = self.env.issue[lane]
+        prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
+        issue.valid.value = 1
+        issue.bits_fuOpType.value = IssueOp.sta(
+            req_id=0 if entry.req_id is None else entry.req_id,
+            sq_ptr=entry.sq_ptr,
+            addr=entry.addr,
+            lane=lane,
+            mask=entry.mask,
+            store_opcode=entry.store_opcode,
+            rob_idx=entry.rob_idx,
+            ftq_idx_flag=entry.ftq_idx_flag,
+            ftq_idx_value=entry.ftq_idx_value,
+        ).store_fu_op_type
+        issue.bits_src_0.value = int(entry.addr)
+        issue.bits_robIdx_flag.value = int(entry.rob_idx.flag)
+        issue.bits_robIdx_value.value = int(entry.rob_idx.value)
+        issue.bits_sqIdx_flag.value = int(entry.sq_ptr.flag)
+        issue.bits_sqIdx_value.value = int(entry.sq_ptr.value)
+        _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}isFirstIssue", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}pdest", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}rfWen", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}isRVC", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_flag", 0 if entry.ftq_idx_flag is None else int(entry.ftq_idx_flag))
+        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_value", 0 if entry.ftq_idx_value is None else int(entry.ftq_idx_value))
+        _set_optional_signal(self.env.dut, f"{prefix}ftqOffset", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}storeSetHit", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}ssid", 0)
+        self._owned_lane_signatures[lane] = self._issue_signature(issue)
+
+    def _clear_sta_optional_fields(self, lane: int) -> None:
+        prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
+        _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}isFirstIssue", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}pdest", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}rfWen", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}isRVC", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_flag", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_value", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}ftqOffset", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}storeSetHit", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}ssid", 0)
+
+    def _observe_feedback(self) -> None:
+        for bundle in tuple(getattr(self.env, "sta_iq_feedback", ())):
+            if bundle.read("valid", 0) == 0:
+                continue
+            self.feedback_observed_count += 1
+            if bundle.read("sourceType", -1) != RS_FEEDBACK_TYPE_TLB_MISS:
+                continue
+            self.feedback_tlb_miss_count += 1
+            if bundle.read("sqIdx_flag", 0) not in (0, 1):
+                continue
+            key = self._ptr_key(bundle.read("sqIdx_flag", 0), bundle.read("sqIdx_value", -1))
+            entry = self._tracked_stores.get(key)
+            if entry is None or entry.released or entry.cancelled:
+                continue
+            entry.awaiting_feedback = False
+            if bundle.read("hit", 0):
+                if entry.auto_replay_count > 0:
+                    self.retry_success_count += 1
+                entry.replay_pending = False
+                self._drop_replay_key(key)
+                continue
+            entry.replay_pending = True
+            self._enqueue_replay_key(key)
+
+    def _observe_deq_ptrs(self) -> None:
+        current_lq_ptr = self._ptr_tuple(
+            getattr(self.env.mem_status, "lqDeqPtr_flag", None),
+            getattr(self.env.mem_status, "lqDeqPtr_value", None),
+        )
+        current_sq_ptr = self._ptr_tuple(
+            getattr(self.env.mem_status, "sqDeqPtr_flag", None),
+            getattr(self.env.mem_status, "sqDeqPtr_value", None),
+        )
+        if self._prev_lq_deq_ptr is not None and current_lq_ptr is not None and current_lq_ptr != self._prev_lq_deq_ptr:
+            for lq_idx in self._ptr_iter(self._prev_lq_deq_ptr, current_lq_ptr, self._lq_size):
+                self.lq_credit_release_count += 1
+                self._tracked_loads.pop(self._ptr_key(0, lq_idx), None)
+                self._tracked_loads.pop(self._ptr_key(1, lq_idx), None)
+        if self._prev_sq_deq_ptr is not None and current_sq_ptr is not None and current_sq_ptr != self._prev_sq_deq_ptr:
+            for sq_idx in self._ptr_iter(self._prev_sq_deq_ptr, current_sq_ptr, self._sq_size):
+                self.sq_credit_release_count += 1
+                self._release_store_by_sq_value(sq_idx)
+        self._prev_lq_deq_ptr = current_lq_ptr
+        self._prev_sq_deq_ptr = current_sq_ptr
+
+    def _release_store_by_sq_value(self, sq_idx_value: int) -> None:
+        for key in tuple(self._tracked_stores):
+            if int(key[1]) != int(sq_idx_value):
+                continue
+            entry = self._tracked_stores.pop(key)
+            entry.released = True
+            if entry.replay_pending or entry.awaiting_feedback:
+                entry.cancelled = True
+                self.replay_cancelled_count += 1
+            self._drop_replay_key(key)
+
+    def _enqueue_replay_key(self, key: tuple[int, int]) -> None:
+        if key in self._replay_queued:
+            return
+        self._replay_queue.append(key)
+        self._replay_queued.add(key)
+
+    def _drop_replay_key(self, key: tuple[int, int]) -> None:
+        if key not in self._replay_queued:
+            return
+        self._replay_queued.discard(key)
+        self._replay_queue = deque(item for item in self._replay_queue if item != key)
+
+    @staticmethod
+    def _ptr_key(flag: int, value: int) -> tuple[int, int]:
+        return (int(flag), int(value))
+
+    @staticmethod
+    def _ptr_tuple(flag_signal, value_signal):
+        if flag_signal is None or value_signal is None:
+            return None
+        try:
+            return (int(flag_signal.value), int(value_signal.value))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _ptr_iter(prev: tuple[int, int], curr: tuple[int, int], size: int) -> list[int]:
+        prev_abs = prev[0] * size + prev[1]
+        curr_abs = curr[0] * size + curr[1]
+        if curr_abs < prev_abs:
+            curr_abs += size * 2
+        distance = curr_abs - prev_abs
+        _, ptr_value = prev
+        indices = []
+        for _ in range(distance):
+            indices.append(ptr_value)
+            ptr_value += 1
+            if ptr_value >= size:
+                ptr_value = 0
+        return indices
+
+    @staticmethod
+    def _issue_signature(issue) -> tuple[int, int, int, int, int, int, int]:
+        return (
+            int(issue.valid.value),
+            int(issue.bits_fuOpType.value),
+            int(issue.bits_src_0.value),
+            int(issue.bits_robIdx_flag.value),
+            int(issue.bits_robIdx_value.value),
+            int(issue.bits_sqIdx_flag.value),
+            int(issue.bits_sqIdx_value.value),
+        )
+
+
 class BackendFacade:
     """Coordinate backend-facing active agents behind one semantic API."""
 
@@ -42,10 +399,20 @@ class BackendFacade:
         self.rob = env.rob_agent
         self.commit = env.commit_agent
         self.vector_monitor = getattr(env, "vector_monitor", None)
+        self._feedback_model = _BackendReplayCreditModel(env)
         self.reset_runtime_state()
 
     def reset_runtime_state(self) -> None:
         self._next_rob_idx = RobIndex(flag=0, value=0)
+        self._feedback_model.reset_runtime_state()
+
+    @property
+    def models_feedback_credit_replay(self) -> bool:
+        return True
+
+    @property
+    def stats(self) -> dict[str, int]:
+        return self._feedback_model.stats
 
     def _validate_rob_idx(self, rob_idx: RobIndex, *, field_name: str) -> RobIndex:
         flag = int(rob_idx.flag)
@@ -162,6 +529,7 @@ class BackendFacade:
             rob_idx_flag=None if normalized_rob_idx is None else normalized_rob_idx.flag,
             rob_idx_value=None if normalized_rob_idx is None else normalized_rob_idx.value,
         )
+        self._feedback_model.note_load_allocated(lq_ptr, normalized_rob_idx)
 
     def enqueue_scalar_load(
         self,
@@ -553,6 +921,8 @@ class BackendFacade:
                 )
             elif isinstance(step, EnqueueLoadCyclePlan):
                 self.enqueue_load_cycle(step)
+                for load_step in step.steps:
+                    self._feedback_model.note_load_allocated(load_step.lq_ptr, load_step.resolved_rob_idx)
             elif isinstance(step, EnqueueStoreStep):
                 allocated_sq_ptr = self.enqueue_store(
                     req_id=step.req_id,
@@ -643,6 +1013,7 @@ class BackendFacade:
             if not isinstance(op.sq_ptr, QueuePtr):
                 raise TypeError(f"unresolved SQ pointer in issue cycle: {op.sq_ptr!r}")
             if op.kind == "sta":
+                self._feedback_model.note_store_sta_issue(op)
                 self.commit.mark_store_addr_ready(op.sq_ptr.flag, op.sq_ptr.value)
             elif op.kind == "std":
                 self.commit.mark_store_data_ready(op.sq_ptr.flag, op.sq_ptr.value)
@@ -771,21 +1142,21 @@ class BackendFacade:
         max_cycles: int = 50,
     ) -> None:
         txns = tuple(txns)
-        self.issue.issue_cycle(
-            IssueCyclePlan(
-                ops=tuple(IssueOp.load_from_txn(txn) for txn in txns)
-                + (
-                    IssueOp.sta(
-                        req_id=sta_req_id,
-                        sq_ptr=sta_sq_ptr,
-                        addr=sta_addr,
-                        lane=sta_lane,
-                        mask=sta_mask,
-                    ),
+        plan = IssueCyclePlan(
+            ops=tuple(IssueOp.load_from_txn(txn) for txn in txns)
+            + (
+                IssueOp.sta(
+                    req_id=sta_req_id,
+                    sq_ptr=sta_sq_ptr,
+                    addr=sta_addr,
+                    lane=sta_lane,
+                    mask=sta_mask,
                 ),
-                max_cycles=max_cycles,
-            )
+            ),
+            max_cycles=max_cycles,
         )
+        self.issue.issue_cycle(plan)
+        self._note_issue_cycle_store_progress(plan)
 
     def issue_scalar_load_batch_with_sta_same_cycle(
         self,
@@ -821,22 +1192,22 @@ class BackendFacade:
         ftq_idx_flag: int | None = None,
         ftq_idx_value: int | None = None,
     ) -> None:
-        self.issue.issue_cycle(
-            IssueCyclePlan.from_ops(
-                IssueOp.std(
-                    req_id=req_id,
-                    sq_ptr=sq_ptr,
-                    data=data,
-                    lane=lane,
-                    mask=mask,
-                    rob_idx=rob_idx,
-                    rob_idx_flag=rob_idx_flag,
-                    rob_idx_value=rob_idx_value,
-                    ftq_idx_flag=ftq_idx_flag,
-                    ftq_idx_value=ftq_idx_value,
-                )
+        plan = IssueCyclePlan.from_ops(
+            IssueOp.std(
+                req_id=req_id,
+                sq_ptr=sq_ptr,
+                data=data,
+                lane=lane,
+                mask=mask,
+                rob_idx=rob_idx,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+                ftq_idx_flag=ftq_idx_flag,
+                ftq_idx_value=ftq_idx_value,
             )
         )
+        self.issue.issue_cycle(plan)
+        self._note_issue_cycle_store_progress(plan)
 
     def issue_scalar_std(
         self,
@@ -877,22 +1248,22 @@ class BackendFacade:
         ftq_idx_flag: int | None = None,
         ftq_idx_value: int | None = None,
     ) -> None:
-        self.issue.issue_cycle(
-            IssueCyclePlan.from_ops(
-                IssueOp.sta(
-                    req_id=req_id,
-                    sq_ptr=sq_ptr,
-                    addr=addr,
-                    lane=lane,
-                    mask=mask,
-                    rob_idx=rob_idx,
-                    rob_idx_flag=rob_idx_flag,
-                    rob_idx_value=rob_idx_value,
-                    ftq_idx_flag=ftq_idx_flag,
-                    ftq_idx_value=ftq_idx_value,
-                )
+        plan = IssueCyclePlan.from_ops(
+            IssueOp.sta(
+                req_id=req_id,
+                sq_ptr=sq_ptr,
+                addr=addr,
+                lane=lane,
+                mask=mask,
+                rob_idx=rob_idx,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+                ftq_idx_flag=ftq_idx_flag,
+                ftq_idx_value=ftq_idx_value,
             )
         )
+        self.issue.issue_cycle(plan)
+        self._note_issue_cycle_store_progress(plan)
 
     def issue_scalar_sta(
         self,
@@ -1034,6 +1405,10 @@ class BackendFacade:
             rob_idx_flag=normalized_rob_idx.flag,
             rob_idx_value=normalized_rob_idx.value,
         )
+        self._feedback_model.note_store_allocated(
+            QueuePtr(flag=int(sq_idx_flag), value=int(sq_idx_value)),
+            normalized_rob_idx,
+        )
 
     def note_load_completed(
         self,
@@ -1098,3 +1473,25 @@ class BackendFacade:
             max_cycles=max_cycles,
             settle_cycles=settle_cycles,
         )
+
+    def drive_pre_step(self) -> None:
+        self._feedback_model.drive_pre_step()
+
+    def capture_pre_step_handshake(self) -> None:
+        self._feedback_model.capture_pre_step_handshake()
+
+    def after_cycle(self) -> None:
+        self._feedback_model.after_cycle()
+
+    def backend_state(self) -> dict:
+        return self._feedback_model.snapshot()
+
+    def wait_replay_idle(self, max_cycles: int = 200) -> None:
+        self.env.wait_until(
+            lambda: self._feedback_model.is_idle(),
+            max_cycles=max_cycles,
+            timeout_message="等待 backend replay 队列清空超时",
+        )
+
+    def assert_credit_consistent(self) -> None:
+        self._feedback_model.assert_consistent()

@@ -102,10 +102,11 @@ class RobCoverageCollector:
             gaps.append("commit_bool_not_modelled")
         if not getattr(self.env.commit_agent, "models_mixed_commit_packet", False):
             gaps.append("mixed_lcommit_scommit_not_modelled")
+        if not getattr(self.env.backend, "models_feedback_credit_replay", False):
+            gaps.append("backend_feedback_credit_not_modelled")
         gaps.extend(
             (
                 "redirect_cancel_not_modelled",
-                "backend_feedback_credit_not_modelled",
             )
         )
         return tuple(gaps)
@@ -269,6 +270,31 @@ class RobCoverageCollector:
             {"store_readiness_resume_seen": fc.Eq(1)},
             name="store_readiness_resumes_frontier_observed",
         )
+        current.add_watch_point(
+            self._box("sta_feedback_tlb_miss_observed"),
+            {"sta_feedback_tlb_miss_seen": fc.Eq(1)},
+            name="sta_feedback_tlb_miss_observed",
+        )
+        current.add_watch_point(
+            self._box("sta_feedback_retry_issued_observed"),
+            {"sta_feedback_retry_issue_seen": fc.Eq(1)},
+            name="sta_feedback_retry_issued_observed",
+        )
+        current.add_watch_point(
+            self._box("sta_feedback_retry_success_observed"),
+            {"sta_feedback_retry_success_seen": fc.Eq(1)},
+            name="sta_feedback_retry_success_observed",
+        )
+        current.add_watch_point(
+            self._box("sq_credit_release_observed"),
+            {"sq_credit_release_seen": fc.Eq(1)},
+            name="sq_credit_release_observed",
+        )
+        current.add_watch_point(
+            self._box("replay_deferred_by_lane_busy_observed"),
+            {"replay_deferred_lane_busy_seen": fc.Eq(1)},
+            name="replay_deferred_by_lane_busy_observed",
+        )
 
         gap_observed = fc.CovGroup("MemBlock.ROB.GapObserved")
         gap_observed.add_watch_point(
@@ -327,6 +353,7 @@ class RobCoverageCollector:
         self._sample_drain_log()
         self._sample_replay_related()
         self._sample_rob_agent()
+        self._sample_backend_model()
         for group in self._groups:
             group.sample()
 
@@ -335,6 +362,7 @@ class RobCoverageCollector:
         self._sample_drain_log()
         self._sample_mem_status()
         self._sample_rob_agent()
+        self._sample_backend_model()
         if self._box("flushsb_command_observed").value and self._box("sbuffer_drain_observed").value:
             self._latch("cacheable_store_flush_drain_observed")
         if self._box("flushsb_command_observed").value and self._nc_drain_overlap_observed:
@@ -424,7 +452,8 @@ class RobCoverageCollector:
 
         if _read_signal(self.env.mem_status.sqDeq, 0) > 0:
             self._latch("backend_feedback_observed")
-            self._latch("gap_backend_feedback_without_model")
+            if not getattr(self.env.backend, "models_feedback_credit_replay", False):
+                self._latch("gap_backend_feedback_without_model")
 
         current_lq_ptr = self._ptr_tuple(
             getattr(self.env.mem_status, "lqDeqPtr_flag", None),
@@ -436,10 +465,12 @@ class RobCoverageCollector:
         )
         if self._prev_lq_deq_ptr is not None and current_lq_ptr is not None and current_lq_ptr != self._prev_lq_deq_ptr:
             self._latch("backend_feedback_observed")
-            self._latch("gap_backend_feedback_without_model")
+            if not getattr(self.env.backend, "models_feedback_credit_replay", False):
+                self._latch("gap_backend_feedback_without_model")
         if self._prev_sq_deq_ptr is not None and current_sq_ptr is not None and current_sq_ptr != self._prev_sq_deq_ptr:
             self._latch("backend_feedback_observed")
-            self._latch("gap_backend_feedback_without_model")
+            if not getattr(self.env.backend, "models_feedback_credit_replay", False):
+                self._latch("gap_backend_feedback_without_model")
         self._prev_lq_deq_ptr = current_lq_ptr
         self._prev_sq_deq_ptr = current_sq_ptr
 
@@ -469,6 +500,19 @@ class RobCoverageCollector:
     def _sample_flush_inputs(self) -> None:
         if _read_signal(getattr(self.env.dut, "io_ooo_to_mem_flushSb", None), 0):
             self._latch("flushsb_command_observed")
+
+    def _sample_backend_model(self) -> None:
+        stats = getattr(self.env.backend, "stats", {})
+        if stats.get("backend_feedback_tlb_miss_count", 0) > 0:
+            self._latch("sta_feedback_tlb_miss_observed")
+        if stats.get("backend_retry_issue_count", 0) > 0:
+            self._latch("sta_feedback_retry_issued_observed")
+        if stats.get("backend_retry_success_count", 0) > 0:
+            self._latch("sta_feedback_retry_success_observed")
+        if stats.get("backend_sq_credit_release_count", 0) > 0:
+            self._latch("sq_credit_release_observed")
+        if stats.get("backend_replay_deferred_lane_busy_count", 0) > 0:
+            self._latch("replay_deferred_by_lane_busy_observed")
 
     def _sample_writebacks(self) -> None:
         for lane, bundle in enumerate(self.env.writeback):

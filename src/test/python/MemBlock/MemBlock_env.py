@@ -557,6 +557,21 @@ class StoreQueueShadowEntry(OptionalSignalBundle):
         self.robIdx_value = getattr(dut, f"MemBlock_inner_lsq_storeQueue_uop_{index}_robIdx_value", None)
 
 
+class MemRSFeedbackBundle(OptionalSignalBundle):
+    SIGNAL_MAP = {
+        "valid": "valid",
+        "hit": "bits_hit",
+        "flushState": "bits_flushState",
+        "sourceType": "bits_sourceType",
+        "robIdx_flag": "bits_robIdx_flag",
+        "robIdx_value": "bits_robIdx_value",
+        "sqIdx_flag": "bits_sqIdx_flag",
+        "sqIdx_value": "bits_sqIdx_value",
+        "lqIdx_flag": "bits_lqIdx_flag",
+        "lqIdx_value": "bits_lqIdx_value",
+    }
+
+
 class MemStatusBundle(Bundle):
     """`mem_to_ooo` 中 env 常用的状态输出。"""
 
@@ -2152,6 +2167,10 @@ class MemBlockEnv:
             VecWritebackBundle(f"io_mem_to_ooo_vecWriteback_{idx}_0_", dut)
             for idx in range(VEC_WRITEBACK_PORTS)
         ]
+        self.sta_iq_feedback = [
+            MemRSFeedbackBundle(f"io_mem_to_ooo_staIqFeedback_{idx}_feedbackSlow_", dut)
+            for idx in range(self.config.store_pipeline_width)
+        ]
         self.store_data_inputs = [
             StoreDataInputBundle(f"MemBlock_inner_lsq_io_std_storeDataIn_{idx}_", dut)
             for idx in range(self.config.store_pipeline_width)
@@ -2308,7 +2327,10 @@ class MemBlockEnv:
             raise ValueError(f"cycles 必须非负，当前值为 {cycles}")
         for _ in range(cycles):
             self.commit_agent.drive()
+            self.backend.drive_pre_step()
             self.memory.drive_pre_step()
+            self.refresh_comb()
+            self.backend.capture_pre_step_handshake()
             await self._clock.step(1)
             self.memory.after_cycle()
             self.vector_monitor.sample()
@@ -2318,6 +2340,7 @@ class MemBlockEnv:
                 self.backend.reset_runtime_state()
             else:
                 self.mem_status_monitor.after_cycle()
+                self.backend.after_cycle()
                 self.commit_agent.advance()
             for callback in tuple(self._after_step_callbacks):
                 result = callback()

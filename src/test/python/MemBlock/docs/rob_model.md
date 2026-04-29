@@ -789,6 +789,23 @@ env.backend.execute(
 
 ### 7.7 需求七：支持 backend 反馈接口的半模型
 
+补充状态（2026-04-28）：
+
+- 当前环境已经不再是“完全没有 backend feedback 半模型”。
+- 标量 store 侧已补入一个最小闭环：
+  - 观测 `staIqFeedback[*].feedbackSlow`
+  - 观测 `lqDeqPtr/sqDeqPtr`
+  - 在测试侧维护最小 `lq/sq` credit 视图
+  - 对 `STA tlbMiss` 场景做下一拍自动 replay
+- 这意味着当前 env 已经能对白盒可见的 `store TLB miss -> feedbackSlow -> reissue` 给出一个可解释的 backend 代理闭环，而不再只是“看到最终结果，不知道为什么会重发”。
+- 但这项实现仍然是刻意收敛过的半模型，不应误读为“完整 backend 已建模”。当前仍未覆盖：
+  - 向量 `vstu/vldu` feedback 闭环
+  - 更完整的 issue queue 竞争 / credit 恢复策略
+  - dispatch/rename/ROB 的全真实资源模型
+  - 除 `tlbMiss` 以外的其它 feedback sourceType 调度语义
+
+因此，下面这一节的“为什么需要 backend half-model”的论证仍然成立，但它的适用边界现在应理解为：**向量与更宽 backend 闭环仍是缺口；标量 STA 的最小 replay/credit 闭环已经具备。**
+
 如果测试目标始终只限定为“MemBlock 单边功能验证”，那么观测 `lqDeq/sqDeq/lqDeqPtr/sqDeqPtr` 已经有价值；但如果目标扩展为“后端与 MemBlock 的交互场景验证”，就必须为这些反馈接口建立一个至少半真实的 backend resource model。
 
 所谓“半模型”，不是要求测试环境真的重建 dispatch/rename/ROB 全流程，而是至少要能在测试侧表达：

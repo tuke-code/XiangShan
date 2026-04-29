@@ -3,6 +3,8 @@
 request_apis should route active control through env.backend.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from agents.backend_facade import BackendFacade
@@ -122,8 +124,16 @@ class _FakeLsqAgent:
     def wait_store_enq_ready(self, max_cycles: int = 200) -> None:
         self.calls.append(("wait_store_enq_ready", max_cycles))
 
-    def enqueue_scalar_load(self, req_id, lq_ptr, sq_ptr, enq_port: int = 0) -> None:
-        self.calls.append(("enqueue_scalar_load", req_id, lq_ptr, sq_ptr, enq_port))
+    def enqueue_scalar_load(
+        self,
+        req_id,
+        lq_ptr,
+        sq_ptr,
+        enq_port: int = 0,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+    ) -> None:
+        self.calls.append(("enqueue_scalar_load", req_id, lq_ptr, sq_ptr, enq_port, rob_idx_flag, rob_idx_value))
 
     def enqueue_load_cycle(self, plan) -> None:
         self.calls.append(("enqueue_load_cycle", plan))
@@ -155,6 +165,55 @@ class _FakeIssueAgent:
 
     def issue_cycle(self, plan) -> None:
         self.calls.append(("issue_cycle", plan))
+
+
+class _FakeSignal:
+    def __init__(self, value: int = 0) -> None:
+        self.value = int(value)
+
+
+class _FakeIssueBundle:
+    def __init__(self, ready: int = 1) -> None:
+        self.ready = _FakeSignal(ready)
+        self.valid = _FakeSignal(0)
+        self.bits_fuOpType = _FakeSignal(0)
+        self.bits_src_0 = _FakeSignal(0)
+        self.bits_robIdx_flag = _FakeSignal(0)
+        self.bits_robIdx_value = _FakeSignal(0)
+        self.bits_sqIdx_flag = _FakeSignal(0)
+        self.bits_sqIdx_value = _FakeSignal(0)
+
+    def drive_idle(self) -> None:
+        self.valid.value = 0
+        self.bits_fuOpType.value = 0
+        self.bits_src_0.value = 0
+        self.bits_robIdx_flag.value = 0
+        self.bits_robIdx_value.value = 0
+        self.bits_sqIdx_flag.value = 0
+        self.bits_sqIdx_value.value = 0
+
+
+class _FakeFeedbackBundle:
+    def __init__(self) -> None:
+        self.values = {
+            "valid": 0,
+            "hit": 0,
+            "sourceType": 0,
+            "sqIdx_flag": 0,
+            "sqIdx_value": 0,
+            "robIdx_flag": 0,
+            "robIdx_value": 0,
+            "lqIdx_flag": 0,
+            "lqIdx_value": 0,
+        }
+
+    def read(self, name: str, default=None):
+        return int(self.values.get(name, default if default is not None else 0))
+
+
+class _FakeDut:
+    def __init__(self) -> None:
+        self.io_reset_backend = _FakeSignal(0)
 
 
 class _FakeVectorIssueAgent:
@@ -241,7 +300,15 @@ class _FakeFacadeEnv:
         self.commit_agent = _FakeCommitAgent()
         self.memory = _FakeMemory()
         self.vector_monitor = _FakeVectorMonitor()
-        self.config = type("Config", (), {"rob_size": 512})()
+        self.config = type(
+            "Config",
+            (),
+            {
+                "rob_size": 512,
+                "store_queue_size": 56,
+                "sequence": type("SequenceConfig", (), {"load_queue_size": 72})(),
+            },
+        )()
         self.run_async_calls = []
 
     def _run_async(self, marker):
@@ -253,6 +320,23 @@ class _FakeFacadeEnv:
 
     def _flush_store_buffers_and_wait_impl(self, max_cycles: int = 200, settle_cycles: int = 4) -> dict:
         return {"max_cycles": max_cycles, "settle_cycles": settle_cycles}
+
+
+class _ReplayFacadeEnv(_FakeFacadeEnv):
+    def __init__(self) -> None:
+        super().__init__()
+        self.dut = _FakeDut()
+        self.issue = [_FakeIssueBundle() for _ in range(7)]
+        self.mem_status = SimpleNamespace(
+            lqDeqPtr_flag=_FakeSignal(0),
+            lqDeqPtr_value=_FakeSignal(0),
+            sqDeqPtr_flag=_FakeSignal(0),
+            sqDeqPtr_value=_FakeSignal(0),
+        )
+        self.sta_iq_feedback = [_FakeFeedbackBundle() for _ in range(2)]
+
+    def refresh_comb(self) -> None:
+        return None
 
 
 class _FakeEnv:
@@ -358,6 +442,106 @@ def test_api_request_apis_issue_scalar_load_forwards_size():
             "pc": None,
         },
     )
+
+
+def test_api_backend_facade_direct_issue_sta_marks_store_ready_and_tracks_feedback_state():
+    env = _ReplayFacadeEnv()
+    backend = BackendFacade(env)
+
+    backend.note_store_allocated(
+        sq_idx_flag=0,
+        sq_idx_value=3,
+        rob_idx_flag=0,
+        rob_idx_value=9,
+    )
+    backend.issue_scalar_sta(
+        req_id=0x31,
+        sq_ptr=QueuePtr(flag=0, value=3),
+        addr=0x80001000,
+        lane=3,
+        rob_idx=RobIndex(flag=0, value=9),
+        ftq_idx_flag=0,
+        ftq_idx_value=4,
+    )
+
+    state = backend.backend_state()
+    tracked = state["tracked_stores"][0]
+    assert tracked["awaiting_feedback"] is True
+    assert tracked["addr"] == 0x80001000
+    assert env.commit_agent.calls[-1] == ("mark_store_addr_ready", 0, 3)
+
+
+def test_api_backend_facade_auto_replays_sta_tlb_miss_feedback_and_releases_sq_credit():
+    env = _ReplayFacadeEnv()
+    backend = BackendFacade(env)
+    env.mem_status.sqDeqPtr_value.value = 5
+    backend.after_cycle()
+
+    backend.note_store_allocated(
+        sq_idx_flag=0,
+        sq_idx_value=5,
+        rob_idx_flag=0,
+        rob_idx_value=11,
+    )
+    backend.issue_scalar_sta(
+        req_id=0x41,
+        sq_ptr=QueuePtr(flag=0, value=5),
+        addr=0x80002000,
+        lane=3,
+        rob_idx=RobIndex(flag=0, value=11),
+        ftq_idx_flag=0,
+        ftq_idx_value=8,
+    )
+
+    env.sta_iq_feedback[0].values.update(
+        {
+            "valid": 1,
+            "hit": 0,
+            "sourceType": 1,
+            "sqIdx_flag": 0,
+            "sqIdx_value": 5,
+            "robIdx_flag": 0,
+            "robIdx_value": 11,
+        }
+    )
+    backend.after_cycle()
+    env.sta_iq_feedback[0].values["valid"] = 0
+
+    assert backend.backend_state()["replay_queue"] == [(0, 5)]
+
+    backend.drive_pre_step()
+    env.refresh_comb()
+    backend.capture_pre_step_handshake()
+
+    assert env.issue[3].valid.value == 1
+    assert env.issue[3].bits_src_0.value == 0x80002000
+
+    backend.after_cycle()
+    state = backend.backend_state()
+    tracked = state["tracked_stores"][0]
+    assert state["replay_queue"] == []
+    assert tracked["awaiting_feedback"] is True
+    assert state["stats"]["backend_retry_issue_count"] == 1
+
+    env.sta_iq_feedback[1].values.update(
+        {
+            "valid": 1,
+            "hit": 1,
+            "sourceType": 1,
+            "sqIdx_flag": 0,
+            "sqIdx_value": 5,
+            "robIdx_flag": 0,
+            "robIdx_value": 11,
+        }
+    )
+    backend.after_cycle()
+    env.sta_iq_feedback[1].values["valid"] = 0
+    assert backend.backend_state()["stats"]["backend_retry_success_count"] == 1
+
+    env.mem_status.sqDeqPtr_value.value = 6
+    backend.after_cycle()
+    assert backend.backend_state()["sq_occupancy"] == 0
+    assert backend.backend_state()["stats"]["backend_sq_credit_release_count"] == 1
 
 
 def test_api_request_apis_send_txns_delegate_to_backend():
