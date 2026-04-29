@@ -258,6 +258,27 @@
   - 结果：`3 xfailed`
   - 说明：当前 standalone `intIssue` AMO 驱动在真实 DUT 上仍未产生下游 TL/writeback 活动；用例按“`dcache_a_request_count == 0 && writeback_events == 0`”定向记录该 contract gap，而不是误报通过
 
+### 4. 新增 DCache CtrlUnit MMIO facade 与真实 DUT 注入 directed 回归
+
+本条目记录一轮围绕 `docs/XiangShan-Design-Doc/docs/zh/memblock/DCache/Error.md` 的基础闭环补强。当前 MemBlock harness 已经内建 `L1DCacheCtrl` 的内部 MMIO 地址路由，但此前 Python env 没有稳定的 control-plane helper，也没有一组只依赖真实 LSU 请求的 `CtrlUnit` directed 回归。因此即便 RTL 已支持 `tag/data` 伪 ECC 注入，验证侧仍缺少“寄存器编程/回读、真实 cache hit 触发、`dcacheError` 输出、load `hardwareError` 异常位”这一条最小可重复证明链。
+
+本轮在 `MemBlock_env.py` 中新增 `DCacheCtrlFacade` 与 `DCacheCtrlConfig`，统一封装控制寄存器地址、`ECCCTL` 编码/解码和 `dcacheError` 白盒采样；同时新增 `test_MemBlock_dcache_ctrlunit.py`，通过真实 LSU `load/store` 请求完成 CtrlUnit MMIO 编程，验证内部 MMIO 不会落到 outer transport，并覆盖 `tag one-shot`、`data delayed + persist rearm`、`bank_mask=0 no-effect` 这些基础场景。由于当前 harness 仍未集成真实 BEU 模块，本轮验证范围明确止于 `dcacheError` 与 load `hardwareError`，不伪造 BEU 寄存器或 NMI 闭环。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - 新增 `DCacheCtrlConfig`
+  - 新增 `DCacheCtrlFacade`
+  - 封装 `L1DCacheCtrl` 基地址、寄存器偏移、`ECCCTL` 编解码与 `dcacheError` 采样/等待 helper
+- `tests/test_MemBlock_dcache_ctrlunit.py`
+  - 新增 CtrlUnit MMIO roundtrip smoke
+  - 新增 `tag one-shot -> hardwareError + dcacheError` directed
+  - 新增 `data delayed + persist` 二次 rearm directed
+  - 新增 `bank_mask=0` no-effect directed
+
+#### 验证情况
+
+- 待本轮回归确认
 
 ## 2026-04-28
 

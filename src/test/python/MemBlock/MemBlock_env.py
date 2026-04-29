@@ -58,6 +58,7 @@ from agents.issue_agent import IssueAgent
 from agents.lsq_agent import LsqAgent
 from agents.vector_backend_facade import VectorBackendFacade
 from agents.vector_issue_agent import VectorIssueAgent
+from dcache_ctrl_facade import DCacheCtrlConfig, DCacheCtrlFacade, HARDWARE_ERROR_BIT
 from env_config import DEFAULT_ENV_CONFIG, EnvConfig
 from frontend_facade import FetchToMemFacade, FrontendBridgeFacade
 from issue_lanes import issue_lane_kind
@@ -1099,7 +1100,6 @@ class _PtwTileLinkResponder:
         self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_denied.value = 0
         self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_data.value = int(beat["data"])
         self.env.dut.auto_inner_ptw_to_l2_buffer_out_d_bits_corrupt.value = 0
-
 
 @dataclass(frozen=True)
 class _ActiveTranslationState:
@@ -2360,6 +2360,7 @@ class MemBlockEnv:
         self.mem_status_monitor = MemStatusMonitor(self.mem_status, self.memory, self.commit_agent)
         self.vector_monitor = VectorMemMonitor(self, self.vector_writeback)
         self.backend.vector_monitor = self.vector_monitor
+        self.dcache_ctrl = DCacheCtrlFacade(self)
         self.mmu = MmuFacade(self)
         self.frontend_bridge = FrontendBridgeFacade(self)
         self.fetch_to_mem = FetchToMemFacade(self)
