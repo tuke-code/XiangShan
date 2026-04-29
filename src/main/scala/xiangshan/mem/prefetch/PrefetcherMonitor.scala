@@ -306,7 +306,7 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
     val t = (1 << i)
     XSPerfAccumulate(s"${param.name}_depth${t}", depth === t.U && total_prefetch)
   }
-  XSPerfAccumulate(s"${param.name}_trigger_disable", trigger_disable)
+  XSPerfAccumulate(s"${param.name}_trigger_disable", RegNext(enable) && !enable)
   XSPerfAccumulate(s"${param.name}_disable_time", !enable)
   XSPerfAccumulate(s"${param.name}_trigger_depth_up", old_depth < depth)
   XSPerfAccumulate(s"${param.name}_trigger_depth_down", old_depth > depth)
@@ -318,11 +318,11 @@ abstract class PrefetcherMonitorParam {
   val name: String
   def isMyType(value: UInt): Bool
 
-  val VALIDITY_CHECK_INTERVAL = 1000
+  val VALIDITY_CHECK_INTERVAL = 1024
   val DISABLE_THRESHOLD = 900
 
   val WINDOW_SIZE = 512
-  val LATE_HIT_THRESHOLD = 100
+  val LATE_HIT_THRESHOLD = 25
   val HIT_MARGIN = 30
 
   val BACK_OFF_INTERVAL = 100000
