@@ -87,6 +87,37 @@
 - `python3 -m pytest -n 16 -q -rx src/test/python/MemBlock/tests -k pmp`
   - 待本轮回归确认
 
+### 4. 补齐 single-uop AMO 的 backend/env 闭环，并新增 real-DUT smoke
+
+本条目记录一轮围绕 atomic memory operation 的环境补强。此前 `transactions.py` 已经开始承载 AMO opcode/fu-op 编码，但 backend facade、issue driver 和 env writeback 观测还没有把 AMO 当作 `MOU + AtomicsUnit` 单独建模，仍容易误走普通 LSQ store 路径。本轮把支持范围限定在 current RTL 已经稳定存在的 single-uop AMO（非 LR/SC、非 AMOCAS），并明确采用“AMO writeback 返回旧值 + 后续真实 load 验证提交后新值”的收口方式。
+
+#### 变更摘要
+
+- `transactions.py`
+  - 补齐 `AtomicTxn` 的 runtime binding、预测旧值/新值辅助与 `fuType/fuOpType` 编码
+- `agents/issue_agent.py` / `agents/backend_facade.py`
+  - issue lane 现可显式驱动 `fuType`
+  - 新增 `prepare_atomic()/issue_atomic_*/send_atomic()`，并避免把 AMO 误记入普通 store replay/credit 跟踪
+- `MemBlock_env.py`
+  - 新增按 `robIdx + pdest` 等待整数 writeback 的 helper，用于 AMO 返回值校验
+- `sequences/atomic_sequences.py`
+  - 新增 `AtomicSequence`，统一封装 AMO 发射、旧值写回校验和后续 load 验证
+- `tests/test_MemBlock_amo.py`
+  - 新增 `amoadd.w` / `amoswap.d` / `amoxor.w` real-DUT directed smoke
+- `tests/test_request_apis_backend_facade.py` / `tests/test_issue_agent.py`
+  - 补齐 atomic wrapper、prepare/send 绑定和 issue 驱动单测
+
+#### 验证情况
+
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_issue_agent.py`
+  - 结果：`8 passed`
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：`45 passed`
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_amo.py`
+  - 结果：`3 xfailed`
+  - 说明：当前 standalone `intIssue` AMO 驱动在真实 DUT 上仍未产生下游 TL/writeback 活动；用例按“`dcache_a_request_count == 0 && writeback_events == 0`”定向记录该 contract gap，而不是误报通过
+
+
 ## 2026-04-28
 
 ### 1. 补齐标量 `STA` backend 反馈闭环，新增 `staIqFeedback + deqPtr` 半模型与自动重发

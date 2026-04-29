@@ -3,6 +3,10 @@
 MemBlock reusable test sequences.
 """
 
+from .atomic_sequences import (
+    AtomicSequence,
+    AtomicSequenceResult,
+)
 from .memblock_sequences import (
     CboFlushSequence,
     CboFlushSequenceResult,

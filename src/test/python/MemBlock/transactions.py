@@ -14,6 +14,15 @@ SCALAR_STORE_MASK_TO_SIZE_BYTES = {
     0xFF: 8,
 }
 SCALAR_STORE_OPCODE = "scalar"
+ATOMIC_SWAP_OPCODE = "amoswap"
+ATOMIC_ADD_OPCODE = "amoadd"
+ATOMIC_XOR_OPCODE = "amoxor"
+ATOMIC_AND_OPCODE = "amoand"
+ATOMIC_OR_OPCODE = "amoor"
+ATOMIC_MIN_OPCODE = "amomin"
+ATOMIC_MAX_OPCODE = "amomax"
+ATOMIC_MINU_OPCODE = "amominu"
+ATOMIC_MAXU_OPCODE = "amomaxu"
 CBO_CLEAN_STORE_OPCODE = "cbo_clean"
 CBO_FLUSH_STORE_OPCODE = "cbo_flush"
 CBO_INVAL_STORE_OPCODE = "cbo_inval"
@@ -28,6 +37,17 @@ CBO_STORE_OPCODES = (
     CBO_FLUSH_STORE_OPCODE,
     CBO_INVAL_STORE_OPCODE,
     CBO_ZERO_STORE_OPCODE,
+)
+ATOMIC_OPCODES = (
+    ATOMIC_SWAP_OPCODE,
+    ATOMIC_ADD_OPCODE,
+    ATOMIC_XOR_OPCODE,
+    ATOMIC_AND_OPCODE,
+    ATOMIC_OR_OPCODE,
+    ATOMIC_MIN_OPCODE,
+    ATOMIC_MAX_OPCODE,
+    ATOMIC_MINU_OPCODE,
+    ATOMIC_MAXU_OPCODE,
 )
 SCALAR_STORE_SIZE_BYTES_TO_FU_OP_TYPE = {
     1: 0x0,
@@ -55,8 +75,31 @@ VECTOR_OPCODE_CLASS_TO_STORE_FU_OP_TYPE = {
     "unit_stride": 0b10_00_00000,
     "stride": 0b10_10_00000,
 }
+ATOMIC_OPCODE_TO_FU_OP_TYPE = {
+    (ATOMIC_SWAP_OPCODE, 4): 0b00_1010,
+    (ATOMIC_ADD_OPCODE, 4): 0b00_1110,
+    (ATOMIC_XOR_OPCODE, 4): 0b01_0010,
+    (ATOMIC_AND_OPCODE, 4): 0b01_0110,
+    (ATOMIC_OR_OPCODE, 4): 0b01_1010,
+    (ATOMIC_MIN_OPCODE, 4): 0b01_1110,
+    (ATOMIC_MAX_OPCODE, 4): 0b10_0010,
+    (ATOMIC_MINU_OPCODE, 4): 0b10_0110,
+    (ATOMIC_MAXU_OPCODE, 4): 0b10_1010,
+    (ATOMIC_SWAP_OPCODE, 8): 0b00_1011,
+    (ATOMIC_ADD_OPCODE, 8): 0b00_1111,
+    (ATOMIC_XOR_OPCODE, 8): 0b01_0011,
+    (ATOMIC_AND_OPCODE, 8): 0b01_0111,
+    (ATOMIC_OR_OPCODE, 8): 0b01_1011,
+    (ATOMIC_MIN_OPCODE, 8): 0b01_1111,
+    (ATOMIC_MAX_OPCODE, 8): 0b10_0011,
+    (ATOMIC_MINU_OPCODE, 8): 0b10_0111,
+    (ATOMIC_MAXU_OPCODE, 8): 0b10_1011,
+}
 
 # Match the one-hot ordering in `backend/fu/FuType.scala`.
+FU_TYPE_LDU = 1 << 16
+FU_TYPE_STU = 1 << 17
+FU_TYPE_MOU = 1 << 18
 FU_TYPE_VLDU = 1 << 31
 FU_TYPE_VSTU = 1 << 32
 
@@ -145,6 +188,83 @@ def vector_fu_op_type(*, is_load: bool, opcode_class: str) -> int:
 
 def vector_fu_type(*, is_load: bool) -> int:
     return FU_TYPE_VLDU if is_load else FU_TYPE_VSTU
+
+
+def atomic_mask_from_size(size: int) -> int:
+    if int(size) not in (4, 8):
+        raise ValueError(f"unsupported atomic size: {size!r}")
+    return (1 << int(size)) - 1
+
+
+def normalized_atomic_opcode(opcode: str) -> str:
+    normalized = str(opcode)
+    if normalized not in ATOMIC_OPCODES:
+        raise ValueError(
+            f"unsupported atomic opcode: {opcode!r}; "
+            f"expected one of {list(ATOMIC_OPCODES)}"
+        )
+    return normalized
+
+
+def atomic_fu_op_type(*, opcode: str, size: int) -> int:
+    normalized_opcode = normalized_atomic_opcode(opcode)
+    normalized_size = int(size)
+    try:
+        return ATOMIC_OPCODE_TO_FU_OP_TYPE[(normalized_opcode, normalized_size)]
+    except KeyError as exc:
+        raise ValueError(f"unsupported atomic opcode/size pair: opcode={opcode!r}, size={size!r}") from exc
+
+
+def _sign_extend(value: int, width_bits: int, *, result_bits: int = 64) -> int:
+    mask = (1 << int(width_bits)) - 1
+    normalized = int(value) & mask
+    sign_bit = 1 << (int(width_bits) - 1)
+    if normalized & sign_bit:
+        normalized |= ((1 << int(result_bits)) - 1) ^ mask
+    return normalized & ((1 << int(result_bits)) - 1)
+
+
+def atomic_return_value(*, size: int, old_value: int) -> int:
+    normalized_size = int(size)
+    normalized_old_value = int(old_value) & ((1 << (normalized_size * 8)) - 1)
+    if normalized_size == 4:
+        return _sign_extend(normalized_old_value, 32)
+    if normalized_size == 8:
+        return normalized_old_value & ((1 << 64) - 1)
+    raise ValueError(f"unsupported atomic size: {size!r}")
+
+
+def atomic_committed_value(*, opcode: str, size: int, old_value: int, operand: int) -> int:
+    normalized_opcode = normalized_atomic_opcode(opcode)
+    normalized_size = int(size)
+    if normalized_size not in (4, 8):
+        raise ValueError(f"unsupported atomic size: {size!r}")
+
+    mask = (1 << (normalized_size * 8)) - 1
+    lhs = int(old_value) & mask
+    rhs = int(operand) & mask
+
+    if normalized_opcode == ATOMIC_SWAP_OPCODE:
+        result = rhs
+    elif normalized_opcode == ATOMIC_ADD_OPCODE:
+        result = lhs + rhs
+    elif normalized_opcode == ATOMIC_XOR_OPCODE:
+        result = lhs ^ rhs
+    elif normalized_opcode == ATOMIC_AND_OPCODE:
+        result = lhs & rhs
+    elif normalized_opcode == ATOMIC_OR_OPCODE:
+        result = lhs | rhs
+    elif normalized_opcode == ATOMIC_MIN_OPCODE:
+        result = lhs if _sign_extend(lhs, normalized_size * 8) <= _sign_extend(rhs, normalized_size * 8) else rhs
+    elif normalized_opcode == ATOMIC_MAX_OPCODE:
+        result = lhs if _sign_extend(lhs, normalized_size * 8) >= _sign_extend(rhs, normalized_size * 8) else rhs
+    elif normalized_opcode == ATOMIC_MINU_OPCODE:
+        result = lhs if lhs <= rhs else rhs
+    elif normalized_opcode == ATOMIC_MAXU_OPCODE:
+        result = lhs if lhs >= rhs else rhs
+    else:
+        raise ValueError(f"unsupported atomic opcode: {opcode!r}")
+    return result & mask
 
 
 def legacy_rob_idx_flag(req_id: int) -> int:
@@ -654,6 +774,150 @@ class StoreTxn:
 
 
 @dataclass
+class AtomicTxn:
+    """Single-uop AMO transaction driven through `STA + STD + AtomicsUnit`."""
+
+    req_id: int
+    sq_ptr: QueuePtr
+    addr: int
+    operand: int
+    opcode: Literal[
+        "amoswap",
+        "amoadd",
+        "amoxor",
+        "amoand",
+        "amoor",
+        "amomin",
+        "amomax",
+        "amominu",
+        "amomaxu",
+    ]
+    size: int = 8
+    pdest: int | None = None
+    sta_lane: int = 3
+    std_lane: int = 5
+    rob_ref: RobRef | None = None
+    rob_idx_override_flag: int | None = None
+    rob_idx_override_value: int | None = None
+    ftq_idx_flag: int | None = None
+    ftq_idx_value: int | None = None
+    pc: int | None = None
+    assigned_rob_idx_flag: int | None = field(default=None, repr=False, compare=False)
+    assigned_rob_idx_value: int | None = field(default=None, repr=False, compare=False)
+    assigned_pdest: int | None = field(default=None, repr=False, compare=False)
+    assigned_ftq_idx_flag: int | None = field(default=None, repr=False, compare=False)
+    assigned_ftq_idx_value: int | None = field(default=None, repr=False, compare=False)
+    assigned_pc: int | None = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        normalized_atomic_opcode(self.opcode)
+        atomic_fu_op_type(opcode=self.opcode, size=self.size)
+        if int(self.addr) % int(self.size) != 0:
+            raise ValueError(f"atomic address must be {self.size}-byte aligned: addr=0x{int(self.addr):x}")
+
+    @property
+    def rob_idx_override(self) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx_flag=self.rob_idx_override_flag,
+            rob_idx_value=self.rob_idx_override_value,
+        )
+
+    @rob_idx_override.setter
+    def rob_idx_override(self, rob_idx: RobIndex | None) -> None:
+        normalized = make_rob_index(rob_idx=rob_idx)
+        self.rob_idx_override_flag = None if normalized is None else int(normalized.flag)
+        self.rob_idx_override_value = None if normalized is None else int(normalized.value)
+
+    @property
+    def assigned_rob_idx(self) -> RobIndex | None:
+        return make_rob_index(
+            rob_idx_flag=self.assigned_rob_idx_flag,
+            rob_idx_value=self.assigned_rob_idx_value,
+        )
+
+    @assigned_rob_idx.setter
+    def assigned_rob_idx(self, rob_idx: RobIndex | None) -> None:
+        normalized = make_rob_index(rob_idx=rob_idx)
+        self.assigned_rob_idx_flag = None if normalized is None else int(normalized.flag)
+        self.assigned_rob_idx_value = None if normalized is None else int(normalized.value)
+
+    @property
+    def rob_idx(self) -> RobIndex:
+        assigned = self.assigned_rob_idx
+        if assigned is not None:
+            return assigned
+        override = self.rob_idx_override
+        if override is not None:
+            return override
+        _missing_runtime_binding(self, "rob_idx", remedy="call env.backend.prepare_atomic()/send_atomic(), or set rob_idx_override")
+
+    @property
+    def rob_idx_flag(self) -> int:
+        return int(self.rob_idx.flag)
+
+    @property
+    def rob_idx_value(self) -> int:
+        return int(self.rob_idx.value)
+
+    @property
+    def resolved_pdest(self) -> int:
+        if self.assigned_pdest is not None:
+            return int(self.assigned_pdest)
+        if self.pdest is not None:
+            return int(self.pdest)
+        _missing_runtime_binding(self, "resolved_pdest", remedy="call env.backend.prepare_atomic()/send_atomic(), or set pdest")
+
+    @property
+    def resolved_ftq_idx_flag(self) -> int:
+        if self.assigned_ftq_idx_flag is not None:
+            return int(self.assigned_ftq_idx_flag)
+        if self.ftq_idx_flag is not None:
+            return int(self.ftq_idx_flag)
+        if self.assigned_ftq_idx_value is not None or self.ftq_idx_value is not None:
+            return 0
+        _missing_runtime_binding(self, "resolved_ftq_idx_flag", remedy="call env.backend.prepare_atomic()/send_atomic(), or set ftq_idx_flag/ftq_idx_value")
+
+    @property
+    def resolved_ftq_idx_value(self) -> int:
+        if self.assigned_ftq_idx_value is not None:
+            return int(self.assigned_ftq_idx_value)
+        if self.ftq_idx_value is not None:
+            return int(self.ftq_idx_value)
+        _missing_runtime_binding(self, "resolved_ftq_idx_value", remedy="call env.backend.prepare_atomic()/send_atomic(), or set ftq_idx_value")
+
+    @property
+    def resolved_pc(self) -> int:
+        if self.assigned_pc is not None:
+            return int(self.assigned_pc)
+        if self.pc is not None:
+            return int(self.pc)
+        _missing_runtime_binding(self, "resolved_pc", remedy="call env.backend.prepare_atomic()/send_atomic(), or set pc")
+
+    @property
+    def fu_type(self) -> int:
+        return FU_TYPE_MOU
+
+    @property
+    def fu_op_type(self) -> int:
+        return atomic_fu_op_type(opcode=self.opcode, size=self.size)
+
+    @property
+    def store_mask(self) -> int:
+        return atomic_mask_from_size(self.size)
+
+    def predict_return_value(self, old_value: int) -> int:
+        return atomic_return_value(size=self.size, old_value=old_value)
+
+    def predict_committed_value(self, old_value: int) -> int:
+        return atomic_committed_value(
+            opcode=self.opcode,
+            size=self.size,
+            old_value=old_value,
+            operand=self.operand,
+        )
+
+
+@dataclass
 class VectorMemTxn:
     """Vector memory transaction carried through enqueue + vecIssue."""
 
@@ -1020,7 +1284,9 @@ class IssueOp:
     ftq_idx_flag: int | None = None
     ftq_idx_value: int | None = None
     pc: int | None = None
-    txn: LoadTxn | StoreTxn | None = field(default=None, repr=False, compare=False)
+    txn: LoadTxn | StoreTxn | AtomicTxn | None = field(default=None, repr=False, compare=False)
+    fu_type_override: int | None = None
+    fu_op_type_override: int | None = None
 
     def __post_init__(self) -> None:
         if self.kind not in {"load", "sta", "std"}:
@@ -1035,11 +1301,13 @@ class IssueOp:
         elif self.kind == "sta":
             if self.addr is None:
                 raise ValueError("STA issue op requires `addr`")
-            store_fu_op_type(opcode=self.store_opcode, mask=self.mask)
+            if self.fu_op_type_override is None:
+                store_fu_op_type(opcode=self.store_opcode, mask=self.mask)
         elif self.kind == "std":
             if self.data is None:
                 raise ValueError("STD issue op requires `data`")
-            store_fu_op_type(opcode=self.store_opcode, mask=self.mask)
+            if self.fu_op_type_override is None:
+                store_fu_op_type(opcode=self.store_opcode, mask=self.mask)
         if self.kind != "load" and int(self.fp_wen) != 0:
             raise ValueError("only load issue ops may set fp_wen")
 
@@ -1144,6 +1412,46 @@ class IssueOp:
             ftq_idx_flag=ftq_idx_flag,
             ftq_idx_value=ftq_idx_value,
             txn=txn,
+        )
+
+    @classmethod
+    def atomic_sta(cls, txn: AtomicTxn) -> "IssueOp":
+        return cls(
+            kind="sta",
+            req_id=txn.req_id,
+            lane=txn.sta_lane,
+            sq_ptr=txn.sq_ptr,
+            addr=txn.addr,
+            mask=txn.store_mask,
+            rob_ref=txn.rob_ref,
+            rob_idx_flag=None if txn.assigned_rob_idx is None else txn.assigned_rob_idx.flag,
+            rob_idx_value=None if txn.assigned_rob_idx is None else txn.assigned_rob_idx.value,
+            pdest=txn.resolved_pdest,
+            ftq_idx_flag=txn.resolved_ftq_idx_flag,
+            ftq_idx_value=txn.resolved_ftq_idx_value,
+            pc=txn.resolved_pc,
+            txn=txn,
+            fu_type_override=txn.fu_type,
+            fu_op_type_override=txn.fu_op_type,
+        )
+
+    @classmethod
+    def atomic_std(cls, txn: AtomicTxn) -> "IssueOp":
+        return cls(
+            kind="std",
+            req_id=txn.req_id,
+            lane=txn.std_lane,
+            sq_ptr=txn.sq_ptr,
+            data=txn.operand,
+            mask=txn.store_mask,
+            rob_ref=txn.rob_ref,
+            rob_idx_flag=None if txn.assigned_rob_idx is None else txn.assigned_rob_idx.flag,
+            rob_idx_value=None if txn.assigned_rob_idx is None else txn.assigned_rob_idx.value,
+            ftq_idx_flag=txn.resolved_ftq_idx_flag,
+            ftq_idx_value=txn.resolved_ftq_idx_value,
+            txn=txn,
+            fu_type_override=txn.fu_type,
+            fu_op_type_override=txn.fu_op_type,
         )
 
     @classmethod
@@ -1271,6 +1579,22 @@ class IssueOp:
     @property
     def store_fu_op_type(self) -> int:
         return store_fu_op_type(opcode=self.store_opcode, mask=self.mask)
+
+    @property
+    def issue_fu_type(self) -> int:
+        if self.fu_type_override is not None:
+            return int(self.fu_type_override)
+        if self.kind == "load":
+            return FU_TYPE_LDU
+        return FU_TYPE_STU
+
+    @property
+    def issue_fu_op_type(self) -> int:
+        if self.fu_op_type_override is not None:
+            return int(self.fu_op_type_override)
+        if self.kind == "load":
+            return self.load_fu_op_type
+        return self.store_fu_op_type
 
     @property
     def load_fu_op_type(self) -> int:

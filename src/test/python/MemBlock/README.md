@@ -9,6 +9,7 @@
 - load 在线 compare 采用 commit-boundary 语义。
 - store 采用 deferred visibility，测试结束时统一 flush/drain 收口。
 - backend 请求模型已支持通过 `StoreTxn.mask` 表达连续字节宽度的 scalar partial-store。
+- backend/env 已支持 single-uop AMO 事务建模与 smoke 用例；当前 real-DUT case 会在无下游活动时定向 `xfail` 记录 standalone `intIssue` contract gap。
 - 已具备 cacheable load/store、store->load ordering、RAW/RAR/FF/DM/NC 等基础 replay 场景。
 - 已接入 toffee 官方 function coverage 与 DUT line coverage 报告链路。
 

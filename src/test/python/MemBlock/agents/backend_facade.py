@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from agents.issue_agent import _set_optional_signal
 
 from transactions import (
+    AtomicTxn,
     BackendPreparedPlan,
     BackendSendPlan,
     BackendSendResult,
@@ -236,8 +237,7 @@ class _BackendReplayCreditModel:
         lane = int(entry.lane)
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
-        issue.valid.value = 1
-        issue.bits_fuOpType.value = IssueOp.sta(
+        replay_op = IssueOp.sta(
             req_id=0 if entry.req_id is None else entry.req_id,
             sq_ptr=entry.sq_ptr,
             addr=entry.addr,
@@ -247,12 +247,17 @@ class _BackendReplayCreditModel:
             rob_idx=entry.rob_idx,
             ftq_idx_flag=entry.ftq_idx_flag,
             ftq_idx_value=entry.ftq_idx_value,
-        ).store_fu_op_type
+        )
+        issue.valid.value = 1
+        if hasattr(issue, "bits_fuType"):
+            issue.bits_fuType.value = replay_op.issue_fu_type
+        issue.bits_fuOpType.value = replay_op.store_fu_op_type
         issue.bits_src_0.value = int(entry.addr)
         issue.bits_robIdx_flag.value = int(entry.rob_idx.flag)
         issue.bits_robIdx_value.value = int(entry.rob_idx.value)
         issue.bits_sqIdx_flag.value = int(entry.sq_ptr.flag)
         issue.bits_sqIdx_value.value = int(entry.sq_ptr.value)
+        _set_optional_signal(self.env.dut, f"{prefix}fuType", replay_op.issue_fu_type)
         _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
         _set_optional_signal(self.env.dut, f"{prefix}isFirstIssue", 0)
         _set_optional_signal(self.env.dut, f"{prefix}pdest", 0)
@@ -267,6 +272,7 @@ class _BackendReplayCreditModel:
 
     def _clear_sta_optional_fields(self, lane: int) -> None:
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
+        _set_optional_signal(self.env.dut, f"{prefix}fuType", 0)
         _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
         _set_optional_signal(self.env.dut, f"{prefix}isFirstIssue", 0)
         _set_optional_signal(self.env.dut, f"{prefix}pdest", 0)
@@ -637,6 +643,15 @@ class BackendFacade:
                 txn.assigned_ftq_idx_flag = 0
             if txn.ftq_idx_value is None:
                 txn.assigned_ftq_idx_value = self._default_ftq_idx(rob_idx)[1]
+        elif isinstance(txn, AtomicTxn):
+            if txn.pdest is None:
+                txn.assigned_pdest = self._default_scalar_pdest(rob_idx)
+            if txn.ftq_idx_flag is None:
+                txn.assigned_ftq_idx_flag = 0
+            if txn.ftq_idx_value is None:
+                txn.assigned_ftq_idx_value = self._default_ftq_idx(rob_idx)[1]
+            if txn.pc is None:
+                txn.assigned_pc = self._default_pc(rob_idx)
         elif isinstance(txn, VectorMemTxn):
             if txn.pdest is None:
                 txn.assigned_pdest = self._default_vector_pdest(rob_idx)
@@ -652,7 +667,7 @@ class BackendFacade:
         override = getattr(owner, "rob_idx_override", None)
         if override is not None:
             return RobIndex(flag=int(override.flag), value=int(override.value))
-        if isinstance(owner, (LoadTxn, StoreTxn, VectorMemTxn)):
+        if isinstance(owner, (LoadTxn, StoreTxn, AtomicTxn, VectorMemTxn)):
             return None
         return make_rob_index(
             rob_idx=getattr(owner, "rob_idx", None),
@@ -693,6 +708,12 @@ class BackendFacade:
         )
         self._bind_txn_runtime(target, rob_idx)
         return rob_idx
+
+    def _ensure_atomic_runtime_bound(self, txn: AtomicTxn) -> None:
+        rob_idx = self._explicit_rob_idx(txn)
+        if rob_idx is None:
+            rob_idx = self._allocate_rob_idx()
+        self._bind_txn_runtime(txn, rob_idx)
 
     def _prepare_issue_op(self, op: IssueOp, *, key_robs: dict, req_id_robs: dict[int, RobIndex], ref_robs: dict[RobRef, RobIndex]) -> IssueOp:
         key = self._rob_key(req_id=op.req_id, rob_ref=op.rob_ref)
@@ -888,6 +909,18 @@ class BackendFacade:
             )
             self._bind_txn_runtime(request, prepared.rob_idx_of(request))
             return prepared
+        if isinstance(request, AtomicTxn):
+            self._ensure_atomic_runtime_bound(request)
+            prepared = self._prepare_plan(
+                BackendSendPlan.from_steps(
+                    IssueCyclePlan.from_ops(
+                        IssueOp.atomic_sta(request),
+                        IssueOp.atomic_std(request),
+                    )
+                )
+            )
+            self._bind_txn_runtime(request, prepared.rob_idx_of(request))
+            return prepared
         if isinstance(request, VectorMemTxn):
             if not hasattr(self.env, "vector_backend"):
                 raise RuntimeError("vector backend facade is not attached to env")
@@ -1003,6 +1036,9 @@ class BackendFacade:
                     opcode=request.opcode,
                 )
             return allocated_sq_ptr
+        if isinstance(request, AtomicTxn):
+            self.execute(self.prepare(request))
+            return None
         raise TypeError(f"unsupported backend send request: {type(request)!r}")
 
     def send_many(self, requests):
@@ -1010,6 +1046,8 @@ class BackendFacade:
 
     def _note_issue_cycle_store_progress(self, plan: IssueCyclePlan) -> None:
         for op in plan.ops:
+            if isinstance(op.txn, AtomicTxn):
+                continue
             if not isinstance(op.sq_ptr, QueuePtr):
                 raise TypeError(f"unresolved SQ pointer in issue cycle: {op.sq_ptr!r}")
             if op.kind == "sta":
@@ -1290,6 +1328,38 @@ class BackendFacade:
             ftq_idx_flag=ftq_idx_flag,
             ftq_idx_value=ftq_idx_value,
         )
+
+    def prepare_atomic(self, txn: AtomicTxn) -> BackendPreparedPlan:
+        return self.prepare(txn)
+
+    def issue_atomic_sta(self, txn: AtomicTxn) -> None:
+        self._ensure_atomic_runtime_bound(txn)
+        self.issue.issue_cycle(
+            IssueCyclePlan.from_ops(
+                self._prepare_issue_op(
+                    IssueOp.atomic_sta(txn),
+                    key_robs={},
+                    req_id_robs={},
+                    ref_robs={},
+                )
+            )
+        )
+
+    def issue_atomic_std(self, txn: AtomicTxn) -> None:
+        self._ensure_atomic_runtime_bound(txn)
+        self.issue.issue_cycle(
+            IssueCyclePlan.from_ops(
+                self._prepare_issue_op(
+                    IssueOp.atomic_std(txn),
+                    key_robs={},
+                    req_id_robs={},
+                    ref_robs={},
+                )
+            )
+        )
+
+    def send_atomic(self, txn: AtomicTxn) -> None:
+        self.send(txn)
 
     def send_load(self, txn: LoadTxn) -> None:
         self.send(txn)

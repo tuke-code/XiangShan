@@ -15,6 +15,11 @@
 
 历史定向 campaign 和 focused snapshot 仍然保留，但它们的定位是解释“某一轮定向补强打到了哪里”，而不是覆盖当前 full 主报告中的所有事实。文中若继续引用 `StoreMisalignBuffer.sv`，默认应理解为历史 misalign 功能簇标签；当前 full 主报告已经不再提供该独立模块统计，后续应更多按行为 gap 而不是旧模块名理解该项待办。
 
+当前 atomic/AMO 口径补充说明：
+
+- single-uop AMO smoke 已补入 `amoadd/amoswap/amoxor`；当前 real-DUT 用例会在 `dcache_a_request_count == 0 && writeback_events == 0` 时定向 `xfail`，记录 standalone `intIssue` contract gap
+- 剩余 atomic gap 主要收敛到 LR/SC、AMOCAS 和更深 atomic replay/exception 语义
+
 ## 2. 优先级说明
 
 - `P0`：当前最该补，直接影响标量 ld/st 验证深度

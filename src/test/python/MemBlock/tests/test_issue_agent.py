@@ -6,7 +6,7 @@ IssueAgent 单元测试。
 import asyncio
 
 from agents.issue_agent import IssueAgent
-from transactions import IssueCyclePlan, IssueOp, QueuePtr, RobIndex
+from transactions import AtomicTxn, IssueCyclePlan, IssueOp, QueuePtr, RobIndex
 
 
 class _FakeSignal:
@@ -18,6 +18,7 @@ class _FakeIssueBundle:
     def __init__(self, ready: int = 1) -> None:
         self.ready = _FakeSignal(ready)
         self.valid = _FakeSignal(0)
+        self.bits_fuType = _FakeSignal(0)
         self.bits_fuOpType = _FakeSignal(0)
         self.bits_src_0 = _FakeSignal(0)
         self.bits_robIdx_flag = _FakeSignal(0)
@@ -27,6 +28,7 @@ class _FakeIssueBundle:
 
     def drive_idle(self) -> None:
         self.valid.value = 0
+        self.bits_fuType.value = 0
         self.bits_fuOpType.value = 0
         self.bits_src_0.value = 0
         self.bits_robIdx_flag.value = 0
@@ -366,3 +368,40 @@ def test_api_issue_agent_integer_load_drives_size_specific_fu_op():
     assert env.issue[0].bits_fuOpType.value == 0x1
     assert getattr(env.dut, f"{prefix}rfWen").value == 1
     assert getattr(env.dut, f"{prefix}fpWen").value == 0
+
+
+def test_api_issue_agent_drives_atomic_fu_type_and_sta_pdest():
+    env = _FakeIssueEnv({3: [1], 5: [1]})
+    sta_prefix = "io_ooo_to_mem_intIssue_3_0_bits_"
+    std_prefix = "io_ooo_to_mem_intIssue_5_0_bits_"
+    setattr(env.dut, f"{sta_prefix}fuType", _FakeSignal(0))
+    setattr(env.dut, f"{sta_prefix}pdest", _FakeSignal(0))
+    setattr(env.dut, f"{sta_prefix}rfWen", _FakeSignal(0))
+    setattr(env.dut, f"{sta_prefix}ftqIdx_flag", _FakeSignal(0))
+    setattr(env.dut, f"{sta_prefix}ftqIdx_value", _FakeSignal(0))
+    setattr(env.dut, f"{std_prefix}fuType", _FakeSignal(0))
+    agent = IssueAgent(env)
+    txn = AtomicTxn(
+        req_id=0x71,
+        sq_ptr=QueuePtr(flag=0, value=3),
+        addr=0x8000,
+        operand=0x55,
+        opcode="amoadd",
+        pdest=9,
+    )
+    txn.assigned_rob_idx = RobIndex(flag=0, value=7)
+    txn.assigned_ftq_idx_flag = 0
+    txn.assigned_ftq_idx_value = 5
+    txn.assigned_pc = 0x80000020
+
+    agent.issue_cycle(
+        IssueCyclePlan.from_ops(
+            IssueOp.atomic_sta(txn),
+            IssueOp.atomic_std(txn),
+        )
+    )
+
+    assert getattr(env.dut, f"{sta_prefix}fuType").value == txn.fu_type
+    assert getattr(env.dut, f"{sta_prefix}pdest").value == txn.resolved_pdest
+    assert getattr(env.dut, f"{sta_prefix}rfWen").value == 1
+    assert getattr(env.dut, f"{std_prefix}fuType").value == txn.fu_type

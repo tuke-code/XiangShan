@@ -74,13 +74,17 @@ class IssueAgent:
         lane: int,
     ) -> None:
         issue = self.env.issue[lane]
+        prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        issue.bits_fuOpType.value = op.store_fu_op_type
+        if hasattr(issue, "bits_fuType"):
+            issue.bits_fuType.value = op.issue_fu_type
+        issue.bits_fuOpType.value = op.issue_fu_op_type
         issue.bits_src_0.value = data
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
         issue.bits_robIdx_value.value = op.resolved_rob_idx_value
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
+        _set_optional_signal(self.env.dut, f"{prefix}fuType", op.issue_fu_type)
 
     def _drive_issue_op(self, op: IssueOp) -> None:
         if op.kind == "load":
@@ -134,13 +138,16 @@ class IssueAgent:
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        issue.bits_fuOpType.value = op.load_fu_op_type
+        if hasattr(issue, "bits_fuType"):
+            issue.bits_fuType.value = op.issue_fu_type
+        issue.bits_fuOpType.value = op.issue_fu_op_type
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
         issue.bits_robIdx_value.value = op.resolved_rob_idx_value
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
 
+        _set_optional_signal(self.env.dut, f"{prefix}fuType", op.issue_fu_type)
         _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
         _set_optional_signal(self.env.dut, f"{prefix}pdest", op.resolved_pdest)
         _set_optional_signal(self.env.dut, f"{prefix}rfWen", 0 if int(op.fp_wen) else 1)
@@ -176,18 +183,23 @@ class IssueAgent:
     ) -> None:
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
+        rf_wen = 1 if op.pdest is not None else 0
+        pdest = 0 if op.pdest is None else op.resolved_pdest
         issue.valid.value = 1
-        issue.bits_fuOpType.value = op.store_fu_op_type
+        if hasattr(issue, "bits_fuType"):
+            issue.bits_fuType.value = op.issue_fu_type
+        issue.bits_fuOpType.value = op.issue_fu_op_type
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
         issue.bits_robIdx_value.value = op.resolved_rob_idx_value
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
 
+        _set_optional_signal(self.env.dut, f"{prefix}fuType", op.issue_fu_type)
         _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
         _set_optional_signal(self.env.dut, f"{prefix}isFirstIssue", 1)
-        _set_optional_signal(self.env.dut, f"{prefix}pdest", 0)
-        _set_optional_signal(self.env.dut, f"{prefix}rfWen", 0)
+        _set_optional_signal(self.env.dut, f"{prefix}pdest", pdest)
+        _set_optional_signal(self.env.dut, f"{prefix}rfWen", rf_wen)
         _set_optional_signal(self.env.dut, f"{prefix}isRVC", 0)
         _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_flag", op.resolved_ftq_idx_flag)
         _set_optional_signal(self.env.dut, f"{prefix}ftqIdx_value", op.resolved_ftq_idx_value)

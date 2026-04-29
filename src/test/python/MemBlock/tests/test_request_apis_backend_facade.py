@@ -9,6 +9,7 @@ import pytest
 
 from agents.backend_facade import BackendFacade
 from transactions import (
+    AtomicTxn,
     BackendSendPlan,
     CBO_CLEAN_STORE_OPCODE,
     CBO_FLUSH_STORE_OPCODE,
@@ -42,9 +43,12 @@ from transactions import (
 from request_apis import (
     enqueue_scalar_load,
     enqueue_scalar_store,
+    issue_atomic_sta,
+    issue_atomic_std,
     issue_scalar_load,
     issue_scalar_sta,
     issue_scalar_std,
+    send_atomic,
     send_cbo,
     send_cbo_zero,
     send_load,
@@ -97,12 +101,21 @@ class _FakeBackend:
     def issue_scalar_sta(self, req_id, sq_ptr, addr, lane: int = 3, mask: int = 0xFF, **kwargs) -> None:
         self.calls.append(("issue_scalar_sta", req_id, sq_ptr, addr, lane, mask, kwargs))
 
+    def issue_atomic_sta(self, txn) -> None:
+        self.calls.append(("issue_atomic_sta", txn))
+
+    def issue_atomic_std(self, txn) -> None:
+        self.calls.append(("issue_atomic_std", txn))
+
     def send_load(self, txn) -> None:
         self.calls.append(("send_load", txn))
 
     def send_store(self, txn):
         self.calls.append(("send_store", txn))
         return QueuePtr(flag=1, value=9)
+
+    def send_atomic(self, txn):
+        self.calls.append(("send_atomic", txn))
 
     def send(self, txn):
         self.calls.append(("send", txn))
@@ -183,6 +196,7 @@ class _FakeIssueBundle:
     def __init__(self, ready: int = 1) -> None:
         self.ready = _FakeSignal(ready)
         self.valid = _FakeSignal(0)
+        self.bits_fuType = _FakeSignal(0)
         self.bits_fuOpType = _FakeSignal(0)
         self.bits_src_0 = _FakeSignal(0)
         self.bits_robIdx_flag = _FakeSignal(0)
@@ -192,6 +206,7 @@ class _FakeIssueBundle:
 
     def drive_idle(self) -> None:
         self.valid.value = 0
+        self.bits_fuType.value = 0
         self.bits_fuOpType.value = 0
         self.bits_src_0.value = 0
         self.bits_robIdx_flag.value = 0
@@ -372,6 +387,13 @@ def test_api_request_apis_enqueue_and_issue_delegate_to_backend():
     env = _FakeEnv()
     lq_ptr = QueuePtr(flag=0, value=2)
     sq_ptr = QueuePtr(flag=1, value=3)
+    atomic_txn = AtomicTxn(
+        req_id=10,
+        sq_ptr=sq_ptr,
+        addr=0x4000,
+        operand=0x55AA,
+        opcode="amoadd",
+    )
 
     wait_lsq_load_enq_ready(env, max_cycles=19)
     wait_lsq_store_enq_ready(env, max_cycles=21)
@@ -380,6 +402,8 @@ def test_api_request_apis_enqueue_and_issue_delegate_to_backend():
     issue_scalar_load(env, req_id=7, addr=0x1000, lq_ptr=lq_ptr, sq_ptr=sq_ptr, lane=4)
     issue_scalar_std(env, req_id=8, sq_ptr=sq_ptr, data=0x55, lane=6, mask=0x0F)
     issue_scalar_sta(env, req_id=9, sq_ptr=sq_ptr, addr=0x2000, lane=3, mask=0x03)
+    issue_atomic_sta(env, atomic_txn)
+    issue_atomic_std(env, atomic_txn)
 
     assert returned_sq_ptr == QueuePtr(flag=0, value=4)
     assert env.backend.calls[0] == ("wait_load_enq_ready", 19)
@@ -416,6 +440,8 @@ def test_api_request_apis_enqueue_and_issue_delegate_to_backend():
             "ftq_idx_value": None,
         },
     )
+    assert env.backend.calls[7] == ("issue_atomic_sta", atomic_txn)
+    assert env.backend.calls[8] == ("issue_atomic_std", atomic_txn)
 
 
 def test_api_request_apis_issue_scalar_load_forwards_size():
@@ -570,14 +596,23 @@ def test_api_request_apis_send_txns_delegate_to_backend():
         sq_ptr=QueuePtr(flag=0, value=7),
         addr=0x4040,
     )
+    atomic_txn = AtomicTxn(
+        req_id=0x24,
+        sq_ptr=QueuePtr(flag=0, value=5),
+        addr=0x5000,
+        operand=0x1234,
+        opcode="amoxor",
+    )
 
     send_load(env, load_txn)
     result = send_store(env, store_txn)
     cbo_result = send_cbo_zero(env, cbo_txn)
+    send_atomic(env, atomic_txn)
 
     assert env.backend.calls[0] == ("send", load_txn)
     assert env.backend.calls[1] == ("send", store_txn)
     assert env.backend.calls[2] == ("send", cbo_txn)
+    assert env.backend.calls[3] == ("send_atomic", atomic_txn)
     assert result == QueuePtr(flag=1, value=11)
     assert cbo_result == QueuePtr(flag=1, value=11)
 
@@ -844,6 +879,23 @@ def test_api_nonzero_cbo_store_txn_uses_cacheline_size_and_cbo_fu_op(
     assert not txn.is_cbo_zero
 
 
+def test_api_atomic_txn_predicts_fu_op_and_results():
+    txn = AtomicTxn(
+        req_id=0x51,
+        sq_ptr=QueuePtr(flag=0, value=2),
+        addr=0x8000,
+        operand=0x20,
+        opcode="amoadd",
+        size=4,
+    )
+
+    assert txn.fu_type == (1 << 18)
+    assert txn.fu_op_type == 0b00_1110
+    assert txn.store_mask == 0x0F
+    assert txn.predict_return_value(0xFFFF_FF80) == 0xFFFF_FFFF_FFFF_FF80
+    assert txn.predict_committed_value(0x10) == 0x30
+
+
 def test_api_issue_op_rejects_non_scalar_store_mask():
     with pytest.raises(ValueError):
         IssueOp.std(req_id=1, sq_ptr=QueuePtr(0, 1), data=0x11, lane=5, mask=0x05)
@@ -999,6 +1051,31 @@ def test_api_backend_facade_prepare_binds_load_txn_before_send():
     assert prepared.rob_idx_of(txn) == prepared.rob_idx_of(txn.req_id)
 
 
+def test_api_backend_facade_prepare_binds_atomic_txn_before_send():
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+    txn = AtomicTxn(
+        req_id=0x52,
+        sq_ptr=QueuePtr(flag=0, value=7),
+        addr=0x9000,
+        operand=0x88,
+        opcode="amoswap",
+    )
+
+    prepared = backend.prepare_atomic(txn)
+
+    assert prepared.rob_idx_of(txn) == txn.rob_idx
+    assert txn.resolved_pdest == backend._default_scalar_pdest(txn.rob_idx)
+    assert txn.resolved_ftq_idx_value == backend._default_ftq_idx(txn.rob_idx)[1]
+    assert txn.resolved_pc == backend._default_pc(txn.rob_idx)
+
+    issue_steps = [step for step in prepared.resolved_plan.steps if isinstance(step, IssueCyclePlan)]
+    assert len(issue_steps) == 1
+    assert tuple(op.kind for op in issue_steps[0].ops) == ("sta", "std")
+    assert all(op.issue_fu_type == txn.fu_type for op in issue_steps[0].ops)
+    assert all(op.issue_fu_op_type == txn.fu_op_type for op in issue_steps[0].ops)
+
+
 def test_api_issue_op_load_from_txn_preserves_fp_wen_and_size():
     txn = LoadTxn(
         req_id=0x61,
@@ -1073,6 +1150,28 @@ def test_api_backend_facade_issue_scalar_load_preserves_fp_contract():
     assert op.fp_wen == 1
     assert op.load_fu_op_type == 0x1
     assert op.resolved_rob_idx == RobIndex(flag=0, value=9)
+
+
+def test_api_backend_facade_send_atomic_issues_same_cycle_without_store_tracking():
+    env = _ReplayFacadeEnv()
+    backend = BackendFacade(env)
+    txn = AtomicTxn(
+        req_id=0x62,
+        sq_ptr=QueuePtr(flag=0, value=9),
+        addr=0xA000,
+        operand=0x99,
+        opcode="amoxor",
+    )
+
+    backend.send_atomic(txn)
+
+    assert len(env.issue_agent.calls) == 1
+    _, plan = env.issue_agent.calls[0]
+    assert tuple(op.kind for op in plan.ops) == ("sta", "std")
+    assert all(op.issue_fu_type == txn.fu_type for op in plan.ops)
+    assert all(op.issue_fu_op_type == txn.fu_op_type for op in plan.ops)
+    assert backend.backend_state()["tracked_stores"] == []
+    assert env.commit_agent.calls == []
 
 
 def test_api_transactions_require_runtime_binding_before_access():

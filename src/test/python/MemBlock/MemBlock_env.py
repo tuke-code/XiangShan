@@ -2221,8 +2221,9 @@ class MemBlockEnv:
         self.lsq_agent = LsqAgent(self)
 
         self.issue = BundleList(IntIssueBundle, "io_ooo_to_mem_intIssue_#_0_", self.config.int_issue_ports)
-        for bundle in self.issue:
+        for idx, bundle in enumerate(self.issue):
             bundle.bind(dut)
+            bundle.bits_fuType = getattr(dut, f"io_ooo_to_mem_intIssue_{idx}_0_bits_fuType", None)
         self.issue_agent = IssueAgent(self)
         self.vector_issue = [
             VecIssueBundle(f"io_ooo_to_mem_vecIssue_{idx}_0_", dut)
@@ -2703,6 +2704,109 @@ class MemBlockEnv:
                 expected_fp_wen=expected_fp_wen,
                 expected_mmio=expected_mmio,
                 expected_ncio=expected_ncio,
+                max_cycles=max_cycles,
+            )
+        )
+
+    async def _wait_int_writeback_by_rob_pdest_async(
+        self,
+        *,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        pdest: int | None = None,
+        data: int | None = None,
+        expected_int_wen: bool = True,
+        require_to_rob_valid: bool = True,
+        require_from_load_unit: bool | None = False,
+        max_cycles: int = 200,
+    ) -> dict:
+        """等待一条整数 writeback，并按 `robIdx + pdest` 过滤。"""
+
+        normalized_rob_idx = self._normalize_rob_idx_filter(
+            rob_idx=rob_idx,
+            rob_idx_flag=rob_idx_flag,
+            rob_idx_value=rob_idx_value,
+        )
+
+        for _ in range(max_cycles):
+            for lane, bundle in enumerate(self.writeback):
+                if not bundle.connected("valid") or bundle.read("valid", 0) == 0:
+                    continue
+                if bundle.connected("ready") and bundle.read("ready", 0) == 0:
+                    continue
+                if require_to_rob_valid and bundle.connected("toRob_valid") and bundle.read("toRob_valid", 0) == 0:
+                    continue
+                if (
+                    require_from_load_unit is not None
+                    and bundle.connected("isFromLoadUnit")
+                    and bool(bundle.read("isFromLoadUnit", 0)) != bool(require_from_load_unit)
+                ):
+                    continue
+
+                event = {
+                    "cycle": self._current_cycle(),
+                    "lane": lane,
+                    "rob_idx_flag": bundle.read("robIdx_flag", 0),
+                    "rob_idx_value": bundle.read("robIdx_value", 0),
+                    "lq_idx_flag": bundle.read("lqIdx_flag", 0),
+                    "lq_idx_value": bundle.read("lqIdx_value", 0),
+                    "sq_idx_flag": bundle.read("sqIdx_flag", 0),
+                    "sq_idx_value": bundle.read("sqIdx_value", 0),
+                    "pdest": bundle.read("pdest", 0),
+                    "data": bundle.read("data_0", 0),
+                    "int_wen": bundle.read("intWen", 0),
+                    "fp_wen": bundle.read("fpWen", 0),
+                    "is_from_load_unit": bundle.read("isFromLoadUnit", 0) if bundle.connected("isFromLoadUnit") else None,
+                    "to_rob_valid": bundle.read("toRob_valid", 0) if bundle.connected("toRob_valid") else None,
+                    "debug_vaddr": bundle.read("debug_vaddr", 0) if bundle.connected("debug_vaddr") else None,
+                    "debug_paddr": bundle.read("debug_paddr", 0) if bundle.connected("debug_paddr") else None,
+                    "debug_is_mmio": bundle.read("debug_isMMIO", 0) if bundle.connected("debug_isMMIO") else None,
+                    "debug_is_ncio": bundle.read("debug_isNCIO", 0) if bundle.connected("debug_isNCIO") else None,
+                    "exception_bits": bundle.read_exception_bits() if hasattr(bundle, "read_exception_bits") else None,
+                }
+                if not self._event_matches_rob_idx(event, normalized_rob_idx):
+                    continue
+                if pdest is not None and event["pdest"] != int(pdest):
+                    continue
+                if data is not None and event["data"] != int(data):
+                    continue
+                if bool(event["int_wen"]) != bool(expected_int_wen):
+                    continue
+                return event
+            await self._step_async(1)
+
+        raise TimeoutError(
+            "等待整数 writeback 观测超时: "
+            f"rob={self._format_rob_idx(normalized_rob_idx)}, pdest={pdest}, data={data}, "
+            f"expected_int_wen={expected_int_wen}, require_from_load_unit={require_from_load_unit}"
+        )
+
+    def wait_int_writeback_by_rob_pdest(
+        self,
+        *,
+        rob_idx: RobIndex | None = None,
+        rob_idx_flag: int | None = None,
+        rob_idx_value: int | None = None,
+        pdest: int | None = None,
+        data: int | None = None,
+        expected_int_wen: bool = True,
+        require_to_rob_valid: bool = True,
+        require_from_load_unit: bool | None = False,
+        max_cycles: int = 200,
+    ) -> dict:
+        """按 `robIdx + pdest` 等待整数 writeback。"""
+
+        return self._run_async(
+            self._wait_int_writeback_by_rob_pdest_async(
+                rob_idx=rob_idx,
+                rob_idx_flag=rob_idx_flag,
+                rob_idx_value=rob_idx_value,
+                pdest=pdest,
+                data=data,
+                expected_int_wen=expected_int_wen,
+                require_to_rob_valid=require_to_rob_valid,
+                require_from_load_unit=require_from_load_unit,
                 max_cycles=max_cycles,
             )
         )

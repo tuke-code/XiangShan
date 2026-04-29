@@ -11,6 +11,7 @@ New testcase authoring should prefer `sequences/` over composing flows here.
 """
 
 from transactions import (
+    AtomicTxn,
     BackendSendPlan,
     EnqueueLoadCyclePlan,
     EnqueueLoadStep,
@@ -38,6 +39,7 @@ DEFAULT_STD_LANE = 5
 
 __all__ = [
     "BackendSendPlan",
+    "AtomicTxn",
     "EnqueueLoadCyclePlan",
     "EnqueueLoadStep",
     "IssueCyclePlan",
@@ -59,6 +61,7 @@ __all__ = [
     "send_load_batch_with_sta_same_cycle",
     "expect_load",
     "send_store",
+    "send_atomic",
     "send_cbo",
     "send_cbo_zero",
     "send_vector_load",
@@ -66,6 +69,8 @@ __all__ = [
     "issue_scalar_load",
     "issue_scalar_std",
     "issue_scalar_sta",
+    "issue_atomic_std",
+    "issue_atomic_sta",
 ]
 
 
@@ -267,6 +272,15 @@ def expect_load(env, txn: LoadTxn):
 def send_store(env, txn: StoreTxn) -> QueuePtr:
     """兼容入口：按标准时序发送一笔标量 store。"""
 
+    return env.backend.send(txn)
+
+
+def send_atomic(env, txn: AtomicTxn) -> None:
+    """兼容入口：发送一笔 single-uop AMO。"""
+
+    send_fn = getattr(env.backend, "send_atomic", None)
+    if send_fn is not None:
+        return send_fn(txn)
     return env.backend.send(txn)
 
 
@@ -483,3 +497,21 @@ def issue_scalar_sta(
             ftq_idx_flag=ftq_idx_flag,
             ftq_idx_value=ftq_idx_value,
         )
+
+
+def issue_atomic_sta(env, txn: AtomicTxn) -> None:
+    """兼容入口：仅发送 AMO 的 STA 半拍。"""
+
+    issue_fn = getattr(env.backend, "issue_atomic_sta", None)
+    if issue_fn is not None:
+        return issue_fn(txn)
+    raise AttributeError("env.backend does not expose issue_atomic_sta")
+
+
+def issue_atomic_std(env, txn: AtomicTxn) -> None:
+    """兼容入口：仅发送 AMO 的 STD 半拍。"""
+
+    issue_fn = getattr(env.backend, "issue_atomic_std", None)
+    if issue_fn is not None:
+        return issue_fn(txn)
+    raise AttributeError("env.backend does not expose issue_atomic_std")
