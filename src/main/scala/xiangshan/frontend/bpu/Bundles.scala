@@ -272,6 +272,7 @@ class BpuCommit(implicit p: Parameters) extends BpuBundle with HalfAlignHelper {
 // metadata for redirect (e.g. speculative state recovery) & training (e.g. rasPtr, phr)
 class BpuRedirectMeta(implicit p: Parameters) extends BpuBundle {
   val phr:          PhrMeta         = new PhrMeta
+  val phrDiff:      PhrMeta         = new PhrMeta
   val commonHRMeta: CommonHRMeta    = new CommonHRMeta
   val ras:          RasRedirectMeta = new RasRedirectMeta
 }
@@ -283,6 +284,7 @@ class BpuResolveMeta(implicit p: Parameters) extends BpuBundle {
   val sc:       ScMeta              = new ScMeta
   val ittage:   IttageMeta          = new IttageMeta
   val phr:      PhrMeta             = new PhrMeta
+  val phrDiff:  PhrMeta             = new PhrMeta
   val commonHR: CommonHRResolveMeta = new CommonHRResolveMeta
 
   // val debug_utage: Option[MicroTageMeta] = Option.when(!env.FPGAPlatform)(new MicroTageMeta)
