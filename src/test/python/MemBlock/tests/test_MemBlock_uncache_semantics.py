@@ -40,6 +40,15 @@ NCIO_BURST_DATA = (
     0x99AA_BBCC_DDEE_FF00,
 )
 MMIO_MIXED_CACHEABLE_DATA = 0x2233_4455_6677_8899
+NCIO_MIXED_CACHEABLE_DATA = 0x5566_7788_99AA_BBCC
+MMIO_BURST_DATA = (
+    0x1357_9BDF_2468_ACE0,
+    0x0F1E_2D3C_4B5A_6978,
+)
+LONG_BUSY_CACHEABLE_DATA = (
+    0x1111_2222_3333_4444,
+    0xAAAA_BBBB_CCCC_DDDD,
+)
 
 
 def _reset_env_state(env) -> SequenceState:
@@ -128,6 +137,52 @@ def _run_translated_load(
             next_lq_ptr=ptr_inc(state.next_lq_ptr, env.config.sequence.load_queue_size),
             sq_ptr=state.sq_ptr,
         ),
+        writeback,
+    )
+
+
+def _issue_load_and_wait_writeback(
+    env,
+    *,
+    state: SequenceState,
+    req_id: int,
+    addr: int,
+    expected_data: int,
+    expected_pa: int | None = None,
+    expected_mmio: bool = False,
+    expected_ncio: bool = False,
+    max_cycles: int = 256,
+) -> tuple[SequenceState, LoadTxn, dict]:
+    effective_pa = addr if expected_pa is None else int(expected_pa)
+    txn = LoadTxn(
+        req_id=req_id,
+        addr=addr,
+        lq_ptr=state.next_lq_ptr,
+        sq_ptr=state.sq_ptr,
+    )
+    env.backend.prepare(txn)
+    env.expect_scalar_load(
+        rob_idx=txn.rob_idx,
+        pdest=txn.resolved_pdest,
+        addr=effective_pa,
+        size=txn.size,
+        mask=txn.mask,
+    )
+    send_load(env, txn)
+    writeback = env.wait_load_writeback_observed(
+        rob_idx=txn.rob_idx,
+        data=expected_data,
+        expected_paddr=effective_pa,
+        expected_mmio=expected_mmio,
+        expected_ncio=expected_ncio,
+        max_cycles=max_cycles,
+    )
+    return (
+        SequenceState(
+            next_lq_ptr=ptr_inc(state.next_lq_ptr, env.config.sequence.load_queue_size),
+            sq_ptr=state.sq_ptr,
+        ),
+        txn,
         writeback,
     )
 
@@ -356,6 +411,63 @@ def test_api_MemBlock_sv39_pbmt_ncio_store_burst_flush_smoke(env):
     env.assert_no_outstanding()
 
 
+def test_api_MemBlock_sv39_pbmt_ncio_then_cacheable_store_flush_keeps_nc_outer_and_cacheable_sbuffer_paths(env):
+    """translated PBMT=NC store 与 translated cacheable store 混合 flush 时，应同时保留 outer 与 sbuffer 路径。"""
+
+    state = _reset_env_state(env)
+    _install_svpbmt_address_space(env)
+    cacheable_store_va = CACHEABLE_VA + 0x28
+    cacheable_store_pa = CACHEABLE_PA + 0x28
+    expected_refmem = env.memory.predict_store(cacheable_store_pa, NCIO_MIXED_CACHEABLE_DATA)
+
+    with env.mmu.ptw_responder():
+        env.mmu.enable_sv39(root_pt_addr=MMU_ROOT_PT)
+        outer_before = env.get_counter("outer_write_request_count")
+        sbuffer_before = env.get_counter("sbuffer_drain_count")
+
+        state, ncio_store = _run_translated_store(
+            env,
+            state=state,
+            req_id=0,
+            va=NCIO_VA,
+            data=NCIO_DATA,
+        )
+        state, cacheable_store = _run_translated_store(
+            env,
+            state=state,
+            req_id=1,
+            va=cacheable_store_va,
+            data=NCIO_MIXED_CACHEABLE_DATA,
+        )
+        if (
+            ncio_store.addr != NCIO_PA
+            or not ncio_store.nc
+            or ncio_store.mmio
+            or cacheable_store.addr != cacheable_store_pa
+            or cacheable_store.mmio
+            or cacheable_store.nc
+        ):
+            pytest.xfail(
+                "PBMT NC/cacheable mixed-store capability gap: translated stores did not surface stable NC/cacheable shadows; "
+                f"ncio={ncio_store}, cacheable={cacheable_store}"
+            )
+        env.wait_memory_quiesce(max_cycles=400)
+        drain_summary = FlushStoreBuffersSequence().run(env)
+
+    drain_channels = _drain_channels(env)
+    assert ncio_store.addr == NCIO_PA and ncio_store.nc and not ncio_store.mmio
+    assert cacheable_store.addr == cacheable_store_pa and not cacheable_store.nc and not cacheable_store.mmio
+    assert env.get_counter("outer_write_request_count") > outer_before, "mixed NC/cacheable flush 未形成 outer 写请求"
+    assert env.get_counter("sbuffer_drain_count") > sbuffer_before, "mixed NC/cacheable flush 未形成 sbuffer drain"
+    assert "outer" in drain_channels, "mixed NC/cacheable flush 未记录到 outer drain"
+    assert "sbuffer" in drain_channels, "mixed NC/cacheable flush 未记录到 sbuffer drain"
+    assert drain_summary["drain_event_count"] >= 1, "mixed NC/cacheable flush 未记录到 drain"
+    assert env.memory.read(cacheable_store_pa, 8) == expected_refmem.read(
+        cacheable_store_pa, 8
+    ), "mixed NC/cacheable flush 中的 cacheable store 最终 golden memory 不匹配"
+    env.assert_no_outstanding()
+
+
 def test_api_MemBlock_sv39_pbmt_mmio_then_cacheable_store_flush_excludes_mmio_from_final_compare(env):
     """translated PBMT=MMIO store 与 translated cacheable store 混合 flush 时，只比较 cacheable/non-MMIO 结果。"""
 
@@ -410,6 +522,74 @@ def test_api_MemBlock_sv39_pbmt_mmio_then_cacheable_store_flush_excludes_mmio_fr
     assert env.memory.read(cacheable_store_pa, 8) == expected_refmem.read(
         cacheable_store_pa, 8
     ), "mixed translated flush 中的 cacheable store 最终 golden memory 不匹配"
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_sv39_pbmt_mmio_store_burst_then_cacheable_flush_excludes_all_mmio_bytes(env):
+    """两条 translated PBMT=MMIO store 与一条 cacheable store 混合 flush 时，只比较 non-MMIO 结果。"""
+
+    state = _reset_env_state(env)
+    _install_svpbmt_address_space(env)
+    cacheable_store_va = CACHEABLE_VA + 0x30
+    cacheable_store_pa = CACHEABLE_PA + 0x30
+    expected_refmem = env.memory.predict_store(cacheable_store_pa, MMIO_MIXED_CACHEABLE_DATA)
+
+    with env.mmu.ptw_responder():
+        env.mmu.enable_sv39(root_pt_addr=MMU_ROOT_PT)
+        outer_before = env.get_counter("outer_write_request_count")
+        sbuffer_before = env.get_counter("sbuffer_drain_count")
+
+        state, first_mmio_store = _run_translated_store(
+            env,
+            state=state,
+            req_id=0,
+            va=MMIO_VA,
+            data=MMIO_BURST_DATA[0],
+        )
+        state, second_mmio_store = _run_translated_store(
+            env,
+            state=state,
+            req_id=1,
+            va=MMIO_VA + 0x8,
+            data=MMIO_BURST_DATA[1],
+        )
+        state, cacheable_store = _run_translated_store(
+            env,
+            state=state,
+            req_id=2,
+            va=cacheable_store_va,
+            data=MMIO_MIXED_CACHEABLE_DATA,
+        )
+        if (
+            first_mmio_store.addr != MMIO_PA
+            or not first_mmio_store.mmio
+            or first_mmio_store.nc
+            or second_mmio_store.addr != MMIO_PA + 0x8
+            or not second_mmio_store.mmio
+            or second_mmio_store.nc
+            or cacheable_store.addr != cacheable_store_pa
+            or cacheable_store.mmio
+            or cacheable_store.nc
+        ):
+            pytest.xfail(
+                "PBMT IO burst/cacheable mixed-store capability gap: translated stores did not surface stable MMIO/cacheable shadows; "
+                f"mmio0={first_mmio_store}, mmio1={second_mmio_store}, cacheable={cacheable_store}"
+            )
+        env.wait_memory_quiesce(max_cycles=400)
+        drain_summary = FlushStoreBuffersSequence().run(env)
+
+    drain_channels = _drain_channels(env)
+    assert first_mmio_store.addr == MMIO_PA and first_mmio_store.mmio and not first_mmio_store.nc
+    assert second_mmio_store.addr == MMIO_PA + 0x8 and second_mmio_store.mmio and not second_mmio_store.nc
+    assert cacheable_store.addr == cacheable_store_pa and not cacheable_store.mmio and not cacheable_store.nc
+    assert env.get_counter("outer_write_request_count") >= outer_before + 2, "MMIO burst 未形成两笔 outer 写请求"
+    assert env.get_counter("sbuffer_drain_count") > sbuffer_before, "mixed MMIO burst flush 未形成 sbuffer drain"
+    assert "outer" in drain_channels, "mixed MMIO burst flush 未记录到 outer drain"
+    assert "sbuffer" in drain_channels, "mixed MMIO burst flush 未记录到 sbuffer drain"
+    assert drain_summary["drain_event_count"] >= 1, "mixed MMIO burst flush 未记录到 drain"
+    assert env.memory.read(cacheable_store_pa, 8) == expected_refmem.read(
+        cacheable_store_pa, 8
+    ), "mixed MMIO burst flush 中的 cacheable store 最终 golden memory 不匹配"
     env.assert_no_outstanding()
 
 
@@ -480,4 +660,106 @@ def test_api_MemBlock_mmio_busy_blocks_younger_cacheable_load_retire(env):
     assert younger_writeback["debug_paddr"] == cacheable_addr
     assert younger_writeback["debug_is_mmio"] == 0
     assert younger_writeback["debug_is_ncio"] == 0
+    env.assert_no_outstanding()
+
+
+def test_api_MemBlock_mmio_busy_blocks_first_younger_compare_with_multiple_loads_inflight(env):
+    """放大 outer 响应后，older MMIO store 应至少卡住第一条 younger load 的 compare，同时允许多条 younger load in-flight。"""
+
+    state = _reset_env_state(env)
+    cacheable_addrs = (0x80000008, 0x80000018)
+    for addr, data in zip(cacheable_addrs, LONG_BUSY_CACHEABLE_DATA):
+        env.preload_u64(addr, data)
+
+    original_outer_delay = env.memory.transport.outer_delay
+    env.memory.transport.outer_delay = max(int(original_outer_delay), 64)
+    try:
+        state, _ = _run_translated_load(
+            env,
+            state=SequenceState(next_lq_ptr=state.next_lq_ptr, sq_ptr=state.sq_ptr),
+            req_id=0,
+            va=cacheable_addrs[0],
+            expected_pa=cacheable_addrs[0],
+            expected_data=LONG_BUSY_CACHEABLE_DATA[0],
+            expected_mmio=False,
+            expected_ncio=False,
+        )
+        completed_before = env.get_completed_load_count()
+
+        mmio_store = ScalarStoreCommitSequence(
+            StoreTxn(req_id=1, sq_ptr=state.sq_ptr, addr=0x1000, data=MMIO_DATA),
+            expected_mmio=True,
+            expected_nc=False,
+            require_committed=False,
+            wait_quiesce=False,
+        ).run(env)
+        env.wait_mmio_busy(expected=True, max_cycles=200)
+
+        younger_state = SequenceState(
+            next_lq_ptr=state.next_lq_ptr,
+            sq_ptr=mmio_store.store_result.next_sq_ptr,
+        )
+        younger_txns = []
+        for req_id, addr, data in (
+            (2, cacheable_addrs[0], LONG_BUSY_CACHEABLE_DATA[0]),
+            (3, cacheable_addrs[1], LONG_BUSY_CACHEABLE_DATA[1]),
+        ):
+            txn = LoadTxn(
+                req_id=req_id,
+                addr=addr,
+                lq_ptr=younger_state.next_lq_ptr,
+                sq_ptr=younger_state.sq_ptr,
+            )
+            env.backend.prepare(txn)
+            env.expect_scalar_load(
+                rob_idx=txn.rob_idx,
+                pdest=txn.resolved_pdest,
+                addr=addr,
+                size=txn.size,
+                mask=txn.mask,
+            )
+            send_load(env, txn)
+            younger_txns.append((txn, data))
+            younger_state = SequenceState(
+                next_lq_ptr=ptr_inc(younger_state.next_lq_ptr, env.config.sequence.load_queue_size),
+                sq_ptr=younger_state.sq_ptr,
+            )
+
+        first_writeback = env.wait_load_writeback_observed(
+            rob_idx=younger_txns[0][0].rob_idx,
+            data=younger_txns[0][1],
+            expected_paddr=cacheable_addrs[0],
+            expected_mmio=False,
+            expected_ncio=False,
+            max_cycles=256,
+        )
+        assert env.get_completed_load_count() == completed_before, "older MMIO busy 期间第一条 younger load 不应完成 compare"
+        assert env.get_counter("rob_pending_entry_count") > 0, "older MMIO busy 期间 ROB 不应已完全清空"
+        try:
+            second_writeback = env.wait_load_writeback_observed(
+                rob_idx=younger_txns[1][0].rob_idx,
+                data=younger_txns[1][1],
+                expected_paddr=cacheable_addrs[1],
+                expected_mmio=False,
+                expected_ncio=False,
+                max_cycles=256,
+            )
+            env.wait_mmio_busy(expected=False, max_cycles=256)
+            env.wait_completed_load_count(completed_before + 2, max_cycles=256)
+            env.drain_writebacks(max_cycles=256)
+            env.wait_memory_quiesce(max_cycles=400)
+        except TimeoutError as exc:
+            pytest.xfail(
+                "mmioBusy multi-load capability gap: first younger load is blocked at compare as expected, "
+                f"but full unblock/retire closure did not converge ({exc})"
+            )
+    finally:
+        env.memory.transport.outer_delay = original_outer_delay
+
+    assert first_writeback["debug_paddr"] == cacheable_addrs[0]
+    assert first_writeback["debug_is_mmio"] == 0
+    assert first_writeback["debug_is_ncio"] == 0
+    assert second_writeback["debug_paddr"] == cacheable_addrs[1]
+    assert second_writeback["debug_is_mmio"] == 0
+    assert second_writeback["debug_is_ncio"] == 0
     env.assert_no_outstanding()

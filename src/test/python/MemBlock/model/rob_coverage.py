@@ -578,7 +578,10 @@ class RobCoverageCollector:
                         self._nc_drain_overlap_observed = True
                         break
                 for record in self._mmio_store_records:
-                    if record.touched_bytes & touched_bytes:
+                    # MMIO outer drain 本身是允许可见的；这里真正要排除的是
+                    # “最终 non-MMIO compare 仍把 MMIO touched-byte 算进去”的情况。
+                    # 因此只把 non-outer overlap 视作 exclusion 失败。
+                    if event.get("channel") != "outer" and record.touched_bytes & touched_bytes:
                         self._mmio_drain_overlap_observed = True
                         break
             if event.get("channel") == "sbuffer":

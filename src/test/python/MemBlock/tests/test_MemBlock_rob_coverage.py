@@ -58,3 +58,63 @@ def test_api_MemBlock_rob_coverage_samples_new_rob_frontier_points(env):
     env.rob_coverage.finalize()
     assert env.rob_coverage._box("non_mem_blocker_inserted_observed").value == 1
     assert env.rob_coverage._box("non_mem_blocker_released_observed").value == 1
+
+
+def test_api_MemBlock_rob_coverage_allows_mmio_outer_drain_but_still_marks_exclusion(env):
+    """MMIO outer drain 可见时，collector 仍应把“未进入 final compare”记成 exclusion 命中。"""
+
+    env.reset(cycles=2, settle_cycles=5)
+
+    env.memory.note_store_allocated(
+        sq_idx_flag=0,
+        sq_idx_value=0,
+        rob_idx_flag=0,
+        rob_idx_value=0,
+    )
+    env.memory.note_store_request(
+        sq_idx=0,
+        addr=0x1000,
+        data=0x1122_3344_5566_7788,
+        mask=0xFF,
+    )
+    env.memory.scoreboard.observe_store_addr(
+        sq_idx=0,
+        paddr=0x1000,
+        miss=False,
+        mask=0xFF,
+        nc=False,
+    )
+    env.memory.scoreboard.observe_store_addr_re(
+        sq_idx=0,
+        mmio=True,
+    )
+    env.memory.scoreboard.observe_store_data(
+        sq_idx=0,
+        data=0x1122_3344_5566_7788,
+        width_bytes=16,
+    )
+    env.memory.scoreboard.mark_store_committed(0)
+    env.memory.scoreboard.observe_sbuffer_write(
+        lane_idx=0,
+        addr=0x8000_0000,
+        data=0x8877_6655_4433_2211,
+        mask=0xFF,
+        width_bytes=8,
+    )
+    env.memory.drain_log.append(
+        {
+            "channel": "outer",
+            "addr": 0x1000,
+            "data": 0x1122_3344_5566_7788,
+            "mask": 0xFF,
+            "width_bytes": 8,
+            "cycle": 0,
+        }
+    )
+    env.rob_coverage._latch("flushsb_command_observed")
+
+    env.rob_coverage.finalize()
+
+    assert env.rob_coverage._box("mmio_store_shadow_observed").value == 1
+    assert env.rob_coverage._box("outer_drain_observed").value == 1
+    assert env.rob_coverage._box("mmio_store_excluded_from_drain_observed").value == 1

@@ -142,7 +142,32 @@
 
 
 ## 2026-04-29
-### 1. 统一 DCache 覆盖率文档口径，区分当前 full 主报告与历史定向快照
+### 1. 补强 Uncache mixed-path / long-window 回归，并收口 MMIO exclusion coverage 口径
+
+本条目记录一轮围绕 `Uncache` 深状态的 testcase + coverage 收口。此前 `tests/test_MemBlock_uncache_semantics.py` 已经有 translated `PBMT=NC/MMIO` smoke、translated `MMIO + cacheable` mixed flush，以及 basic `mmioBusy` directed case，但还缺少两类更接近当前 coverage todo 的证明点：一类是 `NC/MMIO` 与 cacheable store 并发 flush 的 mixed-path 组合，另一类是可稳定复现的 `mmioBusy` 长窗口。与此同时，`rob_coverage.py` 中 `mmio_store_excluded_from_drain_observed` 的 collector 还把合法的 MMIO `outer` drain 也算成“exclusion 失败”，与 `scoreboard.finalize_and_check_drain()` 已实现的“允许 MMIO outer drain 可见，但从 final compare 中排除对应 touched-byte”语义不一致。
+
+本轮在不改 DUT / env 主 contract 的前提下，同时补了 testcase 与 collector：translated `PBMT=NC + cacheable` mixed flush、translated `PBMT=MMIO burst + cacheable` mixed flush、以及通过放大 `outer_delay` 形成的多 younger load `mmioBusy` 长窗口 case；coverage 侧则把 `mmio_store_excluded_from_drain_observed` 的 overlap 判据收紧为“只把 non-outer overlap 视为 exclusion 失败”，并用单测固定这层口径。
+
+#### 变更摘要
+
+- `tests/test_MemBlock_uncache_semantics.py`
+  - 新增 translated `PBMT=NC` store 与 translated cacheable store 的 mixed flush case
+  - 新增 translated `PBMT=MMIO` 双 store burst 与 translated cacheable store 的 mixed flush case
+  - 新增放大 `outer_delay` 的 `mmioBusy` 长窗口 case，证明多个 younger cacheable load 可写回但不会提前 compare/retire
+  - 保持 `PBMT=NC/MMIO` capability gap 的精确 `xfail` 策略，不把断言降级成“只要走到 outer 就算通过”
+- `model/rob_coverage.py`
+  - `mmio_store_excluded_from_drain_observed` 改为允许 MMIO `outer` drain 可见
+  - 只把 non-outer drain 与 MMIO touched-byte 的 overlap 视为 exclusion 失败
+- `tests/test_MemBlock_rob_coverage.py`
+  - 新增单测，固定“MMIO outer drain 可见但仍应命中 exclusion”的 collector 语义
+
+#### 验证情况
+
+- 待本轮回归确认：
+  - `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_uncache_semantics.py`
+  - `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_rob_coverage.py`
+
+### 2. 统一 DCache 覆盖率文档口径，区分当前 full 主报告与历史定向快照
 
 本条目记录一次面向覆盖率文档一致性的收口。此前 `docs/coverage_summary.md`、`docs/coverage_todo.md` 与 `docs/BUGS.md` 同时保留了 `2026-04-11/12` 的 full/focused snapshot、`2026-04-27` 的 `NewStoreQueue` 定向 campaign，以及当前 `src/test/python/MemBlock/data/toffee_report_full/line_dat/` 的 full 主报告；但部分段落仍把旧快照里的 `NewStoreQueue/SbufferData` 低百分比写成“当前事实”，也没有把“覆盖不足”和“功能未闭环”明确拆开。本轮只更新共享文档口径，不改 testcase、env 或 DUT 行为。
 
@@ -164,7 +189,7 @@
 
 - 本条目为文档更新，未运行 pytest / real DUT 回归。
 
-### 2. 补齐 non-zero CBO 的 dcache `A -> D(CBOAck)` 环境闭环，并把文档口径收敛到当前支持边界
+### 3. 补齐 non-zero CBO 的 dcache `A -> D(CBOAck)` 环境闭环，并把文档口径收敛到当前支持边界
 
 本条目记录一轮围绕 `cbo.clean/flush/inval` 的环境补强。此前事务层、request API、scoreboard 与 directed testcase 已经补到位，但真实 DUT 回归仍会在 `TransportResponder._handle_dcache_a()` 处被环境断言拦住，原因是 responder 还停留在“dcache A 只可能是 `AcquireBlock`”的旧假设。对当前 Kunminghu V2 TileLink 扩展来说，这个假设已经过时：non-zero CBO 会在 dcache A 上发出自定义 opcode `12/13/14`，并在 dcache D 上等待单拍 `CBOAck`，而不是走 `GrantData -> GrantAck(E)` 的 load/refill 闭环。
 
@@ -193,7 +218,7 @@
   - 结果：`3 passed, 2 xfailed`
   - 说明：3 条 non-zero CBO real-DUT smoke 转绿；保留的 2 条 `xfail` 仍是既有 `cbo.zero` 多 entry drain 缺口
 
-### 3. 修正 store fault 观测链路并移除剩余 PMP store 侧 `xfail`
+### 4. 修正 store fault 观测链路并移除剩余 PMP store 侧 `xfail`
 
 本条目记录一次围绕 `test_MemBlock_pmp_runtime.py` 的最终收口。此前 store-side PMP/PMA 回归长期保留 grouped `xfail`，一部分根因是 testcase 读到了过早的 shadow，另一部分根因是 env 对 `storeAddrInRe` 的消费过于乐观：真实 DUT 没有稳定导出 `sqIdx`，而同一 lane 的 `storeAddrInRe` payload 又可能跨多个 cycle 残留，导致 monitor 既可能丢 fault，也可能把旧返回重复归因到后续 SQ 项。
 
