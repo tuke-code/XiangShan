@@ -233,6 +233,10 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   ctrlBlock.io.toDispatch.wakeUpFp  := fpRegion.io.wakeUpToDispatch
   ctrlBlock.io.toDispatch.wakeUpVec := vecRegion.io.wakeUpToDispatch
   ctrlBlock.io.toDispatch.IQValidNumVec := intRegion.io.IQValidNumVec ++ fpRegion.io.IQValidNumVec ++ vecRegion.io.IQValidNumVec
+  ctrlBlock.io.toDispatch.debugIQValidNumVec.foreach(_ := intRegion.io.debugIQValidNumVec.get ++
+    fpRegion.io.debugIQValidNumVec.get ++ vecRegion.io.debugIQValidNumVec.get)
+  ctrlBlock.io.toDispatch.debugIQEnqHasIssuedVec.foreach(_ := intRegion.io.debugIQEnqHasIssuedVec.get ++
+    fpRegion.io.debugIQEnqHasIssuedVec.get ++ vecRegion.io.debugIQEnqHasIssuedVec.get)
   ctrlBlock.io.toDispatch.ldCancel := io.mem.ldCancel
   // Todo: when add cross domain wake up, it is necessary to add assertions that fp and vec do not have 0 lat fu.
   ctrlBlock.io.toDispatch.og0Cancel := intRegion.io.og0Cancel
@@ -295,12 +299,14 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
 
   intRegion.io.memWriteback.zip(io.mem.intWriteback).foreach { case (sinkWriteback, sourceWriteback) =>
     sinkWriteback.zip(sourceWriteback).foreach { case (sink, source) =>
-      sink <> source
+      sink.valid := source.toRob.valid
+      sink.bits := source.toNewExuOutputBundle()
     }
   }
-  val lduWriteback = io.mem.intWriteback.flatten.filter(_.bits.params.hasLoadFu)
+  val lduWriteback = io.mem.intWriteback.flatten.filter(_.params.hasLoadFu)
   fpRegion.io.lduWriteback.get.flatten.zip(lduWriteback).map { case (sink, source) =>
-    sink <> source
+    sink.valid := source.toRob.valid
+    sink.bits := source.toNewExuOutputBundle()
   }
   intRegion.io.wakeUpFromFp. foreach(x => x := fpRegion.io.wakeUpToDispatch)
   intRegion.io.wakeupFromF2I.foreach(x => x := fpRegion.io.cross.F2IWakeupOut.get)
@@ -511,6 +517,8 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   ctrlBlock.io.robio.robHeadLsIssue := issue.flatten.map(deq =>
     deq.fire && deq.bits.robIdx === ctrlBlock.io.robio.robDeqPtr
   ).reduce(_ || _)
+  ctrlBlock.io.robio.debugIQDeqRobIdxVec.foreach(_ := intRegion.io.debugIQDeqRobIdxVec.get ++
+    fpRegion.io.debugIQDeqRobIdxVec.get ++ vecRegion.io.debugIQDeqRobIdxVec.get)
 
   // mem io
   io.mem.robLsqIO <> ctrlBlock.io.robio.lsq
@@ -524,7 +532,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
 
   io.csrCustomCtrl := csrio.customCtrl
 
-  io.toTop.cpuHalted := ctrlBlock.io.toTop.cpuHalt
+  io.toTop.cpuWfi := ctrlBlock.io.toTop.cpuWfi
 
   io.traceCoreInterface <> ctrlBlock.io.traceCoreInterface
 
@@ -641,8 +649,8 @@ class BackendMemIO(implicit p: Parameters, params: BackendParams) extends XSBund
   val storePcRead = Vec(params.StaCnt, Output(UInt(VAddrBits.W)))
   val hyuPcRead = Vec(params.HyuCnt, Output(UInt(VAddrBits.W)))
   // Input
-  val intWriteback: MixedVec[MixedVec[DecoupledIO[NewExuOutput]]] =
-    Flipped(intSchdParams.genNewExuOutputDecoupledBundleMemBlock)
+  val intWriteback: MixedVec[MixedVec[MemWriteBack]] =
+    Flipped(intSchdParams.genMemWriteBackBundle)
   val vecWriteback: MixedVec[MixedVec[DecoupledIO[ExuOutput]]] =
     Flipped(vecSchdParams.genExuOutputDecoupledBundleMemBlock)
 
@@ -702,7 +710,7 @@ class TopToBackendBundle(implicit p: Parameters) extends XSBundle with HasSoCPar
 }
 
 class BackendToTopBundle(implicit p: Parameters) extends XSBundle with HasSoCParameter{
-  val cpuHalted = Output(Bool())
+  val cpuWfi = Output(Bool())
   val cpuCriticalError = Output(Bool())
   val msiAck = Output(Bool())
   val teemsiAck = Option.when(soc.IMSICParams.HasTEEIMSIC)(Output(Bool()))

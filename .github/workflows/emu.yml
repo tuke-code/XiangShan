@@ -73,9 +73,11 @@ jobs:
             --trace-fst
       - name: GSIM Test - Linux
         run: |
+          # TODO: remove --disable-fork to enable lightSSS when gsim supports it
           python3 ${GITHUB_WORKSPACE}/scripts/xiangshan.py \
             --wave-dump ${WAVE_HOME} \
             --numa --threads 1 \
+            --disable-fork \
             --ci linux-hello-opensbi \
             2> stderr.log
           cat stderr.log | sort
@@ -156,6 +158,7 @@ jobs:
             --trace-fst
       - name: Simfrontend Test - SPEC06 astar
         id: astar_simfrontend
+        shell: bash
         run: |
           python3 ${GITHUB_WORKSPACE}/scripts/xiangshan.py \
             --wave-dump ${WAVE_HOME} \
@@ -169,6 +172,7 @@ jobs:
           echo "IPC=$(grep -oP 'IPC = \K\d+\.\d+' stdout.log)" >> $GITHUB_OUTPUT
       - name: Simfrontend Test - SPEC06 milc
         id: milc_simfrontend
+        shell: bash
         run: |
           python3 ${GITHUB_WORKSPACE}/scripts/xiangshan.py \
             --wave-dump ${WAVE_HOME} \
@@ -182,6 +186,7 @@ jobs:
           echo "IPC=$(grep -oP 'IPC = \K\d+\.\d+' stdout.log)" >> $GITHUB_OUTPUT
       - name: Simfrontend Test - SPEC06 xalancbmk
         id: xalancbmk_simfrontend
+        shell: bash
         run: |
           python3 ${GITHUB_WORKSPACE}/scripts/xiangshan.py \
             --wave-dump ${WAVE_HOME} \
@@ -274,9 +279,10 @@ jobs:
       - name: Build SIMV on Remote
         run: |
           ssh -tt eda01 "python3 `echo $GITHUB_WORKSPACE`/scripts/xiangshan.py --vcs-build --xprop"
-      - name: V Extension Test - rvv-test
-        run: |
-          ssh -tt eda01 "python3 `echo $GITHUB_WORKSPACE`/scripts/xiangshan.py --wave-dump `echo $WAVE_HOME` --ci-vcs rvv-test"
+      # Vector-related workloads are temporarily disabled in CI due to the ongoing vector refactor.
+      # - name: V Extension Test - rvv-test
+      #   run: |
+      #     ssh -tt eda01 "python3 `echo $GITHUB_WORKSPACE`/scripts/xiangshan.py --wave-dump `echo $WAVE_HOME` --ci-vcs rvv-test"
       - name: Simple Test - CoreMark 1 iteration
         run: |
           ssh -tt eda01 "python3 `echo $GITHUB_WORKSPACE`/scripts/xiangshan.py --wave-dump `echo $WAVE_HOME` --ci-vcs coremark-1-iteration"

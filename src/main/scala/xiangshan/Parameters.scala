@@ -114,6 +114,7 @@ case class XSCoreParameters
   IssueQueueSize: Int = 20,
   IssueQueueCompEntrySize: Int = 12,
   EnableBackendV2Config: Boolean = false,
+  EnableDispatchIQBalanceOpt: Boolean = true,
   intPreg: PregParams = IntPregParams(
     numEntries = 224,
     numBank    = 4,
@@ -518,6 +519,7 @@ case object DebugOptionsKey extends Field[DebugOptions]
 case class DebugOptions
 (
   FPGAPlatform: Boolean = false,
+  DumpCSR: Boolean = false,
   ResetGen: Boolean = false,
   EnableDifftest: Boolean = false,
   AlwaysBasicDiff: Boolean = true,

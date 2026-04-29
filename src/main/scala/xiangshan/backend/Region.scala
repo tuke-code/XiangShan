@@ -30,6 +30,7 @@ import xiangshan.mem._
 import utility._
 import xiangshan.backend.fu.vector.Bundles.{VType, Vstart}
 import xiangshan.backend.fu.wrapper.{CSRInput, CSRToDecode}
+import xiangshan.backend.rob.RobPtr
 import xiangshan.backend.issue.EntryBundles.RespType
 import xiangshan.backend.issue._
 
@@ -728,7 +729,6 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     io.wbDataPathToCtrlBlock.delayedOldestExuRedirect.get.valid := RegNext(oldestExuRedirect.valid)
     io.wbDataPathToCtrlBlock.delayedOldestExuRedirect.get.bits  := RegEnable(oldestExuRedirect.bits, oldestExuRedirect.valid)
   }
-
   io.IQValidNumVec := issueQueues.filter(_.param.StdCnt == 0).map(_.io.validCntDeqVec).flatten
   io.og0Cancel := dataPath.io.og0Cancel
   io.diffVl.foreach(_ := dataPath.io.diffVl.get)
@@ -741,6 +741,49 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
   io.uopTopDown.noStoreIssued := dataPath.io.uopTopDown.noStoreIssued
 
   // perf counter
+  val staValidNum = stAddrIQs.map{ case staIQ =>
+    PopCount(staIQ.io.validVec)
+  }
+  val stdValidNum = stDataIQs.map{ case stdIQ =>
+    PopCount(stdIQ.io.validVec)
+  }
+  def andVec(a: Vec[Bool], b: Vec[Bool]): Vec[Bool] =
+    VecInit(a.zip(b).map { case (x, y) => x && y })
+
+  val staNumEnq = params.issueBlockParams.filter(iq => iq.StaCnt > 0).map(_.numEnq)
+  val stdNumEnq = params.issueBlockParams.filter(iq => iq.StdCnt > 0).map(_.numEnq)
+  val staEnqHasIssuedVec = stAddrIQs.zip(staNumEnq).map{ case (staIQ, numEnq) =>
+    andVec(staIQ.io.issuedVec, staIQ.io.validVec).take(numEnq).reduce(_ & _)
+  }
+  val stdEnqHasIssuedVec = stDataIQs.zip(stdNumEnq).map{ case (stdIQ, numEnq) =>
+    andVec(stdIQ.io.issuedVec, stdIQ.io.validVec).take(numEnq).reduce(_ & _)
+  }
+
+
+  val issueQueueValidNumVec: Vec[UInt] = io.debugIQValidNumVec.getOrElse(VecInit(Seq.fill(io.IQNum)(0.U)))
+  issueQueues.filter(_.param.StdCnt == 0).zip(issueQueueValidNumVec).foreach{ case (issueQueue, validNum) =>
+    validNum := PopCount(issueQueue.io.validVec)
+  }
+  staIdx.zipWithIndex.foreach { case (sta, i) =>
+    issueQueueValidNumVec(sta) := Mux(staValidNum(i) > stdValidNum(i), staValidNum(i), stdValidNum(i))
+  }
+
+  val issueQueueEnqHasIssuedVec : Vec[Bool] = io.debugIQEnqHasIssuedVec.getOrElse(VecInit(Seq.fill(io.IQNum)(false.B)))
+  issueQueues.filter(_.param.StdCnt == 0).zip(issueQueueEnqHasIssuedVec).foreach{ case (issueQueue, enqIssued) =>
+    enqIssued := andVec(issueQueue.io.issuedVec, issueQueue.io.validVec).take(issueQueue.param.numEnq).reduce(_ & _)
+  }
+  staIdx.zipWithIndex.foreach { case (sta, i) =>
+    issueQueueEnqHasIssuedVec(sta) := Mux(staValidNum(i) > stdValidNum(i), staEnqHasIssuedVec(i), stdEnqHasIssuedVec(i))
+  }
+
+  val issueQueueDeqVec = issueQueues.flatMap(_.io.deqDelay)
+  io.debugIQDeqRobIdxVec.foreach(_.zip(issueQueueDeqVec).foreach{ case(sink, source) =>
+    sink.valid := source.valid
+    sink.bits := source.bits.robIdx
+  })
+
+
+
   if (params.isIntSchd) {
     val iqNum = issueQueues.size
     case class FUConfig(filter: UInt => Bool, name: String, paramCheck: IssueBlockParams => Boolean)
@@ -837,6 +880,7 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val lqDeqPtr = Option.when(params.isVecSchd)(Input(new LqPtr))
   val sqDeqPtr = Option.when(params.isVecSchd)(Input(new SqPtr))
   val allIssueParams = params.issueBlockParams.filter(_.StdCnt == 0)
+  val IQNum = allIssueParams.size
   val IssueQueueDeqSum = allIssueParams.map(_.numDeq).sum
   val maxIQSize = allIssueParams.map(_.numEntries).max
   val IQValidNumVec = Output(Vec(IssueQueueDeqSum, UInt((maxIQSize).U.getWidth.W)))
@@ -896,5 +940,9 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
 
   // TopDown
   val uopTopDown = new UopTopDown
+  val iqDeqSum = params.issueBlockParams.map(_.numDeq).sum
+  val debugIQValidNumVec = Option.when(backendParams.debugEn)(Vec(IQNum, Output(UInt(maxIQSize.U.getWidth.W))))
+  val debugIQEnqHasIssuedVec = Option.when(backendParams.debugEn)(Vec(IQNum, Output(Bool())))
+  val debugIQDeqRobIdxVec = Option.when(backendParams.debugEn)(Vec(iqDeqSum, ValidIO(new RobPtr())))
 }
 

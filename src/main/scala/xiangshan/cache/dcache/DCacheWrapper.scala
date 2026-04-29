@@ -19,7 +19,7 @@ package xiangshan.cache
 import chisel3._
 import chisel3.experimental.ExtModule
 import chisel3.util._
-import coupledL2.{IsKeywordKey, IsKeywordField, MemBackTypeMMField, MemPageTypeNCField, VaddrField}
+import coupledL2.{IsKeywordKey, IsKeywordField, MemBackTypeMMField, MemPageTypeNCField, PCField, VaddrField}
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util.BundleFieldBase
@@ -94,6 +94,9 @@ trait HasDCacheParameters
   with HasL1CacheParameters {
   val cacheParams = dcacheParameters
   val cfg = cacheParams
+  def l2ClientPcBitsOpt: Option[Int] = p(XSCoreParamsKey).L2CacheParamsOpt
+    .flatMap(_.clientCaches.find(_.name == "dcache"))
+    .flatMap(_.pcBitOpt)
 
   def GenLatencyArray: Boolean = hasBerti
 
@@ -849,9 +852,9 @@ class DCache()(implicit p: Parameters) extends LazyModule with HasDCacheParamete
     ReqSourceField(),
     VaddrField(VAddrBits - blockOffBits),
     MemBackTypeMMField(),
-    MemPageTypeNCField(),
+    MemPageTypeNCField()
   //  IsKeywordField()
-  ) ++ cacheParams.aliasBitsOpt.map(AliasField)
+  ) ++ l2ClientPcBitsOpt.map(PCField(_)).toSeq ++ cacheParams.aliasBitsOpt.map(AliasField)
   val echoFields: Seq[BundleFieldBase] = Seq(
     IsKeywordField()
   )
@@ -1352,7 +1355,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     ldu(w).io.disable_ld_fast_wakeup :=
       bankedDataArray.io.disable_ld_fast_wakeup(w) // load pipe fast wake up should be disabled when bank conflict
   }
-  
+
   val clear_flag = Wire(Vec(LoadPipelineWidth, Bool()))
   clear_flag(0) := false.B
   for (i <- 1 until LoadPipelineWidth) {

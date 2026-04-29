@@ -179,6 +179,29 @@ class VecPipeBundle(isVStore: Boolean=false)(implicit p: Parameters) extends VLS
     out.occupySource := DontCare
     out
   }
+
+  def toVectorStoreIn(): VectorStoreIn = {
+    require(isVStore)
+    val out = Wire(new VectorStoreIn())
+    out.entrance := StoreEntrance.vectorIssue.U
+    out.accessType.instrType := InstrType.vector.U
+    out.accessType.isCbo := false.B
+    out.accessType.isCboNoZero := false.B
+    out.uop := uop
+    out.vaddr := vaddr
+    out.fullva := vaddr
+    out.size := alignedType
+    out.mask := mask
+    out.isFirstIssue := true.B // TODO: In new vector implement, modifications are required
+
+    out.vecBaseVaddr.get := basevaddr
+    out.usSecondInv.get := usSecondInv
+    out.elemIdx.get := elemIdx
+    out.mbIndex.get := mBIndex
+    out.vecTriggerMask.get := 0.U
+    out.vecVaddrOffset.get := 0.U
+    out
+  }
 }
 
 object VecFeedbacks {
@@ -247,7 +270,6 @@ class VSplitIO(param: ExeUnitParams, isVStore: Boolean=false)(implicit p: Parame
   val toMergeBuffer       = new ToMergeBufferIO(isVStore) //to merge buffer req mergebuffer entry
   val out                 = Decoupled(new VecPipeBundle(isVStore))// to scala pipeline
   val vstd                = OptionWrapper(isVStore, Valid(new StoreQueueDataWrite))
-  val vstdMisalign        = OptionWrapper(isVStore, new storeMisaignIO)
   val threshold            = OptionWrapper(!isVStore, Flipped(ValidIO(new LqPtr)))
 }
 
@@ -263,7 +285,6 @@ class VSplitBufferIO(isVStore: Boolean=false)(implicit p: Parameters) extends VL
   val in                  = Flipped(Decoupled(new VLSBundle()))
   val out                 = Decoupled(new VecPipeBundle(isVStore))//to scala pipeline
   val vstd                = OptionWrapper(isVStore, ValidIO(new StoreQueueDataWrite))
-  val vstdMisalign        = OptionWrapper(isVStore, new storeMisaignIO)
 }
 
 class VMergeBufferIO(isVStore : Boolean=false)(implicit p: Parameters) extends VLSUBundle{
