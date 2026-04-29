@@ -18,6 +18,23 @@
 - `suspected`
   - 已有稳定 testcase 签名，静态 RTL 检查也能看到可疑点，但还需要进一步波形或更小粒度 probe 来最终闭环。
 
+## 覆盖率文档口径约束
+
+`coverage_summary.md` 与 `coverage_todo.md` 在描述“当前未支持/未闭环功能点”时，应优先以本文件中已有 testcase 触达、但真实 DUT 仍不能闭环的条目为依据，而不是把它们写成单纯“没测到”。当前应统一按未闭环功能簇理解的条目包括：
+
+- `DUTBUG-vector-store-data-path-disconnected`
+- `DUTBUG-cbo-zero-missing-wline-drain`
+- `DUTBUG-store-misalign-cross-page-flush-stall`
+- `DUTBUG-svpbmt-nc-load-debug-classification-lost`
+- `DUTBUG-svpbmt-nc-store-zero-paddr-shadow`
+- `DUTBUG-store-side-pmp-deny-missing-fault`
+
+这几类问题的共同特征是：
+
+- testcase 已经能把请求送进真实 DUT 的相关路径；
+- 但数据通路、debug 分类、drain 收尾或 fault 收口仍然缺失；
+- 因而它们在 coverage 文档里应被写成“当前未支持/未闭环”，而不是“当前还没有 testcase 入口”。
+
 ## DUTBUG-store-side-pmp-deny-missing-fault
 
 - 状态：suspected

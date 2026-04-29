@@ -1,5 +1,29 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-04-29
+
+### 1. 统一 DCache 覆盖率文档口径，区分当前 full 主报告与历史定向快照
+
+本条目记录一次面向覆盖率文档一致性的收口。此前 `docs/coverage_summary.md`、`docs/coverage_todo.md` 与 `docs/BUGS.md` 同时保留了 `2026-04-11/12` 的 full/focused snapshot、`2026-04-27` 的 `NewStoreQueue` 定向 campaign，以及当前 `src/test/python/MemBlock/data/toffee_report_full/line_dat/` 的 full 主报告；但部分段落仍把旧快照里的 `NewStoreQueue/SbufferData` 低百分比写成“当前事实”，也没有把“覆盖不足”和“功能未闭环”明确拆开。本轮只更新共享文档口径，不改 testcase、env 或 DUT 行为。
+
+#### 变更摘要
+
+- `docs/coverage_summary.md`
+  - 新增“当前 full 主口径说明”，明确当前默认引用 `data/toffee_report_full/line_dat/`，时间戳为 `2026-04-29 08:46:21`
+  - 把 DCache/store/uncache/TLB 相关模块数字切到当前 full 主报告口径
+  - 区分历史 campaign/focused snapshot 与当前 full 主报告
+  - 把“当前未支持/未闭环功能点”收敛到 vector store、CBO、cross-page misalign、PBMT-NC/MMIO 深语义、store-side PMP fault 等已知缺口
+- `docs/coverage_todo.md`
+  - 明确 `coverage_todo` 的优先级判断默认跟随当前 full 主报告，而历史 campaign 仅作定向补充
+  - 移除把 `NewStoreQueue/SbufferData` 继续描述成“当前低覆盖模块”的过时表述
+  - 将短期验收目标从旧的低百分比门槛改成“保持已获得覆盖率 + 推进未闭环功能簇”的行为目标
+- `docs/BUGS.md`
+  - 新增面向 coverage 文档的状态说明，明确相关 bug 条目是“当前未支持/未闭环功能点”的统一依据
+
+#### 验证情况
+
+- 本条目为文档更新，未运行 pytest / real DUT 回归。
+
 ## 2026-04-28
 
 ### 1. 补齐标量 `STA` backend 反馈闭环，新增 `staIqFeedback + deqPtr` 半模型与自动重发
