@@ -11,6 +11,9 @@ TL_A_PUT_FULL = 0
 TL_A_PUT_PARTIAL = 1
 TL_A_GET = 4
 TL_A_ACQUIRE_BLOCK = 6
+TL_A_CBO_CLEAN = 12
+TL_A_CBO_FLUSH = 13
+TL_A_CBO_INVAL = 14
 
 TL_C_PROBE_ACK = 4
 TL_C_PROBE_ACK_DATA = 5
@@ -21,6 +24,7 @@ TL_D_ACCESS_ACK = 0
 TL_D_ACCESS_ACK_DATA = 1
 TL_D_GRANT_DATA = 5
 TL_D_RELEASE_ACK = 6
+TL_D_CBO_ACK = 8
 
 DEFAULT_CACHELINE_BYTES = 64
 DEFAULT_DCACHE_BEAT_BYTES = 32
@@ -375,9 +379,6 @@ class TransportResponder:
 
     def _handle_dcache_a(self) -> None:
         opcode = int(self.dcache_a.bits_opcode.value)
-        if opcode != TL_A_ACQUIRE_BLOCK:
-            raise AssertionError(f"load-only 场景仅支持 AcquireBlock，观测到 A.opcode={opcode}")
-
         raw_addr = int(self.dcache_a.bits_address.value)
         block_addr = raw_addr & ~(DEFAULT_CACHELINE_BYTES - 1)
         size = int(self.dcache_a.bits_size.value)
@@ -389,6 +390,35 @@ class TransportResponder:
             "source": source,
             "is_keyword": is_keyword,
         }
+
+        if opcode in (TL_A_CBO_CLEAN, TL_A_CBO_FLUSH, TL_A_CBO_INVAL):
+            self._pending_d.append(
+                {
+                    "release_cycle": self._cycle + self._sample_dcache_delay(),
+                    "beats": deque(
+                        [
+                            {
+                                "opcode": TL_D_CBO_ACK,
+                                "param": 0,
+                                "size": size,
+                                "source": source,
+                                "request_channel": "a",
+                                "request_source": source,
+                                "sink": 0,
+                                "denied": 0,
+                                "echo_isKeyword": is_keyword,
+                                "data": 0,
+                                "corrupt": 0,
+                            }
+                        ]
+                    ),
+                }
+            )
+            return
+
+        if opcode != TL_A_ACQUIRE_BLOCK:
+            raise AssertionError(f"dcache A 通道未支持的请求 opcode={opcode}")
+
         line = self.ref_memory.read_cacheline(block_addr, DEFAULT_CACHELINE_BYTES)
         beats = [
             int.from_bytes(line[idx: idx + DEFAULT_DCACHE_BEAT_BYTES], "little")

@@ -149,6 +149,9 @@ class StoreView:
     retired: bool
     rob_idx_flag: int | None
     rob_idx_value: int | None
+    opcode: str
+    is_cbo: bool
+    is_cbo_nonzero: bool
     is_cbo_zero: bool
 
 
@@ -3679,6 +3682,9 @@ class MemBlockEnv:
             retired=bool(store.retired),
             rob_idx_flag=rob_idx_flag,
             rob_idx_value=rob_idx_value,
+            opcode=str(getattr(store, "opcode", getattr(store, "request_opcode", "scalar"))),
+            is_cbo=bool(getattr(store, "is_cbo", False)),
+            is_cbo_nonzero=bool(getattr(store, "is_cbo_nonzero", False)),
             is_cbo_zero=bool(getattr(store, "is_cbo_zero", False)),
         )
 

@@ -1357,10 +1357,15 @@ class BackendFacade:
     def send_store(self, txn: StoreTxn):
         return self.send(txn)
 
+    def send_cbo(self, txn: StoreTxn):
+        if not txn.is_cbo:
+            raise ValueError("send_cbo requires a StoreTxn with a CBO opcode")
+        return self.send(txn)
+
     def send_cbo_zero(self, txn: StoreTxn):
         if not txn.is_cbo_zero:
             raise ValueError("send_cbo_zero requires a StoreTxn with opcode='cbo_zero'")
-        return self.send(txn)
+        return self.send_cbo(txn)
 
     def note_load_issued(
         self,

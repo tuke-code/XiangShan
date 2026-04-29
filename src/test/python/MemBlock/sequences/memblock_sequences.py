@@ -113,10 +113,12 @@ class ScalarStoreFlushSequenceResult:
 
 
 @dataclass(frozen=True)
-class CboZeroFlushSequenceResult:
+class CboFlushSequenceResult:
     store_result: ScalarStoreSequenceResult
     drain_summary: dict
     line_addr: int
+    transport_stats_before: dict[str, int]
+    transport_stats_after: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -1338,7 +1340,7 @@ class ScalarStoreFlushSequence:
         )
 
 
-class CboZeroFlushSequence:
+class CboFlushSequence:
     def __init__(
         self,
         txn,
@@ -1356,11 +1358,12 @@ class CboZeroFlushSequence:
         self.settle_cycles = settle_cycles
         self.assert_no_outstanding = assert_no_outstanding
 
-    def run(self, env) -> CboZeroFlushSequenceResult:
-        if not self.txn.is_cbo_zero:
-            raise ValueError("CboZeroFlushSequence requires a StoreTxn with opcode='cbo_zero'")
+    def run(self, env) -> CboFlushSequenceResult:
+        if not self.txn.is_cbo:
+            raise ValueError("CboFlushSequence requires a StoreTxn with a CBO opcode")
         line_addr = int(self.txn.addr) & ~(CACHELINE_BYTES - 1)
         sbuffer_drains_before = env.get_counter("sbuffer_drain_count")
+        transport_stats_before = env.get_transport_stats()
         commit_result = ScalarStoreCommitSequence(
             self.txn,
             expected_mmio=False,
@@ -1391,22 +1394,33 @@ class CboZeroFlushSequence:
                 ),
             )
             drain_summary = env.memory.finalize_and_check_drain()
+        env.wait_memory_quiesce(
+            max_cycles=(
+                env.config.sequence.store_flush_cycles
+                if self.max_cycles is None
+                else self.max_cycles
+            ),
+        )
+        transport_stats_after = env.get_transport_stats()
+        final_store_view = env.get_store_view(commit_result.store_result.allocated_sq_ptr.value)
         if self.assert_no_outstanding:
             env.assert_no_outstanding()
-        return CboZeroFlushSequenceResult(
+        return CboFlushSequenceResult(
             store_result=ScalarStoreSequenceResult(
                 txn=commit_result.store_result.txn,
                 allocated_sq_ptr=commit_result.store_result.allocated_sq_ptr,
                 next_sq_ptr=commit_result.store_result.next_sq_ptr,
-                store_view=(
-                    commit_result.committed_store_view
-                    if commit_result.committed_store_view is not None
-                    else commit_result.store_result.store_view
-                ),
+                store_view=final_store_view,
             ),
             drain_summary=drain_summary,
             line_addr=line_addr,
+            transport_stats_before=transport_stats_before,
+            transport_stats_after=transport_stats_after,
         )
+
+
+CboZeroFlushSequenceResult = CboFlushSequenceResult
+CboZeroFlushSequence = CboFlushSequence
 
 
 class ScalarMixedTrafficSequence:

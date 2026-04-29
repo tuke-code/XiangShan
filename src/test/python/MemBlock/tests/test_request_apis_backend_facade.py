@@ -10,12 +10,18 @@ import pytest
 from agents.backend_facade import BackendFacade
 from transactions import (
     BackendSendPlan,
+    CBO_CLEAN_STORE_OPCODE,
+    CBO_FLUSH_STORE_OPCODE,
+    CBO_INVAL_STORE_OPCODE,
     CBO_ZERO_STORE_OPCODE,
     EnqueueLoadCyclePlan,
     EnqueueLoadStep,
     EnqueueStoreStep,
     IssueCyclePlan,
     IssueOp,
+    LSU_OP_CBO_CLEAN,
+    LSU_OP_CBO_FLUSH,
+    LSU_OP_CBO_INVAL,
     LSU_OP_CBO_ZERO,
     LoadTxn,
     NonMemBlockerStep,
@@ -39,6 +45,7 @@ from request_apis import (
     issue_scalar_load,
     issue_scalar_sta,
     issue_scalar_std,
+    send_cbo,
     send_cbo_zero,
     send_load,
     send_store,
@@ -751,6 +758,38 @@ def test_api_backend_facade_send_cbo_zero_marks_issue_ops_with_cbo_opcode():
     assert second_cycle.ops[0].store_fu_op_type == LSU_OP_CBO_ZERO
 
 
+@pytest.mark.parametrize(
+    ("factory_name", "expected_opcode", "expected_fu_op"),
+    (
+        ("cbo_clean", CBO_CLEAN_STORE_OPCODE, LSU_OP_CBO_CLEAN),
+        ("cbo_flush", CBO_FLUSH_STORE_OPCODE, LSU_OP_CBO_FLUSH),
+        ("cbo_inval", CBO_INVAL_STORE_OPCODE, LSU_OP_CBO_INVAL),
+    ),
+)
+def test_api_backend_facade_send_cbo_marks_issue_ops_with_nonzero_cbo_opcode(
+    factory_name,
+    expected_opcode,
+    expected_fu_op,
+):
+    env = _FakeFacadeEnv()
+    backend = BackendFacade(env)
+    txn = getattr(StoreTxn, factory_name)(
+        req_id=0x36,
+        sq_ptr=QueuePtr(flag=0, value=10),
+        addr=0x8080,
+    )
+
+    allocated = backend.send_cbo(txn)
+
+    assert allocated == QueuePtr(flag=1, value=11)
+    first_cycle = env.issue_agent.calls[0][1]
+    second_cycle = env.issue_agent.calls[1][1]
+    assert first_cycle.ops[0].store_opcode == expected_opcode
+    assert second_cycle.ops[0].store_opcode == expected_opcode
+    assert first_cycle.ops[0].store_fu_op_type == expected_fu_op
+    assert second_cycle.ops[0].store_fu_op_type == expected_fu_op
+
+
 def test_api_scalar_store_mask_decodes_to_size_and_fu_op():
     txn = StoreTxn(
         req_id=0x24,
@@ -777,6 +816,34 @@ def test_api_cbo_zero_store_txn_uses_cacheline_size_and_cbo_fu_op():
     assert txn.is_cbo_zero
 
 
+@pytest.mark.parametrize(
+    ("factory_name", "expected_opcode", "expected_fu_op"),
+    (
+        ("cbo_clean", CBO_CLEAN_STORE_OPCODE, LSU_OP_CBO_CLEAN),
+        ("cbo_flush", CBO_FLUSH_STORE_OPCODE, LSU_OP_CBO_FLUSH),
+        ("cbo_inval", CBO_INVAL_STORE_OPCODE, LSU_OP_CBO_INVAL),
+    ),
+)
+def test_api_nonzero_cbo_store_txn_uses_cacheline_size_and_cbo_fu_op(
+    factory_name,
+    expected_opcode,
+    expected_fu_op,
+):
+    txn = getattr(StoreTxn, factory_name)(
+        req_id=0x35,
+        sq_ptr=QueuePtr(flag=0, value=2),
+        addr=0x6080,
+    )
+
+    assert txn.opcode == expected_opcode
+    assert txn.size_bytes == 64
+    assert txn.fu_op_type == expected_fu_op
+    assert txn.issue_data == 0
+    assert txn.is_cbo
+    assert txn.is_cbo_nonzero
+    assert not txn.is_cbo_zero
+
+
 def test_api_issue_op_rejects_non_scalar_store_mask():
     with pytest.raises(ValueError):
         IssueOp.std(req_id=1, sq_ptr=QueuePtr(0, 1), data=0x11, lane=5, mask=0x05)
@@ -792,6 +859,40 @@ def test_api_issue_op_cbo_zero_uses_explicit_store_opcode():
     )
 
     assert op.store_fu_op_type == LSU_OP_CBO_ZERO
+
+
+@pytest.mark.parametrize(
+    ("opcode", "expected_fu_op"),
+    (
+        (CBO_CLEAN_STORE_OPCODE, LSU_OP_CBO_CLEAN),
+        (CBO_FLUSH_STORE_OPCODE, LSU_OP_CBO_FLUSH),
+        (CBO_INVAL_STORE_OPCODE, LSU_OP_CBO_INVAL),
+    ),
+)
+def test_api_issue_op_nonzero_cbo_uses_explicit_store_opcode(opcode, expected_fu_op):
+    op = IssueOp.sta(
+        req_id=2,
+        sq_ptr=QueuePtr(0, 2),
+        addr=0x8040,
+        lane=3,
+        store_opcode=opcode,
+    )
+
+    assert op.store_fu_op_type == expected_fu_op
+
+
+def test_api_send_cbo_routes_generic_cbo_transaction_to_backend_send():
+    env = _FakeEnv()
+    txn = StoreTxn.cbo_clean(
+        req_id=0x55,
+        sq_ptr=QueuePtr(flag=0, value=4),
+        addr=0x9000,
+    )
+
+    result = send_cbo(env, txn)
+
+    assert result == QueuePtr(flag=1, value=11)
+    assert env.backend.calls[-1] == ("send", txn)
 
 
 def test_api_backend_facade_execute_resolves_store_ref_in_issue_cycle():

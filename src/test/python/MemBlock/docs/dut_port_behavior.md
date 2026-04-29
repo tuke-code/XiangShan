@@ -649,7 +649,7 @@ store 的提交时序目前主要依赖：
 4. 若 `wline = 0`，按普通 sbuffer drain 记录 16B `addr/data/mask`
 5. 若 `wline = 1`，按 `cbo.zero` line write 记录整条 cacheline drain
 
-这意味着当前环境已经支持 `cbo.zero` 的 line write drain 校验；其余 CBO 类型仍不在本轮校验范围内。
+这意味着当前环境已经支持 `cbo.zero` 的 line write drain 校验；`cbo.clean/flush/inval` 则不伪造 sbuffer drain，而是通过 dcache `A -> D(CBOAck)` 闭环完成收口。
 
 ## 11. outer TileLink 端口行为
 
@@ -726,13 +726,17 @@ sequenceDiagram
 
 - `dcache_a.ready = 1`
 
-当前模型只接受：
+当前模型接受：
 
 - `TL_A_ACQUIRE_BLOCK`
+- `TL_A_CBO_CLEAN`
+- `TL_A_CBO_FLUSH`
+- `TL_A_CBO_INVAL`
 
 环境对这一点的理解很明确：
 
-- 现有 cacheable load 测试只覆盖最小 cacheline 获取路径。
+- cacheable load 测试覆盖最小 cacheline 获取路径。
+- non-zero CBO 测试覆盖 `flushSb -> sendReq -> waitResp -> writeback` 的最小 dcache 握手路径。
 
 ### 12.2 B 通道
 
@@ -763,6 +767,7 @@ sequenceDiagram
 
 - `GrantData`
 - `ReleaseAck`
+- `CBOAck`
 
 关键字段包括：
 
@@ -780,7 +785,8 @@ sequenceDiagram
 
 模型要求：
 
-- DUT 对每个 inflight grant 发出合法的 GrantAck。
+- DUT 只对真正的 inflight `Grant/GrantData` 发出合法的 `GrantAck`。
+- `CBOAck` 不进入 `E` 通道闭环，也不分配 grant sink。
 
 ### 12.6 dcache 路径时序图
 
@@ -795,6 +801,18 @@ sequenceDiagram
     M-->>D: D: GrantData beat1
     D->>M: E: GrantAck
     M->>M: 删除 inflight grant
+```
+
+对 non-zero CBO，当前最小闭环则是：
+
+```mermaid
+sequenceDiagram
+    participant D as DUT
+    participant M as MemoryModel
+
+    D->>M: A: CBOClean/Flush/Inval
+    M-->>D: D: CBOAck
+    M->>M: 不生成 sbuffer drain，也不等待 E: GrantAck
 ```
 
 ## 13. 端口空闲值与默认行为

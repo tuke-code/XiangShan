@@ -5,8 +5,10 @@ MemoryModel store/deferred-compare 纯 Python 单元测试。
 
 from memory_model import (
     MemoryModel,
+    TL_A_CBO_CLEAN,
     TL_A_PUT_FULL,
     TL_A_PUT_PARTIAL,
+    TL_D_CBO_ACK,
 )
 from model.ref_memory import RefMemory
 from model.scoreboard import Scoreboard
@@ -291,6 +293,23 @@ def test_memory_model_finalize_accepts_cbo_zero_wline_drain_and_zeroes_cacheline
     assert model.read_cacheline(0x2040) == bytes(64)
 
 
+def test_memory_model_finalize_ignores_nonzero_cbo_without_drain_compare():
+    model = _create_model()
+    initial_line = bytes((0x80 + idx) & 0xFF for idx in range(64))
+    model.preload_bytes(0x2080, initial_line)
+
+    model.note_store_allocated(sq_idx_flag=0, sq_idx_value=0, rob_idx_flag=0, rob_idx_value=5)
+    model.note_store_request(sq_idx=0, addr=0x2080, data=0, mask=0xFF, opcode="cbo_clean")
+    model.scoreboard.mark_store_committed(0)
+    model.scoreboard.mark_store_completed(0)
+    model.after_cycle()
+    result = model.finalize_and_check_drain()
+
+    assert result["drain_event_count"] == 0
+    assert result["touched_byte_count"] == 0
+    assert model.read_cacheline(0x2080) == initial_line
+
+
 def test_memory_model_records_outer_put_partial_as_drain_event():
     model = _create_model(outer_delay=0)
 
@@ -310,6 +329,29 @@ def test_memory_model_records_outer_put_partial_as_drain_event():
     assert model.drain_log[-1]["channel"] == "outer"
     assert model.drain_log[-1]["addr"] == 0x3000
     assert model.outer_d.valid.value == 1
+
+
+def test_memory_model_cbo_clean_returns_single_beat_cbo_ack_without_grant_tracking():
+    model = _create_model(grant_delay_min=0, grant_delay_max=0)
+
+    model.drive_pre_step(0)
+    model.dcache_a.valid.value = 1
+    model.dcache_a.bits_opcode.value = TL_A_CBO_CLEAN
+    model.dcache_a.bits_size.value = 6
+    model.dcache_a.bits_source.value = 9
+    model.dcache_a.bits_address.value = 0x4000
+    model.dcache_a.bits_echo_isKeyword.value = 0
+
+    model.capture_on_rise(1)
+    model.drive_pre_step(1)
+
+    assert model.stats["dcache_a_request_count"] == 1
+    assert model.stats["dcache_d_response_count"] == 1
+    assert model.stats["inflight_grant_count"] == 0
+    assert model.dcache_d.valid.value == 1
+    assert model.dcache_d.bits_opcode.value == TL_D_CBO_ACK
+    assert model.dcache_d.bits_source.value == 9
+    assert model.dcache_d.bits_sink.value == 0
 
 
 def test_memory_model_finalize_ignores_mmio_outer_drain_in_golden_compare():

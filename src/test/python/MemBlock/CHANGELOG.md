@@ -24,6 +24,35 @@
 
 - 本条目为文档更新，未运行 pytest / real DUT 回归。
 
+### 2. 补齐 non-zero CBO 的 dcache `A -> D(CBOAck)` 环境闭环，并把文档口径收敛到当前支持边界
+
+本条目记录一轮围绕 `cbo.clean/flush/inval` 的环境补强。此前事务层、request API、scoreboard 与 directed testcase 已经补到位，但真实 DUT 回归仍会在 `TransportResponder._handle_dcache_a()` 处被环境断言拦住，原因是 responder 还停留在“dcache A 只可能是 `AcquireBlock`”的旧假设。对当前 Kunminghu V2 TileLink 扩展来说，这个假设已经过时：non-zero CBO 会在 dcache A 上发出自定义 opcode `12/13/14`，并在 dcache D 上等待单拍 `CBOAck`，而不是走 `GrantData -> GrantAck(E)` 的 load/refill 闭环。
+
+本轮把这个 contract 补进 `transport_responder.py`：对 `TL_A_CBO_CLEAN/FLUSH/INVAL` 接受请求、延迟返回单拍 `TL_D_CBO_ACK`，且不再错误地登记 inflight grant 或等待 E 通道 `GrantAck`。同时补了一条纯 Python 单测固定这层契约，并把 `docs/dut_port_behavior.md`、`docs/memory_model_design.md`、`docs/coverage_summary.md` 与 `docs/coverage_todo.md` 的口径从“non-zero CBO 尚未支持/尚缺入口”更新为“已具备 directed smoke，剩余 gap 收敛到 `cbo.zero` 多 entry drain 与更深 CBO 语义”。
+
+#### 变更摘要
+
+- `model/transport_responder.py`
+  - 新增 `TL_A_CBO_CLEAN/FLUSH/INVAL` 与 `TL_D_CBO_ACK` 常量
+  - `dcache_a` 现在接受 non-zero CBO 请求并返回单拍 `CBOAck`
+  - non-zero CBO 不再分配 grant sink，也不要求 E 通道 `GrantAck`
+- `memory_model.py`
+  - 同步导出 CBO 相关 TileLink 常量，便于单测引用
+- `tests/test_memory_model_store_logic.py`
+  - 新增 non-zero CBO `A -> D(CBOAck)` 单测
+- `docs/dut_port_behavior.md` / `docs/memory_model_design.md`
+  - 更新 dcache A/D/E 通道支持边界与 `cbo.zero` / non-zero CBO 的不同收口方式
+- `docs/coverage_summary.md` / `docs/coverage_todo.md`
+  - 更新当前 coverage 口径，移除“non-zero CBO 尚缺 directed 入口”的过时表述
+
+#### 验证情况
+
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_memory_model_store_logic.py`
+  - 结果：`19 passed`
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'cbo_'`
+  - 结果：`3 passed, 2 xfailed`
+  - 说明：3 条 non-zero CBO real-DUT smoke 转绿；保留的 2 条 `xfail` 仍是既有 `cbo.zero` 多 entry drain 缺口
+
 ## 2026-04-28
 
 ### 1. 补齐标量 `STA` backend 反馈闭环，新增 `staIqFeedback + deqPtr` 半模型与自动重发

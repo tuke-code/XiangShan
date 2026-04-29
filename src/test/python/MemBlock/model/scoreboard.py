@@ -10,7 +10,14 @@ from dataclasses import dataclass
 
 from transactions import (
     CACHELINE_BYTES,
+    CBO_CLEAN_STORE_OPCODE,
+    CBO_FLUSH_STORE_OPCODE,
+    CBO_INVAL_STORE_OPCODE,
+    CBO_STORE_OPCODES,
     CBO_ZERO_STORE_OPCODE,
+    LSU_OP_CBO_CLEAN,
+    LSU_OP_CBO_FLUSH,
+    LSU_OP_CBO_INVAL,
     LSU_OP_CBO_ZERO,
     SCALAR_STORE_OPCODE,
     normalized_store_opcode,
@@ -112,11 +119,21 @@ class PendingStore:
     request_opcode: str = SCALAR_STORE_OPCODE
 
     @property
+    def is_cbo(self) -> bool:
+        return self.opcode in CBO_STORE_OPCODES or self.request_opcode in CBO_STORE_OPCODES
+
+    @property
     def is_cbo_zero(self) -> bool:
         return self.opcode == CBO_ZERO_STORE_OPCODE or self.request_opcode == CBO_ZERO_STORE_OPCODE
 
     @property
+    def is_cbo_nonzero(self) -> bool:
+        return self.is_cbo and not self.is_cbo_zero
+
+    @property
     def ready_for_retire(self) -> bool:
+        if self.is_cbo_nonzero:
+            return False
         retired_boundary = self.completed if self.is_cbo_zero else self.committed
         return (
             retired_boundary
@@ -426,8 +443,16 @@ class Scoreboard:
         store.data = data
         store.data_valid = True
         store.width_bytes = width_bytes
-        if fu_op_type is not None and int(fu_op_type) == LSU_OP_CBO_ZERO:
-            store.opcode = CBO_ZERO_STORE_OPCODE
+        if fu_op_type is not None:
+            normalized_fu_op_type = int(fu_op_type)
+            if normalized_fu_op_type == LSU_OP_CBO_CLEAN:
+                store.opcode = CBO_CLEAN_STORE_OPCODE
+            elif normalized_fu_op_type == LSU_OP_CBO_FLUSH:
+                store.opcode = CBO_FLUSH_STORE_OPCODE
+            elif normalized_fu_op_type == LSU_OP_CBO_INVAL:
+                store.opcode = CBO_INVAL_STORE_OPCODE
+            elif normalized_fu_op_type == LSU_OP_CBO_ZERO:
+                store.opcode = CBO_ZERO_STORE_OPCODE
 
     def observe_sbuffer_write(
         self,
@@ -613,11 +638,15 @@ class Scoreboard:
         if store.request_opcode == CBO_ZERO_STORE_OPCODE and store.request_addr is not None:
             self.ref_memory.apply_cbo_zero(store.request_addr)
             return
+        if store.request_opcode in {CBO_CLEAN_STORE_OPCODE, CBO_FLUSH_STORE_OPCODE, CBO_INVAL_STORE_OPCODE}:
+            return
         if store.request_addr is not None and store.request_data is not None and store.request_mask is not None:
             self.ref_memory.apply_store(store.request_addr, store.request_data, store.request_mask)
             return
         if store.is_cbo_zero and store.addr is not None:
             self.ref_memory.apply_cbo_zero(store.addr)
+            return
+        if store.is_cbo_nonzero:
             return
         normalized = _normalized_store_window(store.addr, store.mask, store.width_bytes)
         if normalized is None:

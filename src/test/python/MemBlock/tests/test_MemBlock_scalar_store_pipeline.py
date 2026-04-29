@@ -19,6 +19,7 @@ from request_apis import (
 )
 from transactions import LoadTxn, ptr_inc, QueuePtr, StoreTxn
 from sequences import (
+    CboFlushSequence,
     CboZeroFlushSequence,
     FlushStoreBuffersSequence,
     ResetEnvSequence,
@@ -50,6 +51,9 @@ PARTIAL_STORE_WINDOW_ADDRS = [
     PARTIAL_STORE_WINDOW_BASE + 0x8,
 ]
 CBO_ZERO_LINE_ADDR = STORE_ADDR_BASE + 0x100
+CBO_CLEAN_LINE_ADDR = STORE_ADDR_BASE + 0x200
+CBO_FLUSH_LINE_ADDR = STORE_ADDR_BASE + 0x240
+CBO_INVAL_LINE_ADDR = STORE_ADDR_BASE + 0x280
 SBUFFER_FORWARD_LINE_ADDR = STORE_ADDR_BASE + 0x140
 SBUFFER_DATA_OFFSET_LINE_ADDR = STORE_ADDR_BASE + 0x180
 SBUFFER_DATA_BURST_BASE = STORE_ADDR_BASE + 0x400
@@ -1324,6 +1328,64 @@ def test_api_MemBlock_cbo_zero_flush_zeroes_entire_cacheline(env):
     assert result.drain_summary["drain_event_count"] >= 1, "`cbo.zero` flush 未记录到 drain 事件"
     assert any(event.get("wline") for event in env.memory.drain_log), "`cbo.zero` 未记录到 wline drain"
     assert env.read_cacheline(CBO_ZERO_LINE_ADDR) == bytes(64), "`cbo.zero` 未把整条 cacheline 清零"
+
+
+def _run_nonzero_cbo_smoke(env, txn_factory, *, line_addr: int, req_id: int):
+    state = _reset_env_and_state(env)
+    initial_line = bytes((((req_id + 3) * 7) + index) & 0xFF for index in range(64))
+    env.preload_bytes(line_addr, initial_line)
+
+    result = CboFlushSequence(
+        txn_factory(
+            req_id=req_id,
+            sq_ptr=state.sq_ptr,
+            addr=line_addr,
+        ),
+        require_committed=True,
+        assert_no_outstanding=True,
+    ).run(env)
+
+    store_view = result.store_result.store_view
+    assert store_view is not None, "non-zero CBO 未产生 store view"
+    assert store_view.committed, "non-zero CBO 未进入 committed"
+    assert store_view.completed, "non-zero CBO 未进入 completed/writeback"
+    assert store_view.is_cbo, "store view 未标记为 CBO"
+    assert store_view.is_cbo_nonzero, "store view 未标记为 non-zero CBO"
+    assert not store_view.is_cbo_zero, "non-zero CBO 被误标成 cbo.zero"
+    assert store_view.addr == line_addr, "non-zero CBO 地址不匹配"
+    assert result.drain_summary["drain_event_count"] == 0, "non-zero CBO 不应伪造 sbuffer drain 数据事件"
+    assert env.read_cacheline(line_addr) == initial_line, "non-zero CBO smoke 不应改写参考内存内容"
+    return result
+
+
+def test_api_MemBlock_cbo_clean_cacheline_smoke(env):
+    result = _run_nonzero_cbo_smoke(
+        env,
+        StoreTxn.cbo_clean,
+        line_addr=CBO_CLEAN_LINE_ADDR,
+        req_id=10,
+    )
+    assert result.store_result.txn.opcode == "cbo_clean"
+
+
+def test_api_MemBlock_cbo_flush_cacheline_smoke(env):
+    result = _run_nonzero_cbo_smoke(
+        env,
+        StoreTxn.cbo_flush,
+        line_addr=CBO_FLUSH_LINE_ADDR,
+        req_id=11,
+    )
+    assert result.store_result.txn.opcode == "cbo_flush"
+
+
+def test_api_MemBlock_cbo_inval_cacheline_smoke(env):
+    result = _run_nonzero_cbo_smoke(
+        env,
+        StoreTxn.cbo_inval,
+        line_addr=CBO_INVAL_LINE_ADDR,
+        req_id=12,
+    )
+    assert result.store_result.txn.opcode == "cbo_inval"
 
 
 @pytest.mark.xfail(

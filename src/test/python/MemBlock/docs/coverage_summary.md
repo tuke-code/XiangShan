@@ -120,7 +120,7 @@ python3 -m pytest -q src/test/python/MemBlock/tests/test_MemBlock_store_misalign
 3. 当前平台的主要瓶颈已经收敛为：
    - vector-store 控制路径（`vecInactive` / `vecMbCommit` / split dequeue）覆盖不足；
    - 部分 cross-16B / cross-page / vector drain 在真实 DUT 上仍会卡在 `flushSb -> sbIsEmpty`；
-   - 非 `cbo.zero` 的 CBO 状态机路径仍缺 directed 入口。
+   - 当时 non-zero CBO 状态机路径仍缺 directed 入口。
 
 ## 3. 覆盖率执行命令与产物
 
@@ -398,7 +398,7 @@ store execute 和 wrapper 主路径整体并不差，说明：
 但明显还没有覆盖充分的包括：
 
 - 向量 store control-path 与最终 drain
-- 非 `cbo.zero` 的 CBO 状态机入口
+- 更深的 CBO 语义闭环
 - cross-page scalar store-misalign 的 drain 闭环
 - 更复杂的 partial write / cross-line / exception / delayed drain 场景
 
@@ -530,11 +530,11 @@ store execute 和 wrapper 主路径整体并不差，说明：
    - 下一步不再是先补接口，而是把 partial-store 场景矩阵扩到多次 merge、full-store 覆写和多地址交织
 
 5. **已知未闭环功能点转正**
-   - vector store data path
-   - `cbo.zero` / 非 `cbo.zero` CBO
-   - cross-page scalar store-misalign
-   - PBMT-NC store/load
-   - store-side PMP deny/fault
+  - vector store data path
+  - `cbo.zero` 多 entry drain 与更深 CBO 语义
+  - cross-page scalar store-misalign
+  - PBMT-NC store/load
+  - store-side PMP deny/fault
 
 详细用例补强清单见：`src/test/python/MemBlock/docs/coverage_todo.md`
 

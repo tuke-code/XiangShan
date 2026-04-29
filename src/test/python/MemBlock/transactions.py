@@ -14,9 +14,21 @@ SCALAR_STORE_MASK_TO_SIZE_BYTES = {
     0xFF: 8,
 }
 SCALAR_STORE_OPCODE = "scalar"
+CBO_CLEAN_STORE_OPCODE = "cbo_clean"
+CBO_FLUSH_STORE_OPCODE = "cbo_flush"
+CBO_INVAL_STORE_OPCODE = "cbo_inval"
 CBO_ZERO_STORE_OPCODE = "cbo_zero"
 CACHELINE_BYTES = 64
+LSU_OP_CBO_CLEAN = 0xC
+LSU_OP_CBO_FLUSH = 0xD
+LSU_OP_CBO_INVAL = 0xE
 LSU_OP_CBO_ZERO = 0x7
+CBO_STORE_OPCODES = (
+    CBO_CLEAN_STORE_OPCODE,
+    CBO_FLUSH_STORE_OPCODE,
+    CBO_INVAL_STORE_OPCODE,
+    CBO_ZERO_STORE_OPCODE,
+)
 SCALAR_STORE_SIZE_BYTES_TO_FU_OP_TYPE = {
     1: 0x0,
     2: 0x1,
@@ -92,23 +104,29 @@ def validate_scalar_load_size_and_mask(*, size: int, mask: int) -> None:
 
 def normalized_store_opcode(opcode: str) -> str:
     normalized = str(opcode)
-    if normalized not in {SCALAR_STORE_OPCODE, CBO_ZERO_STORE_OPCODE}:
+    if normalized not in {SCALAR_STORE_OPCODE, *CBO_STORE_OPCODES}:
         raise ValueError(
             f"unsupported store opcode: {opcode!r}; "
-            f"expected one of {[SCALAR_STORE_OPCODE, CBO_ZERO_STORE_OPCODE]}"
+            f"expected one of {[SCALAR_STORE_OPCODE, *CBO_STORE_OPCODES]}"
         )
     return normalized
 
 
 def store_size_bytes(*, opcode: str, mask: int) -> int:
     normalized_opcode = normalized_store_opcode(opcode)
-    if normalized_opcode == CBO_ZERO_STORE_OPCODE:
+    if normalized_opcode in CBO_STORE_OPCODES:
         return CACHELINE_BYTES
     return scalar_store_size_bytes_from_mask(mask)
 
 
 def store_fu_op_type(*, opcode: str, mask: int) -> int:
     normalized_opcode = normalized_store_opcode(opcode)
+    if normalized_opcode == CBO_CLEAN_STORE_OPCODE:
+        return LSU_OP_CBO_CLEAN
+    if normalized_opcode == CBO_FLUSH_STORE_OPCODE:
+        return LSU_OP_CBO_FLUSH
+    if normalized_opcode == CBO_INVAL_STORE_OPCODE:
+        return LSU_OP_CBO_INVAL
     if normalized_opcode == CBO_ZERO_STORE_OPCODE:
         return LSU_OP_CBO_ZERO
     return scalar_store_fu_op_type_from_mask(mask)
@@ -369,7 +387,7 @@ class StoreTxn:
     addr: int
     data: int
     mask: int = 0xFF
-    opcode: Literal["scalar", "cbo_zero"] = SCALAR_STORE_OPCODE
+    opcode: Literal["scalar", "cbo_clean", "cbo_flush", "cbo_inval", "cbo_zero"] = SCALAR_STORE_OPCODE
     enq_port: int = 0
     sta_lane: int = 3
     std_lane: int = 5
@@ -389,8 +407,9 @@ class StoreTxn:
             scalar_store_size_bytes_from_mask(self.mask)
 
     @classmethod
-    def cbo_zero(
+    def _cbo(
         cls,
+        opcode: Literal["cbo_clean", "cbo_flush", "cbo_inval", "cbo_zero"],
         *,
         req_id: int,
         sq_ptr: QueuePtr,
@@ -410,7 +429,131 @@ class StoreTxn:
             addr=addr,
             data=0,
             mask=0xFF,
-            opcode=CBO_ZERO_STORE_OPCODE,
+            opcode=opcode,
+            enq_port=enq_port,
+            sta_lane=sta_lane,
+            std_lane=std_lane,
+            rob_ref=rob_ref,
+            rob_idx_override_flag=rob_idx_override_flag,
+            rob_idx_override_value=rob_idx_override_value,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+        )
+
+    @classmethod
+    def cbo_zero(
+        cls,
+        *,
+        req_id: int,
+        sq_ptr: QueuePtr,
+        addr: int,
+        enq_port: int = 0,
+        sta_lane: int = 3,
+        std_lane: int = 5,
+        rob_ref: RobRef | None = None,
+        rob_idx_override_flag: int | None = None,
+        rob_idx_override_value: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+    ) -> "StoreTxn":
+        return cls._cbo(
+            CBO_ZERO_STORE_OPCODE,
+            req_id=req_id,
+            sq_ptr=sq_ptr,
+            addr=addr,
+            enq_port=enq_port,
+            sta_lane=sta_lane,
+            std_lane=std_lane,
+            rob_ref=rob_ref,
+            rob_idx_override_flag=rob_idx_override_flag,
+            rob_idx_override_value=rob_idx_override_value,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+        )
+
+    @classmethod
+    def cbo_clean(
+        cls,
+        *,
+        req_id: int,
+        sq_ptr: QueuePtr,
+        addr: int,
+        enq_port: int = 0,
+        sta_lane: int = 3,
+        std_lane: int = 5,
+        rob_ref: RobRef | None = None,
+        rob_idx_override_flag: int | None = None,
+        rob_idx_override_value: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+    ) -> "StoreTxn":
+        return cls._cbo(
+            CBO_CLEAN_STORE_OPCODE,
+            req_id=req_id,
+            sq_ptr=sq_ptr,
+            addr=addr,
+            enq_port=enq_port,
+            sta_lane=sta_lane,
+            std_lane=std_lane,
+            rob_ref=rob_ref,
+            rob_idx_override_flag=rob_idx_override_flag,
+            rob_idx_override_value=rob_idx_override_value,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+        )
+
+    @classmethod
+    def cbo_flush(
+        cls,
+        *,
+        req_id: int,
+        sq_ptr: QueuePtr,
+        addr: int,
+        enq_port: int = 0,
+        sta_lane: int = 3,
+        std_lane: int = 5,
+        rob_ref: RobRef | None = None,
+        rob_idx_override_flag: int | None = None,
+        rob_idx_override_value: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+    ) -> "StoreTxn":
+        return cls._cbo(
+            CBO_FLUSH_STORE_OPCODE,
+            req_id=req_id,
+            sq_ptr=sq_ptr,
+            addr=addr,
+            enq_port=enq_port,
+            sta_lane=sta_lane,
+            std_lane=std_lane,
+            rob_ref=rob_ref,
+            rob_idx_override_flag=rob_idx_override_flag,
+            rob_idx_override_value=rob_idx_override_value,
+            ftq_idx_flag=ftq_idx_flag,
+            ftq_idx_value=ftq_idx_value,
+        )
+
+    @classmethod
+    def cbo_inval(
+        cls,
+        *,
+        req_id: int,
+        sq_ptr: QueuePtr,
+        addr: int,
+        enq_port: int = 0,
+        sta_lane: int = 3,
+        std_lane: int = 5,
+        rob_ref: RobRef | None = None,
+        rob_idx_override_flag: int | None = None,
+        rob_idx_override_value: int | None = None,
+        ftq_idx_flag: int | None = None,
+        ftq_idx_value: int | None = None,
+    ) -> "StoreTxn":
+        return cls._cbo(
+            CBO_INVAL_STORE_OPCODE,
+            req_id=req_id,
+            sq_ptr=sq_ptr,
+            addr=addr,
             enq_port=enq_port,
             sta_lane=sta_lane,
             std_lane=std_lane,
@@ -493,13 +636,21 @@ class StoreTxn:
 
     @property
     def issue_data(self) -> int:
-        if self.opcode == CBO_ZERO_STORE_OPCODE:
+        if self.is_cbo:
             return 0
         return int(self.data)
 
     @property
+    def is_cbo(self) -> bool:
+        return self.opcode in CBO_STORE_OPCODES
+
+    @property
     def is_cbo_zero(self) -> bool:
         return self.opcode == CBO_ZERO_STORE_OPCODE
+
+    @property
+    def is_cbo_nonzero(self) -> bool:
+        return self.is_cbo and not self.is_cbo_zero
 
 
 @dataclass
@@ -855,7 +1006,7 @@ class IssueOp:
     size: int = 8
     mask: int = 0xFF
     fp_wen: int = 0
-    store_opcode: Literal["scalar", "cbo_zero"] = SCALAR_STORE_OPCODE
+    store_opcode: Literal["scalar", "cbo_clean", "cbo_flush", "cbo_inval", "cbo_zero"] = SCALAR_STORE_OPCODE
     store_set_hit: int = 0
     load_wait_bit: int = 0
     load_wait_strict: int = 0
@@ -926,7 +1077,7 @@ class IssueOp:
         addr: int,
         lane: int = 3,
         mask: int = 0xFF,
-        store_opcode: Literal["scalar", "cbo_zero"] = SCALAR_STORE_OPCODE,
+        store_opcode: Literal["scalar", "cbo_clean", "cbo_flush", "cbo_inval", "cbo_zero"] = SCALAR_STORE_OPCODE,
         rob_ref: RobRef | None = None,
         rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
@@ -965,7 +1116,7 @@ class IssueOp:
         data: int,
         lane: int = 5,
         mask: int = 0xFF,
-        store_opcode: Literal["scalar", "cbo_zero"] = SCALAR_STORE_OPCODE,
+        store_opcode: Literal["scalar", "cbo_clean", "cbo_flush", "cbo_inval", "cbo_zero"] = SCALAR_STORE_OPCODE,
         rob_ref: RobRef | None = None,
         rob_idx: RobIndex | None = None,
         rob_idx_flag: int | None = None,
