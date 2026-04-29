@@ -597,6 +597,7 @@ class StoreAddrReInputBundle(OptionalSignalBundle):
         "mmio": "mmio",
         "memBackTypeMM": "memBackTypeMM",
         "hasException": "hasException",
+        "isLastRequest": "isLastRequest",
     }
 
 
@@ -622,6 +623,9 @@ class StoreQueueShadowEntry(OptionalSignalBundle):
         self.committed = getattr(dut, f"MemBlock_inner_lsq_storeQueue_committed_{index}", None)
         self.completed = getattr(dut, f"MemBlock_inner_lsq_storeQueue_completed_{index}", None)
         self.nc = getattr(dut, f"MemBlock_inner_lsq_storeQueue_nc_{index}", None)
+        self.hasException = getattr(dut, f"MemBlock_inner_lsq_storeQueue_hasException_{index}", None)
+        if self.hasException is None:
+            self.hasException = getattr(dut, f"MemBlock_inner_lsq_storeQueue_ctrlEntries_{index}_hasException", None)
         self.robIdx_flag = getattr(dut, f"MemBlock_inner_lsq_storeQueue_uop_{index}_robIdx_flag", None)
         self.robIdx_value = getattr(dut, f"MemBlock_inner_lsq_storeQueue_uop_{index}_robIdx_value", None)
 

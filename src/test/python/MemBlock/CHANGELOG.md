@@ -1,7 +1,6 @@
 # MemBlock Python Verification Environment CHANGELOG
 
 ## 2026-04-29
-
 ### 1. 统一 DCache 覆盖率文档口径，区分当前 full 主报告与历史定向快照
 
 本条目记录一次面向覆盖率文档一致性的收口。此前 `docs/coverage_summary.md`、`docs/coverage_todo.md` 与 `docs/BUGS.md` 同时保留了 `2026-04-11/12` 的 full/focused snapshot、`2026-04-27` 的 `NewStoreQueue` 定向 campaign，以及当前 `src/test/python/MemBlock/data/toffee_report_full/line_dat/` 的 full 主报告；但部分段落仍把旧快照里的 `NewStoreQueue/SbufferData` 低百分比写成“当前事实”，也没有把“覆盖不足”和“功能未闭环”明确拆开。本轮只更新共享文档口径，不改 testcase、env 或 DUT 行为。
@@ -52,6 +51,41 @@
 - `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_scalar_store_pipeline.py -k 'cbo_'`
   - 结果：`3 passed, 2 xfailed`
   - 说明：3 条 non-zero CBO real-DUT smoke 转绿；保留的 2 条 `xfail` 仍是既有 `cbo.zero` 多 entry drain 缺口
+
+### 3. 修正 store fault 观测链路并移除剩余 PMP store 侧 `xfail`
+
+本条目记录一次围绕 `test_MemBlock_pmp_runtime.py` 的最终收口。此前 store-side PMP/PMA 回归长期保留 grouped `xfail`，一部分根因是 testcase 读到了过早的 shadow，另一部分根因是 env 对 `storeAddrInRe` 的消费过于乐观：真实 DUT 没有稳定导出 `sqIdx`，而同一 lane 的 `storeAddrInRe` payload 又可能跨多个 cycle 残留，导致 monitor 既可能丢 fault，也可能把旧返回重复归因到后续 SQ 项。
+
+本轮把 `storeAddrInRe` 改成“按 lane 挂起目标 + 只在 final response 上一次性消费”的模式，并在 weak-shadow 语义下只把 `sq_shadow.hasException` 作为最小补充事实，不重新恢复 `committed/completed/nc` 等弱 shadow 依赖。与此同时，`PMP runtime store` 在每次 entry 改写后补一次 `enable_sv39(root_pt_addr=PMP_ROOT_PT)` 状态重同步，`PMA NAPOT/TOR boundary store` 统一改为 `wait_store_materialized()` 严格等待 `translated paddr + mmio/nc + committed` 收敛；因此剩余的 PMP/PMA store 侧 grouped `xfail` 已全部移除。
+
+#### 变更摘要
+
+- `monitors/store_monitor.py`
+  - `storeAddrInRe` 改为基于挂起 lane 目标的 final-response 一次性消费
+  - 增加重复 payload 去重，避免旧返回在后续 cycle 被重复归因
+- `model/scoreboard.py`
+  - `observe_sq_shadow_entry()` 新增 `has_exception` 入参
+  - 保持 `reduce weak shadow dependencies` 的主语义，只把 `sq_shadow.hasException` 作为最小补充事实
+- `MemBlock_env.py`
+  - 为 `StoreAddrReInputBundle` 新增 `isLastRequest` 绑定
+  - 为 `StoreQueueShadowEntry` 新增可选 `hasException` 绑定
+- `tests/test_memory_model_store_logic.py`
+  - 新增 `test_memory_model_tracks_store_exception_from_sq_shadow`
+  - 新增 `test_store_monitor_consumes_final_store_addr_re_once_per_request`
+- `tests/test_MemBlock_pmp_runtime.py`
+  - 修正 grouped `xfail` 在 `--runxfail` 下会吞掉失败的问题
+  - `PMP runtime store` 在每次 entry 改写后补一次 `enable_sv39(root_pt_addr=PMP_ROOT_PT)` 状态重同步
+  - `PMA NAPOT/TOR boundary store` 改为 `wait_store_materialized()` 严格等待 `addr/mmio/nc/committed`
+  - 移除 `runtime store`、`PMA runtime store`、`PMA boundary store` 的 grouped `xfail` 口径
+- `docs/BUGS.md`
+  - 删除已不成立的 store-side PMP deny 缺口口径
+
+#### 验证情况
+
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_memory_model_store_logic.py -k 'store_exception_from_sq_shadow or final_store_addr_re_once_per_request'`
+  - 待本轮回归确认
+- `python3 -m pytest -n 16 -q -rx src/test/python/MemBlock/tests -k pmp`
+  - 待本轮回归确认
 
 ## 2026-04-28
 

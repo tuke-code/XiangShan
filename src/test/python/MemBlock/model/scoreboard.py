@@ -366,6 +366,7 @@ class Scoreboard:
         committed: bool,
         completed: bool,
         nc: bool,
+        has_exception: bool | None = None,
     ) -> None:
         del addrvalid
         del datavalid
@@ -384,10 +385,13 @@ class Scoreboard:
                 sq_idx=sq_idx,
                 rob_idx=rob_idx,
                 allocated=True,
+                has_exception=bool(has_exception) if has_exception is not None else False,
             )
             return
         if store.rob_idx is None:
             store.rob_idx = rob_idx
+        if has_exception is not None:
+            store.has_exception = bool(has_exception)
 
     def observe_store_addr(
         self,

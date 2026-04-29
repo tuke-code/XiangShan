@@ -10,6 +10,7 @@ from memory_model import (
     TL_A_PUT_PARTIAL,
     TL_D_CBO_ACK,
 )
+from monitors.store_monitor import StoreMonitor
 from model.ref_memory import RefMemory
 from model.scoreboard import Scoreboard
 
@@ -657,3 +658,71 @@ def test_scoreboard_sign_extends_narrow_scalar_loads():
 
     assert scoreboard.completed_loads == 1
     assert scoreboard.outstanding_expected_count == 0
+
+
+def test_memory_model_tracks_store_exception_from_sq_shadow():
+    sq_shadow = FakeReadBundle(
+        allocated=1,
+        addrvalid=1,
+        datavalid=1,
+        committed=0,
+        completed=1,
+        nc=1,
+        hasException=1,
+        robIdx_flag=0,
+        robIdx_value=3,
+    )
+    store_addr = FakeReadBundle(valid=1, sqIdx_value=0, paddr=0x2000, miss=0, nc=1)
+    store_mask = FakeReadBundle(valid=1, sqIdx_value=0, mask=0x00FF)
+    store_data = FakeReadBundle(valid=1, sqIdx_value=0, fuType=1 << 17, fuOpType=0x3, data=0x1234)
+
+    model = _create_model(
+        store_addr_inputs=[store_addr],
+        store_mask_inputs=[store_mask],
+        store_data_inputs=[store_data],
+        sq_shadow_entries=[sq_shadow],
+    )
+    model.note_store_allocated(sq_idx_flag=0, sq_idx_value=0, rob_idx_flag=0, rob_idx_value=3)
+
+    model.after_cycle()
+
+    store = model.pending_stores[0]
+    assert store.allocated
+    assert store.has_exception
+
+
+def test_store_monitor_consumes_final_store_addr_re_once_per_request():
+    scoreboard = Scoreboard(
+        RefMemory(),
+        rob_size=512,
+        store_queue_size=8,
+    )
+    store_addr = FakeReadBundle(valid=0, sqIdx_value=0, paddr=0, miss=0, mask=0x00FF, nc=0)
+    store_addr_re = FakeReadBundle(nc=0, mmio=0, memBackTypeMM=0, hasException=0, isLastRequest=0)
+    monitor = StoreMonitor(
+        FakeDut(),
+        scoreboard,
+        store_addr_inputs=[store_addr],
+        store_addr_re_inputs=[store_addr_re],
+        store_queue_size=8,
+    )
+
+    scoreboard.note_store_allocated(sq_idx_flag=0, sq_idx_value=1, rob_idx_flag=0, rob_idx_value=1)
+    scoreboard.note_store_allocated(sq_idx_flag=0, sq_idx_value=2, rob_idx_flag=0, rob_idx_value=2)
+
+    store_addr.values.update(valid=1, sqIdx_value=1, paddr=0x1000, miss=0, mask=0x00FF, nc=0)
+    store_addr_re.values.update(nc=0, mmio=0, memBackTypeMM=1, hasException=0, isLastRequest=0)
+    monitor.after_cycle()
+
+    store_addr.values["valid"] = 0
+    store_addr_re.values.update(hasException=1, isLastRequest=1)
+    monitor.after_cycle()
+
+    store_addr.values.update(valid=1, sqIdx_value=2, paddr=0x2000, miss=0, mask=0x00FF, nc=0)
+    monitor.after_cycle()
+
+    store_addr.values["valid"] = 0
+    monitor.after_cycle()
+
+    assert scoreboard.pending_stores[1].has_exception
+    assert not scoreboard.pending_stores[2].has_exception

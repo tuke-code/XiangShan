@@ -476,7 +476,7 @@ store execute 和 wrapper 主路径整体并不差，说明：
 
 - translation / permission 相关路径已经被真实 DUT 回归显著点亮；
 - 但这并不等于所有 fault/deny/guest/NC 语义都已闭环；
-- 当前未闭环点主要体现在 `BUGS.md` 已列出的 store-side PMP deny、PBMT-NC 分类与 paddr/shadow 导出等问题。
+- 当前未闭环点主要体现在 `BUGS.md` 已列出的 PBMT-NC 分类与 paddr/shadow 导出等问题。
 
 ## 7. 当前覆盖率的总体判断
 
@@ -534,7 +534,6 @@ store execute 和 wrapper 主路径整体并不差，说明：
   - `cbo.zero` 多 entry drain 与更深 CBO 语义
   - cross-page scalar store-misalign
   - PBMT-NC store/load
-  - store-side PMP deny/fault
 
 详细用例补强清单见：`src/test/python/MemBlock/docs/coverage_todo.md`
 

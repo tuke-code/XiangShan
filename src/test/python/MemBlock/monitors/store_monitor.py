@@ -29,10 +29,16 @@ class StoreMonitor:
         self.store_queue_size = store_queue_size
         self._prev_sq_commit_ptr: tuple[int, int] | None = None
         self._prev_sq_deq_ptr: tuple[int, int] | None = None
+        self._pending_store_addr_re_sq_idx = [-1 for _ in self.store_addr_inputs]
+        self._store_addr_re_armed = [False for _ in self.store_addr_inputs]
+        self._last_store_addr_re_signature = [None for _ in self.store_addr_re_inputs]
 
     def reset_runtime_state(self) -> None:
         self._prev_sq_commit_ptr = None
         self._prev_sq_deq_ptr = None
+        self._pending_store_addr_re_sq_idx = [-1 for _ in self.store_addr_inputs]
+        self._store_addr_re_armed = [False for _ in self.store_addr_inputs]
+        self._last_store_addr_re_signature = [None for _ in self.store_addr_re_inputs]
 
     def after_cycle(self) -> None:
         self._observe_sq_commit_ptr()
@@ -43,6 +49,7 @@ class StoreMonitor:
         self._observe_store_mask()
         self._observe_store_data()
         self._observe_sbuffer_writes()
+        self._capture_store_addr_re_targets_for_next_cycle()
 
     def _read_ptr(self, prefix: str) -> tuple[int, int] | None:
         flag_signal = getattr(self.dut, f"{prefix}_flag", None)
@@ -108,6 +115,9 @@ class StoreMonitor:
                 committed=bool(entry.read("committed", 0)),
                 completed=bool(entry.read("completed", 0)),
                 nc=bool(entry.read("nc", 0)),
+                has_exception=(
+                    bool(entry.read("hasException", 0)) if entry.connected("hasException") else None
+                ),
             )
 
     def _observe_store_addr(self) -> None:
@@ -133,12 +143,31 @@ class StoreMonitor:
             ):
                 should_update = False
             if not should_update:
+                if lane_idx < len(self._last_store_addr_re_signature):
+                    self._last_store_addr_re_signature[lane_idx] = None
                 continue
-            sq_idx = lane.read("sqIdx_value", -1)
-            if sq_idx < 0 and lane_idx < len(self.store_addr_inputs):
-                sq_idx = self.store_addr_inputs[lane_idx].read("sqIdx_value", -1)
+            if lane.connected("isLastRequest") and lane.read("isLastRequest", 0) == 0:
+                if lane_idx < len(self._last_store_addr_re_signature):
+                    self._last_store_addr_re_signature[lane_idx] = None
+                continue
+            armed = lane_idx < len(self._store_addr_re_armed) and self._store_addr_re_armed[lane_idx]
+            sq_idx = -1
+            if armed and lane_idx < len(self._pending_store_addr_re_sq_idx):
+                sq_idx = self._pending_store_addr_re_sq_idx[lane_idx]
+            if sq_idx < 0 and lane.connected("sqIdx_value"):
+                sq_idx = lane.read("sqIdx_value", -1)
             if sq_idx < 0:
                 continue
+            signature = (
+                bool(lane.read("nc", 0)) if lane.connected("nc") else None,
+                bool(lane.read("mmio", 0)),
+                bool(lane.read("memBackTypeMM", 0)),
+                bool(lane.read("hasException", 0)),
+            )
+            if lane_idx < len(self._last_store_addr_re_signature):
+                if self._last_store_addr_re_signature[lane_idx] == signature:
+                    continue
+                self._last_store_addr_re_signature[lane_idx] = signature
             self.scoreboard.observe_store_addr_re(
                 sq_idx=sq_idx,
                 nc=bool(lane.read("nc", 0)) if lane.connected("nc") else None,
@@ -146,6 +175,19 @@ class StoreMonitor:
                 mem_back_type_mm=bool(lane.read("memBackTypeMM", 0)),
                 has_exception=bool(lane.read("hasException", 0)),
             )
+            if armed and lane_idx < len(self._store_addr_re_armed):
+                self._store_addr_re_armed[lane_idx] = False
+                self._pending_store_addr_re_sq_idx[lane_idx] = -1
+
+    def _capture_store_addr_re_targets_for_next_cycle(self) -> None:
+        for lane_idx, lane in enumerate(self.store_addr_inputs):
+            if lane.read("valid", 0) == 0:
+                continue
+            if bool(lane.read("miss", 0)):
+                continue
+            if lane_idx < len(self._pending_store_addr_re_sq_idx):
+                self._pending_store_addr_re_sq_idx[lane_idx] = lane.read("sqIdx_value", -1)
+                self._store_addr_re_armed[lane_idx] = True
 
     def _observe_store_mask(self) -> None:
         for lane in self.store_mask_inputs:

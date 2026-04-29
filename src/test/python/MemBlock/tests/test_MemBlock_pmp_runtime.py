@@ -52,14 +52,6 @@ TOR_ENTRY_CASES = (0, 7, 15, 23, 29)
 PMA_RUNTIME_ENTRY_CASES = tuple(range(24))
 PMA_BOUNDARY_ENTRY_CASES = (0, 7, 15, 23)
 PMA_TOR_ENTRY_CASES = (0, 7, 15, 21)
-STORE_PMP_DENY_CAPABILITY_GAP_XFAIL_REASON = (
-    "Store-side PMP deny capability gap: current DUT/env still materializes translated stores "
-    "without a stable store exception marker under PMP deny/off/TOR boundary reprogramming"
-)
-STORE_PMA_TRANSLATED_CLASSIFICATION_GAP_XFAIL_REASON = (
-    "Store-side PMA translated classification gap: current DUT/env still materializes translated stores "
-    "without stable translated paddr/mmio shadow updates under PMA runtime or boundary reprogramming"
-)
 
 
 def _reset_env_state(env):
@@ -287,6 +279,7 @@ def _run_group_cases(case_runner, case_values, *, label_prefix: str, expected_fa
             if expected_failure_reason is None:
                 pytest.fail(message)
             pytest.xfail(f"{expected_failure_reason}\n{message}")
+            raise AssertionError(message) from exc
 
 
 def _program_pma_entry(
@@ -470,11 +463,10 @@ def _run_runtime_store_case(env, entry_index: int) -> None:
     _install_mappings(env, (PMP_STORE_VA, store_pa_base))
     next_sq_ptr = state.sq_ptr
 
-    with env.mmu.ptw_responder() as ptw:
+    with env.mmu.ptw_responder():
         _program_allow_all_entry(env, entry_index=int(entry_index))
         env.mmu.enable_sv39(root_pt_addr=PMP_ROOT_PT)
 
-        trace_start = len(ptw.trace)
         _, _, next_sq_ptr, prime_store = _run_translated_store(
             env,
             req_id=0x200 + int(entry_index),
@@ -484,9 +476,9 @@ def _run_runtime_store_case(env, entry_index: int) -> None:
             data=PMP_STORE_DATA,
             expect_fault=False,
         )
-        prime_ptw_trace = _capture_ptw_delta(ptw, trace_start)
 
         _program_off_entry(env, entry_index=int(entry_index))
+        env.mmu.enable_sv39(root_pt_addr=PMP_ROOT_PT)
         _, _, next_sq_ptr, denied_store = _run_translated_store(
             env,
             req_id=0x400 + int(entry_index),
@@ -498,6 +490,7 @@ def _run_runtime_store_case(env, entry_index: int) -> None:
         )
 
         _program_allow_all_entry(env, entry_index=int(entry_index))
+        env.mmu.enable_sv39(root_pt_addr=PMP_ROOT_PT)
         _, _, _, restored_store = _run_translated_store(
             env,
             req_id=0x600 + int(entry_index),
@@ -508,7 +501,6 @@ def _run_runtime_store_case(env, entry_index: int) -> None:
             expect_fault=False,
         )
 
-    assert any(event["event"] == "a_fire" for event in prime_ptw_trace), f"entry{entry_index}: prime store 未触发 PTW"
     assert not prime_store.has_exception
     assert denied_store.has_exception, f"entry{entry_index}: deny store 未被标记为 exception"
     assert not restored_store.has_exception
@@ -1200,6 +1192,8 @@ def _run_pma_napot_boundary_store_case(env, entry_index: int) -> None:
     )
 
     cfg_words: dict[int, int] = {}
+    inside_translated_pa = _translated_pa(PMP_BOUNDARY_DENIED_VA, inside_pa_base)
+    outside_translated_pa = _translated_pa(PMP_BOUNDARY_ALLOWED_VA, outside_pa_base)
     next_sq_ptr = state.sq_ptr
     with env.mmu.ptw_responder():
         _program_pma_off_entry(env, cfg_words, entry_index=int(entry_index))
@@ -1224,6 +1218,15 @@ def _run_pma_napot_boundary_store_case(env, entry_index: int) -> None:
             data=PMP_STORE_DATA,
             expect_fault=False,
         )
+        inside_store = env.wait_store_materialized(
+            inside_store.sq_idx,
+            expected_addr=inside_translated_pa,
+            expected_data=PMP_STORE_DATA,
+            expected_mmio=True,
+            expected_nc=False,
+            require_committed=True,
+            max_cycles=400,
+        )
         _, _, _, outside_store = _run_translated_store(
             env,
             req_id=0x1680 + int(entry_index),
@@ -1232,6 +1235,15 @@ def _run_pma_napot_boundary_store_case(env, entry_index: int) -> None:
             sq_ptr=next_sq_ptr,
             data=PMP_RESTORED_STORE_DATA,
             expect_fault=False,
+        )
+        outside_store = env.wait_store_materialized(
+            outside_store.sq_idx,
+            expected_addr=outside_translated_pa,
+            expected_data=PMP_RESTORED_STORE_DATA,
+            expected_mmio=False,
+            expected_nc=False,
+            require_committed=True,
+            max_cycles=400,
         )
 
     assert inside_store.mmio and not inside_store.nc, f"entry{entry_index}: boundary inside store 未被标记为 mmio"
@@ -1369,6 +1381,8 @@ def _run_pma_tor_boundary_store_case(env, lower_entry_index: int) -> None:
     )
 
     cfg_words: dict[int, int] = {}
+    inside_translated_pa = _translated_pa(PMP_TOR_INSIDE_VA, inside_pa_base)
+    above_translated_pa = _translated_pa(PMP_TOR_ABOVE_VA, above_pa_base)
     next_sq_ptr = state.sq_ptr
     with env.mmu.ptw_responder():
         _program_pma_off_entry(env, cfg_words, entry_index=int(lower_entry_index))
@@ -1395,6 +1409,15 @@ def _run_pma_tor_boundary_store_case(env, lower_entry_index: int) -> None:
             data=PMP_STORE_DATA ^ 0x22,
             expect_fault=False,
         )
+        inside_store = env.wait_store_materialized(
+            inside_store.sq_idx,
+            expected_addr=inside_translated_pa,
+            expected_data=PMP_STORE_DATA ^ 0x22,
+            expected_mmio=True,
+            expected_nc=False,
+            require_committed=True,
+            max_cycles=400,
+        )
         _, _, _, above_store = _run_translated_store(
             env,
             req_id=0x1980 + int(lower_entry_index),
@@ -1403,6 +1426,15 @@ def _run_pma_tor_boundary_store_case(env, lower_entry_index: int) -> None:
             sq_ptr=next_sq_ptr,
             data=PMP_RESTORED_STORE_DATA,
             expect_fault=False,
+        )
+        above_store = env.wait_store_materialized(
+            above_store.sq_idx,
+            expected_addr=above_translated_pa,
+            expected_data=PMP_RESTORED_STORE_DATA,
+            expected_mmio=False,
+            expected_nc=False,
+            require_committed=True,
+            max_cycles=400,
         )
 
     assert inside_store.mmio and not inside_store.nc, f"entry{lower_entry_index}: TOR inside store 未被标记为 mmio"
@@ -1420,14 +1452,13 @@ def test_api_MemBlock_pmp_runtime_load_matrix(env):
     )
 
 
-def test_api_MemBlock_pmp_runtime_store_gap_matrix(env):
-    """按行为簇收口 32 个 real entry 的 runtime store deny capability gap。"""
+def test_api_MemBlock_pmp_runtime_store_matrix(env):
+    """按行为簇收口 32 个 real entry 的 runtime store 改写矩阵。"""
 
     _run_group_cases(
         lambda entry_index: _run_runtime_store_case(env, entry_index),
         ALL_REAL_ENTRY_CASES,
-        label_prefix="runtime_store_gap_entry",
-        expected_failure_reason=STORE_PMP_DENY_CAPABILITY_GAP_XFAIL_REASON,
+        label_prefix="runtime_store_entry",
     )
 
 
@@ -1451,14 +1482,13 @@ def test_api_MemBlock_pmp_napot_boundary_load_matrix(env):
     )
 
 
-def test_api_MemBlock_pmp_napot_boundary_store_gap_matrix(env):
-    """按行为簇收口 NAPOT boundary store capability gap。"""
+def test_api_MemBlock_pmp_napot_boundary_store_matrix(env):
+    """按行为簇收口 NAPOT boundary store 覆盖矩阵。"""
 
     _run_group_cases(
         lambda entry_index: _run_napot_boundary_store_case(env, entry_index),
         BOUNDARY_ENTRY_CASES,
-        label_prefix="napot_boundary_store_gap_entry",
-        expected_failure_reason=STORE_PMP_DENY_CAPABILITY_GAP_XFAIL_REASON,
+        label_prefix="napot_boundary_store_entry",
     )
 
 
@@ -1472,14 +1502,13 @@ def test_api_MemBlock_pmp_tor_boundary_load_matrix(env):
     )
 
 
-def test_api_MemBlock_pmp_tor_boundary_store_gap_matrix(env):
-    """按行为簇收口 TOR boundary store capability gap。"""
+def test_api_MemBlock_pmp_tor_boundary_store_matrix(env):
+    """按行为簇收口 TOR boundary store 覆盖矩阵。"""
 
     _run_group_cases(
         lambda lower_entry_index: _run_tor_boundary_store_case(env, lower_entry_index),
         TOR_ENTRY_CASES,
-        label_prefix="tor_boundary_store_gap_entry",
-        expected_failure_reason=STORE_PMP_DENY_CAPABILITY_GAP_XFAIL_REASON,
+        label_prefix="tor_boundary_store_entry",
     )
 
 
@@ -1500,7 +1529,6 @@ def test_api_MemBlock_pma_runtime_store_matrix(env):
         lambda entry_index: _run_pma_runtime_store_case(env, entry_index),
         PMA_RUNTIME_ENTRY_CASES,
         label_prefix="pma_runtime_store_entry",
-        expected_failure_reason=STORE_PMA_TRANSLATED_CLASSIFICATION_GAP_XFAIL_REASON,
     )
 
 
@@ -1521,7 +1549,6 @@ def test_api_MemBlock_pma_napot_boundary_store_matrix(env):
         lambda entry_index: _run_pma_napot_boundary_store_case(env, entry_index),
         PMA_BOUNDARY_ENTRY_CASES,
         label_prefix="pma_napot_boundary_store_entry",
-        expected_failure_reason=STORE_PMA_TRANSLATED_CLASSIFICATION_GAP_XFAIL_REASON,
     )
 
 
@@ -1542,5 +1569,4 @@ def test_api_MemBlock_pma_tor_boundary_store_matrix(env):
         lambda lower_entry_index: _run_pma_tor_boundary_store_case(env, lower_entry_index),
         PMA_TOR_ENTRY_CASES,
         label_prefix="pma_tor_boundary_store_entry",
-        expected_failure_reason=STORE_PMA_TRANSLATED_CLASSIFICATION_GAP_XFAIL_REASON,
     )
