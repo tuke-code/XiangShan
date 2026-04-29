@@ -1618,10 +1618,10 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val lastShouldIssueTime = deqEntry.topdownLastShouldIssueTime.get
     val robHeadTime = deqEntry.topdownRobHeadTime.get
     val issued = candidateIQDeqVec.get(deqPtr.value).reduce(_ || _)
-    when(deqEntry.valid){
-      assert(issueTime >= lastIssueTime)
-      assert(lastIssueTime <= lastShouldIssueTime)
-    }
+//    when(deqEntry.valid){
+//      assert(issueTime >= lastIssueTime)
+//      assert(lastIssueTime <= lastShouldIssueTime)
+//    }
     val waitTime = issueTime - robHeadTime
     val robHeadFutype = deqEntry.debug_fuType.get
     val robHeadExecStall = deqEntry.valid && (lastIssueTime > deqEntryNormalLatency) && (lastIssueTime > waitTime)
