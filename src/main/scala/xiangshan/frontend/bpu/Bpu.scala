@@ -34,6 +34,7 @@ import xiangshan.frontend.bpu.history.commonhr.CommonHR
 import xiangshan.frontend.bpu.history.commonhr.CommonHRMeta
 import xiangshan.frontend.bpu.history.phr.Phr
 import xiangshan.frontend.bpu.history.phr.PhrAllFoldedHistories
+import xiangshan.frontend.bpu.history.phr.PhrDiff
 import xiangshan.frontend.bpu.ittage.Ittage
 import xiangshan.frontend.bpu.mbtb.MainBtb
 import xiangshan.frontend.bpu.ras.MicroRas
@@ -65,6 +66,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val sc          = Module(new Sc)
   private val ras         = Module(new Ras)
   private val phr         = Module(new Phr)
+  private val phrDiff     = Module(new PhrDiff)
   private val commonHR    = Module(new CommonHR)
   private val uras        = Module(new MicroRas)
 
@@ -429,6 +431,9 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s2_phrMeta = RegEnable(phr.io.phrMeta, s1_fire)
   private val s3_phrMeta = RegEnable(s2_phrMeta, s2_fire)
 
+  private val s2_phrDiffMeta = RegEnable(phrDiff.io.phrMeta, s1_fire)
+  private val s3_phrDiffMeta = RegEnable(s2_phrDiffMeta, s2_fire)
+
   private val s3_commonHRMeta = WireInit(0.U.asTypeOf(new CommonHRMeta))
   s3_commonHRMeta.ghr       := commonHR.io.s3ResolveMeta.ghr
   s3_commonHRMeta.bw        := commonHR.io.s3ResolveMeta.bw
@@ -439,6 +444,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   private val s3_redirectMeta = Wire(new BpuRedirectMeta)
   s3_redirectMeta.phr          := s3_phrMeta
+  s3_redirectMeta.phrDiff      := s3_phrDiffMeta
   s3_redirectMeta.commonHRMeta := s3_commonHRMeta
   s3_redirectMeta.ras          := ras.io.redirectMeta
 
@@ -449,6 +455,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_resolveMeta.commonHR := commonHR.io.s3ResolveMeta
   s3_resolveMeta.ittage   := ittage.io.meta
   s3_resolveMeta.phr      := s3_phrMeta
+  s3_resolveMeta.phrDiff  := s3_phrDiffMeta
   // s3_resolveMeta.debug_utage.foreach(_ := s3_utageMeta)
   s3_resolveMeta.utage := s3_utageMeta
 
@@ -551,6 +558,49 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   phrBits        := phr.io.phr.asUInt
 
   dontTouch(phrBits)
+
+  private val phrDiffBits        = WireInit(0.U(PhrHistoryLength.W))
+  private val s0_foldedPhrDiff   = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
+  private val s1_foldedPhrDiff   = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
+  private val s2_foldedPhrDiff   = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
+  private val s3_foldedPhrDiff   = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
+  private val trainFoldedPhrDiff = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
+
+  phrDiff.io.train.s0_stall      := s0_stall
+  phrDiff.io.train.stageCtrl     := stageCtrl
+  phrDiff.io.train.redirect      := redirect
+  phrDiff.io.train.s3_override   := s3_override
+  phrDiff.io.train.s3_phrMeta    := s3_phrDiffMeta
+  phrDiff.io.train.s3_prediction := s3_prediction
+  phrDiff.io.train.s3_startPc    := s3_startPc
+  phrDiff.io.train.s1_valid      := s1_fire
+  phrDiff.io.train.s1_prediction := s1_prediction
+  phrDiff.io.train.s1_startPc    := s1_startPc
+
+  phrDiff.io.commit.valid := io.fromFtq.train.fire
+  phrDiff.io.commit.bits  := train
+
+  s0_foldedPhrDiff   := phrDiff.io.s0_foldedPhr
+  s1_foldedPhrDiff   := phrDiff.io.s1_foldedPhr
+  s2_foldedPhrDiff   := phrDiff.io.s2_foldedPhr
+  s3_foldedPhrDiff   := phrDiff.io.s3_foldedPhr
+  trainFoldedPhrDiff := phrDiff.io.trainFoldedPhr
+  phrDiffBits        := phrDiff.io.phr.asUInt
+
+  private val s0_foldedPhrIsDiff   = s0_fire && s0_foldedPhrDiff.asUInt =/= s0_foldedPhr.asUInt
+  private val s1_foldedPhrIsDiff   = s1_fire && s1_foldedPhrDiff.asUInt =/= s1_foldedPhr.asUInt
+  private val s2_foldedPhrIsDiff   = s2_fire && s2_foldedPhrDiff.asUInt =/= s2_foldedPhr.asUInt
+  private val s3_foldedPhrIsDiff   = s3_fire && s3_foldedPhrDiff.asUInt =/= s3_foldedPhr.asUInt
+  private val trainFoldedPhrIsDiff = io.fromFtq.train.fire && trainFoldedPhr.asUInt =/= trainFoldedPhrDiff.asUInt
+  dontTouch(s0_foldedPhrIsDiff)
+  dontTouch(s1_foldedPhrIsDiff)
+  dontTouch(s2_foldedPhrIsDiff)
+  dontTouch(s3_foldedPhrIsDiff)
+  XSError(s0_foldedPhrIsDiff, "s0_foldedPhr is not equal s0_foldedPhrDiff")
+  XSError(s1_foldedPhrIsDiff, "s1_foldedPhr is not equal s1_foldedPhrDiff")
+  XSError(s2_foldedPhrIsDiff, "s2_foldedPhr is not equal s2_foldedPhrDiff")
+  XSError(s3_foldedPhrIsDiff, "s3_foldedPhr is not equal s3_foldedPhrDiff")
+  XSError(trainFoldedPhrIsDiff, "trainFoldedPhr is not equal trainFoldedPhrDiff")
 
   // ghr update
   private val s1_cfiPc = getCfiPcFromPosition(s1_startPc, s1_prediction.cfiPosition)
