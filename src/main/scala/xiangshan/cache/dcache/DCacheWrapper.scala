@@ -38,7 +38,7 @@ case class DCacheParameters
 (
   nSets: Int = 128,
   nWays: Int = 8,
-  tagBanks: Int = 4,
+  tagBanks: Int = 2,
   rowBits: Int = 64,
   tagECC: Option[String] = None,
   dataECC: Option[String] = None,
