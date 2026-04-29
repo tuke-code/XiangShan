@@ -75,7 +75,7 @@ class StoreUnit(implicit p: Parameters) extends XSModule
     val sqCommitUopIdx = Input(UopIdx())
     val sqCommitRobIdx = Input(new RobPtr)
 
-    val s0_s1_s2_valid = Output(Bool())
+    val s1_s2_valid = Output(Bool())
     val vecMisalignBlockScalaIssue = Input(Bool())
 
   })
@@ -89,7 +89,7 @@ class StoreUnit(implicit p: Parameters) extends XSModule
   // stage 0
   // --------------------------------------------------------------------------------
   // generate addr, use addr to query DCache and DTLB
-  val s0_iss_valid        = io.stin.valid && !io.vecMisalignBlockScalaIssue
+  val s0_iss_valid        = io.stin.valid
   val s0_prf_valid        = io.prefetch_req.valid && io.dcache.req.ready
   val s0_vec_valid        = io.vecstin.valid
   val s0_ma_st_valid      = io.misalign_stin.valid
@@ -573,7 +573,7 @@ class StoreUnit(implicit p: Parameters) extends XSModule
   io.prefetch_train.bits.hasException := false.B
 
   // for misalign in vsMergeBuffer
-  io.s0_s1_s2_valid := s0_valid || s1_valid || s2_valid
+  io.s1_s2_valid := s1_valid || s2_valid
 
   // Pipeline
   // --------------------------------------------------------------------------------
