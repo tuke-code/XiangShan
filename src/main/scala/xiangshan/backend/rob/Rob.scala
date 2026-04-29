@@ -125,7 +125,6 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val debug_ls = Flipped(new DebugLSIO)
     val debugBlockBackward = Option.when(backendParams.debugEn)(Output(Bool()))
     val debugWaitForward   = Option.when(backendParams.debugEn)(Output(Bool()))
-    val debugIQDeqRobIdxVec = Option.when(backendParams.debugEn)(Vec(IssueQueueDeqSum, Flipped(ValidIO(new RobPtr()))))
     val topdownIQInfoVec = Option.when(backendParams.debugEn)(Input(Vec(iqEntryNum, Flipped(ValidIO(new TopdownIQExtendedInfo())))))
     val debugRobHeadStall = Option.when(backendParams.debugEn)(ValidIO(UInt(log2Ceil(TopDownCounters.NumStallReasons.id).W)))
     val debugEnqLsq = Input(new LsqEnqIO)
@@ -1552,11 +1551,6 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val writeBackLatency = 1.U
 
 
-  val candidateIQDeqVec = Option.when(backendParams.debugEn)(Wire(Vec(RobSize, Vec(io.IssueQueueDeqSum, Bool()))))
-  candidateIQDeqVec.foreach( _ := VecInit.tabulate(RobSize, io.IssueQueueDeqSum){ (index, i) =>
-    val deq = io.debugIQDeqRobIdxVec.get(i)
-    deq.valid && (deq.bits.value === index.U)
-  })
   val candidateTopdownIQInfoVec = Option.when(backendParams.debugEn)(Wire(Vec(RobSize, Vec(io.iqEntryNum, Bool()))))
   candidateTopdownIQInfoVec.foreach( _ := VecInit.tabulate(RobSize, io.iqEntryNum){ (index, i) =>
     val topdownIQInfo = io.topdownIQInfoVec.get(i)
@@ -1564,7 +1558,6 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   })
 
   if (backendParams.debugEn) {
-    dontTouch(candidateIQDeqVec.get)
     dontTouch(candidateTopdownIQInfoVec.get)
   }
 
@@ -1572,16 +1565,19 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     when(robEntries(i).valid){
       val hasWriteBack = robEntries(i).uopNum === 0.U
       val isRobHead = i.U === deqPtr.value
-      val issued = candidateIQDeqVec.get(i).reduce(_ || _)
 
       val topdownIQInfoCandidate = candidateTopdownIQInfoVec.get(i)
+      val topdownIQIssued = topdownIQInfoCandidate.zip(io.topdownIQInfoVec.get.map(_.bits.issued)).map{
+        case (candidate, iqIssued) => candidate && iqIssued }.reduce(_ || _)
+      val topdownIQIdealIssue = topdownIQInfoCandidate.zip(io.topdownIQInfoVec.get.map(_.bits.idealIssueTime)).map{
+        case (candidate, ideal) => candidate && ideal }.reduce(_ || _)
+
       val topdownIQInfo = PriorityMuxDefault(topdownIQInfoCandidate.zip(io.topdownIQInfoVec.get.map(_.bits)),
         0.U.asTypeOf(new TopdownIQExtendedInfo()))
       val topdownIQCancelSource = topdownIQInfo.cancelSource
-      val topdownIQIdealIssue = topdownIQInfo.idealIssueTime
 
-      val topdownCanceledUpdate = issued && robEntries(i).topdownIssued.get || robEntries(i).topdownCanceled.get
-      val topdownIssuedUpdate = issued || robEntries(i).topdownIssued.get
+      val topdownCanceledUpdate = topdownIQIssued && robEntries(i).topdownIssued.get || robEntries(i).topdownCanceled.get
+      val topdownIssuedUpdate = topdownIQIssued || robEntries(i).topdownIssued.get
       val topdownRobHeadUpdate = isRobHead || robEntries(i).topdownRobHead.get
       val topdownIdealIssueUpdate = topdownIQIdealIssue || robEntries(i).topdownIdealIssue.get
       val topdownCancelSrcUpdate = Mux(topdownCanceledUpdate, topdownIQCancelSource, robEntries(i).topdownCanceled.get)
@@ -1594,7 +1590,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       robEntries(i).topdownIssueTime.foreach(_ := Mux(hasWriteBack , 0.U,
         robEntries(i).topdownIssueTime.get +& topdownIssuedUpdate))
       robEntries(i).topdownLastIssueTime.foreach(_ := Mux(hasWriteBack , 0.U,
-        Mux(issued, 1.U,
+        Mux(topdownIQIssued, 1.U,
           robEntries(i).topdownLastIssueTime.get +& robEntries(i).topdownIssued.get)
       ))
       robEntries(i).topdownRobHeadTime.foreach(_ := Mux(hasWriteBack , 0.U,
@@ -1615,7 +1611,12 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val lastIssueTime = deqEntry.topdownLastIssueTime.get
     val lastIdealIssueTime = deqEntry.topdownIdealIssueTime.get
     val robHeadTime = deqEntry.topdownRobHeadTime.get
-    val issued = candidateIQDeqVec.get(deqPtr.value).reduce(_ || _)
+
+    val topdownIQInfoCandidate = candidateTopdownIQInfoVec.get(deqPtr.value)
+    val topdownIQissuedVec = topdownIQInfoCandidate.zip(io.topdownIQInfoVec.get.map(_.bits.issued)).map{
+      case (candidate, iqIssued) => candidate && iqIssued }
+    val issued = topdownIQissuedVec.reduce(_ || _)
+
     when(deqEntry.valid){
       assert(issueTime >= lastIssueTime)
       assert(lastIssueTime <= lastIdealIssueTime)

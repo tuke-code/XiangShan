@@ -776,11 +776,6 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     issueQueueEnqHasIssuedVec(sta) := Mux(staValidNum(i) > stdValidNum(i), staEnqHasIssuedVec(i), stdEnqHasIssuedVec(i))
   }
 
-  val issueQueueDeqVec = issueQueues.flatMap(_.io.deqDelay)
-  io.debugIQDeqRobIdxVec.foreach(_.zip(issueQueueDeqVec).foreach{ case(sink, source) =>
-    sink.valid := source.valid
-    sink.bits := source.bits.robIdx
-  })
 
   val srcReadyVec = issueQueues.flatMap(_.io.srcReadyVec)
   val robIdxVec = issueQueues.flatMap(_.io.debugRobIdxVec.get)
@@ -988,7 +983,6 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val iqEntryNum = params.issueBlockParams.map(_.numEntries).sum
   val debugIQValidNumVec = Option.when(backendParams.debugEn)(Vec(IQNum, Output(UInt(maxIQSize.U.getWidth.W))))
   val debugIQEnqHasIssuedVec = Option.when(backendParams.debugEn)(Vec(IQNum, Output(Bool())))
-  val debugIQDeqRobIdxVec = Option.when(backendParams.debugEn)(Vec(iqDeqSum, ValidIO(new RobPtr())))
   val topdownIQInfoVec = Option.when(backendParams.debugEn)(Output(Vec(iqEntryNum, ValidIO(new TopdownIQExtendedInfo()))))
 }
 
