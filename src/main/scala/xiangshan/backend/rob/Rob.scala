@@ -1587,7 +1587,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       val topdownIssuedUpdate = issued || robEntries(i).topdownIssued.get
       val topdownRobHeadUpdate = isRobHead || robEntries(i).topdownRobHead.get
       val topdownSrcReadyUpdate = srcReady || robEntries(i).topdownSrcReady.get
-      val topdownCancelSrcUpdate = Mux(topdownCanceledUpdate, topdownIQCancelSource, IQCancelSource.none)
+      val topdownCancelSrcUpdate = Mux(topdownCanceledUpdate, topdownIQCancelSource, robEntries(i).topdownCanceled.get)
 
       robEntries(i).topdownCanceled.foreach(_ := topdownCanceledUpdate)
       robEntries(i).topdownIssued.foreach(_ := topdownIssuedUpdate)
