@@ -38,7 +38,6 @@ case class DCacheParameters
 (
   nSets: Int = 128,
   nWays: Int = 8,
-  tagBanks: Int = 2,
   rowBits: Int = 64,
   tagECC: Option[String] = None,
   dataECC: Option[String] = None,
@@ -135,7 +134,6 @@ trait HasDCacheParameters
   // banked dcache support
   val DCacheSetDiv = 2
   val DCacheSets = cacheParams.nSets
-  val DCacheTagBanks = cacheParams.tagBanks
   val DCacheWayDiv = 2
   val DCacheWays = cacheParams.nWays
   val DCacheBanks = 8 // hardcoded
@@ -146,13 +144,9 @@ trait HasDCacheParameters
   val MaxPrefetchEntry = cacheParams.nMaxPrefetchEntry
   def DCacheVWordBytes = VLEN / 8
   require(DCacheSRAMRowBits == 64)
-  require(isPow2(DCacheTagBanks), s"DCacheTagBanks($DCacheTagBanks) must be pow2")
-  require(DCacheTagBanks > 0, s"DCacheTagBanks($DCacheTagBanks) must be positive")
-  require(DCacheTagBanks < DCacheSets, s"DCacheTagBanks($DCacheTagBanks) must be < DCacheSets($DCacheSets)")
 
   val DCacheSetDivBits = log2Ceil(DCacheSetDiv)
   val DCacheSetBits = log2Ceil(DCacheSets)
-  val DCacheTagBankBits = log2Ceil(DCacheTagBanks)
   val DCacheSizeBits = DCacheSRAMRowBits * DCacheBanks * DCacheWays * DCacheSets
   val DCacheSizeBytes = DCacheSizeBits / 8
   val DCacheSizeWords = DCacheSizeBits / 64 // TODO
@@ -222,16 +216,6 @@ trait HasDCacheParameters
   def set_to_dcache_div_set(set: UInt) = {
     require(set.getWidth >= DCacheSetBits)
     set(DCacheSetBits - 1, DCacheSetDivBits)
-  }
-
-  def set_to_tag_bank(set: UInt) = {
-    require(set.getWidth >= DCacheSetBits)
-    if (DCacheTagBankBits == 0) 0.U(1.W) else set(DCacheTagBankBits - 1, 0)
-  }
-
-  def set_to_tag_bank_set(set: UInt) = {
-    require(set.getWidth >= DCacheSetBits)
-    set(DCacheSetBits - 1, DCacheTagBankBits)
   }
 
   def addr_to_dcache_bank(addr: UInt) = {
@@ -901,7 +885,6 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   println("DCache:")
   println("  DCacheSets: " + DCacheSets)
   println("  DCacheSetDiv: " + DCacheSetDiv)
-  println("  DCacheTagBanks: " + DCacheTagBanks)
   println("  DCacheWays: " + DCacheWays)
   println("  DCacheBanks: " + DCacheBanks)
   println("  DCacheSRAMRowBits: " + DCacheSRAMRowBits)
@@ -1201,12 +1184,14 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     case (ld, i) =>
       tagArray.io.read(i) <> ld.io.tag_read
       ld.io.tag_resp := tagArray.io.resp(i)
+      ld.io.tag_read.ready := !tag_write_intend
   }
   if(StorePrefetchL1Enabled) {
     stu.take(HybridStoreReadBase).zipWithIndex.foreach {
       case (st, i) =>
         tagArray.io.read(HybridLoadReadBase + i) <> st.io.tag_read
         st.io.tag_resp := tagArray.io.resp(HybridLoadReadBase + i)
+        st.io.tag_read.ready := !tag_write_intend
     }
   }else {
     stu.foreach {
@@ -1229,19 +1214,16 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     stu(HybridStoreTagReadPort).io.tag_read.ready := false.B
 
     if (StorePrefetchL1Enabled) {
-      tagArray.io.read(TagReadPort).valid := false.B
-      tagArray.io.read(TagReadPort).bits := DontCare
       when (ldu(HybridLoadTagReadPort).io.tag_read.valid) {
-        tagArray.io.read(TagReadPort).valid := true.B
-        tagArray.io.read(TagReadPort).bits := ldu(HybridLoadTagReadPort).io.tag_read.bits
-        ldu(HybridLoadTagReadPort).io.tag_read.ready := tagArray.io.read(TagReadPort).ready
-      } .elsewhen (stu(HybridStoreTagReadPort).io.tag_read.valid) {
-        tagArray.io.read(TagReadPort).valid := true.B
-        tagArray.io.read(TagReadPort).bits := stu(HybridStoreTagReadPort).io.tag_read.bits
-        stu(HybridStoreTagReadPort).io.tag_read.ready := tagArray.io.read(TagReadPort).ready
+        tagArray.io.read(TagReadPort) <> ldu(HybridLoadTagReadPort).io.tag_read
+        ldu(HybridLoadTagReadPort).io.tag_read.ready := !tag_write_intend
+      } .otherwise {
+        tagArray.io.read(TagReadPort) <> stu(HybridStoreTagReadPort).io.tag_read
+        stu(HybridStoreTagReadPort).io.tag_read.ready := !tag_write_intend
       }
     } else {
       tagArray.io.read(TagReadPort) <> ldu(HybridLoadTagReadPort).io.tag_read
+      ldu(HybridLoadTagReadPort).io.tag_read.ready := !tag_write_intend
     }
 
     // tag resp
