@@ -204,19 +204,20 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
 
   val sent_cnt = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
   val cur_late = RegInit(0.U((log2Up(4*param.WINDOW_SIZE)).W))
-  val cur_hit_pf = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
+  val cur_hit_pf_in_cache = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
   val cur_useless = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
-  val prev_hit_pf = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
+  val prev_hit_pf_in_cache = RegInit(0.U((log2Up(2*param.WINDOW_SIZE)).W))
 
   val window_end = sent_cnt === param.WINDOW_SIZE.U
   val window_fire = window_end && enable
   sent_cnt := Mux(window_end, 0.U, sent_cnt + total_prefetch)
-  cur_late := Mux(window_end, 0.U, cur_late + (pf_late << 1) + hit_pf_in_mshr)
-  cur_hit_pf := Mux(window_end, 0.U, cur_hit_pf + hit_pf)
+  cur_late := Mux(window_end, 0.U, cur_late + pf_late + hit_pf_in_mshr)
+  cur_hit_pf_in_cache := Mux(window_end, 0.U, cur_hit_pf_in_cache + hit_pf_in_cache)
   cur_useless := Mux(window_end, 0.U, cur_useless + pf_useless)
 
-  val cur_late_high = cur_late >= (2 * param.LATE_HIT_THRESHOLD).U
-  val good_return = cur_hit_pf + param.HIT_MARGIN.U >= prev_hit_pf
+  val cur_late_high = cur_late >= param.LATE_HIT_THRESHOLD.U
+  val good_return = cur_hit_pf_in_cache + param.HIT_MARGIN.U >= prev_hit_pf_in_cache
+  val bad_return_cnt = RegInit(0.U(5.W))
 
   val disable_request = RegInit(false.B)
   val validity_cnt = RegInit(0.U((log2Up(param.VALIDITY_CHECK_INTERVAL) + 1).W))
@@ -248,30 +249,40 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
     switch(state) {
       is(s_decision) {
         when(cur_late_high) {
-          when (!at_max_depth) {
-            depth := Mux(depth === max_depth, max_depth, depth << 1)
-            state := s_buffer
-          }
-        }.elsewhen(good_return && !disable_request) {
-          depth := depth
-          state := s_decision
-        }.elsewhen(!at_base_depth) {
-          depth := Mux(
-            disable_request,
-            Mux((depth >> 2) < base_depth, base_depth, depth >> 2),
-            Mux((depth >> 1) < base_depth, base_depth, depth >> 1)
-          )
+          // up
+          depth := Mux(depth === max_depth, max_depth, depth << 1)
+          state := Mux(depth === max_depth, s_decision, s_buffer)
+          bad_return_cnt := 0.U
+        }.elsewhen(!at_base_depth && disable_request) {
+          // strong down, depth >> 2
+          depth := Mux((depth >> 2) < base_depth, base_depth, depth >> 2)
           state := s_buffer
-        }.elsewhen(disable_request) {
+          bad_return_cnt := 0.U
+        }.elsewhen(at_base_depth && disable_request) {
+          // disable
           enable := false.B
           flush := true.B
           confidence := 0.U(1.W)
           state := s_decision
+          bad_return_cnt := 0.U
+        }.elsewhen(good_return) {
+          // keep
+          depth := depth
+          state := s_decision
+          bad_return_cnt := 0.U
+        }.otherwise {
+          bad_return_cnt := bad_return_cnt + 1.U
+          when (bad_return_cnt === 2.U) {
+            // weak down, depth >> 1
+            depth := Mux((depth >> 1) < base_depth, base_depth, depth >> 1)
+            state := Mux((depth >> 1) < base_depth, s_decision, s_buffer)
+            bad_return_cnt := 0.U
+          }
         }
-        prev_hit_pf := cur_hit_pf
+        prev_hit_pf_in_cache := cur_hit_pf_in_cache
       }
       is(s_buffer) {
-        prev_hit_pf := prev_hit_pf
+        prev_hit_pf_in_cache := prev_hit_pf_in_cache
         state := s_decision
       }
     }
