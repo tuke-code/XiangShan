@@ -82,6 +82,37 @@
 - `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_amo_diagnostics.py`
   - 结果：`4 passed`
 
+### 4. 修复 single-uop AMO smoke 的 reset 后早期 `xfail`，让 real-DUT 用例直接转绿
+
+本条目记录一轮围绕 `tests/test_MemBlock_amo.py` 的收口修复。上一轮白盒诊断已经确认，single-uop AMO 在 reset 后早期卡在 dcache atomic 口并不是功能不支持，而是 `tagArray` 仍处于初始化写窗口，导致 `mainPipe.io_tag_read_ready=0`、进一步把 `atomic_req_ready` 压低。此前 smoke 用例用 `xfail` 暂存这个现象，会把“环境未等到 dcache 可接收窗口”和“真实 DUT 功能不通”混在一起。本轮把等待逻辑下沉到 env/sequence 层，并顺手修复了恢复 AMO 后才会暴露出来的 issue bundle 可选 `fuType` 句柄判定问题。
+
+#### 变更摘要
+
+- `MemBlock_env.py`
+  - 新增 `wait_dcache_tag_array_ready()`，在 DUT 导出 `GetInternalSignal` 时等待 dcache `tagArray` 退出 reset 初始化写窗口
+  - 保持兼容：若当前 DUT 未导出该内部信号，则 helper 直接 no-op 返回 `None`
+- `sequences/atomic_sequences.py`
+  - `AtomicSequence` 默认在发 single-uop AMO 前调用 `wait_dcache_tag_array_ready()`
+  - 避免 testcase 本地散落 256+ 拍的 reset 后等待
+- `agents/issue_agent.py` / `agents/backend_facade.py`
+  - 将可选 `bits_fuType` 驱动从 `hasattr(...)` 收紧为“句柄非空再写”
+  - 修复 real-DUT bundle 在属性存在但句柄为 `None` 时的 follow-up load / replay issue 崩溃
+- `tests/test_MemBlock_amo.py`
+  - 删除此前按“零下游活动”定向触发的 `xfail`
+- `tests/test_MemBlock_amo_diagnostics.py`
+  - 改为复用 env 公共 helper 等待 `tagArray` ready
+
+#### 验证情况
+
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_amo.py`
+  - 结果：`3 passed`
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_amo_diagnostics.py`
+  - 结果：`4 passed`
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_issue_agent.py`
+  - 结果：`8 passed`
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py`
+  - 结果：`45 passed`
+
 
 ## 2026-04-29
 ### 1. 统一 DCache 覆盖率文档口径，区分当前 full 主报告与历史定向快照
