@@ -20,6 +20,22 @@
 - 3 条新增 testcase 均通过 real DUT pytest 验证
 - 完整覆盖率回归待后续重跑后更新 `coverage_summary.md` 中的 VirtualLoadQueue 数据
 
+### 2. 新增 VLQ 分批 wrap-around 闭环测试
+
+在 `tests/test_MemBlock_vlq_coverage.py` 中补入第 4 条定向 testcase：
+
+- `test_vlq_batched_sequential_wrap_around` — 分 9 批、每批 8 条，总计 72 条 load 的完整闭环（enqueue → issue → writeback → drain），推动 enqPtr/deqPtr 跨越 VLQ_SIZE=72 边界触发指针 flag 翻转
+
+#### 变更摘要
+
+- `tests/test_MemBlock_vlq_coverage.py`
+  - 新增 `test_vlq_batched_sequential_wrap_around`（72 条分批闭环）
+
+#### 验证情况
+
+- 4 条 VLQ 定向 testcase 全部通过 real DUT pytest 验证
+- 本轮首轮覆盖提升：line 63.7% → 68.1%（+299 行），本轮增量待下一轮 full regression 量化
+
 ### 1. 将标量 `issue` bundle 拆成 lane-aware 形状，去掉 `fuType` 的可选兜底绑定
 
 本条目记录一轮围绕 `io_ooo_to_mem_intIssue` 的 env/facade 收口。此前 Python env 把 7 路标量 `issue` 统一建模成同构 `IntIssueBundle`，再用 `getattr(..., bits_fuType, None)` 为 lane 3~6 补绑 `fuType`。但当前 real DUT 明确是非同构接口：lane 0~2 为 load-address，不导出 `fuType`；lane 3~4 为 store-address，lane 5~6 为 store-data，才导出 `fuType`。本轮把这种 lane 差异直接体现在 env bundle 形状里，并同步收紧 issue/replay 驱动契约。

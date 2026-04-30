@@ -294,10 +294,12 @@ RAW 已有 smoke，但更像”证明机制存在”，还不是”把 cause/窗
 
 #### 当前进展 (2026-04-30)
 
-- `VirtualLoadQueue.sv` 部分已补入 3 条定向 testcase（`tests/test_MemBlock_vlq_coverage.py`）：
+- `VirtualLoadQueue.sv` 已补入 4 条定向 testcase（`tests/test_MemBlock_vlq_coverage.py`）：
   1. 同拍 8 端口 enqueue（命中 enqueue 端口 4-7 逻辑）
   2. 16 条 cacheable load 批量入队+集中 drain（命中高 commitCount 分支）
   3. redirect 取消在途 load（命中 needCancel / redirectCancelCount 路径）
+  4. 分批 72 条 wrap-around 闭环（推动指针跨边界，覆盖 entry 0-71 的分配路径）
+- 首轮覆盖提升已量化：line 63.7% → 68.1%（+299 行），branch 47.7% → 49.5%（+93 分支）
 - 同时新增 `MemBlock_env.sample_vlq_state()` 为 VLQ 状态提供白盒观测口
 - RAW replay 细分用例（同地址 full/partial overlap、older store committed/uncommitted 窗口等）仍待后续补入
 

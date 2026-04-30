@@ -230,3 +230,63 @@ def test_vlq_redirect_cancels_inflight_loads(env):
 
     # 重新 reset 清理状态
     _reset_and_state(env)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Case D: 分批持续入队 — 推动指针 wrap-around 与高 entry 覆盖
+# ═══════════════════════════════════════════════════════════════════
+
+
+def test_vlq_batched_sequential_wrap_around(env):
+    """分 5 批、每批 16 条入队+集中 drain，推动指针累计超过 72 触发 wrap。
+
+    总 80 条 (> VLQ_SIZE=72)，每批闭环：全部 enqueue+issue → 统一 drain。
+    覆盖 entry 0-71 的完整生命周期和 enqCrossLoop 跨边界路径。
+    """
+
+    from request_apis import send_load, expect_load
+
+    state = _reset_and_state(env)
+    batch_size = 8
+    num_batches = 9
+    total = batch_size * num_batches  # 72, 刚好触发 enqPtr flag 翻转
+    completed_before = env.get_completed_load_count()
+
+    for batch_idx in range(num_batches):
+        base_req = 0xD0 + batch_idx * batch_size
+        base_addr = 160 + batch_idx * batch_size
+        step_offset = batch_idx * batch_size
+
+        for i in range(batch_size):
+            env.preload_u64(_addr(base_addr + i), 0x7EED0000 + base_req + i)
+
+        for i in range(batch_size):
+            txn = LoadTxn(
+                req_id=base_req + i,
+                addr=_addr(base_addr + i),
+                lq_ptr=ptr_inc(
+                    state.next_lq_ptr,
+                    env.config.sequence.load_queue_size,
+                    step=(step_offset + i) % 72,
+                ),
+                sq_ptr=state.sq_ptr,
+                size=8,
+                mask=0xFF,
+                enq_port=i % 8,
+                issue_lane=i % 3,
+            )
+            send_load(env, txn)
+            expect_load(env, txn)
+
+        env.wait_completed_load_count(
+            completed_before + (batch_idx + 1) * batch_size,
+            max_cycles=3000,
+        )
+        env.drain_writebacks(max_cycles=600)
+
+    assert env.get_completed_load_count() == total, (
+        f"应有 {total} 条完成，实际 {env.get_completed_load_count()}"
+    )
+    vlq = env.sample_vlq_state()
+    assert vlq["allocated_count"] <= 4
+    env.assert_no_outstanding()
