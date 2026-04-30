@@ -31,6 +31,7 @@ import xiangshan.frontend.FtqToBpuIO
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.abtb.AheadBtb
 import xiangshan.frontend.bpu.history.commonhr.CommonHR
+import xiangshan.frontend.bpu.history.commonhr.CommonHRDiff
 import xiangshan.frontend.bpu.history.commonhr.CommonHRMeta
 import xiangshan.frontend.bpu.history.phr.Phr
 import xiangshan.frontend.bpu.history.phr.PhrAllFoldedHistories
@@ -55,18 +56,19 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   val io: BpuIO = IO(new BpuIO)
 
   /* *** submodules *** */
-  private val fallThrough = Module(new FallThroughPredictor)
-  private val ubtb        = Module(new MicroBtb)
-  private val abtb        = Module(new AheadBtb)
-  private val utage       = Module(new MicroTage)
-  private val mbtb        = Module(new MainBtb)
-  private val tage        = Module(new Tage)
-  private val ittage      = Module(new Ittage)
-  private val sc          = Module(new Sc)
-  private val ras         = Module(new Ras)
-  private val phr         = Module(new Phr)
-  private val commonHR    = Module(new CommonHR)
-  private val uras        = Module(new MicroRas)
+  private val fallThrough  = Module(new FallThroughPredictor)
+  private val ubtb         = Module(new MicroBtb)
+  private val abtb         = Module(new AheadBtb)
+  private val utage        = Module(new MicroTage)
+  private val mbtb         = Module(new MainBtb)
+  private val tage         = Module(new Tage)
+  private val ittage       = Module(new Ittage)
+  private val sc           = Module(new Sc)
+  private val ras          = Module(new Ras)
+  private val phr          = Module(new Phr)
+  private val commonHR     = Module(new CommonHR)
+  private val commonHRDiff = Module(new CommonHRDiff)
+  private val uras         = Module(new MicroRas)
 
   private def predictors: Seq[BasePredictor] = Seq(
     fallThrough,
@@ -416,18 +418,28 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_commonHRMeta.attribute := VecInit(s3_mbtbResult.map(_.bits.attribute))
   s3_commonHRMeta.position  := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
 
+  private val s3_commonHRMetaDiff = WireInit(0.U.asTypeOf(new CommonHRMeta))
+  s3_commonHRMetaDiff.ghr       := commonHRDiff.io.s3ResolveMeta.ghr
+  s3_commonHRMetaDiff.bw        := commonHRDiff.io.s3ResolveMeta.bw
+  s3_commonHRMetaDiff.imli      := commonHRDiff.io.s3ResolveMeta.imli
+  s3_commonHRMetaDiff.hitMask   := VecInit(s3_mbtbResult.map(_.valid))
+  s3_commonHRMetaDiff.attribute := VecInit(s3_mbtbResult.map(_.bits.attribute))
+  s3_commonHRMetaDiff.position  := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
+
   private val s3_redirectMeta = Wire(new BpuRedirectMeta)
-  s3_redirectMeta.phr          := s3_phrMeta
-  s3_redirectMeta.commonHRMeta := s3_commonHRMeta
-  s3_redirectMeta.ras          := ras.io.redirectMeta
+  s3_redirectMeta.phr              := s3_phrMeta
+  s3_redirectMeta.commonHRMeta     := s3_commonHRMeta
+  s3_redirectMeta.commonHRMetaDiff := s3_commonHRMetaDiff
+  s3_redirectMeta.ras              := ras.io.redirectMeta
 
   private val s3_resolveMeta = Wire(new BpuResolveMeta)
-  s3_resolveMeta.mbtb     := RegEnable(mbtb.io.meta, s2_fire)
-  s3_resolveMeta.tage     := RegEnable(tage.io.meta, s2_fire)
-  s3_resolveMeta.sc       := sc.io.meta
-  s3_resolveMeta.commonHR := commonHR.io.s3ResolveMeta
-  s3_resolveMeta.ittage   := ittage.io.meta
-  s3_resolveMeta.phr      := s3_phrMeta
+  s3_resolveMeta.mbtb         := RegEnable(mbtb.io.meta, s2_fire)
+  s3_resolveMeta.tage         := RegEnable(tage.io.meta, s2_fire)
+  s3_resolveMeta.sc           := sc.io.meta
+  s3_resolveMeta.commonHR     := commonHR.io.s3ResolveMeta
+  s3_resolveMeta.commonHRDiff := commonHRDiff.io.s3ResolveMeta
+  s3_resolveMeta.ittage       := ittage.io.meta
+  s3_resolveMeta.phr          := s3_phrMeta
   // s3_resolveMeta.debug_utage.foreach(_ := s3_utageMeta)
   s3_resolveMeta.utage := s3_utageMeta
 
@@ -519,6 +531,36 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   commonHR.io.redirect.taken          := redirect.bits.taken
   commonHR.io.redirect.attribute      := redirect.bits.attribute
   commonHR.io.redirect.meta           := redirect.bits.meta.commonHRMeta
+
+  commonHRDiff.io.stageCtrl               := stageCtrl
+  commonHRDiff.io.s0_startPc.get          := s0_startPc
+  commonHRDiff.io.s1_imliTaken            := s1_imliTaken
+  commonHRDiff.io.update.startPc          := s3_startPc
+  commonHRDiff.io.update.target           := s3_prediction.target
+  commonHRDiff.io.update.taken            := s3_taken
+  commonHRDiff.io.update.s3Override       := s3_override
+  commonHRDiff.io.update.firstTakenBranch := s3_firstTakenBranch
+  commonHRDiff.io.update.position         := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
+  commonHRDiff.io.update.condHitMask      := s3_condHitMask
+  commonHRDiff.io.redirect.valid          := redirect.valid
+  commonHRDiff.io.redirect.cfiPc          := redirect.bits.cfiPc
+  commonHRDiff.io.redirect.target         := redirect.bits.target
+  commonHRDiff.io.redirect.taken          := redirect.bits.taken
+  commonHRDiff.io.redirect.attribute      := redirect.bits.attribute
+  commonHRDiff.io.redirect.meta           := redirect.bits.meta.commonHRMetaDiff
+
+  private val s0_imliDiff     = s0_fire && commonHR.io.s0_imli =/= commonHRDiff.io.s0_imli
+  private val s0_commonHRDiff = s0_fire && commonHR.io.s0_commonHR.asUInt =/= commonHRDiff.io.s0_commonHR.asUInt
+  private val s3ResolveDiff   = s3_fire && s3_commonHRMetaDiff.asUInt =/= s3_commonHRMeta.asUInt
+
+  XSError(
+    s0_imliDiff,
+    "IMLI diff at s0: commonHR IMLI = %d, commonHRDiff IMLI = %d",
+    commonHR.io.s0_imli,
+    commonHRDiff.io.s0_imli
+  )
+  XSError(s0_commonHRDiff && !redirect.valid, "CommonHR diff at s0")
+  XSError(s3ResolveDiff, "CommonHR diff at s3 resolve")
 
   // Power-on reset
   private val powerOnResetState = RegInit(true.B)
