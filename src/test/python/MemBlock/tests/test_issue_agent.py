@@ -4,8 +4,10 @@ IssueAgent 单元测试。
 """
 
 import asyncio
+import pytest
 
 from agents.issue_agent import IssueAgent
+from issue_lanes import LOAD_ISSUE_LANES, STA_ISSUE_LANES, STD_ISSUE_LANES
 from transactions import AtomicTxn, IssueCyclePlan, IssueOp, QueuePtr, RobIndex
 
 
@@ -14,11 +16,10 @@ class _FakeSignal:
         self.value = int(value)
 
 
-class _FakeIssueBundle:
+class _FakeBaseIssueBundle:
     def __init__(self, ready: int = 1) -> None:
         self.ready = _FakeSignal(ready)
         self.valid = _FakeSignal(0)
-        self.bits_fuType = _FakeSignal(0)
         self.bits_fuOpType = _FakeSignal(0)
         self.bits_src_0 = _FakeSignal(0)
         self.bits_robIdx_flag = _FakeSignal(0)
@@ -28,13 +29,40 @@ class _FakeIssueBundle:
 
     def drive_idle(self) -> None:
         self.valid.value = 0
-        self.bits_fuType.value = 0
         self.bits_fuOpType.value = 0
         self.bits_src_0.value = 0
         self.bits_robIdx_flag.value = 0
         self.bits_robIdx_value.value = 0
         self.bits_sqIdx_flag.value = 0
         self.bits_sqIdx_value.value = 0
+
+
+class _FakeLoadIssueBundle(_FakeBaseIssueBundle):
+    pass
+
+
+class _FakeStaIssueBundle(_FakeBaseIssueBundle):
+    def __init__(self, ready: int = 1) -> None:
+        super().__init__(ready=ready)
+        self.bits_fuType = _FakeSignal(0)
+
+    def drive_idle(self) -> None:
+        super().drive_idle()
+        self.bits_fuType.value = 0
+
+
+class _FakeStdIssueBundle(_FakeStaIssueBundle):
+    pass
+
+
+def _make_fake_issue_bundle(lane: int):
+    if lane in LOAD_ISSUE_LANES:
+        return _FakeLoadIssueBundle()
+    if lane in STA_ISSUE_LANES:
+        return _FakeStaIssueBundle()
+    if lane in STD_ISSUE_LANES:
+        return _FakeStdIssueBundle()
+    raise ValueError(f"unsupported fake issue lane: {lane}")
 
 
 class _FakeDut:
@@ -61,7 +89,7 @@ class _FakeIssueEnv:
         max_lane = max(ready_schedule) if ready_schedule else 0
         self.dut = _FakeDut()
         self.backend = _FakeBackend()
-        self.issue = [_FakeIssueBundle() for _ in range(max_lane + 1)]
+        self.issue = [_make_fake_issue_bundle(lane) for lane in range(max_lane + 1)]
         self._ready_schedule = {int(lane): [int(v) for v in values] for lane, values in ready_schedule.items()}
         self._accepted_schedule = (
             {}
@@ -373,13 +401,10 @@ def test_api_issue_agent_integer_load_drives_size_specific_fu_op():
 def test_api_issue_agent_drives_atomic_fu_type_and_sta_pdest():
     env = _FakeIssueEnv({3: [1], 5: [1]})
     sta_prefix = "io_ooo_to_mem_intIssue_3_0_bits_"
-    std_prefix = "io_ooo_to_mem_intIssue_5_0_bits_"
-    setattr(env.dut, f"{sta_prefix}fuType", _FakeSignal(0))
     setattr(env.dut, f"{sta_prefix}pdest", _FakeSignal(0))
     setattr(env.dut, f"{sta_prefix}rfWen", _FakeSignal(0))
     setattr(env.dut, f"{sta_prefix}ftqIdx_flag", _FakeSignal(0))
     setattr(env.dut, f"{sta_prefix}ftqIdx_value", _FakeSignal(0))
-    setattr(env.dut, f"{std_prefix}fuType", _FakeSignal(0))
     agent = IssueAgent(env)
     txn = AtomicTxn(
         req_id=0x71,
@@ -394,14 +419,42 @@ def test_api_issue_agent_drives_atomic_fu_type_and_sta_pdest():
     txn.assigned_ftq_idx_value = 5
     txn.assigned_pc = 0x80000020
 
-    agent.issue_cycle(
-        IssueCyclePlan.from_ops(
-            IssueOp.atomic_sta(txn),
-            IssueOp.atomic_std(txn),
-        )
-    )
+    agent._drive_issue_op(IssueOp.atomic_sta(txn))
+    agent._drive_issue_op(IssueOp.atomic_std(txn))
 
-    assert getattr(env.dut, f"{sta_prefix}fuType").value == txn.fu_type
     assert getattr(env.dut, f"{sta_prefix}pdest").value == txn.resolved_pdest
     assert getattr(env.dut, f"{sta_prefix}rfWen").value == 1
-    assert getattr(env.dut, f"{std_prefix}fuType").value == txn.fu_type
+    assert env.issue[3].bits_fuType.value == txn.fu_type
+    assert env.issue[5].bits_fuType.value == txn.fu_type
+
+
+def test_api_issue_agent_rejects_kind_lane_mismatch():
+    env = _FakeIssueEnv({0: [1], 3: [1], 5: [1]})
+    agent = IssueAgent(env)
+
+    with pytest.raises(ValueError, match="issue lane 0 is `load`, expected `std`"):
+        agent._drive_issue_op(
+            IssueOp.std(
+                req_id=0x44,
+                sq_ptr=QueuePtr(flag=0, value=1),
+                data=0xAA,
+                lane=0,
+                rob_idx=RobIndex(flag=0, value=1),
+            )
+        )
+
+    with pytest.raises(ValueError, match="issue lane 5 is `std`, expected `load`"):
+        agent._drive_issue_op(
+            IssueOp.load(
+                req_id=0x45,
+                addr=0x1000,
+                lq_ptr=QueuePtr(flag=0, value=1),
+                sq_ptr=QueuePtr(flag=0, value=2),
+                lane=5,
+                rob_idx=RobIndex(flag=0, value=2),
+                pdest=3,
+                ftq_idx_flag=0,
+                ftq_idx_value=0,
+                pc=0x80000000,
+            )
+        )

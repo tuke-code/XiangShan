@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from agents.backend_facade import BackendFacade
+from issue_lanes import LOAD_ISSUE_LANES, STA_ISSUE_LANES, STD_ISSUE_LANES
 from transactions import (
     AtomicTxn,
     BackendSendPlan,
@@ -192,11 +193,10 @@ class _FakeSignal:
         self.value = int(value)
 
 
-class _FakeIssueBundle:
+class _FakeBaseIssueBundle:
     def __init__(self, ready: int = 1) -> None:
         self.ready = _FakeSignal(ready)
         self.valid = _FakeSignal(0)
-        self.bits_fuType = _FakeSignal(0)
         self.bits_fuOpType = _FakeSignal(0)
         self.bits_src_0 = _FakeSignal(0)
         self.bits_robIdx_flag = _FakeSignal(0)
@@ -206,13 +206,40 @@ class _FakeIssueBundle:
 
     def drive_idle(self) -> None:
         self.valid.value = 0
-        self.bits_fuType.value = 0
         self.bits_fuOpType.value = 0
         self.bits_src_0.value = 0
         self.bits_robIdx_flag.value = 0
         self.bits_robIdx_value.value = 0
         self.bits_sqIdx_flag.value = 0
         self.bits_sqIdx_value.value = 0
+
+
+class _FakeLoadIssueBundle(_FakeBaseIssueBundle):
+    pass
+
+
+class _FakeStaIssueBundle(_FakeBaseIssueBundle):
+    def __init__(self, ready: int = 1) -> None:
+        super().__init__(ready=ready)
+        self.bits_fuType = _FakeSignal(0)
+
+    def drive_idle(self) -> None:
+        super().drive_idle()
+        self.bits_fuType.value = 0
+
+
+class _FakeStdIssueBundle(_FakeStaIssueBundle):
+    pass
+
+
+def _make_fake_issue_bundle(lane: int):
+    if lane in LOAD_ISSUE_LANES:
+        return _FakeLoadIssueBundle()
+    if lane in STA_ISSUE_LANES:
+        return _FakeStaIssueBundle()
+    if lane in STD_ISSUE_LANES:
+        return _FakeStdIssueBundle()
+    raise ValueError(f"unsupported fake issue lane: {lane}")
 
 
 class _FakeFeedbackBundle:
@@ -348,7 +375,7 @@ class _ReplayFacadeEnv(_FakeFacadeEnv):
     def __init__(self) -> None:
         super().__init__()
         self.dut = _FakeDut()
-        self.issue = [_FakeIssueBundle() for _ in range(7)]
+        self.issue = [_make_fake_issue_bundle(lane) for lane in range(7)]
         self.mem_status = SimpleNamespace(
             lqDeqPtr_flag=_FakeSignal(0),
             lqDeqPtr_value=_FakeSignal(0),
@@ -575,6 +602,39 @@ def test_api_backend_facade_auto_replays_sta_tlb_miss_feedback_and_releases_sq_c
     backend.after_cycle()
     assert backend.backend_state()["sq_occupancy"] == 0
     assert backend.backend_state()["stats"]["backend_sq_credit_release_count"] == 1
+
+
+def test_api_backend_replay_requires_sta_lane_shape():
+    env = _ReplayFacadeEnv()
+    backend = BackendFacade(env)._feedback_model
+    backend.note_store_allocated(QueuePtr(flag=0, value=5), RobIndex(flag=0, value=11))
+    backend.note_store_sta_issue(
+        IssueOp.sta(
+            req_id=0x41,
+            sq_ptr=QueuePtr(flag=0, value=5),
+            addr=0x80002000,
+            lane=0,
+            rob_idx=RobIndex(flag=0, value=11),
+            ftq_idx_flag=0,
+            ftq_idx_value=8,
+        )
+    )
+    env.sta_iq_feedback[0].values.update(
+        {
+            "valid": 1,
+            "hit": 0,
+            "sourceType": 1,
+            "sqIdx_flag": 0,
+            "sqIdx_value": 5,
+            "robIdx_flag": 0,
+            "robIdx_value": 11,
+        }
+    )
+    backend.after_cycle()
+    env.sta_iq_feedback[0].values["valid"] = 0
+
+    with pytest.raises(ValueError, match="issue lane 0 is `load`, expected `sta`"):
+        backend.drive_pre_step()
 
 
 def test_api_request_apis_send_txns_delegate_to_backend():

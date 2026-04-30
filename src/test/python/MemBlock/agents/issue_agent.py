@@ -3,17 +3,12 @@
 Issue active agent.
 """
 
+from issue_lanes import assert_issue_lane_kind
 from transactions import IssueCyclePlan, IssueOp
 
 
 def _set_optional_signal(dut, signal_name: str, value: int) -> None:
     signal = getattr(dut, signal_name, None)
-    if signal is not None:
-        signal.value = value
-
-
-def _set_optional_bundle_signal(bundle, signal_name: str, value: int) -> None:
-    signal = getattr(bundle, signal_name, None)
     if signal is not None:
         signal.value = value
 
@@ -79,17 +74,17 @@ class IssueAgent:
         data: int,
         lane: int,
     ) -> None:
+        assert_issue_lane_kind(lane, "std")
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        _set_optional_bundle_signal(issue, "bits_fuType", op.issue_fu_type)
+        issue.bits_fuType.value = op.issue_fu_type
         issue.bits_fuOpType.value = op.issue_fu_op_type
         issue.bits_src_0.value = data
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
         issue.bits_robIdx_value.value = op.resolved_rob_idx_value
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
-        _set_optional_signal(self.env.dut, f"{prefix}fuType", op.issue_fu_type)
 
     def _drive_issue_op(self, op: IssueOp) -> None:
         if op.kind == "load":
@@ -140,10 +135,10 @@ class IssueAgent:
         wait_for_rob_idx_flag: int | None = None,
         wait_for_rob_idx_value: int | None = None,
     ) -> None:
+        assert_issue_lane_kind(lane, "load")
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         issue.valid.value = 1
-        _set_optional_bundle_signal(issue, "bits_fuType", op.issue_fu_type)
         issue.bits_fuOpType.value = op.issue_fu_op_type
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
@@ -151,7 +146,6 @@ class IssueAgent:
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
 
-        _set_optional_signal(self.env.dut, f"{prefix}fuType", op.issue_fu_type)
         _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
         _set_optional_signal(self.env.dut, f"{prefix}pdest", op.resolved_pdest)
         _set_optional_signal(self.env.dut, f"{prefix}rfWen", 0 if int(op.fp_wen) else 1)
@@ -185,12 +179,13 @@ class IssueAgent:
         addr: int,
         lane: int,
     ) -> None:
+        assert_issue_lane_kind(lane, "sta")
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         rf_wen = 1 if op.pdest is not None else 0
         pdest = 0 if op.pdest is None else op.resolved_pdest
         issue.valid.value = 1
-        _set_optional_bundle_signal(issue, "bits_fuType", op.issue_fu_type)
+        issue.bits_fuType.value = op.issue_fu_type
         issue.bits_fuOpType.value = op.issue_fu_op_type
         issue.bits_src_0.value = addr
         issue.bits_robIdx_flag.value = op.resolved_rob_idx_flag
@@ -198,7 +193,6 @@ class IssueAgent:
         issue.bits_sqIdx_flag.value = sq_ptr.flag
         issue.bits_sqIdx_value.value = sq_ptr.value
 
-        _set_optional_signal(self.env.dut, f"{prefix}fuType", op.issue_fu_type)
         _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
         _set_optional_signal(self.env.dut, f"{prefix}isFirstIssue", 1)
         _set_optional_signal(self.env.dut, f"{prefix}pdest", pdest)

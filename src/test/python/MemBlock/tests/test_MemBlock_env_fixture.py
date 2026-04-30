@@ -8,6 +8,7 @@ MemBlockEnv 冒烟测试。
 
 import pytest
 import MemBlock_api
+from issue_lanes import LOAD_ISSUE_LANES, STA_ISSUE_LANES, STD_ISSUE_LANES
 from transactions import QueuePtr, VectorMemTxn
 
 
@@ -105,6 +106,15 @@ def test_api_MemBlock_env_has_core_bundles(env):
     assert len(env.store_addr_re_inputs) == env.config.store_pipeline_width
     assert len(env.sbuffer_writes) == env.config.sbuffer_write_ports
     assert len(env.sq_shadow_entries) == env.config.store_queue_size
+
+
+def test_api_MemBlock_env_issue_lane_shapes_follow_dut_layout(env):
+    """验证标量 issue lane 按 load/sta/std 真实接口形状绑定。"""
+
+    for lane in LOAD_ISSUE_LANES:
+        assert not hasattr(env.issue[lane], "bits_fuType")
+    for lane in STA_ISSUE_LANES + STD_ISSUE_LANES:
+        assert hasattr(env.issue[lane], "bits_fuType")
 
 
 def test_api_MemBlock_env_dft_sram_broadcast_passthrough_smoke(env):

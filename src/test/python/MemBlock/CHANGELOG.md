@@ -2,7 +2,34 @@
 
 ## 2026-04-30
 
-### 1. 补齐 single-uop AMO 的 backend/env 闭环，并新增 real-DUT smoke
+### 1. 将标量 `issue` bundle 拆成 lane-aware 形状，去掉 `fuType` 的可选兜底绑定
+
+本条目记录一轮围绕 `io_ooo_to_mem_intIssue` 的 env/facade 收口。此前 Python env 把 7 路标量 `issue` 统一建模成同构 `IntIssueBundle`，再用 `getattr(..., bits_fuType, None)` 为 lane 3~6 补绑 `fuType`。但当前 real DUT 明确是非同构接口：lane 0~2 为 load-address，不导出 `fuType`；lane 3~4 为 store-address，lane 5~6 为 store-data，才导出 `fuType`。本轮把这种 lane 差异直接体现在 env bundle 形状里，并同步收紧 issue/replay 驱动契约。
+
+#### 变更摘要
+
+- `issue_lanes.py`
+  - 新增共享 lane 布局常量与 `issue_lane_kind()/assert_issue_lane_kind()`
+- `MemBlock_env.py`
+  - 将统一 `IntIssueBundle` 拆成 `LoadIssueBundle` / `StaIssueBundle` / `StdIssueBundle`
+  - `env.issue` 仍保持按 lane 索引访问，但每路 bundle 现在按 DUT 真实端口形状绑定
+  - 删除 `bits_fuType = getattr(..., None)` 的后绑兜底
+- `agents/issue_agent.py` / `agents/backend_facade.py`
+  - load lane 不再尝试驱动 `fuType`
+  - sta/std lane 将 `bits_fuType` 作为必绑字段直接驱动
+  - replay 仅允许落在 sta lane；错误 lane/op 组合会直接抛出异常
+- `tests/test_issue_agent.py` / `tests/test_request_apis_backend_facade.py` / `tests/test_MemBlock_env_fixture.py`
+  - fake issue bundle 改为 lane-aware 形状
+  - 新增 lane 形状与 lane/op 不匹配报错校验
+
+#### 验证情况
+
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_issue_agent.py`
+  - 结果：`9 passed`
+- `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_request_apis_backend_facade.py src/test/python/MemBlock/tests/test_MemBlock_env_fixture.py src/test/python/MemBlock/tests/test_MemBlock_amo.py`
+  - 结果：`77 passed`
+
+### 2. 补齐 single-uop AMO 的 backend/env 闭环，并新增 real-DUT smoke
 
 本条目记录一轮围绕 atomic memory operation 的环境补强。此前 `transactions.py` 已经开始承载 AMO opcode/fu-op 编码，但 backend facade、issue driver 和 env writeback 观测还没有把 AMO 当作 `MOU + AtomicsUnit` 单独建模，仍容易误走普通 LSQ store 路径。本轮把支持范围限定在 current RTL 已经稳定存在的 single-uop AMO（非 LR/SC、非 AMOCAS），并明确采用“AMO writeback 返回旧值 + 后续真实 load 验证提交后新值”的收口方式。
 
@@ -32,7 +59,7 @@
   - 结果：`3 xfailed`
   - 说明：当前 standalone `intIssue` AMO 驱动在真实 DUT 上仍未产生下游 TL/writeback 活动；用例按“`dcache_a_request_count == 0 && writeback_events == 0`”定向记录该 contract gap，而不是误报通过
 
-### 2. 用 `GetInternalSignal` 收缩 single-uop AMO 在 dcache atomic 口被 ready 反压的真实原因
+### 3. 用 `GetInternalSignal` 收缩 single-uop AMO 在 dcache atomic 口被 ready 反压的真实原因
 
 本条目记录一轮面向 real DUT 的白盒诊断补强。此前 single-uop AMO smoke 在当前 DUT 上表现为“没有后续 TL/writeback 活动”，仅从黑盒统计无法判断是 sbuffer、probe/refill 仲裁、mainPipe pipeline 冲突，还是 dcache 内部数组自身没有 ready。本轮沿 `dut.GetInternalSignal()` 增加了 atomic 相关采样，并把真实观察结果固化成诊断测试。
 
@@ -54,7 +81,7 @@
   - 说明：当前 single-uop AMO 在 reset 后早期被反压的直接原因不是 sbuffer 或 mainPipe tag-write 冲突，而是 dcache `tagArray` 初始化期间 `read.ready=0`
 
 
-### 3. 将 AMO white-box 观测收缩到诊断测试，smoke 与公共 env 不再依赖内部信号
+### 4. 将 AMO white-box 观测收缩到诊断测试，smoke 与公共 env 不再依赖内部信号
 
 本条目记录一轮边界收紧。上一条修复为了让 single-uop AMO smoke 转绿，把 `tagArray ready` 等待做进了公共 env / sequence 层；这虽然能工作，但把 `GetInternalSignal` 依赖扩散到了 smoke 与公共 helper。现在按“white-box 只留在诊断测试”的原则，把内部信号读取重新收回到 `tests/test_MemBlock_amo_diagnostics.py`，而 smoke 侧改用固定的 post-reset settle 拍数绕过 dcache `tagArray` 初始化窗口。
 
@@ -82,7 +109,7 @@
 - `python3 -m pytest -n 16 -q src/test/python/MemBlock/tests/test_MemBlock_amo_diagnostics.py`
   - 结果：`4 passed`
 
-### 4. 修复 single-uop AMO smoke 的 reset 后早期 `xfail`，让 real-DUT 用例直接转绿
+### 5. 修复 single-uop AMO smoke 的 reset 后早期 `xfail`，让 real-DUT 用例直接转绿
 
 本条目记录一轮围绕 `tests/test_MemBlock_amo.py` 的收口修复。上一轮白盒诊断已经确认，single-uop AMO 在 reset 后早期卡在 dcache atomic 口并不是功能不支持，而是 `tagArray` 仍处于初始化写窗口，导致 `mainPipe.io_tag_read_ready=0`、进一步把 `atomic_req_ready` 压低。此前 smoke 用例用 `xfail` 暂存这个现象，会把“环境未等到 dcache 可接收窗口”和“真实 DUT 功能不通”混在一起。本轮把等待逻辑下沉到 env/sequence 层，并顺手修复了恢复 AMO 后才会暴露出来的 issue bundle 可选 `fuType` 句柄判定问题。
 

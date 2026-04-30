@@ -4,7 +4,8 @@
 from collections import deque
 from dataclasses import dataclass, replace
 
-from agents.issue_agent import _set_optional_bundle_signal, _set_optional_signal
+from agents.issue_agent import _set_optional_signal
+from issue_lanes import assert_issue_lane_kind
 
 from transactions import (
     AtomicTxn,
@@ -235,6 +236,7 @@ class _BackendReplayCreditModel:
 
     def _drive_sta_replay(self, entry: _TrackedStoreReplay) -> None:
         lane = int(entry.lane)
+        assert_issue_lane_kind(lane, "sta")
         issue = self.env.issue[lane]
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
         replay_op = IssueOp.sta(
@@ -249,14 +251,13 @@ class _BackendReplayCreditModel:
             ftq_idx_value=entry.ftq_idx_value,
         )
         issue.valid.value = 1
-        _set_optional_bundle_signal(issue, "bits_fuType", replay_op.issue_fu_type)
+        issue.bits_fuType.value = replay_op.issue_fu_type
         issue.bits_fuOpType.value = replay_op.store_fu_op_type
         issue.bits_src_0.value = int(entry.addr)
         issue.bits_robIdx_flag.value = int(entry.rob_idx.flag)
         issue.bits_robIdx_value.value = int(entry.rob_idx.value)
         issue.bits_sqIdx_flag.value = int(entry.sq_ptr.flag)
         issue.bits_sqIdx_value.value = int(entry.sq_ptr.value)
-        _set_optional_signal(self.env.dut, f"{prefix}fuType", replay_op.issue_fu_type)
         _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
         _set_optional_signal(self.env.dut, f"{prefix}isFirstIssue", 0)
         _set_optional_signal(self.env.dut, f"{prefix}pdest", 0)
@@ -271,7 +272,6 @@ class _BackendReplayCreditModel:
 
     def _clear_sta_optional_fields(self, lane: int) -> None:
         prefix = f"io_ooo_to_mem_intIssue_{lane}_0_bits_"
-        _set_optional_signal(self.env.dut, f"{prefix}fuType", 0)
         _set_optional_signal(self.env.dut, f"{prefix}imm", 0)
         _set_optional_signal(self.env.dut, f"{prefix}isFirstIssue", 0)
         _set_optional_signal(self.env.dut, f"{prefix}pdest", 0)

@@ -60,6 +60,7 @@ from agents.vector_backend_facade import VectorBackendFacade
 from agents.vector_issue_agent import VectorIssueAgent
 from env_config import DEFAULT_ENV_CONFIG, EnvConfig
 from frontend_facade import FetchToMemFacade, FrontendBridgeFacade
+from issue_lanes import issue_lane_kind
 from memory_model import MemoryModel
 from model.rob_coverage import RobCoverageCollector
 from monitors.mem_status_monitor import MemStatusMonitor
@@ -297,7 +298,7 @@ class LsqEnqRespBundle(Bundle):
     lqIdx_flag, lqIdx_value, sqIdx_flag, sqIdx_value = Signals(4)
 
 
-class IntIssueBundle(Bundle):
+class BaseIntIssueBundle(Bundle):
     """整数 issue 单 lane 接口。"""
 
     ready = Signal()
@@ -317,6 +318,30 @@ class IntIssueBundle(Bundle):
         self.bits_robIdx_value.value = 0
         self.bits_sqIdx_flag.value = 0
         self.bits_sqIdx_value.value = 0
+
+
+class LoadIssueBundle(BaseIntIssueBundle):
+    """Load-address issue lane，不导出 `fuType`。"""
+
+
+class StaIssueBundle(BaseIntIssueBundle):
+    """Store-address issue lane。"""
+
+    bits_fuType = Signal()
+
+    def drive_idle(self) -> None:
+        super().drive_idle()
+        self.bits_fuType.value = 0
+
+
+class StdIssueBundle(BaseIntIssueBundle):
+    """Store-data issue lane。"""
+
+    bits_fuType = Signal()
+
+    def drive_idle(self) -> None:
+        super().drive_idle()
+        self.bits_fuType.value = 0
 
 
 class IntWritebackBundle:
@@ -2220,10 +2245,18 @@ class MemBlockEnv:
             bundle.bind(dut)
         self.lsq_agent = LsqAgent(self)
 
-        self.issue = BundleList(IntIssueBundle, "io_ooo_to_mem_intIssue_#_0_", self.config.int_issue_ports)
-        for idx, bundle in enumerate(self.issue):
-            bundle.bind(dut)
-            bundle.bits_fuType = getattr(dut, f"io_ooo_to_mem_intIssue_{idx}_0_bits_fuType", None)
+        self.issue = []
+        for idx in range(self.config.int_issue_ports):
+            prefix = f"io_ooo_to_mem_intIssue_{idx}_0_"
+            lane_kind = issue_lane_kind(idx)
+            bundle_cls = (
+                LoadIssueBundle
+                if lane_kind == "load"
+                else StaIssueBundle
+                if lane_kind == "sta"
+                else StdIssueBundle
+            )
+            self.issue.append(bundle_cls.from_prefix(prefix).bind(dut))
         self.issue_agent = IssueAgent(self)
         self.vector_issue = [
             VecIssueBundle(f"io_ooo_to_mem_vecIssue_{idx}_0_", dut)
