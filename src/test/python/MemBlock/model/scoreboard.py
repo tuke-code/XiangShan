@@ -639,13 +639,14 @@ class Scoreboard:
             store.retired = True
 
     def _retire_store(self, store: PendingStore) -> None:
-        if store.request_opcode == CBO_ZERO_STORE_OPCODE and store.request_addr is not None:
-            self.ref_memory.apply_cbo_zero(store.request_addr)
+        translated_addr = store.addr if store.addr is not None else store.request_addr
+        if store.request_opcode == CBO_ZERO_STORE_OPCODE and translated_addr is not None:
+            self.ref_memory.apply_cbo_zero(translated_addr)
             return
         if store.request_opcode in {CBO_CLEAN_STORE_OPCODE, CBO_FLUSH_STORE_OPCODE, CBO_INVAL_STORE_OPCODE}:
             return
-        if store.request_addr is not None and store.request_data is not None and store.request_mask is not None:
-            self.ref_memory.apply_store(store.request_addr, store.request_data, store.request_mask)
+        if translated_addr is not None and store.request_data is not None and store.request_mask is not None:
+            self.ref_memory.apply_store(translated_addr, store.request_data, store.request_mask)
             return
         if store.is_cbo_zero and store.addr is not None:
             self.ref_memory.apply_cbo_zero(store.addr)

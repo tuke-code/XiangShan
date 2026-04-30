@@ -2460,7 +2460,7 @@ class MemBlockEnv:
     async def _await_until(self, predicate, *, max_cycles: int, timeout_message: str):
         for _ in range(max_cycles):
             result = predicate()
-            if result:
+            if result is not None and result is not False:
                 return result
             await self._step_async(1)
         raise TimeoutError(timeout_message)

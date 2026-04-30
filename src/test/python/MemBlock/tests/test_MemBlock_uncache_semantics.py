@@ -212,6 +212,10 @@ def _run_translated_store(
     req_id: int,
     va: int,
     data: int,
+    expected_addr: int | None = None,
+    expected_mmio: bool | None = None,
+    expected_nc: bool | None = None,
+    require_committed: bool = True,
     max_cycles: int = 256,
 ) -> tuple[SequenceState, object]:
     txn = StoreTxn(
@@ -223,7 +227,18 @@ def _run_translated_store(
     allocated_sq_ptr = send_store(env, txn)
     env.backend.pulse_store_commit(1)
     env.advance_cycles(env.config.sequence.store_settle_cycles)
-    store = _wait_any_store_view(env, allocated_sq_ptr.value, max_cycles=max_cycles)
+    if expected_addr is None:
+        store = _wait_any_store_view(env, allocated_sq_ptr.value, max_cycles=max_cycles)
+    else:
+        store = env.wait_store_materialized(
+            allocated_sq_ptr.value,
+            expected_addr=expected_addr,
+            expected_data=data,
+            expected_mmio=expected_mmio,
+            expected_nc=expected_nc,
+            require_committed=require_committed,
+            max_cycles=max_cycles,
+        )
     return (
         SequenceState(
             next_lq_ptr=state.next_lq_ptr,
@@ -337,16 +352,16 @@ def test_api_MemBlock_sv39_pbmt_ncio_store_flush_smoke(env):
         outer_before = env.get_counter("outer_write_request_count")
         sbuffer_before = env.get_counter("sbuffer_drain_count")
 
-        txn = StoreTxn(req_id=0, sq_ptr=state.sq_ptr, addr=NCIO_VA, data=NCIO_DATA)
-        allocated_sq_ptr = send_store(env, txn)
-        env.backend.pulse_store_commit(1)
-        env.advance_cycles(env.config.sequence.store_settle_cycles)
-        store = _wait_any_store_view(env, allocated_sq_ptr.value, max_cycles=256)
-        if store.addr != NCIO_PA or not store.nc or store.mmio:
-            pytest.xfail(
-                "PBMT NC store capability gap: translated PBMT=NC store did not surface a stable NC shadow; "
-                f"store={store}"
-            )
+        _, store = _run_translated_store(
+            env,
+            state=state,
+            req_id=0,
+            va=NCIO_VA,
+            data=NCIO_DATA,
+            expected_addr=NCIO_PA,
+            expected_mmio=False,
+            expected_nc=True,
+        )
         env.wait_memory_quiesce(max_cycles=400)
         drain_summary = FlushStoreBuffersSequence().run(env)
 
@@ -377,6 +392,9 @@ def test_api_MemBlock_sv39_pbmt_ncio_store_burst_flush_smoke(env):
             req_id=0,
             va=NCIO_VA,
             data=NCIO_BURST_DATA[0],
+            expected_addr=NCIO_PA,
+            expected_mmio=False,
+            expected_nc=True,
         )
         state, second_store = _run_translated_store(
             env,
@@ -384,14 +402,17 @@ def test_api_MemBlock_sv39_pbmt_ncio_store_burst_flush_smoke(env):
             req_id=1,
             va=NCIO_VA + 0x8,
             data=NCIO_BURST_DATA[1],
+            expected_addr=NCIO_PA + 0x8,
+            expected_mmio=False,
+            expected_nc=True,
         )
-        if (
-            first_store.addr != NCIO_PA
-            or not first_store.nc
-            or first_store.mmio
-            or second_store.addr != NCIO_PA + 0x8
-            or not second_store.nc
-            or second_store.mmio
+        if not (
+            first_store.addr == NCIO_PA
+            and first_store.nc
+            and not first_store.mmio
+            and second_store.addr == NCIO_PA + 0x8
+            and second_store.nc
+            and not second_store.mmio
         ):
             pytest.xfail(
                 "PBMT NC burst capability gap: translated PBMT=NC stores did not surface stable NC shadows; "
@@ -431,6 +452,9 @@ def test_api_MemBlock_sv39_pbmt_ncio_then_cacheable_store_flush_keeps_nc_outer_a
             req_id=0,
             va=NCIO_VA,
             data=NCIO_DATA,
+            expected_addr=NCIO_PA,
+            expected_mmio=False,
+            expected_nc=True,
         )
         state, cacheable_store = _run_translated_store(
             env,
@@ -438,14 +462,17 @@ def test_api_MemBlock_sv39_pbmt_ncio_then_cacheable_store_flush_keeps_nc_outer_a
             req_id=1,
             va=cacheable_store_va,
             data=NCIO_MIXED_CACHEABLE_DATA,
+            expected_addr=cacheable_store_pa,
+            expected_mmio=False,
+            expected_nc=False,
         )
-        if (
-            ncio_store.addr != NCIO_PA
-            or not ncio_store.nc
-            or ncio_store.mmio
-            or cacheable_store.addr != cacheable_store_pa
-            or cacheable_store.mmio
-            or cacheable_store.nc
+        if not (
+            ncio_store.addr == NCIO_PA
+            and ncio_store.nc
+            and not ncio_store.mmio
+            and cacheable_store.addr == cacheable_store_pa
+            and not cacheable_store.mmio
+            and not cacheable_store.nc
         ):
             pytest.xfail(
                 "PBMT NC/cacheable mixed-store capability gap: translated stores did not surface stable NC/cacheable shadows; "
@@ -488,6 +515,9 @@ def test_api_MemBlock_sv39_pbmt_mmio_then_cacheable_store_flush_excludes_mmio_fr
             req_id=0,
             va=MMIO_VA,
             data=MMIO_DATA,
+            expected_addr=MMIO_PA,
+            expected_mmio=True,
+            expected_nc=False,
         )
         state, cacheable_store = _run_translated_store(
             env,
@@ -495,14 +525,17 @@ def test_api_MemBlock_sv39_pbmt_mmio_then_cacheable_store_flush_excludes_mmio_fr
             req_id=1,
             va=cacheable_store_va,
             data=MMIO_MIXED_CACHEABLE_DATA,
+            expected_addr=cacheable_store_pa,
+            expected_mmio=False,
+            expected_nc=False,
         )
-        if (
-            mmio_store.addr != MMIO_PA
-            or not mmio_store.mmio
-            or mmio_store.nc
-            or cacheable_store.addr != cacheable_store_pa
-            or cacheable_store.mmio
-            or cacheable_store.nc
+        if not (
+            mmio_store.addr == MMIO_PA
+            and mmio_store.mmio
+            and not mmio_store.nc
+            and cacheable_store.addr == cacheable_store_pa
+            and not cacheable_store.mmio
+            and not cacheable_store.nc
         ):
             pytest.xfail(
                 "PBMT IO/Cacheable mixed-store capability gap: translated stores did not surface stable MMIO/cacheable shadows; "
@@ -545,6 +578,9 @@ def test_api_MemBlock_sv39_pbmt_mmio_store_burst_then_cacheable_flush_excludes_a
             req_id=0,
             va=MMIO_VA,
             data=MMIO_BURST_DATA[0],
+            expected_addr=MMIO_PA,
+            expected_mmio=True,
+            expected_nc=False,
         )
         state, second_mmio_store = _run_translated_store(
             env,
@@ -552,6 +588,9 @@ def test_api_MemBlock_sv39_pbmt_mmio_store_burst_then_cacheable_flush_excludes_a
             req_id=1,
             va=MMIO_VA + 0x8,
             data=MMIO_BURST_DATA[1],
+            expected_addr=MMIO_PA + 0x8,
+            expected_mmio=True,
+            expected_nc=False,
         )
         state, cacheable_store = _run_translated_store(
             env,
@@ -559,17 +598,20 @@ def test_api_MemBlock_sv39_pbmt_mmio_store_burst_then_cacheable_flush_excludes_a
             req_id=2,
             va=cacheable_store_va,
             data=MMIO_MIXED_CACHEABLE_DATA,
+            expected_addr=cacheable_store_pa,
+            expected_mmio=False,
+            expected_nc=False,
         )
-        if (
-            first_mmio_store.addr != MMIO_PA
-            or not first_mmio_store.mmio
-            or first_mmio_store.nc
-            or second_mmio_store.addr != MMIO_PA + 0x8
-            or not second_mmio_store.mmio
-            or second_mmio_store.nc
-            or cacheable_store.addr != cacheable_store_pa
-            or cacheable_store.mmio
-            or cacheable_store.nc
+        if not (
+            first_mmio_store.addr == MMIO_PA
+            and first_mmio_store.mmio
+            and not first_mmio_store.nc
+            and second_mmio_store.addr == MMIO_PA + 0x8
+            and second_mmio_store.mmio
+            and not second_mmio_store.nc
+            and cacheable_store.addr == cacheable_store_pa
+            and not cacheable_store.mmio
+            and not cacheable_store.nc
         ):
             pytest.xfail(
                 "PBMT IO burst/cacheable mixed-store capability gap: translated stores did not surface stable MMIO/cacheable shadows; "
@@ -735,24 +777,18 @@ def test_api_MemBlock_mmio_busy_blocks_first_younger_compare_with_multiple_loads
         )
         assert env.get_completed_load_count() == completed_before, "older MMIO busy 期间第一条 younger load 不应完成 compare"
         assert env.get_counter("rob_pending_entry_count") > 0, "older MMIO busy 期间 ROB 不应已完全清空"
-        try:
-            second_writeback = env.wait_load_writeback_observed(
-                rob_idx=younger_txns[1][0].rob_idx,
-                data=younger_txns[1][1],
-                expected_paddr=cacheable_addrs[1],
-                expected_mmio=False,
-                expected_ncio=False,
-                max_cycles=256,
-            )
-            env.wait_mmio_busy(expected=False, max_cycles=256)
-            env.wait_completed_load_count(completed_before + 2, max_cycles=256)
-            env.drain_writebacks(max_cycles=256)
-            env.wait_memory_quiesce(max_cycles=400)
-        except TimeoutError as exc:
-            pytest.xfail(
-                "mmioBusy multi-load capability gap: first younger load is blocked at compare as expected, "
-                f"but full unblock/retire closure did not converge ({exc})"
-            )
+        second_writeback = env.wait_load_writeback_observed(
+            rob_idx=younger_txns[1][0].rob_idx,
+            data=younger_txns[1][1],
+            expected_paddr=cacheable_addrs[1],
+            expected_mmio=False,
+            expected_ncio=False,
+            max_cycles=256,
+        )
+        env.wait_mmio_busy(expected=False, max_cycles=256)
+        env.wait_completed_load_count(completed_before + 2, max_cycles=256)
+        env.drain_writebacks(max_cycles=256)
+        env.wait_memory_quiesce(max_cycles=400)
     finally:
         env.memory.transport.outer_delay = original_outer_delay
 

@@ -199,6 +199,12 @@ def test_api_MemBlock_env_advance_cycles_and_reset(env):
     assert env.dut.reset.value == 0
 
 
+def test_api_MemBlock_env_wait_until_accepts_zero_result(env):
+    """验证 wait_until 不会把合法结果 0 误判成“条件未满足”而继续超时。"""
+
+    assert env.wait_until(lambda: 0, max_cycles=1, timeout_message="wait_until zero result should pass") == 0
+
+
 def test_api_MemBlock_env_lsq_enq_bundle_access(env):
     """验证 LSQ 入队请求和元信息封装。"""
 

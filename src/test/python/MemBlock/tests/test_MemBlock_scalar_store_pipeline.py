@@ -65,8 +65,6 @@ DUTBUG_SQ_CROSS16B_BATCH_FLUSH_STALL_XFAIL_REASON = (
     f"{DUTBUG_SQ_CROSS16B_BATCH_FLUSH_STALL}: "
     "batched committed cross-16B scalar stores reach sbuffer writeReq activity, but flushSb cannot drain sbuffer to empty"
 )
-
-
 def _reset_env_and_state(env, *, require_issue_lanes=(), require_lq_ready: bool = False) -> SequenceState:
     return ResetEnvSequence(
         require_issue_lanes=require_issue_lanes,
@@ -2526,6 +2524,13 @@ def test_api_MemBlock_sbuffer_data_wide_burst_mask_flush_directed(env):
                 addr=addr,
                 data=data,
             )
+
+        # 当前 DUT 在 wide burst 之后，最后几笔 sbuffer bookkeeping /
+        # mask-flush 活动还会持续几十拍；直接发 younger load 会把这条
+        # coverage 用例变成时序敏感的 false negative。
+        # 使用 wait_memory_quiesce 而非 advance_cycles，
+        # 确保 mask-flush 触发的 transport 事务收敛后再进入 load 阶段。
+        env.wait_memory_quiesce(max_cycles=600)
 
         next_lq_ptr = state.next_lq_ptr
         for completed_loads, (addr, _) in enumerate(burst_ops, start=1):

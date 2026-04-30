@@ -152,17 +152,25 @@ class StoreMonitor:
                 continue
             armed = lane_idx < len(self._store_addr_re_armed) and self._store_addr_re_armed[lane_idx]
             sq_idx = -1
-            if armed and lane_idx < len(self._pending_store_addr_re_sq_idx):
-                sq_idx = self._pending_store_addr_re_sq_idx[lane_idx]
-            if sq_idx < 0 and lane.connected("sqIdx_value"):
+            signature_sq_idx = None
+            if lane.connected("sqIdx_value"):
                 sq_idx = lane.read("sqIdx_value", -1)
+                if sq_idx >= 0:
+                    signature_sq_idx = int(sq_idx)
+            if sq_idx < 0 and armed and lane_idx < len(self._pending_store_addr_re_sq_idx):
+                sq_idx = self._pending_store_addr_re_sq_idx[lane_idx]
             if sq_idx < 0:
                 continue
-            signature = (
+            raw_signature = (
                 bool(lane.read("nc", 0)) if lane.connected("nc") else None,
                 bool(lane.read("mmio", 0)),
                 bool(lane.read("memBackTypeMM", 0)),
                 bool(lane.read("hasException", 0)),
+            )
+            signature = (
+                raw_signature
+                if signature_sq_idx is None
+                else (signature_sq_idx,) + raw_signature
             )
             if lane_idx < len(self._last_store_addr_re_signature):
                 if self._last_store_addr_re_signature[lane_idx] == signature:
@@ -188,6 +196,17 @@ class StoreMonitor:
             if lane_idx < len(self._pending_store_addr_re_sq_idx):
                 self._pending_store_addr_re_sq_idx[lane_idx] = lane.read("sqIdx_value", -1)
                 self._store_addr_re_armed[lane_idx] = True
+            if lane_idx < len(self._last_store_addr_re_signature):
+                last_signature = self._last_store_addr_re_signature[lane_idx]
+                last_has_exception = False
+                if isinstance(last_signature, tuple) and last_signature:
+                    last_has_exception = bool(last_signature[-1])
+                # Non-exception storeAddrInRe payloads can legally repeat on
+                # back-to-back requests of the same class. Exception payloads
+                # are kept sticky here to avoid misattributing a lingering
+                # terminal error report to the next request.
+                if not last_has_exception:
+                    self._last_store_addr_re_signature[lane_idx] = None
 
     def _observe_store_mask(self) -> None:
         for lane in self.store_mask_inputs:
