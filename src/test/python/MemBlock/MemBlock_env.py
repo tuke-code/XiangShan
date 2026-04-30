@@ -3112,6 +3112,65 @@ class MemBlockEnv:
             "lanes": tuple(lanes),
         }
 
+    def sample_vlq_state(self) -> dict:
+        """采样当前拍 VirtualLoadQueue 真实 DUT 状态。
+
+        覆盖 allocated / committed / isvec / robIdx / uopIdx 每条目字段，
+        以及 lqDeq / lqCancelCnt / lqFull / lqEmpty 等全局信号。
+
+        注意：调用者需确保在最新寄存器值更新后调用，
+        例如在 `env.backend.execute()` 之后先 `env.advance_cycles(1)`。
+        """
+
+        self.refresh_comb()
+        cycle = self._current_cycle()
+        vlq_size = 72
+        prefix = "MemBlock_inner_lsq_loadQueue_virtualLoadQueue"
+
+        entries = []
+        for idx in range(vlq_size):
+            allocated = self._read_optional_dut_signal(f"{prefix}_allocated_{idx}")
+            entries.append(
+                {
+                    "index": idx,
+                    "allocated": allocated,
+                    "committed": self._read_optional_dut_signal(f"{prefix}_committed_{idx}"),
+                    "isvec": self._read_optional_dut_signal(f"{prefix}_isvec_{idx}"),
+                    "rob_idx_flag": self._read_optional_dut_signal(f"{prefix}_robIdx_{idx}_flag")
+                    if allocated
+                    else 0,
+                    "rob_idx_value": self._read_optional_dut_signal(f"{prefix}_robIdx_{idx}_value")
+                    if allocated
+                    else 0,
+                    "uop_idx": self._read_optional_dut_signal(f"{prefix}_uopIdx_{idx}")
+                    if allocated
+                    else 0,
+                }
+            )
+
+        deq_ptr_flag = self._read_optional_dut_signal("io_mem_to_ooo_lqDeqPtr_flag")
+        deq_ptr_value = self._read_optional_dut_signal("io_mem_to_ooo_lqDeqPtr_value")
+        lq_deq = self._read_optional_dut_signal("MemBlock_inner_lsq_io_lqDeq")
+        lq_cancel_cnt = self._read_optional_dut_signal("MemBlock_inner_lsq_io_lqCancelCnt")
+        lq_full = self._read_optional_dut_signal("MemBlock_inner_lsq_io_lqFull")
+        lq_empty = self._read_optional_dut_signal("MemBlock_inner_lsq_io_lqEmpty")
+
+        allocated_count = sum(1 for e in entries if e["allocated"])
+        committed_count = sum(1 for e in entries if e["allocated"] and e["committed"])
+
+        return {
+            "cycle": cycle,
+            "entries": tuple(entries),
+            "deq_ptr": {"flag": deq_ptr_flag, "value": deq_ptr_value},
+            "lq_deq": lq_deq,
+            "lq_cancel_cnt": lq_cancel_cnt,
+            "lq_full": lq_full,
+            "lq_empty": lq_empty,
+            "allocated_count": allocated_count,
+            "committed_count": committed_count,
+            "size": vlq_size,
+        }
+
     def _normalize_replay_cause(self, cause: str | None) -> str | None:
         if cause is None:
             return None

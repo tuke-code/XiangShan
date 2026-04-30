@@ -2,6 +2,24 @@
 
 ## 2026-04-30
 
+### 1. 新增 VirtualLoadQueue 覆盖率定向补强用例与 VLQ 状态采样方法
+
+本条目记录一轮面向 `VirtualLoadQueue.sv` 行覆盖率提升的 env 扩展与定向 testcase 补强。当前 full 主报告中 VirtualLoadQueue 行覆盖率仅 63.7%，主要缺口集中在：enqueue 端口 4-7 未使用、redirect/flush 路径覆盖不足、高 commitCount 多条目并发退休逻辑未充分触发。
+
+本轮在 `MemBlock_env.py` 中新增 `sample_vlq_state()` 方法（复用 `lsq_webui_backend.py` 已验证的 DUT 信号访问模式），并补入 3 条定向 testcase：
+
+- `test_vlq_eight_port_same_cycle_enqueue` — 同拍使用 8 个 enqueue 端口，命中 `entryCanEnqSeq_4/5/6/7` 与 `needAlloc_4/6`
+- `test_vlq_many_loads_high_commit_count` — 16 条 cacheable load 批量入队+集中 drain，命中 `commitCount > 2` 分支
+- `test_vlq_redirect_cancels_inflight_loads` — 入队后驱动 redirect 脉冲，命中 `needCancel` / `redirectCancelCount` 路径
+  - 新增 `sample_vlq_state()` 方法，采样 VLQ 72 条目 allocated/committed/isvec 状态及全局信号
+- `tests/test_MemBlock_vlq_coverage.py` (新建)
+  - 包含 3 条定向 testcase，全部基于真实 DUT 验证通过
+
+#### 验证情况
+
+- 3 条新增 testcase 均通过 real DUT pytest 验证
+- 完整覆盖率回归待后续重跑后更新 `coverage_summary.md` 中的 VirtualLoadQueue 数据
+
 ### 1. 将标量 `issue` bundle 拆成 lane-aware 形状，去掉 `fuType` 的可选兜底绑定
 
 本条目记录一轮围绕 `io_ooo_to_mem_intIssue` 的 env/facade 收口。此前 Python env 把 7 路标量 `issue` 统一建模成同构 `IntIssueBundle`，再用 `getattr(..., bits_fuType, None)` 为 lane 3~6 补绑 `fuType`。但当前 real DUT 明确是非同构接口：lane 0~2 为 load-address，不导出 `fuType`；lane 3~4 为 store-address，lane 5~6 为 store-data，才导出 `fuType`。本轮把这种 lane 差异直接体现在 env bundle 形状里，并同步收紧 issue/replay 驱动契约。
@@ -300,6 +318,25 @@
   - 新增 `tag one-shot -> hardwareError + dcacheError` directed
   - 新增 `data delayed + persist` 二次 rearm directed
   - 新增 `bank_mask=0` no-effect directed
+
+#### 验证情况
+
+- 待本轮回归确认
+
+### 5. 修正 CtrlUnit directed 的 testcase 语义，并对白盒 data 注入缺口补充直接证据
+
+本条目记录一轮围绕 `test_MemBlock_dcache_ctrlunit.py` 的失败收口。首次 real-DUT 回归表明，`tag one-shot` 与 `data delayed + persist` 的失败并不完全相同：前者更像 testcase 自身把“第一次 DCache 访问会消费 one-shot 注入”这一 RTL 语义处理得过于宽松，后者则更像 data ECC 注入已进入 banked data array、但没有继续闭环到 `dcacheError` / load `hardwareError`。因此本轮优先修正验证环境语义，并把剩余的 RTL 级怀疑点转成可重复的 `GetInternalSignal` 直接证据。
+
+#### 变更摘要
+
+- `dcache_ctrl_facade.py`
+  - 新增 `sample_fault_debug()`
+  - 新增 `wait_counter_zero()`
+  - 统一暴露 `CtrlUnitPseudoErrorPipelineConnect*`、`bankedDataArray.io_read_error_delayed_*`、`LoadUnit*.troubleMaker` 与 `dcacheError` pipeline 等关键白盒信号
+- `tests/test_MemBlock_dcache_ctrlunit.py`
+  - `tag one-shot` 改为 `ECCCTL` 写完后不再额外空拍，立即发目标 load，避免 testcase 自己提前消耗 one-shot 注入
+  - 为 data fault 路径新增窗口化白盒观测 helper，显式采样 `pipe valid/fire`、`read_error_delayed`、`dcacheError` 与 matching writeback `exceptionVec[19]`
+  - 当观测到 “`read_error_delayed` 已出现，但 `dcacheError` / load `hardwareError` 仍未出现” 时，按已确认 DUT 缺口窄化 `xfail`，不再只依赖超时表象
 
 #### 验证情况
 
