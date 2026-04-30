@@ -99,8 +99,10 @@ def reset_env_and_wait_backend(
     require_lq_ready: bool = False,
     require_sq_ready: bool = False,
 ) -> None:
-    env.reset(cycles=reset_cycles, settle_cycles=settle_cycles)
+    env.reset(cycles=reset_cycles, settle_cycles=0)
     wait_backend_reset_deassert(env, must_observe_assert=True)
+    if settle_cycles > 0:
+        env.advance_cycles(settle_cycles)
 
     assert env.dut.reset.value == 0, "解复位后 `reset` 仍为高"
     assert int(env.dut.io_reset_backend.value) == 0, "解复位后 `io_reset_backend` 仍为高"
