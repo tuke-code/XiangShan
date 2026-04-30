@@ -239,6 +239,11 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
     disable_request := Mux(validity_check, trigger_disable, disable_request)
   }
 
+  val blocked_up_depth = RegInit(0.U(DEPTH_BITS.W))
+  val up_back_off_cnt = RegInit(0.U(5.W))
+  val up_target = depth << 1
+  val up_blocked =  up_back_off_cnt =/= 0.U && up_target === blocked_up_depth
+
   // State
   // s_decision evaluates a completed sent window.
   // s_buffer records late feedback for the first window after a depth upgrade.
@@ -248,14 +253,16 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   when(window_fire) {
     switch(state) {
       is(s_decision) {
-        when(cur_late_high) {
+        up_back_off_cnt := Mux(up_blocked, up_back_off_cnt - 1.U, up_back_off_cnt)
+        prev_hit_pf_in_cache := cur_hit_pf_in_cache
+        when(cur_late_high && good_return && !up_blocked) {
           // up
           depth := Mux(depth === max_depth, max_depth, depth << 1)
           state := Mux(depth === max_depth, s_decision, s_buffer)
           bad_return_cnt := 0.U
         }.elsewhen(!at_base_depth && disable_request) {
           // strong down, depth >> 2
-          depth := Mux((depth >> 2) < base_depth, base_depth, depth >> 2)
+          depth := base_depth
           state := s_buffer
           bad_return_cnt := 0.U
         }.elsewhen(at_base_depth && disable_request) {
@@ -272,14 +279,16 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
           bad_return_cnt := 0.U
         }.otherwise {
           bad_return_cnt := bad_return_cnt + 1.U
-          when (bad_return_cnt === 2.U) {
+          prev_hit_pf_in_cache := prev_hit_pf_in_cache
+          when (bad_return_cnt === 1.U) {
             // weak down, depth >> 1
             depth := Mux((depth >> 1) < base_depth, base_depth, depth >> 1)
             state := Mux((depth >> 1) < base_depth, s_decision, s_buffer)
             bad_return_cnt := 0.U
+            blocked_up_depth := depth
+            up_back_off_cnt := 8.U
           }
         }
-        prev_hit_pf_in_cache := cur_hit_pf_in_cache
       }
       is(s_buffer) {
         prev_hit_pf_in_cache := prev_hit_pf_in_cache
@@ -290,6 +299,7 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   
   when(reset.asBool) {
     depth := base_depth
+    blocked_up_depth := base_depth
   }
 
   XSPerfAccumulate(s"l1prefetchSent${param.name}", total_prefetch)
@@ -322,7 +332,7 @@ abstract class PrefetcherMonitorParam {
   val DISABLE_THRESHOLD = 900
 
   val WINDOW_SIZE = 512
-  val LATE_HIT_THRESHOLD = 25
+  val LATE_HIT_THRESHOLD = 32
   val HIT_MARGIN = 30
 
   val BACK_OFF_INTERVAL = 100000
