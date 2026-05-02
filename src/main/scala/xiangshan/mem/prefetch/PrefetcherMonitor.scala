@@ -220,10 +220,12 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
 
   // disable
   val disable_request = RegInit(false.B)
+  val down_request = RegInit(false.B)
   val validity_cnt = RegInit(0.U((log2Up(param.VALIDITY_CHECK_INTERVAL) + 1).W))
   val useless_cnt = RegInit(0.U((log2Up(param.VALIDITY_CHECK_INTERVAL) + 1).W))
   val validity_check = validity_cnt >= param.VALIDITY_CHECK_INTERVAL.U
   val trigger_disable = validity_check && useless_cnt >= param.DISABLE_THRESHOLD.U
+  val trigger_down = validity_check && useless_cnt >= param.BAD_THRESHOLD.U
   val old_depth = RegNext(depth, init = base_depth)
   val depth_change_fire = old_depth =/= depth
 
@@ -231,10 +233,12 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
     validity_cnt := 0.U
     useless_cnt := 0.U
     disable_request := false.B
+    down_request := false.B
   }.otherwise {
     validity_cnt := Mux(validity_check, 0.U, validity_cnt + hit_pf + pf_useless)
     useless_cnt := Mux(validity_check, 0.U, useless_cnt + pf_useless)
     disable_request := Mux(validity_check, trigger_disable, disable_request)
+    down_request := Mux(validity_check, trigger_down, down_request)
   }
 
   // block
@@ -244,16 +248,17 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   val up_blocked = up_back_off_cnt =/= 0.U && up_target === up_blocked_depth
 
   // State
-  val s_idle :: s_buffer :: s_decision :: Nil = Enum(3)
+  val s_idle :: s_buffer :: s_decision :: s_skip1 :: s_skip2 :: Nil = Enum(5)
   val state = RegInit(s_idle)
 
   val cur_late_high = cur_late >= param.LATE_HIT_THRESHOLD.U
   val bad_return_by_hit = cur_hit_pf_in_cache + param.HIT_MARGIN.U <= prev_hit_pf_in_cache
   val bad_return_by_useless = cur_useless >= prev_useless + param.HIT_MARGIN.U
   val bad_return = bad_return_by_hit || bad_return_by_useless
-  val up = cur_late_high && !up_blocked && !disable_request && !at_max_depth
-  val block = cur_late_high && up_blocked && !disable_request && !at_max_depth
-  val down = disable_request && !at_base_depth
+  val up = cur_late_high && !up_blocked && !disable_request && !down_request && !at_max_depth
+  val block = cur_late_high && up_blocked && !disable_request && !down_request && !at_max_depth
+  val bad_down = down_request && !at_base_depth
+  val disable_down = disable_request && !at_base_depth
   val disable = disable_request && at_base_depth
 
   val in_idle = state === s_idle
@@ -261,7 +266,8 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   val in_decision = state === s_decision
   val up_fire = window_fire && in_idle && up
   val block_fire = window_fire && in_idle && block
-  val down_fire = window_fire && in_idle && down
+  val bad_down_fire = window_fire && in_idle && bad_down
+  val disable_down_fire = window_fire && in_idle && disable_down
   val disable_fire = window_fire && in_idle && disable
   val bad_return_fire = window_fire && in_decision && bad_return
   val bad_return_by_hit_fire = window_fire && in_decision && bad_return_by_hit
@@ -277,12 +283,14 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
           prev_useless := cur_useless
         }.elsewhen(block) {
           up_back_off_cnt := up_back_off_cnt - 1.U
-        }.elsewhen(down) {
+        }.elsewhen(disable_down) {
           depth := base_depth
-          state := s_buffer
-          prev_hit_pf_in_cache := cur_hit_pf_in_cache
-          prev_useless := cur_useless
-          up_back_off_cnt := 0.U
+          state := s_skip1
+        }.elsewhen(bad_down) {
+          depth := depth >> 1
+          state := s_skip1
+          up_blocked_depth := depth
+          up_back_off_cnt := 2.U
         }.elsewhen(disable) {
           enable := false.B
           flush := true.B
@@ -299,6 +307,12 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
           up_blocked_depth := depth
           depth := Mux(at_base_depth, base_depth, depth >> 1)
         }
+        state := s_idle
+      }
+      is(s_skip1) {
+        state := s_skip2
+      }
+      is(s_skip2) {
         state := s_idle
       }
     }
@@ -323,10 +337,13 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   XSPerfAccumulate(s"${param.name}_state_idle_window", window_fire && in_idle)
   XSPerfAccumulate(s"${param.name}_state_buffer_window", window_fire && in_buffer)
   XSPerfAccumulate(s"${param.name}_state_decision_window", window_fire && in_decision)
+  XSPerfAccumulate(s"${param.name}_state_skip1_window", window_fire && state === s_skip1)
+  XSPerfAccumulate(s"${param.name}_state_skip2_window", window_fire && state === s_skip2)
   XSPerfAccumulate(s"${param.name}_late_high_window", window_fire && cur_late_high)
   XSPerfAccumulate(s"${param.name}_up_fire", up_fire)
   XSPerfAccumulate(s"${param.name}_up_blocked_fire", block_fire)
-  XSPerfAccumulate(s"${param.name}_down_to_base_fire", down_fire)
+  XSPerfAccumulate(s"${param.name}_bad_down_fire", bad_down_fire)
+  XSPerfAccumulate(s"${param.name}_down_to_base_fire", disable_down_fire)
   XSPerfAccumulate(s"${param.name}_disable_request_fire", window_fire && in_idle && disable_request)
   XSPerfAccumulate(s"${param.name}_disable_at_base_fire", disable_fire)
   XSPerfAccumulate(s"${param.name}_bad_return_fire", bad_return_fire)
@@ -343,7 +360,8 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
     XSPerfAccumulate(s"${param.name}_disable_request_at_depth${t}", window_fire && at_depth && disable_request)
     XSPerfAccumulate(s"${param.name}_up_from_depth${t}", up_fire && at_depth)
     XSPerfAccumulate(s"${param.name}_up_blocked_from_depth${t}", block_fire && at_depth)
-    XSPerfAccumulate(s"${param.name}_down_to_base_from_depth${t}", down_fire && at_depth)
+    XSPerfAccumulate(s"${param.name}_bad_down_from_depth${t}", bad_down_fire && at_depth)
+    XSPerfAccumulate(s"${param.name}_down_to_base_from_depth${t}", disable_down_fire && at_depth)
     XSPerfAccumulate(s"${param.name}_bad_return_at_depth${t}", bad_return_fire && at_depth)
     XSPerfAccumulate(s"${param.name}_bad_return_by_hit_at_depth${t}", bad_return_by_hit_fire && at_depth)
     XSPerfAccumulate(s"${param.name}_bad_return_by_useless_at_depth${t}", bad_return_by_useless_fire && at_depth)
@@ -362,6 +380,7 @@ abstract class PrefetcherMonitorParam {
 
   val VALIDITY_CHECK_INTERVAL = 1024
   val DISABLE_THRESHOLD = 900
+  val BAD_THRESHOLD = 256
 
   val WINDOW_SIZE = 512
   val LATE_HIT_THRESHOLD = 24
