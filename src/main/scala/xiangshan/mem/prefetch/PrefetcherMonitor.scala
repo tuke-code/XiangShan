@@ -246,6 +246,9 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   val up_back_off_cnt = RegInit(0.U(5.W))
   val up_target = depth << 1
   val up_blocked = up_back_off_cnt =/= 0.U && up_target === up_blocked_depth
+  val high_depth_backoff = Mux(depth >= 64.U(DEPTH_BITS.W), 16.U(5.W),
+    Mux(depth >= 32.U(DEPTH_BITS.W), 8.U(5.W), 2.U(5.W))
+  )
 
   // State
   val s_idle :: s_buffer :: s_decision :: s_skip1 :: s_skip2 :: Nil = Enum(5)
@@ -292,7 +295,7 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
           depth := depth >> 1
           state := s_skip1
           up_blocked_depth := depth
-          up_back_off_cnt := 2.U
+          up_back_off_cnt := high_depth_backoff
         }.elsewhen(disable) {
           enable := false.B
           flush := true.B
@@ -305,7 +308,7 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
       }
       is(s_decision) {
         when (bad_return) {
-          up_back_off_cnt := 2.U
+          up_back_off_cnt := high_depth_backoff
           up_blocked_depth := depth
           depth := Mux(at_base_depth, base_depth, depth >> 1)
         }
