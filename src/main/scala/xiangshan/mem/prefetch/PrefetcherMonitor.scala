@@ -255,11 +255,13 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   val bad_return_by_hit = cur_hit_pf_in_cache + param.HIT_MARGIN.U <= prev_hit_pf_in_cache
   val bad_return_by_useless = cur_useless >= prev_useless + param.HIT_MARGIN.U
   val bad_return = bad_return_by_hit || bad_return_by_useless
-  val up = cur_late_high && !up_blocked && !disable_request && !down_request && !at_max_depth
-  val block = cur_late_high && up_blocked && !disable_request && !down_request && !at_max_depth
-  val bad_down = down_request && !at_base_depth
-  val disable_down = disable_request && !at_base_depth
-  val disable = disable_request && at_base_depth
+  val pending_disable_request = disable_request || trigger_disable
+  val pending_down_request = down_request || trigger_down
+  val up = cur_late_high && !up_blocked && !pending_disable_request && !pending_down_request && !at_max_depth
+  val block = cur_late_high && up_blocked && !pending_disable_request && !pending_down_request && !at_max_depth
+  val bad_down = pending_down_request && !pending_disable_request && !at_base_depth
+  val disable_down = pending_disable_request && !at_base_depth
+  val disable = pending_disable_request && at_base_depth
 
   val in_idle = state === s_idle
   val in_buffer = state === s_buffer
