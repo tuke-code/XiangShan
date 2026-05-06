@@ -670,6 +670,8 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     // special case: data forward fail
     when (enqFireBase && isMA) {
       strict(enqIndex) := enq.bits.uop.loadWaitStrict
+    }.otherwise{
+      strict(enqIndex) := false.B
     }
 
     when (needEnqueue(w) && enq.ready) {
@@ -711,7 +713,6 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
 
       // init
       blocking(enqIndex)     := true.B
-      strict(enqIndex)       := false.B
 
       // update blocking pointer
       when (replayInfo.cause(LoadReplayCauses.C_BC) ||
