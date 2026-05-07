@@ -62,8 +62,9 @@ class MissReqWoStoreData(implicit p: Parameters) extends DCacheBundle {
 
   /**
     * isBtoT is used to mark whether the current request requires BtoT permission.
-    * If so, other requests for BtoT in the same set are blocked. Otherwise,
-    * they are not blocked.
+    * When the number of BtoT-occupied ways in the same set exceeds nWays-2,
+    * new BtoT requests for that set are blocked (via occupy_fail -> LoadPipe cancel).
+    * Non-BtoT requests are not affected.
     */
   val isBtoT = Bool()
   /**
@@ -71,15 +72,14 @@ class MissReqWoStoreData(implicit p: Parameters) extends DCacheBundle {
     */
   val occupy_way = UInt(nWays.W)
 
-  // For now, miss queue entry req is actually valid when req.valid && !cancel
-  // * req.valid is fast to generate
-  // * cancel is slow to generate, it will not be used until the last moment
+  // Enqueue logic uses req.valid && !cancel && !wbq_block_miss_req
   //
-  // cancel may come from the following sources:
-  // 1. miss req blocked by writeback queue:
-  //      a writeback req of the same address is in progress
-  // 2. pmp check failed
-  val cancel = Bool() // cancel is slow to generate, it will cancel missreq.valid
+  // cancel is usually ready later than req.valid and is driven by whoever builds the MissReq:
+  // - LoadPipe: io.lsu.s2_kill (dcacheKill: flush, exceptions incl. PMP-related faults, uncache, ...),
+  //   plus s2_tag_error and s2_btot_occupy_fail
+  // - StorePipe: io.lsu.s2_kill
+  // - MainPipe (miss): s2_grow_perm_fail
+  val cancel = Bool()
 
   // Req source decode
   // Note that req source is NOT cmd type
@@ -783,12 +783,9 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
       )
   }
 
-  // store can be merged before io.mem_acquire.fire
-  // store can not be merged the cycle that io.mem_acquire.fire
   // load can be merged before io.mem_grant.fire
-  //
-  // TODO: merge store if possible? mem_acquire may need to be re-issued,
-  // but sbuffer entry can be freed
+  // Now the store-store merge is supported: if this entry is allocated by store req,
+  // the following same-block store can be merged before refill done.
   def should_reject(new_req: MissReqWoStoreData): Bool = {
     val block_match = get_block(req.addr) === get_block(new_req.addr)
     val set_match = set === addr_to_dcache_set(new_req.vaddr)
