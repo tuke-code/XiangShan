@@ -33,6 +33,7 @@ import xiangshan.backend.fu.wrapper.{CSRInput, CSRToDecode}
 import xiangshan.backend.rob.RobPtr
 import xiangshan.backend.issue.EntryBundles.RespType
 import xiangshan.backend.issue._
+import difftest.common.TopdownIQInfoCollect
 
 
 class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModule with HasCriticalErrors {
@@ -797,28 +798,39 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
   })
 
   val topdownIQInfoVec = issueQueues.flatMap(_.io.topdownIQInfoVec.get)
-
-  io.topdownIQInfoVec.foreach( _.zip(topdownIQInfoVec).foreach{ case (sink, source) =>
+  val topdownIQInfoCollect = Module(new TopdownIQInfoCollect(io.iqEntryNum))
+  topdownIQInfoCollect.io.in.zip(topdownIQInfoVec).foreach{ case (sink, source) =>
+    sink.valid := source.valid
+    sink.robIdx := source.bits.robIdx.value
+    sink.robFlag := source.bits.robIdx.flag
+    sink.srcReady := source.bits.srcReady
+    val currentPipelineNum = Mux1H(source.bits.fuType, fuMapPipelineNum)
+    sink.pipeNum := currentPipelineNum
+    sink.cancelSource := source.bits.cancelSource
+  }
+  io.topdownIQInfoVec.foreach( _.zip(topdownIQInfoVec).zip(topdownIQInfoCollect.io.out).foreach{
+    case ((sink, source), ideal) =>
       sink.valid := source.valid
       // connect base info
       connectSamePort(sink.bits, source.bits)
       // generate extend info
-      val currentPipelineNum = Mux1H(source.bits.fuType, fuMapPipelineNum)
-      val currentRobIdx = source.bits.robIdx
-      val robIdxVec = topdownIQInfoVec.map(_.bits.robIdx)
-      val srcReadyVec = topdownIQInfoVec.map(_.bits.srcReady)
-      val validVec = topdownIQInfoVec.map(_.valid)
-      val olderRobIdxVec = robIdxVec.map(_ > currentRobIdx)
-      val olderIdealCanIssueVec = Wire(Vec(io.iqEntryNum, Bool()))
-      olderIdealCanIssueVec := VecInit(olderRobIdxVec.zip(srcReadyVec).zip(validVec).map{ case((older, srcReady), valid) =>
-        older && srcReady && valid
-      })
-      val olderIdealCanIssueNum = PopCount(olderIdealCanIssueVec)
-//      val olderIdealCanIssueNum = PopCount(olderIdealCanIssueVec.take(10))
-      sink.bits.idealIssueTime := (olderIdealCanIssueNum < currentPipelineNum) && source.bits.srcReady
-      if(backendParams.debugEn){
-        dontTouch(olderIdealCanIssueVec)
-      }
+
+//      val currentPipelineNum = Mux1H(source.bits.fuType, fuMapPipelineNum)
+//      val currentRobIdx = source.bits.robIdx
+//      val robIdxVec = topdownIQInfoVec.map(_.bits.robIdx)
+//      val srcReadyVec = topdownIQInfoVec.map(_.bits.srcReady)
+//      val validVec = topdownIQInfoVec.map(_.valid)
+//      val olderRobIdxVec = robIdxVec.map(_ > currentRobIdx)
+//      val olderIdealCanIssueVec = Wire(Vec(io.iqEntryNum, Bool()))
+//      olderIdealCanIssueVec := VecInit(olderRobIdxVec.zip(srcReadyVec).zip(validVec).map{ case((older, srcReady), valid) =>
+//        older && srcReady && valid
+//      })
+//      val olderIdealCanIssueNum = PopCount(olderIdealCanIssueVec)
+////      val olderIdealCanIssueNum = PopCount(olderIdealCanIssueVec.take(10))
+      sink.bits.idealIssueTime := ideal.idealIssueTime
+//      if(backendParams.debugEn){
+//        dontTouch(olderIdealCanIssueVec)
+//      }
     }
   )
 
