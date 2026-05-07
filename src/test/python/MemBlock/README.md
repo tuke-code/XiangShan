@@ -1,317 +1,307 @@
-# MemBlock Python Verification Environment
+# MemBlock Python 验证环境 — 功能覆盖总览
 
-`src/test/python/MemBlock/` 是面向 MemBlock 真实 DUT 的 Python 验证环境目录。这里不仅包含 testcase、运行环境和 WebUI，也收纳了当前验证状态、覆盖率结果、ROB 建模分析和后续验证规划文档。
+`src/test/python/MemBlock/` 是面向 XiangShan MemBlock 真实 DUT 的 Python 白盒验证环境。
+本文档以 **功能点 (functional point)** 为主线，按基础单点功能、功能空间探索与组合、专项场景覆盖、环境 API 单测四个维度组织已验证、部分覆盖和未覆盖的验证项。
+详细覆盖率数据与补强计划请见 [coverage_summary.md](docs/coverage_summary.md) 和 [coverage_todo.md](docs/coverage_todo.md)。
 
-当前目录已经从“基础 load/store 冒烟环境”演进到“真实 DUT 下的标量 ld/st 白盒验证平台”。环境的当前特点是：
+## 状态图例
 
-- 基于真实 DUT 驱动，不依赖 mock DUT 替代真实流水线行为。
-- 已完成 `env / agents / monitors / model / sequences` 分层。
-- load 在线 compare 采用 commit-boundary 语义。
-- store 采用 deferred visibility，测试结束时统一 flush/drain 收口。
-- backend 请求模型已支持通过 `StoreTxn.mask` 表达连续字节宽度的 scalar partial-store。
-- backend/env 已支持 single-uop AMO 事务建模与 smoke 用例；当前 real-DUT case 会在无下游活动时定向 `xfail` 记录 standalone `intIssue` contract gap。
-- 已具备 cacheable load/store、store->load ordering、RAW/RAR/FF/DM/NC 等基础 replay 场景。
-- 已接入 toffee 官方 function coverage 与 DUT line coverage 报告链路。
+| 图标 | 含义 |
+|------|------|
+| 🟢 | 已覆盖 — 有稳定的真实 DUT directed case |
+| 🟡 | 部分覆盖 — 有 smoke 或基础能力证明，但矩阵未打全 |
+| 🔴 | 未覆盖 — 尚无稳定的真实 DUT 用例 |
 
-## 当前验证状态
+## 一、基础单点功能 (BAS)
 
-截至当前版本，环境已具备以下稳定能力：
+各功能域最基础的端到端 smoke 用例，验证单条操作路径的连通性与正确性。
 
-- 标量 cacheable load/store 主路径真实 DUT 回归。
-- `same-addr` / `overwrite` / `unrelated` store->load ordering 验证。
-- `flushSb + drain` 收尾与最终一致性比较。
-- RAW / RAR / cache miss / forward fail / NC replay 基础场景。
-- ROB 相关 function coverage。
-- 使用 toffee 报告链路生成 DUT line/branch coverage。
+### Load 基础
 
-当前阶段的状态总结和覆盖率结果请直接阅读：
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| BAS-LD-001 | 基础 cacheable load (burst / 饱和) | 2 | 🟢 | [Link](docs/func/load.md) | [Link](tests/test_MemBlock_scalar_load_pipeline.py) |
+| BAS-LD-002 | 标量 load 宽度/掩码 (lb/lh/lw/ld) | 1 | 🟢 | [Link](docs/func/load.md) | [Link](tests/test_MemBlock_scalar_load_width.py) |
+| BAS-LD-003 | 标量 fp load (fpWen boxed) | 1 | 🟢 | [Link](docs/func/load.md) | [Link](tests/test_MemBlock_fp_load.py) |
 
-- `docs/coverage_summary.md`
-- `docs/coverage_todo.md`
+### Store 基础
 
-这两份文档是当前验证状态与后续补强工作的真源；README 只给入口和概览，不重复维护完整数据表。
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| BAS-ST-001 | 基础 cacheable store 提交 + flush + drain | 3 | 🟢 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_scalar_store_pipeline.py) |
+| BAS-ST-002 | MMIO store smoke | 1 | 🟢 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_random_store.py) |
+| BAS-ST-003 | CBO (cbo.zero / clean / flush / inval) | 5 | 🟢 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_scalar_store_pipeline.py) |
+| BAS-ST-004 | SBufferData entry/quarter/byte 定向 | 5 | 🟢 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_scalar_store_pipeline.py) |
 
-## 目录说明
+### MMU 基础
 
-### 根目录
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| BAS-MM-001 | Sv39 地址空间安装与翻译命中 | 5 | 🟢 | [Link](docs/func/mmu.md) | [Link](tests/test_MemBlock_env_mmu_smoke.py) |
+| BAS-MM-002 | DTLB fill + replacement | 1 | 🟢 | [Link](docs/func/mmu.md) | [Link](tests/test_MemBlock_env_mmu_smoke.py) |
+| BAS-MM-003 | PMP CSR 编程 (all 32 entries) | 3 | 🟢 | [Link](docs/func/mmu.md) | [Link](tests/test_MemBlock_env_mmu_smoke.py) |
+| BAS-MM-004 | H-extension two-stage translation load | 3 | 🟢 | [Link](docs/func/mmu.md) | [Link](tests/test_MemBlock_mmu_h_extension.py) |
+| BAS-MM-005 | H-extension two-stage fault | 3 | 🟢 | [Link](docs/func/mmu.md) | [Link](tests/test_MemBlock_mmu_h_extension.py) |
+| BAS-MM-006 | ITLB PTW smoke (frontend-side) | 1 | 🟢 | [Link](docs/func/mmu.md) | [Link](tests/test_MemBlock_env_mmu_smoke.py) |
 
-- `MemBlock_api.py`
-  - DUT 创建、波形/覆盖率路径配置、`dut` fixture。
-- `MemBlock_env.py`
-  - 顶层 `MemBlockEnv`、bundle 定义、统一时钟推进内核、`env.backend` 公共控制入口、toffee function coverage 接入点。
-- `env_config.py`
-  - 环境统一配置入口，收敛 queue 深度、transport 延迟、默认 sequence 时序和 strict check 策略。
-- `request_apis.py`
-  - 基于 `env.backend` 的 primitive helper / 兼容层；新 testcase/sequence 不应继续把类型定义或新场景模板堆在这里。
-- `transactions.py`
-  - `QueuePtr`、`LoadTxn`、`StoreTxn`、`BackendSendPlan` 等公共事务与拍级计划对象。
-- `memory_model.py`
-  - compare / store shadow / drain 校验的顶层编排层。
-- `README.md`
-  - 当前文件，作为目录入口与状态总览。
-- `CHANGELOG.md`
-  - Python 验证环境自身的重构、coverage 与维护变更记录。
-- `ROLES.md`
-  - MemBlock 目录下多人协同与 agent 默认角色规范。
+### Vector 基础
 
-### 子目录
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| BAS-VEC-001 | vector unit-stride load (strict data compare) | 4 | 🟢 | [Link](docs/func/vector.md) | [Link](tests/test_MemBlock_vector_unit_stride.py) |
+| BAS-VEC-002 | vector strided load (正/零/负 stride) | 3 | 🟢 | [Link](docs/func/vector.md) | [Link](tests/test_MemBlock_vector_stride.py) |
 
-- `agents/`
-  - backend-facing active agents，包括 CSR、commit、LSQ enqueue、issue，以及统一编排的 backend facade。
-- `monitors/`
-  - passive monitors，包括 writeback、store、mem_status 三类被动观测器。
-- `model/`
-  - 已从 `MemoryModel` 中拆出的公共组件，例如 `RefMemory`、`TransportResponder`、`Scoreboard`、ROB function coverage collector。
-- `sequences/`
-  - testcase 首选的可复用场景模板层，例如 reset、scalar load/store、same-cycle load batch、flush store buffer、replay/order 场景。
-- `tests/`
-  - 环境冒烟、模型单测和真实 DUT 场景用例。
-- `docs/`
-  - 详细设计文档、覆盖率总结、DUT changelog、实施计划。
-- `webui/`
-  - LSQ 可视化相关资源。
+### Uncache / MMIO 基础
 
-## `docs/` 文档列表
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| BAS-UC-001 | Svpbmt cacheable / NCIO / MMIO 分类 | 3 | 🟢 | [Link](docs/func/uncache-amo.md) | [Link](tests/test_MemBlock_uncache_semantics.py) |
 
-- `verification_env_design.md`
-  - 验证环境总设计，涵盖 `MemBlockEnv`、统一时钟内核、`agents`、`monitors`、`Scoreboard`、`sequences`、`EnvConfig` 的分层关系、实现思路和演进方向。
-- `backend_request_model_design.md`
-  - backend 主动控制请求模型专项说明，重点覆盖 `env.backend.send(...)`、`env.backend.execute(...)`、`IssueCyclePlan`、`BackendSendPlan`、`StoreTxn.mask -> SB/SH/SW/SD` 映射与兼容层收敛策略。
-- `backend_rob_cookbook.md`
-  - 面向 testcase / sequence 作者的 backend/ROB cookbook，集中给出 `BackendSendPlan`、`NonMemBlockerStep`、`StoreCommitReadyStep` 的常见脚本模板。
-- `mmu_env_design_and_usage.md`
-  - MMU/PTW/DTLB 环境设计与使用说明，集中说明 `env.mmu` 的控制面职责、PTW responder、PMP helper 和推荐调试顺序。
-- `vmem_design_and_usage.md`
-  - 向量访存环境设计与使用说明，集中说明 `VectorMemTxn`、`env.vector_backend`、`VectorLoadSequence`、当前 real-DUT smoke 口径与 known gap。
-- `mmu_fault_directed_cases.md`
-  - 标量 load 的 `MMU/TLB/PMP fault matrix` 专题说明，集中解释 `MmuFaultingScalarLoadSequence`、TLB-hit fault 背景和当前异常位断言口径。
-- `misalign.md`
-  - 面向 scalar load/store misalign 的专题分析，集中说明 DUT 中 misalign 的当前设计形态、验证功能点、推荐验证方案，以及当前环境与 testcase 的满足情况。
-- `clock_control_and_migration_guide.md`
-  - 面向开发者的时钟控制与迁移指南，说明各层应该如何复用 env 时钟原语，避免重新引入零散 `Step()`。
-- `memory_model_design.md`
-  - `MemoryModel` 当前职责、load commit-boundary compare、store drain 校验和与 scoreboard 的边界。
-- `dut_port_behavior.md`
-  - DUT 输入输出端口行为说明，覆盖 `enqLsq`、`intIssue`、`mem_to_ooo`、TileLink 和 store shadow 观测口。
-- `test_sequence_and_extension_guide.md`
-  - 如何基于事务与 sequence 组织 load/store 用例，以及如何扩展环境。
-- `rob_model.md`
-  - 当前 ROB 建模现状、缺口、设计需求和后续演进分析。
-- `rob_coverage_plan.md`
-  - ROB function coverage 模型设计与 toffee 汇总方式说明。
-- `coverage_summary.md`
-  - 当前真实 DUT 回归的 function coverage / line coverage 结果分析。
-- `coverage_todo.md`
-  - 基于当前覆盖率结果整理出的用例补强清单。
-- `vp_pipeline_plan.md`
-  - 面向标量 ld/st pipeline 的细粒度白盒验证总体方案。
-- `scalar_load_pipeline_probe_cases.md`
-  - `scalar load pipeline probe` 专题说明，集中解释 bank-conflict、matchInvalid proxy、hi-prio replay 抢占和 late-STA violation 这组 probe case 的设计意图。
-- `DUT_CHANGELOG-20260331.md`
-  - 一次针对 RTL `mem/` 目录版本变化的详细对比与验证影响分析。
+### AMO 基础
 
-## 推荐阅读顺序
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| BAS-AMO-001 | single-uop AMO (amoadd / amoswap / amoxor) | 1 | 🟢 | [Link](docs/func/uncache-amo.md) | [Link](tests/test_MemBlock_amo.py) |
+| BAS-AMO-002 | AMO mainPipe diagnostics | 4 | 🟢 | [Link](docs/func/uncache-amo.md) | [Link](tests/test_MemBlock_amo_diagnostics.py) |
 
-如果是首次接触当前环境，建议按以下顺序阅读：
+---
 
-1. `README.md`
-2. `CHANGELOG.md`
-3. `docs/verification_env_design.md`
-4. `docs/backend_request_model_design.md`
-5. `docs/backend_rob_cookbook.md`
-6. `docs/mmu_env_design_and_usage.md`
-7. `docs/mmu_fault_directed_cases.md`
-8. `docs/vmem_design_and_usage.md`
-9. `docs/clock_control_and_migration_guide.md`
-10. `docs/memory_model_design.md`
-11. `docs/rob_model.md`
-12. `docs/coverage_summary.md`
-13. `docs/coverage_todo.md`
-14. `docs/vp_pipeline_plan.md`
-15. `docs/scalar_load_pipeline_probe_cases.md`
-16. `tests/test_MemBlock_scalar_load_pipeline.py`
-17. `tests/test_MemBlock_scalar_store_pipeline.py`
-18. `tests/test_MemBlock_scalar_ordering.py`
-19. `tests/test_MemBlock_replay.py`
+## 二、功能空间探索与组合 (CMB)
 
-## 当前测试与报告入口
+在基础能力之上，对参数空间进行遍历、对多条路径进行组合，暴露边界条件与交互行为。
 
-推荐的真实 DUT 回归入口：
+### Load 参数空间与 Probe
 
-- `src/test/python/MemBlock/tests/`
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| CMB-LD-001 | 随机 load (IO + cacheable 混合路径) | 6 | 🟢 | [Link](docs/func/load.md) | [Link](tests/test_MemBlock_random_load.py) |
+| CMB-LD-002 | bank conflict hit (无 forward / 无 violation) | 1 | 🟢 | [Link](docs/func/load.md) | [Link](tests/test_MemBlock_scalar_load_pipeline_probe.py) |
+| CMB-LD-003 | matchInvalid proxy nuke | 1 | 🟢 | [Link](docs/func/load.md) | [Link](tests/test_MemBlock_scalar_load_pipeline_probe.py) |
+| CMB-LD-004 | hi-prio replay 抢占 fast replay | 1 | 🟢 | [Link](docs/func/load.md) | [Link](tests/test_MemBlock_scalar_load_pipeline_probe.py) |
+| CMB-LD-005 | late-STA store-load violation | 1 | 🟢 | [Link](docs/func/load.md) | [Link](tests/test_MemBlock_scalar_load_pipeline_probe.py) |
+| CMB-LD-006 | MMU fault pipeline probe (fault 纯度检查) | 3 | 🟢 | [Link](docs/func/load.md) | [Link](tests/test_MemBlock_scalar_load_pipeline_probe.py) |
+| CMB-LD-007 | 标量 load misalign | 0 | 🔴 | [Link](docs/func/load.md) | — |
 
-最小主动控制示例：
+### Store 参数空间与组合
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| CMB-ST-001 | 随机 store (cacheable + MMIO 混合) | 6 | 🟢 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_random_store.py) |
+| CMB-ST-002 | Batched store commit | 1 | 🟢 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_scalar_store_pipeline.py) |
+| CMB-ST-003 | SBuffer forward (sbuffer 内 store→load) | 3 | 🟢 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_scalar_store_pipeline.py) |
+| CMB-ST-004 | partial-mask store 矩阵 (B/H/W/D) | 6 | 🟡 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_scalar_store_pipeline.py) |
+| CMB-ST-005 | cross-16B / cross-beat store | 5 | 🟡 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_store_misalign.py) |
+| CMB-ST-006 | SQ backpressure + delayed drain | 3 | 🟡 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_scalar_store_pipeline.py) |
+| CMB-ST-007 | cross-page scalar store-misalign | 4 | 🔴 | [Link](docs/func/store.md) | [Link](tests/test_MemBlock_store_misalign.py) |
+
+### MMU 参数空间与组合
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| CMB-MM-001 | B/H/W/D load fault size 矩阵 | 1 | 🟢 | [Link](docs/func/mmu.md) | [Link](tests/test_MemBlock_mmu_fault.py) |
+| CMB-MM-002 | mixed size permission fault (TLB miss) | 1 | 🟢 | [Link](docs/func/mmu.md) | [Link](tests/test_MemBlock_mmu_fault.py) |
+| CMB-MM-003 | 2MB / 1GB 大页翻译 | 1 | 🟡 | [Link](docs/func/mmu.md) | [Link](tests/test_MemBlock_mmu_tlbfa_deep.py) |
+| CMB-MM-004 | store-side PMP deny | 1 | 🟡 | [Link](docs/func/mmu.md) | [Link](tests/test_MemBlock_pmp_runtime.py) |
+
+### Vector 参数空间与组合
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| CMB-VEC-001 | vector unit-stride load (mask / port / 非对齐) | 3 | 🟢 | [Link](docs/func/vector.md) | [Link](tests/test_MemBlock_vector_unit_stride.py) |
+| CMB-VEC-002 | vector unit-stride store | 1 | 🟡 | [Link](docs/func/vector.md) | [Link](tests/test_MemBlock_vector_store.py) |
+| CMB-VEC-003 | vector store masked-inactive / nonzero vstart | 2 | 🟡 | [Link](docs/func/vector.md) | [Link](tests/test_MemBlock_vector_store.py) |
+
+### Uncache / MMIO 组合
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| CMB-UC-001 | NC store flush (单条 + burst) | 2 | 🟡 | [Link](docs/func/uncache-amo.md) | [Link](tests/test_MemBlock_uncache_semantics.py) |
+| CMB-UC-002 | MMIO mixed-path flush exclusion | 2 | 🟢 | [Link](docs/func/uncache-amo.md) | [Link](tests/test_MemBlock_uncache_semantics.py) |
+| CMB-UC-003 | NC + cacheable 混合 store flush | 1 | 🟡 | [Link](docs/func/uncache-amo.md) | [Link](tests/test_MemBlock_uncache_semantics.py) |
+| CMB-UC-004 | mmioBusy 阻塞 younger load retire | 2 | 🟡 | [Link](docs/func/uncache-amo.md) | [Link](tests/test_MemBlock_uncache_semantics.py) |
+
+### 访存排序组合
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| CMB-ORD-001 | two stores → load (same-addr) | 1 | 🟢 | [Link](docs/func/ordering.md) | [Link](tests/test_MemBlock_scalar_ordering.py) |
+| CMB-ORD-002 | store → unrelated load (无污染) | 1 | 🟢 | [Link](docs/func/ordering.md) | [Link](tests/test_MemBlock_scalar_ordering.py) |
+| CMB-ORD-003 | 定向混合 ld/st 序列 (覆盖/重读) | 1 | 🟢 | [Link](docs/func/ordering.md) | [Link](tests/test_MemBlock_scalar_ordering.py) |
+
+---
+
+## 三、专项场景覆盖 (SCN)
+
+针对特定子系统的协议、状态机、异常路径进行深度定向验证。
+
+### TLB / PTW 深度
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| SCN-TLB-001 | sv39 多 ASID / sfence 冲刷矩阵 | 4 | 🟢 | [Link](docs/func/tlb-ptw-deep.md) | [Link](tests/test_MemBlock_mmu_tlbfa.py) |
+| SCN-TLB-002 | sfence.vma 四种 rs1/rs2 组合 | 4 | 🟢 | [Link](docs/func/tlb-ptw-deep.md) | [Link](tests/test_MemBlock_mmu_tlbfa_deep.py) |
+| SCN-TLB-003 | 批量填充 + sfence refill 循环 | 2 | 🟢 | [Link](docs/func/tlb-ptw-deep.md) | [Link](tests/test_MemBlock_mmu_tlbfa_deep.py) |
+| SCN-TLB-004 | 三端口同拍 TLB miss + store refill | 2 | 🟢 | [Link](docs/func/tlb-ptw-deep.md) | [Link](tests/test_MemBlock_mmu_tlbfa_deep.py) |
+| SCN-TLB-005 | LLPTW (队列压力 / duplicate / fault) | 7 | 🟡 | [Link](docs/func/tlb-ptw-deep.md) | [Link](tests/test_MemBlock_mmu_llptw.py) |
+| SCN-TLB-006 | H-extension fence (hfence.vvma / gvma) | 8 | 🟡 | [Link](docs/func/tlb-ptw-deep.md) | [Link](tests/test_MemBlock_mmu_h_extension.py) |
+| SCN-TLB-007 | pfTLB (L2TLB prefetcher port) | 9 | 🟡 | [Link](docs/func/tlb-ptw-deep.md) | [Link](tests/test_MemBlock_mmu_tlbfa_pftlb.py) |
+
+### MMU Fault 定向
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| SCN-FLT-001 | load translation fault (TLB hit) | 1 | 🟢 | [Link](docs/func/mmu-fault.md) | [Link](tests/test_MemBlock_mmu_fault.py) |
+| SCN-FLT-002 | load PMP access fault (deny region) | 1 | 🟢 | [Link](docs/func/mmu-fault.md) | [Link](tests/test_MemBlock_mmu_fault.py) |
+| SCN-FLT-003 | translation fault + PMP fault 叠加 | 1 | 🟢 | [Link](docs/func/mmu-fault.md) | [Link](tests/test_MemBlock_mmu_fault.py) |
+| SCN-FLT-004 | PMP deny region 边界 + 恢复 | 2 | 🟢 | [Link](docs/func/mmu-fault.md) | [Link](tests/test_MemBlock_mmu_fault.py) |
+| SCN-FLT-005 | TLB AF + PMP AF 组合矩阵 | 3 | 🟢 | [Link](docs/func/mmu-fault.md) | [Link](tests/test_MemBlock_mmu_fault.py) |
+
+### PMP / PMA 深度
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| SCN-PMP-001 | PMP runtime: 32-entry 重编程 + lock/freeze | 4 | 🟢 | [Link](docs/func/pmp-pma.md) | [Link](tests/test_MemBlock_pmp_runtime.py) |
+| SCN-PMP-002 | PMP NAPOT/TOR boundary 矩阵 (load + store) | 4 | 🟢 | [Link](docs/func/pmp-pma.md) | [Link](tests/test_MemBlock_pmp_runtime.py) |
+| SCN-PMP-003 | PMA runtime 切换 (cacheable↔mmio) | 2 | 🟢 | [Link](docs/func/pmp-pma.md) | [Link](tests/test_MemBlock_pmp_runtime.py) |
+| SCN-PMP-004 | PMA NAPOT/TOR boundary 矩阵 | 4 | 🟢 | [Link](docs/func/pmp-pma.md) | [Link](tests/test_MemBlock_pmp_runtime.py) |
+
+### Replay 机制
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| SCN-RPL-001 | FF (forward fail replay) | 1 | 🟢 | [Link](docs/func/replay.md) | [Link](tests/test_MemBlock_replay.py) |
+| SCN-RPL-002 | DM (dcache miss replay) | 1 | 🟢 | [Link](docs/func/replay.md) | [Link](tests/test_MemBlock_replay.py) |
+| SCN-RPL-003 | NC (uncache/nc path replay) | 1 | 🟢 | [Link](docs/func/replay.md) | [Link](tests/test_MemBlock_replay.py) |
+| SCN-RPL-004 | RAW (read-after-write violation) | 1 | 🟢 | [Link](docs/func/replay.md) | [Link](tests/test_MemBlock_replay.py) |
+| SCN-RPL-005 | RAR (read-after-read violation) | 1 | 🟢 | [Link](docs/func/replay.md) | [Link](tests/test_MemBlock_replay.py) |
+| SCN-RPL-006 | BC (bank conflict) | 1 | 🟢 | [Link](docs/func/replay.md) | [Link](tests/test_MemBlock_replay.py) |
+| SCN-RPL-007 | NK (pipeline st-ld nuke) | 1 | 🟢 | [Link](docs/func/replay.md) | [Link](tests/test_MemBlock_replay.py) |
+| SCN-RPL-008 | BC + dataInvalid + nuke 组合 | 1 | 🟢 | [Link](docs/func/replay.md) | [Link](tests/test_MemBlock_replay.py) |
+| SCN-RPL-009 | SQ dataInvalid + matchInvalid + nuke | 1 | 🟡 | [Link](docs/func/replay.md) | [Link](tests/test_MemBlock_replay.py) |
+| SCN-RPL-010 | FF + DM + NC 小规模混合流 | 1 | 🟢 | [Link](docs/func/replay.md) | [Link](tests/test_MemBlock_replay.py) |
+| SCN-RPL-011 | RAW replay 细分 (full/partial overlap) | 0 | 🟡 | [Link](docs/func/replay.md) | — |
+| SCN-RPL-012 | RAR violation 细分 (release / backpressure) | 0 | 🟡 | [Link](docs/func/replay.md) | — |
+| SCN-RPL-013 | load-wait / waitForRobIdx 定向 | 0 | 🟡 | [Link](docs/func/replay.md) | — |
+
+### 子系统深度
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| SCN-SYS-001 | DCache CtrlUnit (ECC error injection / recovery) | 4 | 🟢 | [Link](docs/func/subsystem.md) | [Link](tests/test_MemBlock_dcache_ctrlunit.py) |
+| SCN-SYS-002 | VLQ coverage (8-port enqueue / redirect / wrap) | 4 | 🟢 | [Link](docs/func/subsystem.md) | [Link](tests/test_MemBlock_vlq_coverage.py) |
+| SCN-SYS-003 | frontendBridge (icache / instr_uncache / ctrl) | 3 | 🟢 | [Link](docs/func/subsystem.md) | [Link](tests/test_MemBlock_frontend_bridge.py) |
+
+---
+
+## 四、环境 API 单测 (UT)
+
+纯 Python 单元测试，验证 env fixture、agent、model、scoreboard 等基础设施的正确性，不依赖真实 DUT 功能。
+
+| 编号 | 功能点 | 用例数 | 状态 | 文档 | 测试代码 |
+|------|--------|--------|------|------|----------|
+| UT-ENV-001 | env fixture (bootstrap / bundle / clock / reset) | 29 | 🟢 | [Link](docs/func/ut-env.md) | [Link](tests/test_MemBlock_env_fixture.py) |
+| UT-ENV-002 | backend facade (send / execute / prepare / credit) | 40 | 🟢 | [Link](docs/func/ut-env.md) | [Link](tests/test_request_apis_backend_facade.py) |
+| UT-ENV-003 | MemoryModel store logic (unit test) | 23 | 🟢 | [Link](docs/func/ut-env.md) | [Link](tests/test_memory_model_store_logic.py) |
+| UT-ENV-004 | VectorMemoryModel element expansion | 7 | 🟢 | [Link](docs/func/ut-env.md) | [Link](tests/test_vector_memory_model.py) |
+| UT-ENV-005 | ROB agent (blocker / readiness / commit) | 10 | 🟢 | [Link](docs/func/ut-env.md) | [Link](tests/test_MemBlock_rob_agent.py) |
+| UT-ENV-006 | ROB function coverage collector | 4 | 🟢 | [Link](docs/func/ut-env.md) | [Link](tests/test_MemBlock_rob_coverage.py) |
+| UT-ENV-007 | IssueAgent (lane shapes / fuType binding) | 9 | 🟢 | [Link](docs/func/ut-env.md) | [Link](tests/test_issue_agent.py) |
+
+---
+
+## 覆盖缺口汇总
+
+以下缺口按 `coverage_todo.md` 中的优先级排列。详情和最新进度请直接阅读 [coverage_todo.md](docs/coverage_todo.md)。
+
+| 优先级 | 缺口功能点 | 编号 | 现状 |
+|--------|-----------|------|------|
+| P0 | vector store control-path 深度覆盖 | CMB-VEC-002/003 | 已知 DUT flushSb stall，现有 case 以 xfail 保留 |
+| P0 | 标量 partial-mask store 矩阵补全 | CMB-ST-004 | 已有基础矩阵，merge 组合未打全 |
+| P0 | cross-line / cross-beat scalar store | CMB-ST-005 | StoreMisalignBuffer 覆盖横盘 |
+| P0 | misaligned store 深状态 (cross-page / exception overwrite) | CMB-ST-007 | cross-page normal path 有已知 DUT xfail |
+| P0 | SQ backpressure + delayed drain | CMB-ST-006 | 已有最小闭环，ready 抖动仍缺 |
+| P1 | RAW replay 细分 (committed/uncommitted window) | SCN-RPL-011 | 已有 smoke，矩阵未打全 |
+| P1 | RAR violation 细分 (release / backpressure) | SCN-RPL-012 | 已有 smoke，细分未打全 |
+| P1 | load-wait / waitForRobIdx 成体系回归 | SCN-RPL-013 | 可触发，未有成体系用例 |
+| P1 | NC store flush/drain 闭环 | CMB-UC-001 | `nc_store_flush_drain_observed` 未命中 |
+| P1 | MMIO store exclusion from drain compare | CMB-UC-002 | `mmio_store_excluded_from_drain_observed` 未命中 |
+| P1 | mmioBusy 长窗口 / uncache 多 outstanding | CMB-UC-004 | 基础 smoke 存在，深组合缺 |
+| P2 | TLB miss → refill → replay 成功路径 | SCN-TLB-005 | hierarchy hit/miss 组合缺 |
+| P2 | store-side PMP deny 收口 (xfail → 硬断言) | CMB-MM-004 | 仍缺稳定 fault 收口 |
+| P2 | frontendBridge PTW 纵深 (repeated hit/miss) | SCN-SYS-003 | 仅最小往返 smoke |
+| P2 | 大页翻译路径 | CMB-MM-003 | 待 PTW 能力开放 |
+| P2 | LR/SC, AMOCAS | — | 尚无稳定入口 |
+
+## 快速开始
 
 ```python
-from transactions import LoadTxn, QueuePtr
+from transactions import LoadTxn
+from sequences import ResetEnvSequence
 
 state = ResetEnvSequence(require_issue_lanes=(0,), require_lq_ready=True).run(env)
 env.preload_u64(0x9000_0000, 0x1122334455667788)
 
 txn = LoadTxn(
-    req_id=0x21,
-    addr=0x9000_0000,
-    lq_ptr=state.next_lq_ptr,
-    sq_ptr=state.sq_ptr,
+    req_id=0x21, addr=0x9000_0000,
+    lq_ptr=state.next_lq_ptr, sq_ptr=state.sq_ptr,
 )
-
 env.backend.send(txn)
 env.expect_scalar_load(rob_idx=txn.rob_idx, pdest=txn.resolved_pdest, addr=txn.addr)
 env.drain_writebacks()
 ```
 
-如果场景已经能被高层 sequence 表达，优先直接复用 `sequences/`；只有在编写新的 primitive 场景或 debug 拍级结构时，才直接调用 `env.backend`。`transactions.py` 负责承载公共数据模型，`request_apis.py` 只负责薄兼容/primitive helper。
+推荐新 testcase 优先复用 `sequences/` 中已有的场景模板。编写指南和调试方法见：
 
-如果 testcase 只是要表达稳定的“多条 `load` 同拍”业务场景，优先直接复用 `ScalarLoadBatchSameCycleSequence` / `ScalarLoadBatchWithStaSequence`；只有在需要精确控制拍级结构时，再直接构造脚本化 plan：
+- [test_sequence_and_extension_guide.md](docs/test_sequence_and_extension_guide.md) — 测试序列编写与扩展指南
+- [backend_rob_cookbook.md](docs/backend_rob_cookbook.md) — backend/ROB 常见脚本模板
+- [verification_env_design.md](docs/verification_env_design.md) — 验证环境架构总览
 
-```python
-from sequences import ScalarLoadBatchSameCycleSequence
+## 目录结构
 
-result = ScalarLoadBatchSameCycleSequence((load0, load1)).run(env)
-assert result.final_state.next_lq_ptr.value == 2
+```
+src/test/python/MemBlock/
+├── MemBlock_env.py          # 顶层环境、bundle、统一时钟内核
+├── MemBlock_api.py          # DUT fixture 与覆盖率路径配置
+├── transactions.py          # 公共事务模型 (LoadTxn, StoreTxn, BackendSendPlan, ...)
+├── memory_model.py          # load compare / store drain 校验编排
+├── env_config.py            # 统一配置入口 (queue 深度、transport 延迟)
+├── request_apis.py          # 兼容层 primitive helper
+├── README.md                # <- 当前文件 (功能覆盖入口)
+├── CHANGELOG.md             # Python 验证环境演进记录
+├── ROLES.md                 # 多人协同角色规范
+├── agents/                  # 主动 agents (backend_facade, issue, commit, csr, lsq, pftlb, vector_*)
+├── monitors/                # 被动 monitors (writeback, store, mem_status, vector_mem)
+├── model/                   # 公共组件 (scoreboard, rob_coverage, transport_responder, ref_memory)
+├── sequences/               # 可复用场景模板 (6 个 sequence 模块)
+├── tests/                   # 真实 DUT 用例 (36 个测试文件)
+├── docs/                    # 详细设计文档 + 功能点 IPO 描述 (docs/func/)
+├── webui/                   # LSQ 可视化资源
+└── data/                    # 覆盖率报告产物
 ```
 
-更底层的 plan 写法仍保留给 debug 与 backend/ROB 拍级脚本：
+## 参考文档
 
-```python
-from transactions import BackendSendPlan, EnqueueLoadCyclePlan, IssueCyclePlan, IssueOp
-
-env.backend.execute(
-    BackendSendPlan.from_steps(
-        EnqueueLoadCyclePlan.from_txns(load0, load1),
-        IssueCyclePlan.from_ops(
-            IssueOp.load_from_txn(load0),
-            IssueOp.load_from_txn(load1),
-        ),
-    )
-)
-```
-
-从 `2026-04-15` 开始，`robIdx` 默认由 env 在 `prepare()/execute()/send()` 流程中统一分配，不再建议让 testcase 直接把 `req_id` 当成 `robIdx` 编码使用。现在 `req_id` 只保留为 testcase 标签；`txn.rob_idx`、`txn.resolved_pdest`、`txn.resolved_ftq_idx_*`、`txn.resolved_pc` 这类 runtime 字段若在 prepare/send 前访问，会直接报错。如果场景需要在 issue 前拿到已分配的 `robIdx`，先显式调用一次 `prepare(...)`：
-
-```python
-prepared = env.backend.prepare(load0)
-assert prepared.rob_idx_of(load0) == load0.rob_idx
-```
-
-当前 `ResetEnvSequence` 默认会在 reset 后，把 allocator 与 commit frontier 一起 seed 到 wrap 边界前一项。这样大多数真实 DUT 回归都会自然跨过一次 ROB wrap；如果某个 env/unit 场景需要明确保留 `(0,0)` 起点，应显式关闭该 profile。
-
-当前默认 transport 延迟已经收缩为较适合回归的保守值：
-
-- `outer_delay = 4`
-- `grant_delay_min = 2`
-- `grant_delay_max = 8`
-
-如果需要专门构造 ROB wrap 场景，不要再通过“大 `req_id`”旁路 legacy 编码；应显式 seed allocator / commit frontier：
-
-```python
-env.backend.set_next_rob_idx(RobIndex(flag=0, value=511))
-env.backend.set_commit_frontier(RobIndex(flag=0, value=511))
-```
-
-如果 testcase / sequence 需要显式传 ROB 过滤条件，优先直接传一个 `RobIndex`；只有在最靠近 DUT bundle 的 driver / monitor 边界，再拆成 `rob_idx_flag/rob_idx_value`：
-
-```python
-prepared = env.backend.prepare(load0)
-env.expect_scalar_load(rob_idx=load0.rob_idx, pdest=load0.resolved_pdest, addr=load0.addr)
-env.wait_load_writeback_observed(rob_idx=load0.rob_idx)
-env.backend.insert_non_mem_blocker(rob_idx=prepared.rob_idx_of(blocker_ref))
-```
-
-如果场景还需要显式操控 ROB 侧阻塞/放行语义，也继续在同一个 `BackendSendPlan` 中补充 ROB 语义步骤，例如 `NonMemBlockerStep`、`StoreCommitReadyStep`，而不是直接操作 `env.rob_agent` 内部队列。
-
-例如，下面这类场景适合直接写在同一个 plan 里：
-
-```python
-from transactions import (
-    BackendSendPlan,
-    EnqueueStoreStep,
-    IssueCyclePlan,
-    IssueOp,
-    NonMemBlockerStep,
-    RobRef,
-    StoreCommitReadyStep,
-    StoreCommitStep,
-    StoreRef,
-)
-
-store_ref = StoreRef("younger_store")
-blocker_ref = RobRef("older_non_mem")
-
-env.backend.execute(
-    BackendSendPlan.from_steps(
-        NonMemBlockerStep.insert(rob_ref=blocker_ref),
-        EnqueueStoreStep.from_txn(store_txn, ref=store_ref),
-        IssueCyclePlan.from_ops(
-            IssueOp.std(req_id=store_txn.req_id, sq_ptr=store_ref, data=store_txn.data, mask=store_txn.mask)
-        ),
-        IssueCyclePlan.from_ops(
-            IssueOp.sta(req_id=store_txn.req_id, sq_ptr=store_ref, addr=store_txn.addr, mask=store_txn.mask)
-        ),
-        StoreCommitReadyStep(sq_ptr=store_ref, ready=True),
-        StoreCommitStep(count=1),  # 这里仍会被 older non-mem blocker 卡住
-        NonMemBlockerStep.release(rob_ref=blocker_ref),
-        StoreCommitStep(count=1),
-    )
-)
-```
-
-这里的 `non-mem` 不是一条真的 issue 到 lane 的指令，而是 ROB 程序序里的一个 non-mem placeholder，用来表达“older non-mem op 还没允许提交，younger mem 不能越过它”的语义。
-
-这套请求脚本模型的设计动机、对象关系与扩展规则，详见 `src/test/python/MemBlock/docs/backend_request_model_design.md`。
-
-当前已稳定存在的测试类型：
-
-- env / fixture 冒烟
-- memory model / scoreboard 单测
-- 标量 load/store 主路径
-- ordering / mixed traffic
-- replay / RAR / RAW / NC / MMIO 场景
-- ROB coverage 接入冒烟
-
-推荐直接查看的报告产物：
-
-- toffee JSON 报告：`src/test/python/MemBlock/data/toffee_report_run/toffee_report.json`
-- DUT line coverage HTML：`src/test/python/MemBlock/data/toffee_report_run/line_dat/index.html`
-- 当 `toffee-report` 未稳定产出 line/json 汇总时，可改用 `docs/coverage_report_workflow.md` 中的 `merged.info -> code_coverage.json` 手工恢复流程
-
-## 推荐工作方式
-
-为了降低 testcase 与环境内部实现的耦合，后续开发建议遵循以下规则：
-
-- 新 testcase 优先通过 sequence + `MemBlockEnv` public facade 组织，不直接依赖 `env.memory` 内部容器。
-- 主动控制入口默认使用 `env.backend` 或 `request_apis.py`，不要再新增 `env.note_*` / `env.pulse_*` 风格 helper。
-- 需要验证 backend/issue 的拍级发送组合，或显式编排 ROB blocker / store readiness 时优先写 `BackendSendPlan`；需要沉淀可复用测试场景时优先上提成 sequence。
-- 需要新增 DUT 白盒观测时，优先扩 `monitors/` 或 env facade，不把私有 DUT 命名直接散落到测试文件。
-- 需要增强检查逻辑时，优先修改 `model/` 与相应设计文档，不在 testcase 中堆临时判断。
-- 覆盖率状态与下一步补强工作以 `coverage_summary.md` 和 `coverage_todo.md` 为准。
-
-## 多人协同建议
-
-当多人同时在当前验证项目上工作时，建议按职责拆分，而不是多人共同修改同一批 testcase 与模型文件：
-
-- testcase / sequence
-  - 负责 `tests/`、`sequences/` 中的新场景与覆盖率补强。
-- env / monitor / facade
-  - 负责 `MemBlock_env.py`、`agents/`、`monitors/` 的稳定接口与白盒观测。
-- model / coverage
-  - 负责 `memory_model.py`、`model/`、ROB coverage、drain 校验与单测。
-- integrator / owner
-  - 负责 `README.md`、`CHANGELOG.md`、`ROLES.md`、`docs/` 与跨角色任务收口。
-
-协同原则：
-
-- 公共接口先文档化，再改代码。
-- testcase、model、docs 尽量分开提交。
-- CHANGELOG 只追加，不覆盖旧条目。
-- `docs/coverage_summary.md` 与 `docs/coverage_todo.md` 作为统一状态源，不维护多份私有进度表。
-- 角色分工、默认工作方式和 agent 角色选择规则以 `ROLES.md` 为准。
-
-## 文档定位
-
-- 根目录 `CHANGELOG.md` 记录的是 Python 验证环境自身的演进。
-- `docs/DUT_CHANGELOG-20260331.md` 记录的是 DUT / RTL 侧变化及其对验证环境的影响。
-- `docs/coverage_summary.md` 记录的是当前回归结果。
-- `docs/coverage_todo.md` 记录的是下一步补强工作。
-
-四者定位不同，不应混用。
+| 文档 | 定位 |
+|------|------|
+| [CHANGELOG.md](CHANGELOG.md) | Python 验证环境自身演进记录 |
+| [ROLES.md](ROLES.md) | 多人协同角色与 agent 规范 |
+| [docs/coverage_summary.md](docs/coverage_summary.md) | 当前回归覆盖率结果分析 (**真源**) |
+| [docs/coverage_todo.md](docs/coverage_todo.md) | 覆盖率驱动补强待办清单 (**真源**) |
+| [docs/vp_pipeline_plan.md](docs/vp_pipeline_plan.md) | 标量 ld/st pipeline 白盒验证总方案 |
+| [docs/verification_env_design.md](docs/verification_env_design.md) | 验证环境分层架构总设计 |
+| [docs/backend_request_model_design.md](docs/backend_request_model_design.md) | backend 主动控制请求模型 |
+| [docs/backend_rob_cookbook.md](docs/backend_rob_cookbook.md) | backend/ROB 常见脚本模板 |
+| [docs/rob_model.md](docs/rob_model.md) | ROB 建模现状、缺口与演进 |
+| [docs/rob_coverage_plan.md](docs/rob_coverage_plan.md) | ROB function coverage 模型设计 |
+| [docs/memory_model_design.md](docs/memory_model_design.md) | MemoryModel 职责与设计 |
+| [docs/mmu_env_design_and_usage.md](docs/mmu_env_design_and_usage.md) | MMU/PTW/DTLB 环境设计与使用 |
+| [docs/mmu_fault_directed_cases.md](docs/mmu_fault_directed_cases.md) | MMU fault 定向用例说明 |
+| [docs/vmem_design_and_usage.md](docs/vmem_design_and_usage.md) | 向量访存环境设计与使用 |
+| [docs/misalign.md](docs/misalign.md) | 标量 load/store misalign 专题分析 |
+| [docs/scalar_load_pipeline_probe_cases.md](docs/scalar_load_pipeline_probe_cases.md) | load pipeline probe 用例说明 |
+| [docs/test_sequence_and_extension_guide.md](docs/test_sequence_and_extension_guide.md) | 测试序列编写与扩展指南 |
+| [docs/dut_port_behavior.md](docs/dut_port_behavior.md) | DUT 端口行为说明 |
+| [docs/clock_control_and_migration_guide.md](docs/clock_control_and_migration_guide.md) | 时钟控制与迁移指南 |
+| [docs/BUGS.md](docs/BUGS.md) | 已知 DUT bug 记录 |
+| [docs/DUT_CHANGELOG-20260331.md](docs/DUT_CHANGELOG-20260331.md) | DUT RTL 变更日志 (3月) |
+| [docs/DUT_CHANGELOG-20260428.md](docs/DUT_CHANGELOG-20260428.md) | DUT RTL 变更日志 (4月) |
