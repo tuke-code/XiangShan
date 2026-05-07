@@ -681,8 +681,8 @@ class Sbuffer(implicit p: Parameters)
   XSDebug(p"sbuffer_out_s0_valid:$sbuffer_out_s0_valid evictIdx:$sbuffer_out_s0_evictionIdx dcache ready:${io.dcache.req.ready}\n")
   // Note: if other dcache req in the same block are inflight,
   // the lru update may not accurate
-  accessIdx(EnsbufferWidth).valid := invalidMask(replaceIdx) || (
-    need_replace && !need_drain && !cohHasTimeOut && !missqReplayHasTimeOut && sbuffer_out_s0_cango && activeMask(replaceIdx))
+  accessIdx(EnsbufferWidth).valid :=
+    need_replace && !need_drain && !cohHasTimeOut && !missqReplayHasTimeOut && sbuffer_out_s0_cango && activeMask(replaceIdx)
   accessIdx(EnsbufferWidth).bits := replaceIdx
   val sbuffer_out_s1_evictionIdx = RegEnable(sbuffer_out_s0_evictionIdx, sbuffer_out_s0_fire)
   val sbuffer_out_s1_evictionPTag = RegEnable(ptag(sbuffer_out_s0_evictionIdx), sbuffer_out_s0_fire)
