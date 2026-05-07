@@ -52,12 +52,21 @@ class S1Train(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
   val abtbPrediction:     Vec[Valid[Prediction]] = Vec(NumAheadBtbPredictionEntries, Valid(new Prediction))
 }
 
+class S3Train(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
+  val valid:          Bool                   = Bool()
+  val taken:          Bool                   = Bool() // actual s3_taken
+  val startPc:        PrunedAddr             = PrunedAddr(VAddrBits)
+  val firstTakenBrOH: Vec[Bool]              = Vec(NumBtbResultEntries, Bool())
+  val phrMeta:        PhrMeta                = new PhrMeta()
+  val s3Prediction:   Vec[Valid[Prediction]] = Vec(NumBtbResultEntries, Valid(new Prediction))
+}
+
 class PhrUpdateData(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
-  val valid:     Bool                  = Bool()
-  val taken:     Bool                  = Bool()
-  val cfiPc:     PrunedAddr            = PrunedAddr(VAddrBits)
-  val target:    PrunedAddr            = PrunedAddr(VAddrBits)
-  val phrMeta:   PhrMeta               = new PhrMeta()
+  val valid:   Bool       = Bool()
+  val taken:   Bool       = Bool()
+  val cfiPc:   PrunedAddr = PrunedAddr(VAddrBits)
+  val target:  PrunedAddr = PrunedAddr(VAddrBits)
+  val phrMeta: PhrMeta    = new PhrMeta()
 }
 
 class PhrUpdateResult(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
@@ -72,10 +81,10 @@ class PhrUpdate(implicit p: Parameters) extends PhrBundle {
 
   val redirect: Valid[BpuRedirect] = Valid(new BpuRedirect)
 
-  val s3_override:   Bool       = Bool()
-  val s3_phrMeta:    PhrMeta    = new PhrMeta()
-  val s3_prediction: Prediction = new Prediction()
-  val s3_startPc:    PrunedAddr = PrunedAddr(VAddrBits)
+  // val s3_override:   Bool       = Bool()
+  // val s3_phrMeta:    PhrMeta    = new PhrMeta()
+  // val s3_prediction: Prediction = new Prediction()
+  // val s3_startPc:    PrunedAddr = PrunedAddr(VAddrBits)
 }
 
 class PhrMeta(implicit p: Parameters) extends PhrBundle {
