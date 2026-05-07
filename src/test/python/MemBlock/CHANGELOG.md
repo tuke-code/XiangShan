@@ -1,5 +1,55 @@
 # MemBlock Python Verification Environment CHANGELOG
 
+## 2026-05-06
+
+### 1. 新增 L2TLB Agent 与 TLBFA_2 L2TLB 端口驱动测试
+
+TLBFA_2 (`pftlb_storage_fa`) 由 MemBlock.io_l2_tlb_req 端口独占驱动，该端口来自 L2 Cache prefetcher (BestOffsetPrefetch)。本轮新增：
+
+- `agents/l2tlb_agent.py` (新建)
+  - `PftlbAgent` 类：驱动 `io_l2_tlb_req_req_*` 信号，采集 `io_l2_tlb_req_resp_*` 响应
+  - `L2TlbReq` / `L2TlbResp` 数据类：请求/响应描述
+  - 支持 `send_request`、`wait_response`、`translated_load`、`batch_translated_loads` 等高层 API
+  - 集成到 `MemBlock_env.__init__` (l2tlb_agent) 和 `idle_inputs` (reset)
+- `tests/test_MemBlock_mmu_tlbfa_pftlb.py` (新建) — 7 条 L2TLB 端口 pass 测试 + 1 条 xfail：
+  - `test_api_MemBlock_tlbfa_l2tlb_request_response_connectivity` — 验证请求/响应联通性
+  - `test_api_MemBlock_tlbfa_l2tlb_agent_signal_drive` — 验证 agent 信号驱动正确性
+  - `test_api_MemBlock_tlbfa_l2tlb_agent_reset` — 验证 agent reset 清零逻辑
+  - `test_api_MemBlock_tlbfa_l2tlb_sfence_connectivity` — sfence 前后端口联通性
+  - `test_api_MemBlock_tlbfa_l2tlb_multi_page_batch` — 32 VA 批量查询
+  - `test_api_MemBlock_tlbfa_l2tlb_two_stage_basic` — 两阶段翻译下基本联通性
+  - `test_api_MemBlock_tlbfa_l2tlb_two_stage_hfence_connectivity` — hfence.vvma 前后联通性
+  - `test_api_MemBlock_tlbfa_l2tlb_miss_refill_hit` (xfail) — miss→refill→hit 闭环，因 pf TLB ptwio→PTW 路径 gated (a_fires=0/d_fires=0)
+- Chisel 源码分析确认数据通路：
+  - `MemBlock.io_l2_tlb_req → dtlb_reqs(L2toL1DTLBPortIndex) → dtlb_prefetch_tlb_prefetch → TLBFA_2`
+  - `pftlbParams.NWays = 48` → TLBFA_2 为 48-entry 全相联
+
+#### 变更摘要
+
+新增 3 个文件，修改 1 个文件 (MemBlock_env.py)。
+
+### 2. 新增 TLBFA_2 深度覆盖率补强测试
+
+本条目记录一轮面向 `TLBFA_2.sv` 行覆盖率提升的定向 testcase 补强。当前 full 主报告中 `TLBFA_2.sv` 行覆盖率仅 44.5%，主要缺口集中在：sfence.vma 四种 rs1/rs2 组合的分支未覆盖、entry 0-47 深度替换路径未触发、三端口同拍 TLB 访问路径不足、store-side TLB refill 路径冷、2MB megapage superpage 路径未激活。
+
+本轮在 `tests/test_MemBlock_mmu_tlbfa_deep.py` (新建) 中补入 8 条定向 testcase：
+
+- `test_api_MemBlock_tlbfa_sfence_rs2_asid_flush_all_addrs` — 覆盖 `sfence(rs2=asid)` 全地址 asid 匹配冲刷
+- `test_api_MemBlock_tlbfa_sfence_rs2_no_asid_selective` — 覆盖 `sfence(rs1=0,rs2=0)` 仅清 ASID=0 分支
+- `test_api_MemBlock_tlbfa_sfence_rs1_specific_addr` — 覆盖 `sfence(rs1=addr)` per-entry 地址标签（tag[34:0]）匹配冲刷
+- `test_api_MemBlock_tlbfa_sfence_rs1_rs2_combined` — 覆盖 `sfence(addr, asid)` 最细粒度精准冲刷分支
+- `test_api_MemBlock_tlbfa_batch_fill_sfence_refill_cycle` — 64 页填充 → sfence 全清 → refill → 回访 hit，覆盖 entry 0-47 refill 写路径
+- `test_api_MemBlock_tlbfa_three_cycle_fill_flush_fill` — 三次 fill-flush 循环，覆盖 3× refill 数据路径
+- `test_api_MemBlock_tlbfa_three_lanes_all_miss_same_cycle` — 三端口（io_r_req_0/1/2）同拍全部 miss，覆盖三端口各自 touch_ways 编码与 hit_vec 比较
+- `test_api_MemBlock_tlbfa_store_tlb_refill_sta_std` — 8 条 translated store 交替使用 sta/std 两 requestor，覆盖 store-side TLB refill
+- `test_api_MemBlock_tlbfa_superpage_2mb_hit_rehit_sfence` (skip) — 2MB megapage 探针，待 PTW 能力开放后启用
+
+#### 验证情况
+
+- 8 条新增 testcase 均通过 real DUT pytest 验证
+- 1 条 2MB megapage testcase 因当前 DUT PTW 不支持 2MB 映射，暂标记 skip
+- 完整覆盖率回归待后续重跑后更新 `coverage_summary.md` 中的 `TLBFA_2.sv` 数据
+
 ## 2026-04-30
 
 ### 1. 新增 VirtualLoadQueue 覆盖率定向补强用例与 VLQ 状态采样方法

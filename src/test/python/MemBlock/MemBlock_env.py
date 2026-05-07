@@ -56,6 +56,7 @@ from agents.commit_agent import CommitAgent
 from agents.csr_agent import CsrAgent
 from agents.issue_agent import IssueAgent
 from agents.lsq_agent import LsqAgent
+from agents.pftlb_agent import PftlbAgent
 from agents.vector_backend_facade import VectorBackendFacade
 from agents.vector_issue_agent import VectorIssueAgent
 from dcache_ctrl_facade import DCacheCtrlConfig, DCacheCtrlFacade, HARDWARE_ERROR_BIT
@@ -2263,6 +2264,7 @@ class MemBlockEnv:
             for idx in range(VEC_ISSUE_PORTS)
         ]
         self.vector_issue_agent = VectorIssueAgent(self)
+        self.pftlb_agent = PftlbAgent(self)
         self.backend = BackendFacade(self)
         self.vector_backend = VectorBackendFacade(self)
         self.writeback = [
@@ -2394,6 +2396,7 @@ class MemBlockEnv:
         """将 env 管理的输入口恢复到空闲值。"""
 
         self.csr_agent.reset()
+        self.pftlb_agent.reset()
         self.redirect.drive_idle()
         self.lsq_enq_meta.drive_idle()
         for bundle in self.lsq_enq_req:
