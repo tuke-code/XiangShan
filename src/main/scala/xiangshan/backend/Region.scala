@@ -808,6 +808,8 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
       val currentPipelineNum = Mux1H(source.bits.fuType, fuMapPipelineNum)
       sink.pipeNum := currentPipelineNum
       sink.cancelSource := source.bits.cancelSource
+      sink.futype := OHToUInt(source.bits.fuType)
+      sink.issued := source.bits.issued
     }
     io.topdownIQInfoVec.foreach( _.zip(topdownIQInfoVec).zip(topdownIQInfoCollect.io.out).foreach{
       case ((sink, source), ideal) =>
