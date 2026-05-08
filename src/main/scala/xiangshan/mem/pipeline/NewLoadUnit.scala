@@ -436,6 +436,7 @@ class LoadUnitS0(param: ExeUnitParams)(
   io.dcacheReq.bits.cmd := Mux(isPrefetch, MemoryOpConstants.M_PFR, MemoryOpConstants.M_XRD)
   io.dcacheReq.bits.vaddr := dcacheVAddr
   io.dcacheReq.bits.vaddr_dup := dcacheVAddr
+  io.dcacheReq.bits.size := sink.bits.size
   io.dcacheReq.bits.data := DontCare
   io.dcacheReq.bits.mask := DontCare
   io.dcacheReq.bits.id := DontCare
