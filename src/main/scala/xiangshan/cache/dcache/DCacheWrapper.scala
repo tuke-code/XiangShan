@@ -137,7 +137,7 @@ trait HasDCacheParameters
   val EnableTagEcc = cacheParams.enableTagEcc
 
   // banked dcache support
-  val DCacheSetDiv = 1
+  val DCacheSetDiv = 2
   val DCacheSets = cacheParams.nSets
   val DCacheWayDiv = 2
   val DCacheWays = cacheParams.nWays
@@ -146,6 +146,9 @@ trait HasDCacheParameters
   val DCacheSRAMRowBits = cacheParams.rowBits // hardcoded
   val DCacheWordBits = 64 // hardcoded
   val DCacheWordBytes = DCacheWordBits / 8
+  val DCacheSubBankBytes = DCacheWordBytes / 2
+  val DCacheBankBits = DCacheSubBankBytes * 8
+  val DCacheSubBanks = DCacheBanks * 2
   val MaxPrefetchEntry = cacheParams.nMaxPrefetchEntry
   def DCacheVWordBytes = VLEN / 8
   require(DCacheSRAMRowBits == 64)
@@ -162,11 +165,12 @@ trait HasDCacheParameters
   val DCacheWordOffset = log2Up(DCacheWordBytes)
   def DCacheVWordOffset = log2Up(DCacheVWordBytes)
 
-  val DCacheBankOffset = log2Up(DCacheSRAMRowBytes)
-  val DCacheSetOffset = DCacheBankOffset + log2Up(DCacheBanks)
+  val DCacheBankOffset = log2Up(DCacheSubBankBytes)
+  val DCacheSetOffset = DCacheBankOffset + log2Up(DCacheSubBanks)
   val DCacheAboveIndexOffset = DCacheSetOffset + log2Up(DCacheSets)
   val DCacheTagOffset = DCacheAboveIndexOffset min DCacheSameVPAddrLength
   val DCacheLineOffset = DCacheSetOffset
+  val DCachePackedBankRowBits = DCacheWays * DCacheSubBankBytes * 8
 
   def encWordBits = cacheParams.dataCode.width(wordBits)
   def encRowBits  = encWordBits * rowWords // for DuplicatedDataArray only
@@ -177,6 +181,8 @@ trait HasDCacheParameters
 
   def encDataBits = if (EnableDataEcc) cacheParams.dataCode.width(DCacheSRAMRowBits) else DCacheSRAMRowBits
   def dataECCBits = encDataBits - DCacheSRAMRowBits
+  def encPackedDataBits = if (EnableDataEcc) cacheParams.dataCode.width(DCachePackedBankRowBits) else DCachePackedBankRowBits
+  def packedDataECCBits = encPackedDataBits - DCachePackedBankRowBits
 
   // L1 DCache controller
   val cacheCtrlParamsOpt  = OptionWrapper(
@@ -197,14 +203,14 @@ trait HasDCacheParameters
     // tag_write.ready -> tag_write.valid
     // tag_write.ready -> err_write.valid
     // tag_write.ready -> wb.valid
-  val nDupTagWriteReady = DCacheBanks + 4
+  val nDupTagWriteReady = DCacheSubBanks + 4
   // In Main Pipe:
     // data_write.ready -> data_write.valid * 8 banks
     // data_write.ready -> meta_write.valid
     // data_write.ready -> tag_write.valid
     // data_write.ready -> err_write.valid
     // data_write.ready -> wb.valid
-  val nDupDataWriteReady = DCacheBanks + 4
+  val nDupDataWriteReady = DCacheSubBanks + 4
   val nDupWbReady = DCacheBanks + 4
   val nDupStatus = nDupTagWriteReady + nDupDataWriteReady
   val dataWritePort = 0
@@ -249,8 +255,23 @@ trait HasDCacheParameters
   }
 
   def get_mask_of_bank(bank: Int, data: UInt) = {
-    require(data.getWidth >= (bank+1)*DCacheSRAMRowBytes)
-    data(DCacheSRAMRowBytes * (bank + 1) - 1, DCacheSRAMRowBytes * bank)
+    require(data.getWidth >= (bank+1)*DCacheSubBankBytes)
+    data(DCacheSubBankBytes * (bank + 1) - 1, DCacheSubBankBytes * bank)
+  }
+
+  def get_mask_of_word(word: Int, data: UInt) = {
+    require(data.getWidth >= (word+1)*DCacheSRAMRowBytes)
+    data(DCacheSRAMRowBytes * (word + 1) - 1, DCacheSRAMRowBytes * word)
+  }
+
+  def get_data_of_subbank(bank: Int, data: UInt) = {
+    require(data.getWidth >= DCacheSRAMRowBits)
+    val half = bank & 1
+    if (half == 0) {
+      data(DCacheBankBits - 1, 0)
+    } else {
+      data(DCacheSRAMRowBits - 1, DCacheBankBits)
+    }
   }
 
   def get_alias(vaddr: UInt): UInt ={
@@ -321,6 +342,7 @@ class DCacheWordReq(implicit p: Parameters) extends DCacheBundle
   val cmd    = UInt(M_SZ.W)
   val vaddr  = UInt(VAddrBits.W)
   val vaddr_dup = UInt(VAddrBits.W)
+  val size   = UInt(MemorySize.Size.width.W)
   val data   = UInt(VLEN.W)
   val mask   = UInt((VLEN/8).W)
   val id     = UInt(reqIdWidth.W)
@@ -368,6 +390,7 @@ class DCacheWordReqWithVaddrAndPfFlag(implicit p: Parameters) extends DCacheWord
     res.wline := wline
     res.cmd := cmd
     res.addr := addr
+    res.size := size
     res.data := data
     res.mask := mask
     res.id := id
@@ -1267,7 +1290,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
 
   bankedDataArray.io.write <> dataWriteArb.io.out
 
-  for (bank <- 0 until DCacheBanks) {
+  for (bank <- 0 until DCacheSubBanks) {
     val dataWriteArb_dup = Module(new Arbiter(new L1BankedDataWriteReqCtrl, 1))
     // dataWriteArb_dup.io.in(0).valid := refillPipe.io.data_write_dup(bank).valid
     // dataWriteArb_dup.io.in(0).bits := refillPipe.io.data_write_dup(bank).bits
@@ -1285,6 +1308,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   mainPipe.io.readline_error := bankedDataArray.io.readline_error
   mainPipe.io.readline_error_delayed := bankedDataArray.io.readline_error_delayed
   mainPipe.io.data_resp := bankedDataArray.io.readline_resp
+  mainPipe.io.data_resp_all_way := bankedDataArray.io.readline_resp_all_way
 
   (0 until LoadPipelineWidth).map(i => {
     bankedDataArray.io.read(i) <> ldu(i).io.banked_data_read
@@ -1587,7 +1611,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   mainPipe.io.refill_req <> missQueue.io.main_pipe_req
 
   mainPipe.io.data_write_ready_dup := VecInit(Seq.fill(nDupDataWriteReady)(true.B))
-  mainPipe.io.tag_write_ready_dup := VecInit(Seq.fill(nDupDataWriteReady)(true.B))
+  mainPipe.io.tag_write_ready_dup := VecInit(Seq.fill(nDupTagWriteReady)(true.B))
   mainPipe.io.wb_ready_dup := wb.io.req_ready_dup
 
   //----------------------------------------
