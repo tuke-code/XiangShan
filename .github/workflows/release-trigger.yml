@@ -7,9 +7,8 @@ on:
     inputs:
       note:
         description: Test note, will be displayed in the title
-        required: false
+        required: true
         type: string
-        default: Performance Regression
       test_branch:
         description: Branch or commit to run performance test on
         required: false
@@ -19,3 +18,5 @@ on:
 jobs:
   release-jobs:
     uses: ./.github/workflows/release.yml
+    with:
+      test_branch: ${{ github.event.inputs.test_branch }}

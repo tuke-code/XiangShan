@@ -5,6 +5,13 @@ on:
     branches: [ kunminghu-v3 ]
   pull_request:
     branches: [ kunminghu-v3 ]
+  workflow_call:
+    inputs:
+      test_branch:
+        description: Branch or commit to run release jobs on
+        required: false
+        type: string
+        default: kunminghu-v3
 
 env:
   NOOP_HOME: ${{ github.workspace }}
@@ -20,6 +27,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_call' && inputs.test_branch || github.ref }}
 
       - name: Initialize submodules 
         run: make init-force
@@ -58,6 +67,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
+          ref: ${{ github.event_name == 'workflow_call' && inputs.test_branch || github.ref }}
           fetch-depth: 0
           submodules: true
       - name: set env
@@ -99,6 +109,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_call' && inputs.test_branch || github.ref }}
       - name: Install deps
         run: |
           sudo apt install python3-psutil
