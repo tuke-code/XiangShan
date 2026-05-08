@@ -2,7 +2,7 @@ name: Release Jobs
 
 on:
   push:
-    branches: [ kunminghu-v3 ]
+    branches: [ kunminghu-v3, '*-release' ]
   pull_request:
     branches: [ kunminghu-v3 ]
 
