@@ -287,7 +287,7 @@ case class WithNKBL1D(n: Int, ways: Int = 8) extends Config((site, here, up) => 
         nReleaseEntries = 18,
         nMaxPrefetchEntry = 6,
         enableTagEcc = true,
-        enableDataEcc = true,
+        enableDataEcc = false,
         cacheCtrlAddressOpt = Some(AddressSet(0x38022000, 0x7f))
       ))
     ))
