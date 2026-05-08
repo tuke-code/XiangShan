@@ -22,6 +22,7 @@ import freechips.rocketchip.tilelink.TLPermissions
 import org.chipsalliance.cde.config.Parameters
 import utility._
 import xiangshan.cache.wpu._
+import xiangshan.mem.MemorySize
 import xiangshan.mem.HasL1PrefetchSourceParameter
 import xiangshan.mem.prefetch._
 import xiangshan.{L1CacheErrorInfo, XSCoreParamsKey}
@@ -124,11 +125,20 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
   s0_req.vaddr := Mux(io.load128Req, Cat(io.lsu.req.bits.vaddr(io.lsu.req.bits.vaddr.getWidth - 1, 4), 0.U(4.W)), io.lsu.req.bits.vaddr)
   val s0_fire = s0_valid && s1_ready
   val s0_vaddr = s0_req.vaddr
+  val s0_size = io.lsu.req.bits.size
   val s0_replayCarry = s0_req.replayCarry
   val s0_load128Req = io.load128Req
-  val s0_bank_oh_64 = UIntToOH(addr_to_dcache_bank(s0_vaddr))
-  val s0_bank_oh_128 = (s0_bank_oh_64 << 1.U).asUInt | s0_bank_oh_64.asUInt
-  val s0_bank_oh = Mux(s0_load128Req, s0_bank_oh_128, s0_bank_oh_64)
+  val s0_bank_oh_4B = UIntToOH(addr_to_dcache_bank(s0_vaddr))
+  val s0_bank_oh_8B = ((s0_bank_oh_4B << 1.U).asUInt | s0_bank_oh_4B.asUInt)
+  val s0_bank_oh_16B = ((s0_bank_oh_8B << 2.U).asUInt | s0_bank_oh_8B.asUInt)
+  val s0_bank_oh_size = LookupTree(s0_size, List(
+    MemorySize.B.U -> s0_bank_oh_4B,
+    MemorySize.H.U -> s0_bank_oh_4B,
+    MemorySize.W.U -> s0_bank_oh_4B,
+    MemorySize.D.U -> s0_bank_oh_8B,
+    MemorySize.Q.U -> s0_bank_oh_16B
+  ))
+  val s0_bank_oh = Mux(s0_load128Req, s0_bank_oh_16B, s0_bank_oh_size)
   assert(RegNext(!(s0_valid && (s0_req.cmd =/= MemoryOpConstants.M_XRD && s0_req.cmd =/= MemoryOpConstants.M_PFR && s0_req.cmd =/= MemoryOpConstants.M_PFW))), "LoadPipe only accepts load req / softprefetch read or write!")
   dump_pipeline_reqs("LoadPipe s0", s0_valid, s0_req)
 
@@ -298,6 +308,7 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
   io.banked_data_read.bits.addr := s1_vaddr
   io.banked_data_read.bits.addr_dup := s1_vaddr_dup
   io.banked_data_read.bits.way_en := s1_pred_tag_match_way_dup_dc
+  io.banked_data_read.bits.size := s1_req.size
   io.banked_data_read.bits.bankMask := s1_bank_oh
   io.banked_data_read.bits.lqIdx := s1_req.lqIdx
   io.is128Req := s1_load128Req
