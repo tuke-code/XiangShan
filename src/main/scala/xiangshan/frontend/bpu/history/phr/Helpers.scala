@@ -19,6 +19,7 @@ import chisel3._
 import chisel3.util._
 import scala.math.min
 import utility.ParallelXOR
+import utility.XSError
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.PrunedAddrInit
 import xiangshan.frontend.bpu.FoldedHistoryInfo
@@ -110,8 +111,10 @@ trait Helpers extends HasPhrParameters with HalfAlignHelper with PhrHelper {
       hashHigh:      UInt,
       shiftBits:     UInt
   ): PhrAllFoldedHistories = {
-    val nextFoldedPhr = WireInit(baseFoldedPhr)
-
+    val nextFoldedPhr     = WireInit(baseFoldedPhr)
+    val nextFoldedPhrDiff = WireInit(baseFoldedPhr)
+    val oldestBits        = Wire(new PhrAllFoldedHistoryOldestBits(AllFoldedHistoryInfo))
+    oldestBits.read(VecInit(basePhr.asBools), data.phrMeta.phrPtr)
     when(data.taken) {
       nextFoldedPhr := baseFoldedPhr.update(
         VecInit(basePhr.asBools),
@@ -120,6 +123,22 @@ trait Helpers extends HasPhrParameters with HalfAlignHelper with PhrHelper {
         Shamt,
         shiftBits
       )
+      nextFoldedPhrDiff := baseFoldedPhr.update(oldestBits, hashHigh, Shamt, shiftBits)
+      assert(nextFoldedPhrDiff.asUInt === nextFoldedPhr.asUInt, f"folded PHR update logic has inconsistency! ")
+    }
+    nextFoldedPhr
+  }
+
+  def getNextFoldedPhr(
+      data:          PhrUpdateData,
+      oldestBits:    PhrAllFoldedHistoryOldestBits,
+      baseFoldedPhr: PhrAllFoldedHistories,
+      hashHigh:      UInt,
+      shiftBits:     UInt
+  ): PhrAllFoldedHistories = {
+    val nextFoldedPhr = WireInit(baseFoldedPhr)
+    when(data.taken) {
+      nextFoldedPhr := baseFoldedPhr.update(oldestBits, hashHigh, Shamt, shiftBits)
     }
     nextFoldedPhr
   }
