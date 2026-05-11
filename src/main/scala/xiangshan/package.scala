@@ -26,6 +26,7 @@ import xiangshan.backend.fu.vector._
 import xiangshan.backend.issue._
 import xiangshan.backend.fu.FuConfig
 import xiangshan.backend.decode.{Imm, ImmUnion}
+import yunsuan.VpermType
 
 package object xiangshan {
   object SrcType {
@@ -1033,6 +1034,19 @@ package object xiangshan {
     val LoadVioReplayStall = Value("LoadVioReplayStall")
     val LoadMSHRReplayStall = Value("LoadMSHRReplayStall")
 
+    // vector classes
+    val VecUnitStrideMemStall = Value("VecUnitStrideMemStall")
+    val VecNonUnitStrideMemStall = Value("VecNonUnitStrideMemStall")
+    val VecFofStall = Value("VecFofStall")
+    val VecSegmentMemStall = Value("VecSegmentMemStall")
+    val VecFloatStall = Value("VecFloatStall")
+    val VecIntStall = Value("VecIntStall")
+    val VecGatherStall = Value("VecGatherStall")
+    val VecCompressStall = Value("VecCompressStall")
+    val VecSlide1UpStall = Value("VecSlide1UpStall")
+    val VecSlide1DownStall = Value("VecSlide1DownStall")
+    val VecSlideStall = Value("VecSlideStall")
+
     // bad speculation
     val ControlRedirectStall = Value("ControlRedirectStall")
     val MemVioRedirectStall = Value("MemVioRedirectStall")
@@ -1047,5 +1061,67 @@ package object xiangshan {
     val BackendOtherCoreStall = Value("BackendOtherCoreStall")
 
     val NumStallReasons = Value("NumStallReasons")
+  }
+
+  object VectorStallReason {
+    def isUnitStrideMem(fuType: UInt, fuOpType: UInt): Bool =
+      FuType.isVnonsegls(fuType) && LSUOpType.isAllUS(fuOpType)
+
+    def isNonUnitStrideMem(fuType: UInt, fuOpType: UInt): Bool =
+      FuType.isVnonsegls(fuType) && !LSUOpType.isAllUS(fuOpType)
+
+    def isFof(fuType: UInt, fuOpType: UInt): Bool =
+      FuType.isVNonsegLoad(fuType) && VlduType.isFof(fuOpType)
+
+    def isSegmentMem(fuType: UInt): Bool =
+      FuType.isVsegls(fuType)
+
+    def isFloat(fuType: UInt): Bool =
+      FuType.isVecOPF(fuType)
+
+    def isInt(fuType: UInt): Bool =
+      FuType.FuTypeOrR(fuType, Seq(FuType.vipu, FuType.vialuF, FuType.vimac, FuType.vidiv))
+
+    def isGather(fuType: UInt, fuOpType: UInt): Bool =
+      FuType.isVppu(fuType) && (
+        fuOpType === VpermType.vrgather ||
+        fuOpType === VpermType.vrgatherei16 ||
+        fuOpType === VpermType.vrgather_vx
+      )
+
+    def isCompress(fuType: UInt, fuOpType: UInt): Bool =
+      FuType.isVppu(fuType) && fuOpType === VpermType.vcompress
+
+    def isSlide1Up(fuType: UInt, fuOpType: UInt): Bool =
+      FuType.isVppu(fuType) && (
+        fuOpType === VpermType.vslide1up ||
+        fuOpType === VpermType.vfslide1up
+      )
+
+    def isSlide1Down(fuType: UInt, fuOpType: UInt): Bool =
+      FuType.isVppu(fuType) && (
+        fuOpType === VpermType.vslide1down ||
+        fuOpType === VpermType.vfslide1down
+      )
+
+    def isSlide(fuType: UInt, fuOpType: UInt): Bool =
+      FuType.isVppu(fuType) && (
+        fuOpType === VpermType.vslideup ||
+        fuOpType === VpermType.vslidedown
+      )
+
+    def refine(fuType: UInt, fuOpType: UInt, default: UInt): UInt = MuxCase(default, Seq(
+      isFof(fuType, fuOpType)              -> TopDownCounters.VecFofStall.id.U,
+      isSegmentMem(fuType)                 -> TopDownCounters.VecSegmentMemStall.id.U,
+      isNonUnitStrideMem(fuType, fuOpType) -> TopDownCounters.VecNonUnitStrideMemStall.id.U,
+      isUnitStrideMem(fuType, fuOpType)    -> TopDownCounters.VecUnitStrideMemStall.id.U,
+      isGather(fuType, fuOpType)           -> TopDownCounters.VecGatherStall.id.U,
+      isCompress(fuType, fuOpType)         -> TopDownCounters.VecCompressStall.id.U,
+      isSlide1Up(fuType, fuOpType)         -> TopDownCounters.VecSlide1UpStall.id.U,
+      isSlide1Down(fuType, fuOpType)       -> TopDownCounters.VecSlide1DownStall.id.U,
+      isSlide(fuType, fuOpType)            -> TopDownCounters.VecSlideStall.id.U,
+      isFloat(fuType)                      -> TopDownCounters.VecFloatStall.id.U,
+      isInt(fuType)                        -> TopDownCounters.VecIntStall.id.U,
+    ))
   }
 }
