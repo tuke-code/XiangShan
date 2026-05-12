@@ -204,7 +204,7 @@ ifeq ($(FPGA), 1)
 override DEBUG_ARGS	+= --fpga-platform --disable-all --remove-assert --disable-clockgate
 override DEBUG_ARGS	+= --full-basicdiff
 else
-override DEBUG_ARGS	+= --enable-difftest
+override DEBUG_ARGS	+= --enable-difftest --enable-backend-debug
 endif
 ifeq ($(RELEASE),1)
 override SIM_ARGS += $(RELEASE_ARGS)

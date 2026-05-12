@@ -557,6 +557,7 @@ case class DebugOptions
   AlwaysBasicDiff: Boolean = true,
   FullBasicDiff: Boolean = false,
   EnableDebug: Boolean = false,
+  EnableBackendDebug: Boolean = false,
   EnablePerfDebug: Boolean = true,
   PerfLevel: String = "VERBOSE",
   EnableXMR: Boolean = true,
