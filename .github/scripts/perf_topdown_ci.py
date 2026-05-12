@@ -37,6 +37,8 @@ def write_result(output_dir, status, details=None):
     lines = [
         f"Status: `{status}`",
         "",
+        f"Python executable: `{sys.executable}`",
+        "",
         f"Native output path: `{output_dir / 'results'}`",
     ]
     if details:
@@ -45,12 +47,16 @@ def write_result(output_dir, status, details=None):
 
 
 def fail(output_dir, reason):
-    write_result(output_dir, f"FAILED: {reason}")
+    status = f"FAILED: {reason}"
+    write_result(output_dir, status)
+    print(status, file=sys.stderr)
     return 1
 
 
 def skip(output_dir, reason):
-    write_result(output_dir, f"SKIPPED: {reason}")
+    status = f"SKIPPED: {reason}"
+    write_result(output_dir, status)
+    print(status)
     return 0
 
 
@@ -162,6 +168,7 @@ def run_topdown(args):
         ]
     )
     write_result(output_dir, "OK", details)
+    print("OK")
     return 0
 
 
