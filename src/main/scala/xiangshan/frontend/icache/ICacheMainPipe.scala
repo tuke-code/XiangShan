@@ -49,7 +49,10 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     val wayLookupRead: DecoupledIO[WayLookupBundle] = Flipped(DecoupledIO(new WayLookupBundle))
     val missReq:       DecoupledIO[MissReqBundle]   = DecoupledIO(new MissReqBundle)
     val missResp:      Valid[MissRespBundle]        = Flipped(ValidIO(new MissRespBundle))
-    val eccEnable:     Bool                         = Input(Bool())
+    // Snoop MissUnit transactions, used for timing optimization of ICache miss response.
+    val missSnoop   = Output(new MissSnoopBundle)
+    val missSnoopFlush = Output(Bool())
+    val eccEnable: Bool                   = Input(Bool())
 
     /* *** outside interface *** */
     // Ftq
@@ -76,6 +79,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val (toMiss, fromMiss) = (io.missReq, io.missResp)
   private val (toPmp, fromPmp)   = (io.pmp.req, io.pmp.resp)
   private val fromWayLookup      = io.wayLookupRead
+  private val toMissSnoop        = io.missSnoop
   private val eccEnable =
     if (ForceMetaEccFail || ForceDataEccFail) true.B else io.eccEnable
 
@@ -133,6 +137,14 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val s0_maybeRvcMap       = fromWayLookup.bits.maybeRvcMap
   private val s0_metaCodes         = fromWayLookup.bits.metaCodes
   private val s0_hits              = VecInit(fromWayLookup.bits.waymask.map(_.orR))
+
+
+  private val s0_snoopMiss =  VecInit((0 until PortNumber).map { i =>
+    (!s0_hits(i) ) && (if (i == 0) true.B else s0_doubleline)
+  })
+  toMissSnoop.isMiss := s0_snoopMiss
+  toMissSnoop.pTag    := s0_pTag
+  toMissSnoop.vSetIdx := s0_vSetIdx
 
   when(s0_fire) {
     assert(
@@ -193,6 +205,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
 
   private val s1_blkEndOffset = RegEnable(s0_blkEndOffset, 0.U.asTypeOf(s0_blkEndOffset), s0_fire)
 
+  io.missSnoopFlush := s1_flush
   /* *******************************************************************
    * Receive data from sram and mshr
    * ******************************************************************* */

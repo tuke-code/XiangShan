@@ -40,6 +40,9 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheModu
     val wfi:    WfiReqBundle = Flipped(new WfiReqBundle)
     // request from mainPipe
     val fetchReq: DecoupledIO[MissReqBundle] = Flipped(DecoupledIO(new MissReqBundle))
+    // snoop request from mainPipe, used for timing optimization of ICache miss response
+    val fetchReqSnoop: MissSnoopBundle = Input(new MissSnoopBundle)
+    val fetchSnoopFlush = Input(Bool())
     // request from prefetchPipe
     val prefetchReq: DecoupledIO[MissReqBundle] = Flipped(DecoupledIO(new MissReqBundle))
     // response to mainPipe / prefetchPipe / waylookup
@@ -83,6 +86,7 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheModu
   // To avoid duplicate request reception.
   private val fetchHit    = Wire(Bool())
   private val prefetchHit = Wire(Bool())
+
   fetchDemux.io.in <> io.fetchReq
   fetchDemux.io.in.valid := io.fetchReq.valid && !fetchHit
   io.fetchReq.ready      := fetchDemux.io.in.ready || fetchHit
@@ -96,6 +100,13 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheModu
   io.memAcquire.bits      := acquireArb.io.out.bits.acquire
   acquireArb.io.out.ready := io.memAcquire.ready
 
+  private val fetchSnoopPtag       = io.fetchReqSnoop.pTag
+  private val fetchSnoopVSetIdx    = io.fetchReqSnoop.vSetIdx
+  private val fetchSnoopValid      = io.fetchReqSnoop.isMiss
+  private val fetchSnoopPtagReg    = Reg(UInt(tagBits.W))
+  private val fetchSnoopVSetIdxReg = Reg(Vec(PortNumber,UInt(idxBits.W)))
+  private val fetchSnoopValidReg   = RegInit(false.B)
+
   private val allMshr = (0 until NumAllMshr).map { i =>
     val isFetch = i < NumFetchMshr
     val mshr    = Module(new ICacheMshr(edge, isFetch, i))
@@ -106,6 +117,11 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheModu
     mshr.io.lookUps(1).req.valid := io.prefetchReq.valid
     mshr.io.lookUps(1).req.bits  := io.prefetchReq.bits
     mshr.io.victimWay            := io.victim.resp.way
+    mshr.io.fetchSnoop.pTag := Mux(io.fetchReqSnoop.isMiss.reduce(_ || _), fetchSnoopPtag, fetchSnoopPtagReg)
+    mshr.io.fetchSnoop.vSetIdx.zipWithIndex.map{case(vIdx,i) =>
+      vIdx := Mux(io.fetchReqSnoop.isMiss(i), fetchSnoopVSetIdx(i), fetchSnoopVSetIdxReg(i))
+    }
+    mshr.io.fetchSnoop.isMiss := DontCare 
     if (isFetch) {
       mshr.io.flush := false.B
       mshr.io.req <> fetchDemux.io.out(i)
@@ -184,6 +200,7 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheModu
 
   private val corruptReg = RegInit(false.B)
   private val deniedReg  = RegInit(false.B)
+
   when(io.memGrant.fire && edge.hasData(io.memGrant.bits)) {
     // Set corruptReg / deniedReg when any beat is corrupt / denied
     corruptReg := corruptReg || io.memGrant.bits.corrupt
@@ -198,6 +215,37 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheModu
     deniedReg  := false.B
   }
 
+  /**
+    ******************************************************************************
+    * Stash snoop req from mainPipe 
+    * -1. The current s0 fetch snoops the MissUnit early. If its tag/index matches the current transaction, the hit is recorded one cycle earlier.
+    * -2. If the s0 fetch reaches s1 before sending the actual miss request, the snooped tag/index from the previous cycle is registered and compared
+    against the MissUnit transaction. This ensures that when the miss response returns, mainPipe can hit on the MissUnit/refill data.
+    ******************************************************************************
+    */
+
+  private val fetchId   = WireInit(io.memGrant.bits.source)
+
+  private val fetcRespHit = (0 until NumAllMshr).map(i => allMshr(i).io.fetchSnoopHit && i.U === fetchId).reduce(
+    _ || _
+  ) 
+
+  private val fetcRespHitReg = RegNext(fetcRespHit)
+  when((fetcRespHitReg && lastFireNext) || io.fetchSnoopFlush) {
+    fetchSnoopPtagReg    := 0.U
+    fetchSnoopValidReg   := false.B
+  }.elsewhen(fetchSnoopValid.reduce(_ || _)) {
+    fetchSnoopPtagReg    := fetchSnoopPtag
+    fetchSnoopValidReg   := true.B
+  }
+
+  for(i <- 0 until PortNumber){
+    when((fetcRespHitReg && lastFireNext) || io.fetchSnoopFlush){
+      fetchSnoopVSetIdxReg(i) := 0.U
+    }.elsewhen(fetchSnoopValid(i)){
+      fetchSnoopVSetIdxReg(i) := fetchSnoopVSetIdx(i)
+    }
+  }
   /**
     ******************************************************************************
     * invalid mshr when finish transition
@@ -255,6 +303,7 @@ class ICacheMissUnit(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheModu
   io.resp.bits.blkPAddr    := mshrInfo.blkPAddr
   io.resp.bits.vSetIdx     := mshrInfo.vSetIdx
   io.resp.bits.waymask     := waymask
+  io.resp.bits.hit         := fetcRespHitReg
   io.resp.bits.data        := respDataReg.asUInt
   io.resp.bits.maybeRvcMap := maybeRvcMap
   io.resp.bits.corrupt     := corruptReg

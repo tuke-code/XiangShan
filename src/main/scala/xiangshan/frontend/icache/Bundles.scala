@@ -291,11 +291,19 @@ class MissReqBundle(implicit p: Parameters) extends ICacheBundle {
   val blkPAddr: UInt = UInt((PAddrBits - blockOffBits).W)
   val vSetIdx:  UInt = UInt(idxBits.W)
 }
+
+class MissSnoopBundle(implicit p: Parameters) extends ICacheBundle {
+  val pTag:    UInt = UInt(tagBits.W)
+  val vSetIdx: Vec[UInt] = Vec(PortNumber, UInt(idxBits.W))
+  val isMiss:   Vec[Bool] = Vec(PortNumber, Bool())
+}
+
 // MissUnit -> ICacheMainPipe / ICachePrefetchPipe / ICacheWayLookup
 class MissRespBundle(implicit p: Parameters) extends ICacheBundle {
   val blkPAddr:    UInt = UInt((PAddrBits - blockOffBits).W)
   val vSetIdx:     UInt = UInt(idxBits.W)
   val waymask:     UInt = UInt(nWays.W)
+  val hit:         Bool = Bool()
   val data:        UInt = UInt(blockBits.W)
   val maybeRvcMap: UInt = UInt(MaxInstNumPerBlock.W)
   val corrupt:     Bool = Bool()

@@ -183,6 +183,8 @@ class ICacheImp(outer: ICache) extends LazyModuleImp(outer) with HasICacheParame
   missUnit.io.flush  := io.fromFtq.redirectFlush
   missUnit.io.wfi <> io.wfi
   missUnit.io.fetchReq <> mainPipe.io.missReq
+  missUnit.io.fetchReqSnoop <> mainPipe.io.missSnoop
+  missUnit.io.fetchSnoopFlush := mainPipe.io.missSnoopFlush
   missUnit.io.prefetchReq <> prefetcher.io.missReq
   missUnit.io.memGrant.valid := false.B
   missUnit.io.memGrant.bits  := DontCare

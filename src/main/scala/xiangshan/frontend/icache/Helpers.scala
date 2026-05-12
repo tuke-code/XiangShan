@@ -221,9 +221,7 @@ trait ICacheMissUpdateHelper extends HasICacheParameters with ICacheEccHelper wi
       allowCorrupt: Boolean = false
   ): Bool =
     valid &&
-      update.valid &&
-      vSetIdx === update.bits.vSetIdx &&
-      pTag === getPTagFromBlk(update.bits.blkPAddr) &&
+      update.valid && update.bits.hit &&
       (if (allowCorrupt) true.B else !update.bits.corrupt)
 
   def checkMshrHitVec(

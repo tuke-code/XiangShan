@@ -26,7 +26,8 @@ import utility.ReqSourceKey
 import utility.XSPerfHistogram
 import xiangshan.WfiReqBundle
 
-class ICacheMshr(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Parameters) extends ICacheModule {
+class ICacheMshr(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Parameters) extends ICacheModule
+    with ICacheAddrHelper {
   class ICacheMshrIO(edge: TLEdgeOut)(implicit p: Parameters) extends ICacheBundle {
     val fencei: Bool         = Input(Bool())
     val flush:  Bool         = Input(Bool())
@@ -37,7 +38,7 @@ class ICacheMshr(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Paramet
     // look up if the request is already in MSHR
     // NOTE: lookUps Vec(2) is not Vec(PortNumber), it's mainPipe + prefetchPipe
     val lookUps: Vec[MshrLookupBundle] = Flipped(Vec(2, new MshrLookupBundle))
-
+    val fetchSnoop = Flipped(new MissSnoopBundle)
     // send request to L2 (tilelink bus)
     val acquire: DecoupledIO[MshrAcquireBundle] = DecoupledIO(new MshrAcquireBundle(edge))
     // select the victim way when acquire fire
@@ -45,6 +46,8 @@ class ICacheMshr(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Paramet
 
     // offer the information needed by responding to requester
     val info: Valid[MshrInfoBundle] = ValidIO(new MshrInfoBundle)
+
+    val fetchSnoopHit = Output(Bool())
     // after respond to requester, invalid the MSHR
     val invalid: Bool = Input(Bool())
 
@@ -78,7 +81,16 @@ class ICacheMshr(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Paramet
   }
   // Decoupling valid and bits
   (0 until 2).foreach(i => io.lookUps(i).resp.hit := hits(i))
+  private val fetchSnoop       = io.fetchSnoop
+  private val fetchSnoopHit    = fetchSnoop.pTag === getPTagFromBlk(blkPAddr) && (fetchSnoop.vSetIdx(0) === vSetIdx 
+  || fetchSnoop.vSetIdx(1) === vSetIdx)
+  private val fetchSnoopHitReg = RegInit(false.B)
 
+  when(valid && (!io.invalid)) {
+    fetchSnoopHitReg := fetchSnoopHit
+  }.otherwise {
+    fetchSnoopHitReg := false.B
+  }
   // disable wake up when hit MSHR (fencei is low)
   // when(hit) {
   //   flush := false.B
@@ -140,6 +152,7 @@ class ICacheMshr(edge: TLEdgeOut, isFetch: Boolean, ID: Int)(implicit p: Paramet
   io.info.bits.vSetIdx  := vSetIdx
   io.info.bits.way      := way
 
+  io.fetchSnoopHit := valid && (fetchSnoopHitReg || fetchSnoopHit)
   // we are safe to enter wfi if we have no pending response from L2
   io.wfi.wfiSafe := !(valid && issue)
 
