@@ -77,6 +77,11 @@ on:
           - "false"
           - "true"
         default: "false"
+      topdown_python:
+        description: Python executable from the shared TopDown virtual environment
+        required: false
+        type: string
+        default: /nfs/home/share/xs-perf-workflow-venv/bin/python
 
 jobs:
   performance-test:
@@ -92,4 +97,5 @@ jobs:
         checkpoint_path: ${{ github.event.inputs.checkpoint_path }}
         json_path: ${{ github.event.inputs.json_path }}
         run_topdown: ${{ github.event.inputs.run_topdown }}
+        topdown_python: ${{ github.event.inputs.topdown_python }}
         perf_report_dir: /nfs/home/cirunner/perf-report-custom

@@ -47,6 +47,11 @@ on:
         required: false
         type: string
         default: "false"
+      topdown_python:
+        description: Python executable from the shared TopDown virtual environment
+        required: false
+        type: string
+        default: /nfs/home/share/xs-perf-workflow-venv/bin/python
       perf_report_dir:
         description: Directory for all spec reports
         required: true
@@ -252,15 +257,48 @@ jobs:
 
       - name: Run TopDown analysis
         if: ${{ !cancelled() && inputs.run_topdown == 'true' }}
-        continue-on-error: true
         run: |
           TOPDOWN_OUT="$SPEC_DIR/perf-analysis/topdown"
-          python3 "$GITHUB_WORKSPACE/.github/scripts/perf_topdown_ci.py" \
+          TOPDOWN_PYTHON="${{ inputs.topdown_python }}"
+
+          if [ ! -f "$TOPDOWN_PYTHON" ] || [ ! -x "$TOPDOWN_PYTHON" ]; then
+            mkdir -p "$TOPDOWN_OUT"
+            TOPDOWN_STATUS="FAILED: missing TopDown Python virtualenv: $TOPDOWN_PYTHON"
+            printf '%s\n' "$TOPDOWN_STATUS" | tee "$TOPDOWN_OUT/topdown_status.txt"
+            {
+              printf 'Status: `%s`\n\n' "$TOPDOWN_STATUS"
+              printf 'Expected Python: `%s`\n' "$TOPDOWN_PYTHON"
+            } > "$TOPDOWN_OUT/topdown.md"
+            exit 0
+          fi
+
+          echo "Using TopDown Python: $TOPDOWN_PYTHON"
+          set +e
+          "$TOPDOWN_PYTHON" "$GITHUB_WORKSPACE/.github/scripts/perf_topdown_ci.py" \
             --stat-dir "$SPEC_DIR" \
             --cluster-json "$CKPT_JSON_PATH" \
             --xiangshan-root "$GITHUB_WORKSPACE" \
             --benchmark-type "${{ inputs.benchmark_type }}" \
             --output "$TOPDOWN_OUT"
+          TOPDOWN_RC=$?
+          set -e
+          if [ "$TOPDOWN_RC" -ne 0 ] && [ ! -f "$TOPDOWN_OUT/topdown_status.txt" ]; then
+            mkdir -p "$TOPDOWN_OUT"
+            TOPDOWN_STATUS="FAILED: TopDown wrapper launch failed with exit code $TOPDOWN_RC"
+            printf '%s\n' "$TOPDOWN_STATUS" | tee "$TOPDOWN_OUT/topdown_status.txt"
+            {
+              printf 'Status: `%s`\n\n' "$TOPDOWN_STATUS"
+              printf 'Python executable: `%s`\n' "$TOPDOWN_PYTHON"
+            } > "$TOPDOWN_OUT/topdown.md"
+          fi
+          if [ -f "$TOPDOWN_OUT/topdown_status.txt" ]; then
+            echo "TopDown status:"
+            cat "$TOPDOWN_OUT/topdown_status.txt"
+          fi
+          if [ "$TOPDOWN_RC" -ne 0 ]; then
+            echo "TopDown wrapper exited with code $TOPDOWN_RC; preserving SPEC result per optional post-analysis contract."
+          fi
+          exit 0
 
       - name: Summary result
         if: always()
