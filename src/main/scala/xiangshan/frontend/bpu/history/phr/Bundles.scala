@@ -186,17 +186,17 @@ class PhrFoldedHistoryOldestBits(val info: FoldedHistoryInfo, val maxUpdateNum: 
 class PhrAllFoldedHistoryOldestBits(gen: Set[FoldedHistoryInfo])(implicit p: Parameters) extends PhrBundle
     with HasPhrParameters {
 
-  val hist: MixedVec[PhrFoldedHistoryOldestBits] =
+  val allOldestBits: MixedVec[PhrFoldedHistoryOldestBits] =
     MixedVec(gen.toSeq.sortBy(_.asTuple).map(info => new PhrFoldedHistoryOldestBits(info, Shamt)))
 
   def getHistWithInfo(info: FoldedHistoryInfo): PhrFoldedHistoryOldestBits = {
-    val selected = hist.filter(_.info.equals(info))
+    val selected = allOldestBits.filter(_.info.equals(info))
     require(selected.length == 1)
     selected.head
   }
 
   def read(phv: Vec[Bool], ptr: PhrPtr): Unit =
-    for (h <- hist) {
+    for (h <- allOldestBits) {
       h.readFromPhr(phv, ptr)
     }
 }
@@ -272,7 +272,7 @@ class PhrAllFoldedHistories(gen: Set[FoldedHistoryInfo])(implicit p: Parameters)
       shiftBits:  UInt
   ): PhrAllFoldedHistories = {
     require(shiftBits.getWidth == shift)
-    require(hist.length == oldestBits.hist.length)
+    require(hist.length == oldestBits.allOldestBits.length)
     val res = WireInit(this)
     for (i <- this.hist.indices) {
       val info = this.hist(i).info
