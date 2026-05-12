@@ -240,20 +240,11 @@ class Ifu(implicit p: Parameters) extends IfuModule
   for (i <- 0 until FetchBlockInstNum) {
     instrCountBeforeCurrent(i) := PopCount(dealInstrValid.take(i))
   }
-  instrCountBeforeCurrent(FetchBlockInstNum)    := PopCount(dealInstrValid)
-  instrCompactor.io.req.fetchBlockSelect        := s1_fetchBlockSelect
-  instrCompactor.io.req.twoFetchPcLower         := s1_twoFetchPcLower
-  instrCompactor.io.req.twoFetchInstrOffset     := s1_twoFetchInstrOffset
-  instrCompactor.io.req.rawInstrValid           := dealInstrValid
-  instrCompactor.io.req.rawIsRvc                := rawIsRvc
-  instrCompactor.io.req.instrCountBeforeCurrent := instrCountBeforeCurrent
-  private val instrCompactInfo = Wire(new InstrCompactBundle(FetchBlockInstNum))
-  instrCompactInfo                   := instrCompactor.io.resp
-  instrCompactInfo.instrEndOffset(0) := Mux(s1_prevLastIsHalfRvi, 0.U, Mux(rawIsRvc(0), 0.U, 1.U))
-
-  private val s1_firstRange    = s1_fetchBlock(0).instrRange
-  private val s1_secondRange   = s1_fetchBlock(1).instrRange
-  private val s1_fetchTakenIdx = Wire(Vec(FetchPorts, new Valid(UInt(FetchBlockInstOffsetWidth.W))))
+  instrCountBeforeCurrent(FetchBlockInstNum) := PopCount(dealInstrValid)
+  private val s1_instrEndOffset0 = Mux(s1_prevLastIsHalfRvi, 0.U, Mux(rawIsRvc(0), 0.U, 1.U))
+  private val s1_firstRange      = s1_fetchBlock(0).instrRange
+  private val s1_secondRange     = s1_fetchBlock(1).instrRange
+  private val s1_fetchTakenIdx   = Wire(Vec(FetchPorts, new Valid(UInt(FetchBlockInstOffsetWidth.W))))
   s1_fetchTakenIdx(0).bits  := PopCount(dealInstrValid.asUInt & s1_firstRange) - 1.U
   s1_fetchTakenIdx(1).bits  := PopCount(dealInstrValid.asUInt & s1_totalInstrRange) - 1.U
   s1_fetchTakenIdx(0).valid := s1_fetchBlock(0).takenCfiOffset.valid && s1_firstValid
@@ -298,14 +289,30 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s2_fetchBlock     = RegEnable(s1_realFetchBlock, s1_fire)
   private val s2_prevIBufEnqPtr = RegInit(0.U.asTypeOf(new IBufPtr))
 
-  private val s2_prevShiftSelect = UIntToMask(s2_prevIBufEnqPtr.value(1, 0), IfuAlignWidth)
+  private val s2_prevShiftSelect         = UIntToMask(s2_prevIBufEnqPtr.value(1, 0), IfuAlignWidth)
+  private val s2_fetchBlockSelect        = RegEnable(s1_fetchBlockSelect, s1_fire)
+  private val s2_twoFetchPcLower         = RegEnable(s1_twoFetchPcLower, s1_fire)
+  private val s2_twoFetchInstrOffset     = RegEnable(s1_twoFetchInstrOffset, s1_fire)
+  private val s2_dealInstrValid          = RegEnable(dealInstrValid, s1_fire)
+  private val s2_rawIsRvc                = RegEnable(rawIsRvc, s1_fire)
+  private val s2_instrCountBeforeCurrent = RegEnable(instrCountBeforeCurrent, s1_fire)
+  private val s2_instrEndOffset0         = RegEnable(s1_instrEndOffset0, s1_fire)
 
   s2_fire  := s2_valid && s3_ready
   s2_ready := s2_fire || !s2_valid
 
-  private val s2_instrCompactInfo = RegEnable(instrCompactInfo, s1_fire)
-  private val s2_instrCount       = RegEnable(s1_realInstrCount, s1_fire)
-  private val s2_instrValid       = RegEnable(s1_realInstrValid, s1_fire)
+  instrCompactor.io.req.fetchBlockSelect        := s2_fetchBlockSelect
+  instrCompactor.io.req.twoFetchPcLower         := s2_twoFetchPcLower
+  instrCompactor.io.req.twoFetchInstrOffset     := s2_twoFetchInstrOffset
+  instrCompactor.io.req.rawInstrValid           := s2_dealInstrValid
+  instrCompactor.io.req.rawIsRvc                := s2_rawIsRvc
+  instrCompactor.io.req.instrCountBeforeCurrent := s2_instrCountBeforeCurrent
+  private val s2_instrCompactInfo = Wire(new InstrCompactBundle(FetchBlockInstNum))
+  s2_instrCompactInfo                   := instrCompactor.io.resp
+  s2_instrCompactInfo.instrEndOffset(0) := s2_instrEndOffset0
+
+  private val s2_instrCount = RegEnable(s1_realInstrCount, s1_fire)
+  private val s2_instrValid = RegEnable(s1_realInstrValid, s1_fire)
 
   private val s2_rawIndex           = RegEnable(instrCountBeforeCurrent, s1_fire)
   private val s2_rawInstrEndVec     = RegEnable(rawInstrEndVec, s1_fire)
