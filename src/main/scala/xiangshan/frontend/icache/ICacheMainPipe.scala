@@ -224,42 +224,48 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val s1_mshrMaybeRvcMap =
     fromMiss.bits.maybeRvcMap.asTypeOf(Vec(DataBanks, UInt(MaxInstNumPerBank.W)))
 
+  // tag match in s1 stage and delay 1 cycle for better timing.
+  private val s1_mshrValidReg     = RegNext(s1_mshrValid)
+  private val s1_bankMshrValidReg = RegNext(s1_bankMshrValid)
+  private val s1_mshrDataReg      = RegNext(s1_mshrDatas)
+  private val s1_mshrMaybeRvcReg  = RegNext(s1_mshrMaybeRvcMap)
+
   private val s1_hits = VecInit((0 until PortNumber).map { i =>
     DataHoldBypass(
-      s1_mshrValid(i) || s1_sramHits(i),
-      s1_mshrValid(i) || s1_sramValid(i)
+      s1_mshrValidReg(i) || s1_sramHits(i),
+      s1_mshrValidReg(i) || s1_sramValid(i)
     )
   })
 
   private val s1_datas = VecInit((0 until DataBanks).map { i =>
     DataHoldBypass(
-      Mux(s1_bankMshrValid(i), s1_mshrDatas(i), s1_sramDatas(i)),
-      s1_bankMshrValid(i) || s1_bankSramValid(i)
+      Mux(s1_bankMshrValidReg(i), s1_mshrDataReg(i), s1_sramDatas(i)),
+      s1_bankMshrValidReg(i) || s1_bankSramValid(i)
     )
   })
 
   private val s1_maybeRvcMap = VecInit((0 until DataBanks).map { i =>
     DataHoldBypass(
       Mux(
-        s1_bankMshrValid(i),
-        s1_mshrMaybeRvcMap(i),
+        s1_bankMshrValidReg(i),
+        s1_mshrMaybeRvcReg(i),
         Mux(getLineSel(s1_offset)(i), s1_sramMaybeRvcMap(1)(i), s1_sramMaybeRvcMap(0)(i))
       ),
-      s1_bankMshrValid(i) || s1_bankSramValid(i)
+      s1_bankMshrValidReg(i) || s1_bankSramValid(i)
     )
   })
 
   private val s1_tlCorrupt = VecInit((0 until PortNumber).map { i =>
     DataHoldBypass(
-      s1_mshrValid(i) && fromMiss.bits.corrupt,
-      s1_mshrValid(i) || s1_sramValid(i)
+      s1_mshrValidReg(i) && fromMiss.bits.corrupt,
+      s1_mshrValidReg(i) || s1_sramValid(i)
     )
   })
 
   private val s1_tlDenied = VecInit((0 until PortNumber).map { i =>
     DataHoldBypass(
-      s1_mshrValid(i) && fromMiss.bits.denied,
-      s1_mshrValid(i) || s1_sramValid(i)
+      s1_mshrValidReg(i) && fromMiss.bits.denied,
+      s1_mshrValidReg(i) || s1_sramValid(i)
     )
   })
 
