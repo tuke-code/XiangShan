@@ -26,7 +26,7 @@ import xiangshan.backend.fu.vector._
 import xiangshan.backend.issue._
 import xiangshan.backend.fu.FuConfig
 import xiangshan.backend.decode.{Imm, ImmUnion}
-import yunsuan.VpermType
+import yunsuan.{VfaluType, VialuFixType, VipuType, VpermType}
 
 package object xiangshan {
   object SrcType {
@@ -1039,6 +1039,7 @@ package object xiangshan {
     val VecNonUnitStrideMemStall = Value("VecNonUnitStrideMemStall")
     val VecFofStall = Value("VecFofStall")
     val VecSegmentMemStall = Value("VecSegmentMemStall")
+    val VecMaskStall = Value("VecMaskStall")
     val VecFloatStall = Value("VecFloatStall")
     val VecIntStall = Value("VecIntStall")
     val VecGatherStall = Value("VecGatherStall")
@@ -1064,6 +1065,9 @@ package object xiangshan {
   }
 
   object VectorStallReason {
+    private def fuOpTypeIn(fuOpType: UInt, fuOpTypes: Seq[UInt]): Bool =
+      fuOpTypes.map(fuOpType === _).reduce(_ || _)
+
     def isUnitStrideMem(fuType: UInt, fuOpType: UInt): Bool =
       FuType.isVnonsegls(fuType) && LSUOpType.isAllUS(fuOpType)
 
@@ -1075,6 +1079,46 @@ package object xiangshan {
 
     def isSegmentMem(fuType: UInt): Bool =
       FuType.isVsegls(fuType)
+
+    def isMask(fuType: UInt, fuOpType: UInt): Bool = {
+      val ialuMask = FuType.FuTypeOrR(fuType, Seq(FuType.vialuF)) && fuOpTypeIn(fuOpType, Seq(
+        VialuFixType.vmadc_vvm,
+        VialuFixType.vmadc_vv,
+        VialuFixType.vmsbc_vvm,
+        VialuFixType.vmsbc_vv,
+        VialuFixType.vmseq_vv,
+        VialuFixType.vmsne_vv,
+        VialuFixType.vmsltu_vv,
+        VialuFixType.vmslt_vv,
+        VialuFixType.vmsleu_vv,
+        VialuFixType.vmsle_vv,
+        VialuFixType.vmsgtu_vv,
+        VialuFixType.vmsgt_vv,
+        VialuFixType.vmand_mm,
+        VialuFixType.vmnand_mm,
+        VialuFixType.vmandn_mm,
+        VialuFixType.vmxor_mm,
+        VialuFixType.vmor_mm,
+        VialuFixType.vmnor_mm,
+        VialuFixType.vmorn_mm,
+        VialuFixType.vmxnor_mm
+      ))
+      val ipuMask = FuType.FuTypeOrR(fuType, Seq(FuType.vipu)) && fuOpTypeIn(fuOpType, Seq(
+        VipuType.vmsbf_m,
+        VipuType.vmsif_m,
+        VipuType.vmsof_m
+      ))
+      val floatMask = FuType.FuTypeOrR(fuType, Seq(FuType.vfalu)) && fuOpTypeIn(fuOpType, Seq(
+        VfaluType.vfeq,
+        VfaluType.vfne,
+        VfaluType.vflt,
+        VfaluType.vfle,
+        VfaluType.vfgt,
+        VfaluType.vfge
+      ))
+
+      ialuMask || ipuMask || floatMask
+    }
 
     def isFloat(fuType: UInt): Bool =
       FuType.isVecOPF(fuType)
@@ -1120,6 +1164,7 @@ package object xiangshan {
       isSlide1Up(fuType, fuOpType)         -> TopDownCounters.VecSlide1UpStall.id.U,
       isSlide1Down(fuType, fuOpType)       -> TopDownCounters.VecSlide1DownStall.id.U,
       isSlide(fuType, fuOpType)            -> TopDownCounters.VecSlideStall.id.U,
+      isMask(fuType, fuOpType)             -> TopDownCounters.VecMaskStall.id.U,
       isFloat(fuType)                      -> TopDownCounters.VecFloatStall.id.U,
       isInt(fuType)                        -> TopDownCounters.VecIntStall.id.U,
     ))
