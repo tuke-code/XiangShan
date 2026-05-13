@@ -212,6 +212,8 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   }
 
   when(r1_valid) {
+    // flus s1/s2/s3_commonHR to r1_commonHR
+    s1_commonHR := r1_commonHR
     s2_commonHR := r1_commonHR
   }.elsewhen(s1_fire) {
     s2_commonHR := s1_commonHR
