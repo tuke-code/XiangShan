@@ -303,8 +303,12 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
 
   // s1: read data
   val s1_valid = RegInit(false.B)
-  val s1_need_data = RegEnable(banked_need_data, s0_fire)
+  val s1_need_data_temp = RegEnable(banked_need_data, s0_fire)
   val s1_req = RegEnable(s0_req, s0_fire)
+  val meta_resp = Wire(Vec(nWays, (new Meta).asUInt))
+  val s1_repl_way_en = WireInit(0.U(nWays.W))
+  val s1_repl_coh = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => meta_resp(w))).asTypeOf(new ClientMetadata)
+  val s1_need_data = Mux(!s1_req.miss, s1_need_data_temp, s1_repl_coh.state === ClientStates.Dirty)
   val s1_banked_rmask = RegEnable(s0_banked_rmask, s0_fire)
   val s1_banked_store_wmask = RegEnable(banked_store_wmask, s0_fire)
   val s1_need_tag = RegEnable(s0_need_tag, s0_fire)
@@ -323,7 +327,6 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   s1_s0_set_conflict_store := s1_valid && store_idx === s1_idx
 
   def wayMap[T <: Data](f: Int => T) = VecInit((0 until nWays).map(f))
-  val meta_resp = Wire(Vec(nWays, (new Meta).asUInt))
   meta_resp := Mux(GatedValidRegNext(s0_fire), VecInit(io.meta_resp.map(_.asUInt)), RegEnable(meta_resp, s1_valid))
   // pseudo ecc enc tag
   val pseudo_tag_toggle_mask = Mux(
@@ -373,7 +376,6 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   val s1_invalid_vec = wayMap(w => !meta_resp(w).asTypeOf(new Meta).coh.isValid())
   val s1_have_invalid_way = s1_invalid_vec.asUInt.orR
   val s1_invalid_way_en = ParallelPriorityMux(s1_invalid_vec.zipWithIndex.map(x => x._1 -> UIntToOH(x._2.U(nWays.W))))
-  val s1_repl_way_en = WireInit(0.U(nWays.W))
   s1_repl_way_en := Mux(
     GatedValidRegNext(s0_fire),
     Mux(
@@ -394,7 +396,6 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
     RegEnable(s1_repl_way, s1_valid)
   ) // UInt format of `s1_repl_way_en`
   val s1_repl_tag = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => tag_resp(w)))
-  val s1_repl_coh = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => meta_resp(w))).asTypeOf(new ClientMetadata)
   val s1_repl_pf  = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => io.extra_meta_resp(w).prefetch))
 
   val s1_real_tag = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => io.tag_resp(w)))
