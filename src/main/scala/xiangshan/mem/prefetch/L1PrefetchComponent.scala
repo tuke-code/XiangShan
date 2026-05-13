@@ -422,6 +422,13 @@ class MLPReqFilterBundle(implicit p: Parameters) extends XSBundle with HasL1Pref
     val candidate = PriorityEncoder(bit_vec & ~sent_vec).asTypeOf(UInt(REGION_BITS.W))
     Cat(debug_va_region, candidate, 0.U(BLOCK_OFFSET.W))
   }
+  
+  def get_pf_candidate_oh(): UInt = {
+    require(PAddrBits <= VAddrBits)
+    require((region.getWidth + REGION_BITS + BLOCK_OFFSET) == VAddrBits)
+
+    PriorityEncoderOH(bit_vec & ~sent_vec).asTypeOf(UInt(BIT_VEC_WITDH.W))
+  }
 
   def get_tlb_va(): UInt = {
     require((region.getWidth + REGION_TAG_OFFSET) == VAddrBits)
@@ -514,12 +521,17 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
   val l1_pf_req_arb = Module(new RRArbiterInit(new Bundle {
     val req = new L1PrefetchReq
     val debug_vaddr = UInt(VAddrBits.W)
+    val pf_candidate_oh = UInt(BIT_VEC_WITDH.W)
   }, MLP_L1_SIZE))
   val l2_pf_req_arb = Module(new RRArbiterInit(new Bundle {
     val req = new L2PrefetchReq
     val debug_vaddr = UInt(VAddrBits.W)
+    val pf_candidate_oh = UInt(BIT_VEC_WITDH.W)
   }, MLP_L2L3_SIZE))
-  val l3_pf_req_arb = Module(new RRArbiterInit(new L3PrefetchReq, MLP_L2L3_SIZE))
+  val l3_pf_req_arb = Module(new RRArbiterInit(new Bundle {
+    val req = new L3PrefetchReq
+    val pf_candidate_oh = UInt(BIT_VEC_WITDH.W)
+  }, MLP_L2L3_SIZE))
 
   val l1_opt_replace_vec = VecInit(l1_array.zip(l1_valids).map{case (e, v) => e.may_be_replace(v)})
   val l2_opt_replace_vec = VecInit(l2_array.zip(l2_valids).map{case (e, v) => e.may_be_replace(v)})
@@ -810,7 +822,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 
   val s0_pf_fire = l1_pf_req_arb.io.out.fire
   val s0_pf_index = l1_pf_req_arb.io.chosen
-  val s0_pf_candidate_oh = get_candidate_oh(l1_pf_req_arb.io.out.bits.req.paddr)
+  val s0_pf_candidate_oh = l1_pf_req_arb.io.out.bits.pf_candidate_oh
 
   for(i <- 0 until MLP_L1_SIZE) {
     val evict = s1_l1_alloc && (s1_l1_index === i.U)
@@ -821,6 +833,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
     l1_pf_req_arb.io.in(i).bits.req.is_store := false.B
     l1_pf_req_arb.io.in(i).bits.req.pf_source := l1_array(i).source
     l1_pf_req_arb.io.in(i).bits.debug_vaddr := l1_array(i).get_pf_debug_vaddr()
+    l1_pf_req_arb.io.in(i).bits.pf_candidate_oh := l1_array(i).get_pf_candidate_oh()
   }
 
   when(s0_pf_fire) {
@@ -870,10 +883,11 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
       L1_HW_PREFETCH_STREAM -> MemReqSource.Prefetch2L2Stream.id.U
     ))
     l2_pf_req_arb.io.in(i).bits.debug_vaddr := l2_array(i).get_pf_debug_vaddr()
+    l2_pf_req_arb.io.in(i).bits.pf_candidate_oh := l2_array(i).get_pf_candidate_oh()
   }
 
   when(l2_pf_req_arb.io.out.valid) {
-    l2_array(l2_pf_req_arb.io.chosen).sent_vec := l2_array(l2_pf_req_arb.io.chosen).sent_vec | get_candidate_oh(l2_pf_req_arb.io.out.bits.req.addr)
+    l2_array(l2_pf_req_arb.io.chosen).sent_vec := l2_array(l2_pf_req_arb.io.chosen).sent_vec | l2_pf_req_arb.io.out.bits.pf_candidate_oh
   }
 
   val stream_out_debug_table = ChiselDB.createTable("StreamPFTraceOut" + p(XSCoreParamsKey).HartId.toString, new StreamPFTraceOutEntry, basicDB = false)
@@ -902,22 +916,23 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
   // last level cache pf
   // s0: generate prefetch req paddr per entry, arb them, sent out
   io.l3_pf_addr.valid := RegNext(l3_pf_req_arb.io.out.valid)
-  io.l3_pf_addr.bits := RegNext(l3_pf_req_arb.io.out.bits)
+  io.l3_pf_addr.bits := RegNext(l3_pf_req_arb.io.out.bits.req)
 
   l3_pf_req_arb.io.out.ready := true.B
 
   for(i <- 0 until MLP_L2L3_SIZE) {
     val evict = s1_l2_alloc && (s1_l2_index === i.U)
     l3_pf_req_arb.io.in(i).valid := l2_array(i).can_send_pf(l2_valids(i)) && (l2_array(i).sink === SINK_L3) && !evict
-    l3_pf_req_arb.io.in(i).bits.addr := l2_array(i).get_pf_addr()
-    l3_pf_req_arb.io.in(i).bits.source := MuxLookup(l2_array(i).source.value, MemReqSource.Prefetch2L3Unknown.id.U)(Seq(
+    l3_pf_req_arb.io.in(i).bits.req.addr := l2_array(i).get_pf_addr()
+    l3_pf_req_arb.io.in(i).bits.req.source := MuxLookup(l2_array(i).source.value, MemReqSource.Prefetch2L3Unknown.id.U)(Seq(
       L1_HW_PREFETCH_STRIDE -> MemReqSource.Prefetch2L3Stride.id.U,
       L1_HW_PREFETCH_STREAM -> MemReqSource.Prefetch2L3Stream.id.U
     ))
+    l3_pf_req_arb.io.in(i).bits.pf_candidate_oh := l2_array(i).get_pf_candidate_oh()
   }
 
   when(l3_pf_req_arb.io.out.valid) {
-    l2_array(l3_pf_req_arb.io.chosen).sent_vec := l2_array(l3_pf_req_arb.io.chosen).sent_vec | get_candidate_oh(l3_pf_req_arb.io.out.bits.addr)
+    l2_array(l3_pf_req_arb.io.chosen).sent_vec := l2_array(l3_pf_req_arb.io.chosen).sent_vec | l3_pf_req_arb.io.out.bits.pf_candidate_oh
   }
 
   // reset meta to avoid muti-hit problem
