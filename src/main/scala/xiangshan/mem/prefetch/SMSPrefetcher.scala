@@ -926,6 +926,11 @@ class PrefetchFilterEntry()(implicit p: Parameters) extends XSBundle with HasSMS
   val debug_source_type = UInt(log2Up(nSourceType).W)
 }
 
+class PrefetchFilterArbPayload()(implicit p: Parameters) extends XSBundle with HasSMSModuleHelper {
+  val entryIdx = UInt(log2Up(smsParams.pf_filter_size).W)
+  val pfAddr = UInt(PAddrBits.W)
+}
+
 class PrefetchFilter()(implicit p: Parameters) extends XSModule with HasSMSModuleHelper {
   val io = IO(new Bundle() {
     val gen_req = Flipped(ValidIO(new PfGenReq()))
@@ -943,21 +948,55 @@ class PrefetchFilter()(implicit p: Parameters) extends XSModule with HasSMSModul
   val prev_gen_req = RegEnable(io.gen_req.bits, io.gen_req.valid)
 
   val tlb_req_arb = Module(new RRArbiterInit(new TlbReq, smsParams.pf_filter_size))
-  val pf_req_arb = Module(new RRArbiterInit(UInt(PAddrBits.W), smsParams.pf_filter_size))
-
-  io.l2_pf_addr <> pf_req_arb.io.out
-  io.pf_alias_bits := Mux1H(entries.zipWithIndex.map({
-    case (entry, i) => (i.U === pf_req_arb.io.chosen) -> entry.alias_bits
-  }))
-
-  io.debug_source_type := VecInit(entries.map(_.debug_source_type))(pf_req_arb.io.chosen)
-
+  val pfReqGroupCount = 4
+  require(smsParams.pf_filter_size >= pfReqGroupCount, "sms_pf_filter: pf_filter_size must be at least 4")
+  val pfReqGroups = (0 until pfReqGroupCount).map(g => valids.indices.filter(_ % pfReqGroupCount == g))
+  val pf_req_group_arb = pfReqGroups.map(group => Module(new RRArbiterInit(new PrefetchFilterArbPayload, group.size)))
+  val pf_req_arb = Module(new RRArbiterInit(new PrefetchFilterArbPayload, pfReqGroupCount))
   val s1_valid = Wire(Bool())
   val s1_hit = Wire(Bool())
   val s1_replace_vec = Wire(UInt(smsParams.pf_filter_size.W))
   val s1_tlb_fire_vec = Wire(UInt(smsParams.pf_filter_size.W))
   val s2_tlb_fire_vec = Wire(UInt(smsParams.pf_filter_size.W))
   val s3_tlb_fire_vec = Wire(UInt(smsParams.pf_filter_size.W))
+  val pf_req_valid_vec = Wire(Vec(smsParams.pf_filter_size, Bool()))
+  val pf_req_addr_vec = Wire(Vec(smsParams.pf_filter_size, UInt(PAddrBits.W)))
+  val s1_group_pf_valid = RegInit(VecInit(Seq.fill(pfReqGroupCount)(false.B)))
+  val s1_group_pf_bits = Reg(Vec(pfReqGroupCount, new PrefetchFilterArbPayload))
+
+  for (g <- 0 until pfReqGroupCount) {
+    val s1_group_pf_killed = s1_group_pf_valid(g) && s1_valid && !s1_hit && s1_replace_vec(s1_group_pf_bits(g).entryIdx)
+    pf_req_arb.io.in(g).valid := s1_group_pf_valid(g) && !s1_group_pf_killed
+    pf_req_arb.io.in(g).bits := s1_group_pf_bits(g)
+    pf_req_group_arb(g).io.out.ready := !s1_group_pf_valid(g) || pf_req_arb.io.in(g).fire || s1_group_pf_killed
+    when(pf_req_group_arb(g).io.out.fire) {
+      s1_group_pf_valid(g) := true.B
+      s1_group_pf_bits(g) := pf_req_group_arb(g).io.out.bits
+    }.elsewhen(pf_req_arb.io.in(g).fire || s1_group_pf_killed) {
+      s1_group_pf_valid(g) := false.B
+    }
+  }
+
+  io.l2_pf_addr.valid := pf_req_arb.io.out.valid
+  io.l2_pf_addr.bits := pf_req_arb.io.out.bits.pfAddr
+  pf_req_arb.io.out.ready := io.l2_pf_addr.ready
+
+  val pf_req_out_fire = io.l2_pf_addr.fire
+  val pf_req_chosen_entry_idx = pf_req_arb.io.out.bits.entryIdx
+  val pf_req_fired_curr_bit = UIntToOH(block_addr(pf_req_arb.io.out.bits.pfAddr)(REGION_OFFSET - 1, 0))
+  io.pf_alias_bits := Mux(
+    pf_req_arb.io.out.valid,
+    Mux1H(entries.zipWithIndex.map({
+      case (entry, i) => (i.U === pf_req_chosen_entry_idx) -> entry.alias_bits
+    })),
+    0.U
+  )
+  io.debug_source_type := Mux(
+    pf_req_arb.io.out.valid,
+    VecInit(entries.map(_.debug_source_type))(pf_req_chosen_entry_idx),
+    0.U
+  )
+
   val not_tlbing_vec = VecInit((0 until smsParams.pf_filter_size).map{case i =>
     !s1_tlb_fire_vec(i) && !s2_tlb_fire_vec(i) && !s3_tlb_fire_vec(i)
   })
@@ -991,12 +1030,17 @@ class PrefetchFilter()(implicit p: Parameters) extends XSModule with HasSMSModul
     tlb_req_arb.io.in(i).bits.pmp_addr := DontCare
 
     val pending_req_vec = ent.region_bits & (~ent.filter_bits).asUInt
+    val pending_req_vec_after_fire = Mux(
+      pf_req_out_fire && pf_req_chosen_entry_idx === i.U,
+      pending_req_vec & (~pf_req_fired_curr_bit).asUInt,
+      pending_req_vec
+    )
     val first_one_offset = PriorityMux(
-      pending_req_vec.asBools,
+      pending_req_vec_after_fire.asBools,
       (0 until smsParams.pf_filter_size).map(_.U(REGION_OFFSET.W))
     )
     val last_one_offset = PriorityMux(
-      pending_req_vec.asBools.reverse,
+      pending_req_vec_after_fire.asBools.reverse,
       (0 until smsParams.pf_filter_size).reverse.map(_.U(REGION_OFFSET.W))
     )
     val pf_addr = Cat(
@@ -1004,12 +1048,20 @@ class PrefetchFilter()(implicit p: Parameters) extends XSModule with HasSMSModul
       Mux(ent.decr_mode, last_one_offset, first_one_offset),
       0.U(log2Up(dcacheParameters.blockBytes).W)
     )
-    pf_req_arb.io.in(i).valid := v && Cat(pending_req_vec).orR && ent.paddr_valid && !is_evicted
-    pf_req_arb.io.in(i).bits := pf_addr
+    pf_req_valid_vec(i) := v && pending_req_vec_after_fire.orR && ent.paddr_valid && !is_evicted
+    pf_req_addr_vec(i) := pf_addr
+  }
+
+  for (((group, arb), g) <- pfReqGroups.zip(pf_req_group_arb).zipWithIndex) {
+    for ((entryIdx, localIdx) <- group.zipWithIndex) {
+      arb.io.in(localIdx).valid := pf_req_valid_vec(entryIdx)
+      arb.io.in(localIdx).bits.entryIdx := entryIdx.U
+      arb.io.in(localIdx).bits.pfAddr := pf_req_addr_vec(entryIdx)
+    }
   }
 
   val s0_tlb_fire_vec = VecInit(tlb_req_arb.io.in.map(_.fire))
-  val s0_pf_fire_vec = VecInit(pf_req_arb.io.in.map(_.fire))
+  val s0_pf_fire_vec = VecInit(valids.indices.map(i => pf_req_out_fire && pf_req_chosen_entry_idx === i.U))
 
   val s0_update_way = OHToUInt(s0_match_vec)
   val s0_replace_way = replacement.way
@@ -1087,8 +1139,7 @@ class PrefetchFilter()(implicit p: Parameters) extends XSModule with HasSMSModul
       ent.region_bits := ent.region_bits | s1_gen_req.region_bits
     }
     when(pf_fired){
-      val curr_bit = UIntToOH(block_addr(pf_req_arb.io.in(i).bits)(REGION_OFFSET - 1, 0))
-      ent.filter_bits := ent.filter_bits | curr_bit
+      ent.filter_bits := ent.filter_bits | pf_req_fired_curr_bit
     }
     when(alloc){
       ent := s1_alloc_entry
