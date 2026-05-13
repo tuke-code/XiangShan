@@ -568,11 +568,12 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   val allowDispatch = Wire(Vec(renameWidth, Bool()))
   val thisCanActualOut = Wire(Vec(renameWidth, Bool()))
   val lsqCanAccept = Wire(Bool())
+  val lsqRecoverStall = Wire(Bool())
   for (i <- 0 until RenameWidth){
     // update valid logic
     fromRenameUpdate(i).valid := fromRename(i).valid && allowDispatch(i) && !uopBlockByIQ(i) && thisCanActualOut(i) &&
-      lsqCanAccept && !fromRename(i).bits.isMove && !fromRename(i).bits.hasException && !fromRenameUpdate(i).bits.singleStep
-    fromRename(i).ready := allowDispatch(i) && !uopBlockByIQ(i) && thisCanActualOut(i) && lsqCanAccept
+      !lsqRecoverStall && !fromRename(i).bits.isMove && !fromRename(i).bits.hasException && !fromRenameUpdate(i).bits.singleStep
+    fromRename(i).ready := allowDispatch(i) && !uopBlockByIQ(i) && thisCanActualOut(i) && !lsqRecoverStall
     // update src type if eliminate old vd
     fromRenameUpdate(i).bits.srcType(numRegSrcVf - 1) := Mux(ignoreOldVdVec(i), SrcType.no, fromRename(i).bits.srcType(numRegSrcVf - 1))
   }
@@ -644,6 +645,7 @@ class Dispatch(implicit p: Parameters) extends XSModule with HasPerfEvents with 
   private val numStoreAMODeq = LSQStEnqWidth
   private val numVLoadDeq = LoadPipelineWidth
   lsqCanAccept := enqLsqIO.canAccept
+  lsqRecoverStall := enqLsqIO.recoverStall
 
   private val isLoadVec = VecInit(fromRename.map(x => x.valid && FuType.isLoad(x.bits.fuType)))
   private val isStoreVec = VecInit(fromRename.map(x => x.valid && FuType.isStore(x.bits.fuType)))
