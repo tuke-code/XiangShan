@@ -373,6 +373,7 @@ case class L2CacheConfig
         elaboratedTopDown = !site(DebugOptionsKey).FPGAPlatform,
         hasMbist = site(DFTOptionsKey).EnableMbist,
         hasSramCtl = site(DFTOptionsKey).EnableSramCtl,
+        mshrs = 32
       )),
       L2NBanks = banks
     ))
