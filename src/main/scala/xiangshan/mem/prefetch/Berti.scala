@@ -972,6 +972,9 @@ class BertiPrefetcher()(implicit p: Parameters) extends BasePrefecher with HasBe
   detlaTable.io.train.valid := canPrefetch
   detlaTable.io.train.bits := trainBits
   prefetchBuffer.io.srcReq := detlaTable.io.prefetch
+  when(detlaTable.io.prefetch.bits.prefetchTarget === PrefetchTarget.L2.id.U) {
+    prefetchBuffer.io.srcReq.valid := detlaTable.io.prefetch.valid && io.fdbkDegree > 0.U
+  }
 
   // 4. io
   io.tlb_req <> prefetchBuffer.io.tlbReq
@@ -987,5 +990,7 @@ class BertiPrefetcher()(implicit p: Parameters) extends BasePrefecher with HasBe
   XSPerfAccumulate("demandPfHit_searchValid", demandPfHit && historyTable.io.search.resp.valid && historyTable.io.search.resp.delta =/= 0.S)
   XSPerfAccumulate("demandMiss_prefetchValid", demandMiss && detlaTable.io.prefetch.valid)
   XSPerfAccumulate("demandPfHit_prefetchValid", demandPfHit && detlaTable.io.prefetch.valid)
+  XSPerfAccumulate("berti_l2_feedback_control_drop",
+    detlaTable.io.prefetch.valid && detlaTable.io.prefetch.bits.prefetchTarget === PrefetchTarget.L2.id.U && io.fdbkDegree === 0.U)
 
 }
