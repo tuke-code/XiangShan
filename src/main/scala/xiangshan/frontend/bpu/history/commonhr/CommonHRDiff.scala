@@ -91,7 +91,7 @@ class CommonHRDiff(implicit p: Parameters) extends CommonHRModule with Helpers w
   private val s3_firstTakenIsCond = s3_update.firstTakenBranch.bits.attribute.isConditional
   private val s3_cfiPc            = getCfiPcFromPosition(s3_update.startPc, s3_firstTakenPos)
   private val s3_bwTaken =
-    s3_cfiPc.addr > s3_update.target.addr
+    s3_cfiPc.addr(PredictionTargetWidth - 1, 0) > s3_update.target.addr(PredictionTargetWidth - 1, 0)
   private val s3_lessThanFirstTaken = s3_update.position.zip(s3_hitMask).map {
     case (pos, hit) => hit && (pos < s3_firstTakenPos)
   }
@@ -126,7 +126,7 @@ class CommonHRDiff(implicit p: Parameters) extends CommonHRModule with Helpers w
   private val r0_taken   = io.redirect.taken
   private val r0_isCond  = io.redirect.attribute.isConditional
   private val r0_bwTaken =
-    io.redirect.cfiPc.addr > io.redirect.target.addr
+    io.redirect.cfiPc.addr(PredictionTargetWidth - 1, 0) > io.redirect.target.addr(PredictionTargetWidth - 1, 0)
   private val r0_takenPosition = getAlignedInstOffset(io.redirect.cfiPc)
   private val r0_lessThanPc = r0_oldPositions.zip(r0_oldHits).map {
     case (pos, hit) => hit && (pos < r0_takenPosition)
