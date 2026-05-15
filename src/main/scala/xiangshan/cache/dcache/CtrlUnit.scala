@@ -32,16 +32,21 @@ import xiangshan.backend.datapath.NewPipelineConnect
 case class L1CacheCtrlParams (
   address: AddressSet,
   beatBytes: Int = 8,
+  tagMaskRegWidth: Int = 64,
+  dataMaskRegWidth: Int = 64,
 ) {
   def maxBanks    = 1
   def bankBytes   = 128
 
   def regWidth    = 64
   def regBytes    = regWidth / 8
+  def tagMaskRegBytes = tagMaskRegWidth / 8
+  def dataMaskRegBytes = dataMaskRegWidth / 8
 
   def ctrlOffset  = 0x0
   def delayOffset = ctrlOffset + regBytes
-  def maskOffset  = delayOffset + regBytes
+  def tagMaskOffset = delayOffset + regBytes
+  def dataMaskOffset = tagMaskOffset + ((tagMaskRegBytes + regBytes - 1) / regBytes) * regBytes
 
   def nSignalComps = 2
 }
@@ -55,7 +60,12 @@ class CtrlUnitCtrlBundle(implicit p: Parameters) extends XSBundle with HasDCache
   val ese     = Bool()      // error signaling enable
 }
 
-class CtrlUnitSignalingBundle(implicit p: Parameters) extends XSBundle with HasDCacheParameters {
+class CtrlUnitTagSignalingBundle(implicit p: Parameters) extends XSBundle with HasDCacheParameters {
+  val valid = Bool()
+  val mask  = UInt(tagBits.W)
+}
+
+class CtrlUnitDataSignalingBundle(implicit p: Parameters) extends XSBundle with HasDCacheParameters {
   val valid = Bool()
   val mask  = UInt(DCacheSRAMRowBits.W)
 }
@@ -75,56 +85,77 @@ class CtrlUnit(params: L1CacheCtrlParams)(implicit p: Parameters) extends LazyMo
   lazy val module = new CtrlUnitImp
 
   class CtrlUnitImp extends LazyModuleImp(this) {
-    val io_pseudoError = IO(Vec(params.nSignalComps, DecoupledIO(Vec(DCacheBanks, new CtrlUnitSignalingBundle))))
+    val io_tagPseudoError = IO(DecoupledIO(new CtrlUnitTagSignalingBundle))
+    val io_dataPseudoError = IO(DecoupledIO(Vec(DCacheBanks, new CtrlUnitDataSignalingBundle)))
 
     require(params.maxBanks > 0, "At least one bank!")
     require(params.maxBanks == 1, "Is it necessary to have more than 1 bank?")
-    require(params.regWidth == DCacheSRAMRowBits, "regWidth must be equal to DCacheSRAMRowBits!")
+    require(params.nSignalComps == 2, "tag and data pseudo-error components are expected")
+    require(params.regWidth == 64, "control register width must preserve the 64-bit control layout!")
+    require(params.tagMaskRegWidth >= tagBits, "tag mask register width must cover tagBits!")
+    require(params.tagMaskRegWidth % 8 == 0, "tag mask register width must be byte addressable!")
+    require(params.dataMaskRegWidth == DCacheSRAMRowBits, "data mask register width must match DCacheSRAMRowBits!")
+    require(params.dataMaskRegWidth % 8 == 0, "data mask register width must be byte addressable!")
+    require(
+      params.dataMaskOffset + params.dataMaskRegBytes * DCacheBanks <= params.bankBytes,
+      "cache-control register map must cover tag and data masks within the MMIO bank!"
+    )
     val ctrlRegs  = RegInit(VecInit(Seq.fill(1)(0.U(params.regWidth.W))))
     val delayRegs = RegInit(VecInit(Seq.fill(1)(0.U(params.regWidth.W))))
-    val maskRegs  = RegInit(VecInit(Seq.fill(DCacheBanks)(0.U(DCacheSRAMRowBits.W))))
+    val tagMaskReg = RegInit(0.U(params.tagMaskRegWidth.W))
+    val dataMaskRegs = RegInit(VecInit(Seq.fill(DCacheBanks)(0.U(DCacheSRAMRowBits.W))))
     val counterRegs = RegInit(VecInit(Seq.fill(1)(0.U(params.regWidth.W))))
-    val pseudoError_gen = Wire(Vec(params.nSignalComps, DecoupledIO(Vec(DCacheBanks, new CtrlUnitSignalingBundle))))
-    pseudoError_gen.zipWithIndex.foreach {
-      case (inj, i) =>
-        val ctrlReg = ctrlRegs.head
-        val ctrlRegBundle = ctrlRegs.head.asTypeOf(new CtrlUnitCtrlBundle)
-        val delayReg = delayRegs.head
-        val counterReg = counterRegs.head
+    val tagPseudoErrorGen = Wire(DecoupledIO(new CtrlUnitTagSignalingBundle))
+    val dataPseudoErrorGen = Wire(DecoupledIO(Vec(DCacheBanks, new CtrlUnitDataSignalingBundle)))
 
-        require(log2Up(pseudoError_gen.length) == ctrlRegBundle.comp.getWidth, "pseudoError_gen must equal number of components!")
-        inj.valid := ctrlRegBundle.ese && (ctrlRegBundle.comp === i.U) && (!ctrlRegBundle.ede || counterReg === 0.U)
-        inj.bits.zip(ctrlRegBundle.bank.asBools).zip(maskRegs).map {
-          case ((bankOut, bankEnable), mask) =>
-            bankOut.valid := bankEnable
-            bankOut.mask  := mask
-        }
+    val ctrlReg = ctrlRegs.head
+    val ctrlRegBundle = ctrlRegs.head.asTypeOf(new CtrlUnitCtrlBundle)
+    val delayReg = delayRegs.head
+    val counterReg = counterRegs.head
+    require(
+      log2Up(params.nSignalComps) == ctrlRegBundle.comp.getWidth,
+      "comp width must cover pseudo-error components!"
+    )
 
-        when (inj.fire) {
-          val newCtrlReg = WireInit(0.U.asTypeOf(ctrlRegBundle))
-          newCtrlReg := ctrlRegBundle
-          newCtrlReg.ese := Mux(ctrlRegBundle.persist, ctrlRegBundle.ese, false.B)
+    tagPseudoErrorGen.valid :=
+      ctrlRegBundle.ese && ctrlRegBundle.comp === 0.U && (!ctrlRegBundle.ede || counterReg === 0.U)
+    tagPseudoErrorGen.bits.valid := ctrlRegBundle.bank(0)
+    tagPseudoErrorGen.bits.mask := tagMaskReg(tagBits - 1, 0)
 
-          when (newCtrlReg.ese && newCtrlReg.ede) {
-            counterReg := Mux(newCtrlReg.persist, delayReg, 0.U)
-          }
-          ctrlReg := newCtrlReg.asUInt
-        }
+    dataPseudoErrorGen.valid :=
+      ctrlRegBundle.ese && ctrlRegBundle.comp === 1.U && (!ctrlRegBundle.ede || counterReg === 0.U)
+    dataPseudoErrorGen.bits.zip(ctrlRegBundle.bank.asBools).zip(dataMaskRegs).map {
+      case ((bankOut, bankEnable), mask) =>
+        bankOut.valid := bankEnable
+        bankOut.mask  := mask
+    }
+
+    when(tagPseudoErrorGen.fire || dataPseudoErrorGen.fire) {
+      val newCtrlReg = WireInit(0.U.asTypeOf(ctrlRegBundle))
+      newCtrlReg := ctrlRegBundle
+      newCtrlReg.ese := Mux(ctrlRegBundle.persist, ctrlRegBundle.ese, false.B)
+
+      when(newCtrlReg.ese && newCtrlReg.ede) {
+        counterReg := Mux(newCtrlReg.persist, delayReg, 0.U)
+      }
+      ctrlReg := newCtrlReg.asUInt
     }
 
     ctrlRegs.map(_.asTypeOf(new CtrlUnitCtrlBundle)).zip(counterRegs).zipWithIndex.foreach {
       case ((ctl, cnt), i) =>
-        when (ctl.ese && ctl.ede && cnt =/= 0.U) {
+        when(ctl.ese && ctl.ede && cnt =/= 0.U) {
           cnt := cnt - 1.U
         }
     }
 
-    for (i <- 0 until params.nSignalComps) {
-      NewPipelineConnect(
-        pseudoError_gen(i), io_pseudoError(i), io_pseudoError(i).fire, false.B,
-        Option(s"CtrlUnitPseudoErrorPipelineConnect${i}")
-      )
-    }
+    NewPipelineConnect(
+      tagPseudoErrorGen, io_tagPseudoError, io_tagPseudoError.fire, false.B,
+      Option("CtrlUnitTagPseudoErrorPipelineConnect")
+    )
+    NewPipelineConnect(
+      dataPseudoErrorGen, io_dataPseudoError, io_dataPseudoError.fire, false.B,
+      Option("CtrlUnitDataPseudoErrorPipelineConnect")
+    )
 
     def ctrlRegDesc(i: Int) =
       RegFieldDesc(
@@ -144,7 +175,16 @@ class CtrlUnit(params: L1CacheCtrlParams)(implicit p: Parameters) extends LazyMo
         reset     = Some(0)
       )
 
-    def maskRegDesc(i: Int) =
+    def tagMaskRegDesc =
+      RegFieldDesc(
+        name      = "tag_mask",
+        desc      = "pseudo error tag toggle mask",
+        group     = Some("tag_mask"),
+        groupDesc = Some("pseudo error tag toggle mask"),
+        reset     = Some(0)
+      )
+
+    def dataMaskRegDesc(i: Int) =
       RegFieldDesc(
         name      = s"mask_$i",
         desc      = s"pseudo error toggle mask$i",
@@ -170,8 +210,12 @@ class CtrlUnit(params: L1CacheCtrlParams)(implicit p: Parameters) extends LazyMo
       )
     }
 
-    def maskRegField(x: UInt, i: Int) = {
-      RegField(params.regWidth, x, maskRegDesc(i))
+    def tagMaskRegField(x: UInt) = {
+      RegField(params.tagMaskRegWidth, x, tagMaskRegDesc)
+    }
+
+    def dataMaskRegField(x: UInt, i: Int) = {
+      RegField(params.dataMaskRegWidth, x, dataMaskRegDesc(i))
     }
 
     val ctrlRegFields = ctrlRegs.zipWithIndex.map {
@@ -182,11 +226,12 @@ class CtrlUnit(params: L1CacheCtrlParams)(implicit p: Parameters) extends LazyMo
       case (reg, i) =>
         params.delayOffset -> Seq(delayRegField(reg, i))
     }
-    val maskRegFields = maskRegs.zipWithIndex.map {
+    val tagMaskRegFields = Seq(params.tagMaskOffset -> Seq(tagMaskRegField(tagMaskReg)))
+    val dataMaskRegFields = dataMaskRegs.zipWithIndex.map {
       case (reg, i) =>
-        (params.maskOffset + 8 * i) -> Seq(maskRegField(reg, i))
+        (params.dataMaskOffset + params.dataMaskRegBytes * i) -> Seq(dataMaskRegField(reg, i))
     }
 
-    node.regmap((ctrlRegFields ++ delayRegFields ++ maskRegFields):_*)
+    node.regmap((ctrlRegFields ++ delayRegFields ++ tagMaskRegFields ++ dataMaskRegFields):_*)
   }
 }

@@ -83,7 +83,7 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
 
     // ecc error
     val error = Output(ValidIO(new L1CacheErrorInfo))
-    val pseudo_error = Flipped(DecoupledIO(Vec(DCacheBanks, new CtrlUnitSignalingBundle)))
+    val pseudo_tag_error = Flipped(DecoupledIO(new CtrlUnitTagSignalingBundle))
     val pseudo_tag_error_inj_done = Output(Bool())
     val pseudo_data_error_inj_done = Output(Bool())
 
@@ -210,10 +210,11 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
   val meta_resp = io.meta_resp
   // pseudo enc ecc tag
   val pseudo_tag_toggle_mask = Mux(
-                                io.pseudo_error.valid && io.pseudo_error.bits(0).valid,
-                                io.pseudo_error.bits(0).mask(tagBits - 1, 0),
+                                io.pseudo_tag_error.valid && io.pseudo_tag_error.bits.valid,
+                                io.pseudo_tag_error.bits.mask,
                                 0.U(tagBits.W)
                             )
+  require(pseudo_tag_toggle_mask.getWidth == tagBits, "tag pseudo-error mask must cover tagBits")
   val s1_enctag_resp = Wire(io.tag_resp.cloneType)
   s1_enctag_resp.zip(io.tag_resp).map {
     case (pseudo_enc, real_enc) =>
@@ -439,7 +440,7 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
     s2_tag_error := s2_tag_errors.orR // error reported by tag ecc check
   }
   io.pseudo_data_error_inj_done := s2_fire && s2_hit && !io.bank_conflict_slow
-  io.pseudo_error.ready := false.B
+  io.pseudo_tag_error.ready := false.B
 
   // send load miss to miss queue
   io.miss_req.valid := s2_miss_req_valid

@@ -204,7 +204,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
 
     // ecc error
     val error = Output(ValidIO(new L1CacheErrorInfo))
-    val pseudo_error = Flipped(DecoupledIO(Vec(DCacheBanks, new CtrlUnitSignalingBundle)))
+    val pseudo_tag_error = Flipped(DecoupledIO(new CtrlUnitTagSignalingBundle))
     val pseudo_tag_error_inj_done = Output(Bool())
     val pseudo_data_error_inj_done = Output(Bool())
     // force write
@@ -327,10 +327,11 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   meta_resp := Mux(GatedValidRegNext(s0_fire), VecInit(io.meta_resp.map(_.asUInt)), RegEnable(meta_resp, s1_valid))
   // pseudo ecc enc tag
   val pseudo_tag_toggle_mask = Mux(
-                                  io.pseudo_error.valid && io.pseudo_error.bits(0).valid,
-                                  io.pseudo_error.bits(0).mask(tagBits - 1, 0),
+                                  io.pseudo_tag_error.valid && io.pseudo_tag_error.bits.valid,
+                                  io.pseudo_tag_error.bits.mask,
                                   0.U(tagBits.W)
                               )
+  require(pseudo_tag_toggle_mask.getWidth == tagBits, "tag pseudo-error mask must cover tagBits")
   val pseudo_encTag_resp = io.tag_resp.map {
     case real_enc =>
       if (cacheCtrlParamsOpt.nonEmpty && EnableTagEcc) {
@@ -377,7 +378,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   s1_repl_way_en := Mux(
     GatedValidRegNext(s0_fire),
     Mux(
-      io.pseudo_error.valid && s1_has_real_tag_eq_way,
+      io.pseudo_tag_error.valid && s1_has_real_tag_eq_way,
       s1_real_tag_match_way_en,
       Mux(s1_req.miss_fail_cause_evict_btot, s1_req.occupy_way, UIntToOH(io.replace_way.way)
     )),
@@ -387,7 +388,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   s1_repl_way := Mux(
     GatedValidRegNext(s0_fire),
     Mux(
-      io.pseudo_error.valid && s1_has_real_tag_eq_way,
+      io.pseudo_tag_error.valid && s1_has_real_tag_eq_way,
       s1_real_tag_match_way,
       Mux(s1_req.miss_fail_cause_evict_btot, OHToUInt(s1_req.occupy_way), io.replace_way.way)
     ),
@@ -402,8 +403,8 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   val s1_need_replacement = s1_req.miss && !s1_tag_match
   val s1_need_eviction = s1_req.miss && !s1_tag_match && s1_repl_coh.state =/= ClientStates.Nothing
 
-  val s1_way_en = Mux(io.pseudo_error.valid || s1_need_replacement, s1_repl_way_en, s1_tag_ecc_match_way)
-  val s1_way = Mux(io.pseudo_error.valid || s1_need_replacement, s1_repl_way, OHToUInt(s1_tag_ecc_match_way))
+  val s1_way_en = Mux(io.pseudo_tag_error.valid || s1_need_replacement, s1_repl_way_en, s1_tag_ecc_match_way)
+  val s1_way = Mux(io.pseudo_tag_error.valid || s1_need_replacement, s1_repl_way, OHToUInt(s1_tag_ecc_match_way))
   assert(!RegNext(s1_fire && PopCount(s1_way_en) > 1.U))
 
   val s1_tag = s1_hit_tag
@@ -435,7 +436,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   val s2_repl_coh = RegEnable(s1_repl_coh, s1_fire)
   val s2_repl_pf  = RegEnable(s1_repl_pf, s1_fire)
 
-  val s2_has_pesudo_inj = RegEnable(io.pseudo_error.valid, false.B, s1_fire)
+  val s2_has_pesudo_inj = RegEnable(io.pseudo_tag_error.valid, false.B, s1_fire)
   val s2_real_tag_has_error = dcacheParameters.tagCode.decode(RegEnable(s1_real_tag, s1_fire)).error
   val s2_refill_tag_eq_way = s2_has_pesudo_inj && s2_has_real_tag_eq_way & !s2_real_tag_has_error
 
@@ -566,7 +567,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   }
 
   io.pseudo_data_error_inj_done := s2_fire_to_s3 && (s2_tag_error || s2_hit) && s2_may_report_data_error
-  io.pseudo_error.ready := false.B
+  io.pseudo_tag_error.ready := false.B
   XSError(s2_valid && s2_can_go_to_s3 && s2_req.miss && !io.refill_info.valid, "MainPipe req can go to s3 but no refill data")
 
   // s3: write data, meta and tag

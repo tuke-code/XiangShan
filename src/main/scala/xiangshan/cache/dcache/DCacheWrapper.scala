@@ -179,7 +179,11 @@ trait HasDCacheParameters
   // L1 DCache controller
   val cacheCtrlParamsOpt  = OptionWrapper(
                               cacheParams.cacheCtrlAddressOpt.nonEmpty,
-                              L1CacheCtrlParams(cacheParams.cacheCtrlAddressOpt.get)
+                              L1CacheCtrlParams(
+                                address = cacheParams.cacheCtrlAddressOpt.get,
+                                tagMaskRegWidth = ((tagBits + 7) / 8) * 8,
+                                dataMaskRegWidth = DCacheSRAMRowBits
+                              )
                             )
   // uncache
   val uncacheIdxBits = log2Up(VirtualLoadQueueMaxStoreQueueSize + 1)
@@ -888,6 +892,11 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   val io = IO(new DCacheIO)
 
   val (bus, edge) = outer.clientNode.out.head
+  require(cacheCtrlParamsOpt.forall(_.tagMaskRegWidth >= tagBits), "cache-control tag masks must cover tagBits")
+  require(
+    cacheCtrlParamsOpt.forall(_.dataMaskRegWidth == DCacheSRAMRowBits),
+    "cache-control data masks must match data-bank row width"
+  )
   require(bus.d.bits.data.getWidth == l1BusDataWidth, "DCache: tilelink width does not match")
 
   println("DCache:")
@@ -987,34 +996,33 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   // l1 dcache controller
   outer.cacheCtrlOpt.foreach {
     case mod =>
-      mod.module.io_pseudoError.foreach {
-        case x => x.ready := false.B
-      }
+      mod.module.io_tagPseudoError.ready := false.B
+      mod.module.io_dataPseudoError.ready := false.B
   }
   ldu.foreach {
     case mod =>
-      mod.io.pseudo_error.valid := false.B
-      mod.io.pseudo_error.bits := DontCare
+      mod.io.pseudo_tag_error.valid := false.B
+      mod.io.pseudo_tag_error.bits := DontCare
   }
-  mainPipe.io.pseudo_error.valid := false.B
-  mainPipe.io.pseudo_error.bits  := DontCare
+  mainPipe.io.pseudo_tag_error.valid := false.B
+  mainPipe.io.pseudo_tag_error.bits  := DontCare
   bankedDataArray.io.pseudo_error.valid := false.B
   bankedDataArray.io.pseudo_error.bits  := DontCare
 
   // pseudo tag ecc error
   if (outer.cacheCtrlOpt.nonEmpty && EnableTagEcc) {
     val ctrlUnit = outer.cacheCtrlOpt.head.module
-    ldu.map(mod => mod.io.pseudo_error <> ctrlUnit.io_pseudoError(0))
-    mainPipe.io.pseudo_error <> ctrlUnit.io_pseudoError(0)
-    ctrlUnit.io_pseudoError(0).ready := mainPipe.io.pseudo_tag_error_inj_done ||
+    ldu.map(mod => mod.io.pseudo_tag_error <> ctrlUnit.io_tagPseudoError)
+    mainPipe.io.pseudo_tag_error <> ctrlUnit.io_tagPseudoError
+    ctrlUnit.io_tagPseudoError.ready := mainPipe.io.pseudo_tag_error_inj_done ||
                                         ldu.map(_.io.pseudo_tag_error_inj_done).reduce(_|_)
   }
 
   // pseudo data ecc error
   if (outer.cacheCtrlOpt.nonEmpty && EnableDataEcc) {
     val ctrlUnit = outer.cacheCtrlOpt.head.module
-    bankedDataArray.io.pseudo_error <> ctrlUnit.io_pseudoError(1)
-    ctrlUnit.io_pseudoError(1).ready := bankedDataArray.io.pseudo_error.ready &&
+    bankedDataArray.io.pseudo_error <> ctrlUnit.io_dataPseudoError
+    ctrlUnit.io_dataPseudoError.ready := bankedDataArray.io.pseudo_error.ready &&
                                         (mainPipe.io.pseudo_data_error_inj_done ||
                                          ldu.map(_.io.pseudo_data_error_inj_done).reduce(_|_))
   }

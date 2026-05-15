@@ -272,7 +272,7 @@ abstract class AbstractBankedDataArray(implicit p: Parameters) extends DCacheMod
     // when bank_conflict, read (1) port should be ignored
     val bank_conflict_slow = Output(Vec(LoadPipelineWidth, Bool()))
     val disable_ld_fast_wakeup = Output(Vec(LoadPipelineWidth, Bool()))
-    val pseudo_error = Flipped(DecoupledIO(Vec(DCacheBanks, new CtrlUnitSignalingBundle)))
+    val pseudo_error = Flipped(DecoupledIO(Vec(DCacheBanks, new CtrlUnitDataSignalingBundle)))
   })
 
   // bank (0, 1, 2, 3) each way use duplicate addr
@@ -663,6 +663,10 @@ class SramedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
 class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   println("  DCacheType: BankedDataArray")
   val ReduceReadlineConflict = false
+  require(
+    io.pseudo_error.bits.head.mask.getWidth == DCacheSRAMRowBits,
+    "data pseudo-error masks must match the data-bank row width"
+  )
 
   io.write.ready := true.B
   io.write_dup.foreach(_.ready := true.B)
