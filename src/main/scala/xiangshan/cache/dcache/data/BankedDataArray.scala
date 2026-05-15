@@ -275,8 +275,8 @@ abstract class AbstractBankedDataArray(implicit p: Parameters) extends DCacheMod
     val pseudo_error = Flipped(DecoupledIO(Vec(DCacheBanks, new CtrlUnitDataSignalingBundle)))
   })
 
-  // bank (0, 1, 2, 3) each way use duplicate addr
-  def DuplicatedQueryBankSeq = Seq(0, 1, 2, 3)
+  // Half of the data banks use the duplicate address path to reduce fanout.
+  def DuplicatedQueryBankSeq = 0 until DCacheBanks / 2
 
   def pipeMap[T <: Data](f: Int => T) = VecInit((0 until LoadPipelineWidth).map(f))
 
@@ -662,7 +662,8 @@ class SramedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
 // the smallest access unit is bank
 class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   println("  DCacheType: BankedDataArray")
-  val ReduceReadlineConflict = false
+  // Keep precise readline bank conflicts enabled for the 32x2B path.
+  val ReduceReadlineConflict = true
   require(
     io.pseudo_error.bits.head.mask.getWidth == DCacheSRAMRowBits,
     "data pseudo-error masks must match the data-bank row width"
@@ -759,11 +760,16 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   val rrl_bank_conflict = Wire(Vec(LoadPipelineWidth, Bool()))
   val rrl_bank_conflict_intend = Wire(Vec(LoadPipelineWidth, Bool()))
   (0 until LoadPipelineWidth).foreach { i =>
-    val readline_bank_overlap = (io.readline.bits.rmask & io.read(i).bits.bankMask) =/= 0.U
-    val judge = io.read(i).valid &&
-      div_addrs(i) === line_div_addr &&
-      set_addrs(i) =/= line_set_addr &&
-      readline_bank_overlap
+    val judge = if (ReduceReadlineConflict) {
+      io.read(i).valid &&
+        (io.readline.bits.rmask & io.read(i).bits.bankMask) =/= 0.U &&
+        div_addrs(i) === line_div_addr &&
+        set_addrs(i) =/= line_set_addr
+    } else {
+      io.read(i).valid &&
+        div_addrs(i) === line_div_addr &&
+        set_addrs(i) =/= line_set_addr
+    }
     rrl_bank_conflict(i) := judge && io.readline.valid
     rrl_bank_conflict_intend(i) := judge && io.readline_intend
   }
@@ -845,9 +851,14 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
         io.read(i).valid && div_addrs_dup(i) === div_index.U &&
           io.read(i).bits.bankMask(bank_index) && !rr_bank_conflict_oldest(i)
       })))
-      val readline_match = io.readline.valid &&
-        io.readline.bits.rmask(bank_index) &&
-        line_div_addr === div_index.U
+      val readline_match = if (ReduceReadlineConflict) {
+        io.readline.valid &&
+          io.readline.bits.rmask(bank_index) &&
+          line_div_addr === div_index.U
+      } else {
+        io.readline.valid &&
+          line_div_addr === div_index.U
+      }
 
       val bank_set_addr = Mux(readline_match,
         line_set_addr,
@@ -857,10 +868,7 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
         line_set_addr,
         PriorityMux(Seq.tabulate(LoadPipelineWidth)(i => bank_addr_matchs_dup(i) -> set_addrs_dup(i)))
       )
-      val read_enable =
-        bank_addr_matchs.asUInt.orR ||
-          bank_addr_matchs_dup.asUInt.orR ||
-          readline_match
+      val read_enable = bank_addr_matchs.asUInt.orR || readline_match
 
       // read raw data
       val data_bank = data_banks(div_index)(bank_index)
