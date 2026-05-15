@@ -1616,7 +1616,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         robEntries(i).topdownCancelTimeVec.foreach(_.zipWithIndex.foreach{ case (cancelTime, index) =>
           val cancelMatch = topdownCancelSrcUpdate === index.asUInt
           cancelTime := Mux(hasWriteBack, 0.U,
-            Mux(topdownCanceled && cancelMatch, robEntries(i).topdownLastIssueTime.get,
+            Mux(topdownCanceled && cancelMatch, robEntries(i).topdownCancelTimeVec.get(index) + robEntries(i).topdownLastIssueTime.get,
               robEntries(i).topdownCancelTimeVec.get(index) +& (cancelMatch & topdownCancelTimeUpdate)))
         })
       }
