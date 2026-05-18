@@ -240,10 +240,9 @@ class WriteBuffer[T <: WriteReqBundle](
 
     io.write(nRows).ready := !fullVec(nRows)
     io.read(nRows).valid  := !emptyVec(nRows)
-    io.read(nRows).bits   := DontCare
+    io.read(nRows).bits   := entries(nRows)(readIdx)
 
     when(readReadyVec(nRows) && !emptyVec(nRows)) {
-      io.read(nRows).bits       := entries(nRows)(readIdx)
       needWrite(nRows)(readIdx) := false.B
     }
     val touchWays = Seq(writeTouchVec(nRows)) ++ hitTouchVec(nRows).filter(_.valid == true.B).take(numPorts)
