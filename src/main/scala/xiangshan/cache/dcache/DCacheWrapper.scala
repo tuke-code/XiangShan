@@ -1328,6 +1328,25 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   io.lsu.loadWakeup.bits.mshrId := bus.d.bits.source
   mainPipe.io.force_write <> io.force_write
 
+  val l2HintSource = Wire(Valid(UInt(io.l2_hint.bits.sourceId.getWidth.W)))
+  l2HintSource.valid := io.l2_hint.valid
+  l2HintSource.bits := io.l2_hint.bits.sourceId
+  val l2HintPrev1 = ValidIODelay(l2HintSource, 1)
+  val l2HintPrev2 = ValidIODelay(l2HintSource, 2)
+  val l2HintPrev3 = ValidIODelay(l2HintSource, 3)
+  val (grantDataFirst, _, _, _) = edge.count(bus.d)
+  val grantDataFirstFire = bus.d.fire && grantDataFirst && bus.d.bits.opcode === TLMessages.GrantData
+  val hintPrev1Match = l2HintPrev1.valid && l2HintPrev1.bits === bus.d.bits.source
+  val hintPrev2Match = l2HintPrev2.valid && l2HintPrev2.bits === bus.d.bits.source
+  val hintPrev3Match = l2HintPrev3.valid && l2HintPrev3.bits === bus.d.bits.source
+  val hintPrev123Match = hintPrev1Match || hintPrev2Match || hintPrev3Match
+  XSPerfAccumulate("grantDataFirstFire", grantDataFirstFire)
+  XSPerfAccumulate("grantdata_with_hint_prev1", grantDataFirstFire && hintPrev1Match)
+  XSPerfAccumulate("grantdata_with_hint_prev2", grantDataFirstFire && hintPrev2Match)
+  XSPerfAccumulate("grantdata_with_hint_prev3", grantDataFirstFire && hintPrev3Match)
+  XSPerfAccumulate("grantdata_with_hint_prev123", grantDataFirstFire && hintPrev123Match)
+  XSPerfAccumulate("grantdata_without_hint_prev123", grantDataFirstFire && !hintPrev123Match)
+
   /** dwpu */
   if (dwpuParam.enWPU) {
     val dwpu = Module(new DCacheWpuWrapper(LoadPipelineWidth))
