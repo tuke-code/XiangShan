@@ -517,7 +517,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   }
 
   canIssueMergeAllBusy.zipWithIndex.foreach { case (merge, i) =>
-    val bypassBusyMask = Mux(realOldestSelValid, realOldestSelOH, 0.U(params.numEntries.W))
+    val bypassBusyMask = 0.U(params.numEntries.W)
     val mergeFuBusyOldest = {
       if (fuBusyTableWrite(i).nonEmpty) canIssueVec.asUInt & ((~fuBusyTableMask(i)).asUInt | bypassBusyMask)
       else canIssueVec.asUInt
