@@ -27,7 +27,7 @@ import xiangshan.frontend.bpu.BasePredictorIO
 import xiangshan.frontend.bpu.Prediction
 
 class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParameters with Helpers {
-  class MainBtbIO(implicit p: Parameters) extends BasePredictorIO {
+  class MainBtbBaseIO extends Bundle {
     // prediction specific bundle
     val result: Vec[Valid[Prediction]] = Output(Vec(NumBtbResultEntries, Valid(new Prediction)))
     val meta:   MainBtbMeta            = Output(new MainBtbMeta)
@@ -37,6 +37,13 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
 
     // final s3_takenMask (mbtb + tage + sc), used to touch replacer accurately
     val s3_takenMask: Vec[Bool] = Input(Vec(NumBtbResultEntries, Bool()))
+  }
+  class MainBtbIO(implicit p: Parameters) extends BasePredictorIO {
+    val btbPorts: Vec[MainBtbBaseIO] = Vec(NumBtbs, new MainBtbBaseIO)
+
+    // FIXME: magic number
+    def mbtb: MainBtbBaseIO = btbPorts(0)
+    def vbtb: MainBtbBaseIO = btbPorts(1)
   }
 
   val io: MainBtbIO = IO(new MainBtbIO)
@@ -97,7 +104,8 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
    */
   s1_fire := io.stageCtrl.s1_fire && io.enable
 
-  io.s1_positions := VecInit(alignBanks.flatMap(_.io.read.s1_positions))
+  io.mbtb.s1_positions := VecInit(alignBanks.flatMap(_.io.read.mbtbResp.positions))
+  io.vbtb.s1_positions := VecInit(alignBanks.flatMap(_.io.read.vbtbResp.positions))
 
   /* *** s2 ***
    * receive read response from alignBanks
@@ -109,9 +117,13 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   // (as s0_posHigherBitsVec is already computed and concatenated to each entry's posLowerBits)
   // (and we care about the full position when searching for a matching entry, not the bank it comes from)
   // so here we just flatten them, without rotating them back to the original order
-  io.result := VecInit(alignBanks.flatMap(_.io.read.resp.predictions))
+  io.mbtb.result := VecInit(alignBanks.flatMap(_.io.read.mbtbResp.predictions))
+  io.vbtb.result := VecInit(alignBanks.flatMap(_.io.read.vbtbResp.predictions))
   // we don't need to flatten meta entries, keep the alignBank structure, anyway we just use them per alignBank
-  io.meta.entries := VecInit(alignBanks.map(_.io.read.resp.metas))
+  io.mbtb.meta.entries := VecInit(alignBanks.map(_.io.read.mbtbResp.metas))
+  io.vbtb.meta.entries := VecInit(alignBanks.map(_.io.read.vbtbResp.metas))
+  // conditional branch metas calculated in Bpu module
+  io.btbPorts.foreach(_.meta.conditions := DontCare)
 
   /* *** s3 ***
    * touch replacer using final takenMask (mbtb + tage + sc)
@@ -119,7 +131,8 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   s3_fire := io.enable && io.stageCtrl.s3_fire
   // io.result is flattened, so is s3_takenMask from Bpu top, here we need to slice it back to alignBank structure
   alignBanks.zipWithIndex.foreach { case (b, i) =>
-    b.io.s3_takenMask := io.s3_takenMask.slice(i * NumWay, (i + 1) * NumWay)
+    b.io.s3_takenMask     := io.mbtb.s3_takenMask.slice(i * NumWay, (i + 1) * NumWay)
+    b.io.s3_vbtbTakenMask := io.vbtb.s3_takenMask.slice(i * NumWay, (i + 1) * NumWay)
   }
 
   /* *** t0 ***
@@ -134,6 +147,7 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   private val t0_startPcVec = t0_rotator.rotate(
     VecInit.tabulate(NumAlignBanks)(i => getAlignedPc(t0_startPc + (i << FetchBlockAlignWidth).U))
   )
+  private val t0_posBitsHigherVec = t0_rotator.rotate(VecInit.tabulate(NumAlignBanks)(_.U(AlignBankIdxLen.W)))
 
   alignBanks.zipWithIndex.foreach { case (b, i) =>
     b.io.t0_startPc := t0_startPcVec(i)
@@ -145,8 +159,9 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   private val t1_fire  = RegNext(t0_fire, init = false.B) && io.enable
   private val t1_train = RegEnable(t0_train, t0_fire)
 
-  private val t1_rotator    = RegEnable(t0_rotator, t0_fire)
-  private val t1_startPcVec = RegEnable(t0_startPcVec, t0_fire)
+  private val t1_rotator          = RegEnable(t0_rotator, t0_fire)
+  private val t1_startPcVec       = RegEnable(t0_startPcVec, t0_fire)
+  private val t1_posBitsHigherVec = RegEnable(t0_posBitsHigherVec, t0_fire)
 
   private val t1_meta           = t1_train.meta.mbtb
   private val t1_mispredictInfo = t1_train.mispredictBranch
@@ -155,11 +170,12 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   private val t1_writeAlignBankMask = t1_rotator.rotate(VecInit(UIntToOH(t1_writeAlignBankIdx).asBools))
 
   alignBanks.zipWithIndex.foreach { case (b, i) =>
-    b.io.write.req.valid          := t1_fire
-    b.io.write.req.bits.needWrite := t1_writeAlignBankMask(i)
-    b.io.write.req.bits.startPc   := t1_startPcVec(i)
-    b.io.write.req.bits.branches  := t1_train.branches
-    b.io.write.req.bits.meta      := t1_meta.entries(i)
+    b.io.write.req.valid              := t1_fire
+    b.io.write.req.bits.needWrite     := t1_writeAlignBankMask(i)
+    b.io.write.req.bits.startPc       := t1_startPcVec(i)
+    b.io.write.req.bits.branches      := t1_train.branches
+    b.io.write.req.bits.meta          := t1_meta.entries(i)
+    b.io.write.req.bits.posHigherBits := t1_posBitsHigherVec(i)
     // see comments in MainBtbAlignBank.scala
     b.io.write.req.bits.mispredictInfo := t1_mispredictInfo
   }
@@ -188,7 +204,7 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   )
 
   /* *** statistics *** */
-  private val perf_s2HitMask             = VecInit(alignBanks.flatMap(_.io.read.resp.predictions.map(_.valid)))
+  private val perf_s2HitMask             = VecInit(alignBanks.flatMap(_.io.read.mbtbResp.predictions.map(_.valid)))
   private val perf_t1HitMispredictBranch = t1_meta.entries.flatten.map(_.hit(t1_mispredictInfo.bits)).reduce(_ || _)
 
   XSPerfAccumulate("total_train", t1_fire)

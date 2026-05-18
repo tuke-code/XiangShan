@@ -69,7 +69,7 @@ class PhrToTageIO(implicit p: Parameters) extends TageBundle {
   val foldedPathHistForTrain: PhrAllFoldedHistories = Input(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
 }
 
-class MainBtbToTageIO(implicit p: Parameters) extends TageBundle {
+class BtbToTageIO(implicit p: Parameters) extends TageBundle {
   val result:       Vec[Valid[Prediction]] = Input(Vec(NumBtbResultEntries, Valid(new Prediction)))
   val s1_positions: Vec[UInt]              = Input(Vec(NumBtbResultEntries, UInt(CfiPositionWidth.W)))
 }

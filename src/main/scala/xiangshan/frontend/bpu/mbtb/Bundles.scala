@@ -55,6 +55,7 @@ class MainBtbEntry(implicit p: Parameters) extends MainBtbBundle {
 }
 
 class MainBtbEntrySramWriteReq(implicit p: Parameters) extends WriteReqBundle with HasMainBtbParameters {
+  val hit:          Bool         = Bool()
   val setIdx:       UInt         = UInt(SetIdxLen.W)
   val entry:        MainBtbEntry = new MainBtbEntry
   override def tag: Option[UInt] = Some(Cat(entry.tag, entry.position)) // use entry's tag directly
@@ -76,7 +77,8 @@ class MainBtbMetaEntry(implicit p: Parameters) extends MainBtbBundle {
 }
 
 class MainBtbMeta(implicit p: Parameters) extends MainBtbBundle {
-  val entries: Vec[Vec[MainBtbMetaEntry]] = Vec(NumAlignBanks, Vec(NumWay, new MainBtbMetaEntry))
+  val entries:    Vec[Vec[MainBtbMetaEntry]] = Vec(NumAlignBanks, Vec(NumWay, new MainBtbMetaEntry))
+  val conditions: Vec[MainBtbMetaEntry]      = Vec(NumBtbResultEntries, new MainBtbMetaEntry)
 }
 
 class MainBtbAlignBankTrace(implicit p: Parameters) extends MainBtbBundle {
@@ -97,4 +99,10 @@ class MainBtbTrace(implicit p: Parameters) extends MainBtbBundle {
   val internalIdx:  UInt = UInt(InternalBankIdxLen.W)
   val alignBankIdx: UInt = UInt(AlignBankIdxLen.W)
   val wayIdx:       UInt = UInt(NumWay.W)
+}
+
+class VictimBtbEntry(implicit p: Parameters) extends MainBtbBundle {
+  val setIdx:  UInt            = UInt(SetIdxLen.W)
+  val entry:   MainBtbEntry    = new MainBtbEntry
+  val counter: SaturateCounter = TakenCounter()
 }
