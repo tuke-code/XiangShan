@@ -392,7 +392,8 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
     Mux(s1_req.miss_fail_cause_evict_btot, OHToUInt(s1_req.occupy_way), io.replace_way.way),
     RegEnable(s1_repl_way, s1_valid)
   ) // UInt format of `s1_repl_way_en`
-  val s1_repl_tag = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => tag_resp(w)))
+  val s1_repl_tag = ParallelMux(Mux(io.pseudo_error.valid && s1_has_real_tag_eq_way, s1_real_tag_match_way_en, s1_repl_way_en).asBools,
+                                (0 until nWays).map(w => tag_resp(w)))
   val s1_repl_pf  = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => io.extra_meta_resp(w).prefetch))
 
   val s1_real_tag = ParallelMux(s1_real_tag_match_way_en.asBools, (0 until nWays).map(w => io.tag_resp(w)))
