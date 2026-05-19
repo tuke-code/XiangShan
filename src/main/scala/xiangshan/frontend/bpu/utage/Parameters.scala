@@ -23,11 +23,11 @@ import xiangshan.frontend.bpu.TageTableInfo
 case class MicroTageParameters(
     // TODO: The length of the Tag and its alias status will need to be adjusted later. The same applies to the number of items.
     TableInfos: Seq[MicroTageInfo] = Seq(
-      new MicroTageInfo(512, 5, 5, 15),
-      new MicroTageInfo(512, 9, 9, 15), // 3Taken maybe better than 2Taken
+      new MicroTageInfo(512, 5, 5, 8),
+      new MicroTageInfo(512, 9, 8, 8), // 3Taken maybe better than 2Taken
       // new MicroTageInfo(512, 12, 12, 15),
-      new MicroTageInfo(512, 16, 10, 16), // follow Tage.
-      new MicroTageInfo(512, 24, 12, 16)
+      // new MicroTageInfo(512, 16, 8, 8), // follow Tage.
+      // new MicroTageInfo(512, 24, 8, 8)
     ),
     TakenCtrWidth:       Int = 3,
     LowTickWidth:        Int = 7,
@@ -52,7 +52,7 @@ trait HasMicroTageParameters extends HasBpuParameters {
   def WayIdWidth:      Int                 = 1 max log2Ceil(NumWays)
 
   def MaxNumSets:        Int = 512
-  def MaxTagLen:         Int = 16
+  def MaxTagLen:         Int = 8
   def DebugPredIdxWidth: Int = log2Ceil(TableInfos(0).NumSets)
   def DebugPredTagWidth: Int = TableInfos(0).TagWidth
 
