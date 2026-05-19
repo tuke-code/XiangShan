@@ -65,9 +65,8 @@ trait HasBpuParameters extends HasFrontendParameters {
 
   def NumAheadBtbPredictionEntries: Int = bpuParameters.abtbParameters.NumWays
 
-  def NumBtbAlignBanks: Int = FetchBlockSize / FetchBlockAlignSize
-  def NumBtbResultEntries: Int =
-    bpuParameters.mbtbParameters.NumWay * NumBtbAlignBanks * 2 // magic number 2: victim btb
+  def NumBtbAlignBanks:    Int = FetchBlockSize / FetchBlockAlignSize
+  def NumBtbResultEntries: Int = bpuParameters.mbtbParameters.NumWay * NumBtbAlignBanks
 
   def GhrShamt:          Int = NumBtbResultEntries
   def GhrHistoryLength:  Int = bpuParameters.scParameters.GlobalTableInfos.map(_.HistoryLength).max
