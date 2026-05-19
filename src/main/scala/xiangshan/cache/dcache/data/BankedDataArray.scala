@@ -678,6 +678,7 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   data_banks.map(_.map(_.dump()))
 
   val way_en = Wire(Vec(LoadPipelineWidth, io.read(0).bits.way_en.cloneType))
+  val isMiss = way_en.map(w => !w.orR)
   val set_addrs = Wire(Vec(LoadPipelineWidth, UInt()))
   val set_addrs_dup = Wire(Vec(LoadPipelineWidth, UInt()))
   val div_addrs = Wire(Vec(LoadPipelineWidth, UInt()))
@@ -730,7 +731,8 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
       io.read(x).valid && io.read(y).valid &&
       div_addrs(x) === div_addrs(y) &&
       (io.read(x).bits.bankMask & io.read(y).bits.bankMask) =/= 0.U &&
-      set_addrs(x) =/= set_addrs(y)
+      set_addrs(x) =/= set_addrs(y) &&
+      !isMiss(x) && !isMiss(y)
     }
   }
   ))
@@ -751,7 +753,7 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   val rrl_bank_conflict_intend = Wire(Vec(LoadPipelineWidth, Bool()))
   (0 until LoadPipelineWidth).foreach { i =>
     val judge = if (ReduceReadlineConflict) io.read(i).valid && (io.readline.bits.rmask & io.read(i).bits.bankMask) =/= 0.U && div_addrs(i) === line_div_addr
-                else io.read(i).valid && div_addrs(i)===line_div_addr
+                else io.read(i).valid && div_addrs(i)===line_div_addr && !isMiss(i)
     rrl_bank_conflict(i) := judge && io.readline.valid
     rrl_bank_conflict_intend(i) := judge && io.readline_intend
   }
@@ -759,7 +761,8 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
     io.read(x).valid &&
     write_valid_reg &&
     div_addrs(x) === write_div_addr_dup_reg.head &&
-    (write_bank_mask_reg(bank_addrs(x)(0)) || write_bank_mask_reg(bank_addrs(x)(1)) && io.is128Req(x))
+    (write_bank_mask_reg(bank_addrs(x)(0)) || write_bank_mask_reg(bank_addrs(x)(1)) && io.is128Req(x)) &&
+    !isMiss(x)
   )
   val wrl_bank_conflict = io.readline.valid && write_valid_reg && line_div_addr === write_div_addr_dup_reg.head
   // ready
@@ -825,11 +828,11 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
       //     +-----------------+
       val bank_addr_matchs = WireInit(VecInit(List.tabulate(LoadPipelineWidth)(i => {
         io.read(i).valid && div_addrs(i) === div_index.U && (bank_addrs(i)(0) === bank_index.U || bank_addrs(i)(1) === bank_index.U && io.is128Req(i)) &&
-          !rr_bank_conflict_oldest(i)
+          !rr_bank_conflict_oldest(i) && !isMiss(i)
       })))
       val bank_addr_matchs_dup = WireInit(VecInit(List.tabulate(LoadPipelineWidth)(i => {
         io.read(i).valid && div_addrs_dup(i) === div_index.U && (bank_addrs_dup(i)(0) === bank_index.U || bank_addrs_dup(i)(1) === bank_index.U && io.is128Req(i)) &&
-          !rr_bank_conflict_oldest(i)
+          !rr_bank_conflict_oldest(i) && !isMiss(i)
       })))
       val readline_match = Wire(Bool())
       if (ReduceReadlineConflict) {
