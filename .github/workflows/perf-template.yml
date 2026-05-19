@@ -12,11 +12,6 @@ on:
         required: false
         type: string
         default: gsim
-      xs_config:
-        description: Config for XiangShan core
-        required: false
-        type: string
-        default: CHIConfig
       benchmark_type:
         required: false
         type: string
@@ -61,7 +56,7 @@ on:
         value: ${{ jobs.run.outputs.SPEC_DIR }}
       CONFIG:
         description: XiangShan config used in this run
-        value: ${{ inputs.xs_config }}
+        value: DefaultConfig
       SCORE_FILE:
         description: Path to the score.txt generated in this run
         value: ${{ jobs.run.outputs.SCORE_FILE }}
@@ -111,7 +106,7 @@ jobs:
             echo "SERVER_LIST=${{ inputs.servers }}" >> $GITHUB_ENV
           fi
 
-          SPEC_TAG="-${{ inputs.xs_config }}"
+          SPEC_TAG="-DefaultConfig"
           # Set CST_COMPILE_OPT and CST_RUN_OPT based on cst_file
           if [[ -n "${{ inputs.cst_file }}" ]]; then
             if [[ ! -f "${{ inputs.cst_file }}" ]]; then
@@ -209,7 +204,7 @@ jobs:
         run: |
           if [ ! -e "$SPEC_DIR/emu-${{ inputs.emulator }}" ]; then
             python3 $GITHUB_WORKSPACE/scripts/xiangshan.py --build \
-              --config "${{ inputs.xs_config }}" \
+              --config "DefaultConfig" \
               --dramsim3 /nfs/home/share/ci-workloads/DRAMsim3 --with-dramsim3 \
               --threads $([ "${{ inputs.emulator }}" = "gsim" ] && echo 1 || echo 8) \
               --pgo $GITHUB_WORKSPACE/ready-to-run/coremark-2-iteration.bin \

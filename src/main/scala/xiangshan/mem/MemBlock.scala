@@ -18,13 +18,13 @@ package xiangshan.mem
 
 import chisel3._
 import chisel3.util._
-import coupledL2.{PrefetchCtrlFromCore, PrefetchRecv}
+import xscache.coupledL2.{PrefetchCtrlFromCore, PrefetchRecv}
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.interrupts.{IntSinkNode, IntSinkPortSimple}
 import freechips.rocketchip.tile.HasFPUParameters
 import freechips.rocketchip.tilelink._
 import org.chipsalliance.cde.config.Parameters
-import system.{HasSoCParameter, SoCParamsKey}
+import system.HasSoCParameter
 import utility._
 import utility.mbist.{MbistInterface, MbistPipeline}
 import utility.sram.{SramBroadcastBundle, SramHelper}
@@ -326,8 +326,6 @@ class MemBlockInlined()(implicit p: Parameters) extends LazyModule
   // NOTE: we currently only use one output port to L2 and L3 prefetch sender respectively
   val l2_pf_sender_opt = if (coreParams.prefetcher.nonEmpty)
     Some(BundleBridgeSource(() => new PrefetchRecv)) else None
-  val l3_pf_sender_opt = if (p(SoCParamsKey).L3CacheParamsOpt.nonEmpty && coreParams.prefetcher.nonEmpty)
-    Some(BundleBridgeSource(() => new huancun.PrefetchRecv)) else None
   val frontendBridge = LazyModule(new FrontendBridge)
   // interrupt sinks
   val clint_int_sink = IntSinkNode(IntSinkPortSimple(1, 2))
@@ -750,12 +748,8 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   outer.l2_pf_sender_opt.foreach(_.out.head._1.addr := prefetcher.io.l1_pf_to_l2.addr)
   outer.l2_pf_sender_opt.foreach(_.out.head._1.pf_source :=  prefetcher.io.l1_pf_to_l2.pf_source)
   outer.l2_pf_sender_opt.foreach(_.out.head._1.l2_pf_en := prefetcher.io.l1_pf_to_l2.l2_pf_en)
-  outer.l3_pf_sender_opt.foreach(_.out.head._1.addr_valid := prefetcher.io.l1_pf_to_l3.addr_valid)
-  outer.l3_pf_sender_opt.foreach(_.out.head._1.addr := prefetcher.io.l1_pf_to_l3.addr)
-  outer.l3_pf_sender_opt.foreach(_.out.head._1.l2_pf_en := prefetcher.io.l1_pf_to_l3.l2_pf_en)
   XSPerfAccumulate("prefetch_fire_l1", l1_pf_req.fire)
   XSPerfAccumulate("prefetch_fire_l2", outer.l2_pf_sender_opt.map(_.out.head._1.addr_valid).getOrElse(false.B))
-  XSPerfAccumulate("prefetch_fire_l3", outer.l3_pf_sender_opt.map(_.out.head._1.addr_valid).getOrElse(false.B))
 
   /** prefetcher site in L2 */
   dtlb_reqs(L2toL1DTLBPortIndex) <> io.l2_tlb_req
