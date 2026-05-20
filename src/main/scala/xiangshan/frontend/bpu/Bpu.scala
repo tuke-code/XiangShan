@@ -21,6 +21,7 @@ import org.chipsalliance.cde.config.Parameters
 import utility.ChiselDB
 import utility.Constantin
 import utility.DelayN
+import utility.LFSR64
 import utility.XSError
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
@@ -375,33 +376,30 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     VecInit(result.map(entry => entry.valid && entry.bits.attribute.isConditional))
   ))
 
-//  private val s2_compareMatrix = CompareMatrix(VecInit(mbtb.io.result.map(_.bits.cfiPosition)))
-//  private val s2_jumpTakenVec = VecInit(mbtb.io.result.map {
-//    entry => entry.valid && (entry.bits.attribute.isDirect || entry.bits.attribute.isIndirect)
-//  })
-//  private val s2_isBrVec = VecInit(mbtb.io.result.map {
-//    entry => entry.valid && entry.bits.attribute.isConditional
-//  })
-
-  // conditional meta compact to NumBtbResultEntries
-  private val s2_alignRawCondMask = s2_alignBtbMetaVec.flatMap(_.map(m => m.rawHit && m.attribute.isConditional))
-  private val s2_alignRawCondCntBefore =
-    VecInit.tabulate(NumBtbs * NumBtbResultEntries)(i => PopCount(s2_alignRawCondMask.take(i)))
-  private val s2_alignRawCondSelectOH = VecInit.tabulate(NumBtbResultEntries) { condIdx =>
+  // conditional meta is compacted to NumBtbResultEntries
+  private val s2_alignHitCondMask = s2_alignBtbResultVec.flatMap(_.map(m => m.valid && m.bits.attribute.isConditional))
+  private val s2_alignHitCondCntBefore =
+    VecInit.tabulate(NumBtbs * NumBtbResultEntries)(i => PopCount(s2_alignHitCondMask.take(i)))
+  private val s2_alignHitCondSelectBeforeOH = VecInit.tabulate(NumBtbResultEntries) { condIdx =>
     VecInit.tabulate(NumBtbs * NumBtbResultEntries) { rawIdx =>
-      s2_alignRawCondMask(rawIdx) &&
-      s2_alignRawCondCntBefore(rawIdx) === condIdx.U
+      s2_alignHitCondMask(rawIdx) &&
+      s2_alignHitCondCntBefore(rawIdx) === condIdx.U
+    }
+  }
+
+  // when the num of conditional branches > NumBtbResultEntries, need tie-break
+  // we use reversed result as alter
+  private val s2_alignHitCondCntAfter =
+    VecInit.tabulate(NumBtbs * NumBtbResultEntries)(i => PopCount(s2_alignHitCondMask.drop(i + 1)))
+
+  private val s2_alignHitCondSelectAfterOH = VecInit.tabulate(NumBtbResultEntries) { condIdx =>
+    VecInit.tabulate(NumBtbs * NumBtbResultEntries) { rawIdx =>
+      s2_alignHitCondMask(rawIdx) &&
+      s2_alignHitCondCntAfter(rawIdx) === condIdx.U
     }
   }
 
   /* *** s3 prediction selection *** */
-//  private val s3_mbtbResult     = RegEnable(mbtb.io.result, s2_fire)
-//  private val s3_tagePrediction = RegEnable(tage.io.prediction, s2_fire)
-//  private val s3_scUsed         = RegEnable(sc.io.scUsed, s2_fire)
-//  private val s3_scTakenMask    = RegEnable(sc.io.scTakenMask, s2_fire)
-//  private val s3_compareMatrix  = RegEnable(s2_compareMatrix, s2_fire)
-//  private val s3_jumpTakenVec   = RegEnable(s2_jumpTakenVec, s2_fire)
-//  private val s3_isBrVec        = RegEnable(s2_isBrVec, s2_fire)
   private val s3_alignTagePredictionVec = RegEnable(s2_alignTagePredictionVec, s2_fire)
   private val s3_alignTageMetaVec       = RegEnable(s2_alignTageMetaVec, s2_fire)
 
@@ -416,14 +414,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_alignPosHigherCompareMatrix = RegEnable(s2_alignPosHigherCompareMatrix, s2_fire)
   private val s3_alignJumpTakenVec           = RegEnable(s2_alignJumpTakenVec, s2_fire)
   private val s3_alignIsBrVec                = RegEnable(s2_alignIsBrVec, s2_fire)
-  private val s3_alignRawCondSelectOH        = RegEnable(s2_alignRawCondSelectOH, s2_fire)
+  private val s3_alignHitCondSelectBeforeOH  = RegEnable(s2_alignHitCondSelectBeforeOH, s2_fire)
+  private val s3_alignHitCondSelectAfterOH   = RegEnable(s2_alignHitCondSelectAfterOH, s2_fire)
 
   private val s3_s1Prediction = RegEnable(s2_s1Prediction, s2_fire)
 
   // timing optimization: The comparison of predictions and the generation of the s3_taken are performed in parallel.
-//  private val s3_mbtbCfiPositionDiffVec = VecInit(s3_mbtbResult.map(_.bits.cfiPosition =/= s3_s1Prediction.cfiPosition))
-//  private val s3_mbtbAttributeDiffVec   = VecInit(s3_mbtbResult.map(_.bits.attribute =/= s3_s1Prediction.attribute))
-//  private val s3_mbtbTargetDiffVec      = VecInit(s3_mbtbResult.map(_.bits.target =/= s3_s1Prediction.target))
   private val s3_alignBtbCfiPositionDiffVec =
     VecInit(s3_alignBtbResultVec.map(r => VecInit(r.map(_.bits.cfiPosition =/= s3_s1Prediction.cfiPosition))))
   private val s3_alignBtbAttributeDiffVec =
@@ -456,10 +452,6 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_alignTakenVec = s3_alignTakenMaskVec.map(mask => mask.reduce(_ || _))
   private val s3_taken         = s3_alignTakenVec.reduce(_ || _)
 
-//  private val s3_firstTakenBranchOH = s3_compareMatrix.getLeastElementOH(s3_takenMask)
-//  private val s3_firstTakenBranch   = Mux1H(s3_firstTakenBranchOH, s3_mbtbResult)
-//  private val s3_useRas             = s3_firstTakenBranch.bits.attribute.isReturn
-//  private val s3_useIttage          = s3_firstTakenBranch.bits.attribute.needIttage && ittage.io.prediction.hit
   private val s3_alignFirstTakenBranchOHVec = VecInit.tabulate(NumBtbAlignBanks) { i =>
     s3_alignCompareMatrixVec(i).getLeastElementOH(s3_alignTakenMaskVec(i))
   }
@@ -488,15 +480,15 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     VecInit.tabulate(NumBtbResultEntries)(i => Mux1H(select(i), src))
 
   // compated meta for training
-  private val s3_compactCondBtbResult = compactedVec(s3_alignRawCondSelectOH, s3_alignBtbResultVec.flatten)
-  private val s3_compactCondBtbMeta   = compactedVec(s3_alignRawCondSelectOH, s3_alignBtbMetaVec.flatten)
-  private val s3_compactCondTageMeta  = compactedVec(s3_alignRawCondSelectOH, s3_alignTageMetaVec.flatten)
-  private val s3_compactCondScMeta    = compactedVec(s3_alignRawCondSelectOH, s3_alignScMetaVec.flatten)
+  private val random                  = LFSR64()
+  private val s3_alignHitCondSelectOH = Mux(random(0), s3_alignHitCondSelectAfterOH, s3_alignHitCondSelectBeforeOH)
+  private val s3_compactCondBtbResult = compactedVec(s3_alignHitCondSelectOH, s3_alignBtbResultVec.flatten)
+  private val s3_compactCondBtbMeta   = compactedVec(s3_alignHitCondSelectOH, s3_alignBtbMetaVec.flatten)
+  private val s3_compactCondTageMeta  = compactedVec(s3_alignHitCondSelectOH, s3_alignTageMetaVec.flatten)
+  private val s3_compactCondScMeta    = compactedVec(s3_alignHitCondSelectOH, s3_alignScMetaVec.flatten)
 
   private val s3_compactCondHitMask  = VecInit(s3_compactCondBtbResult.map(_.valid))
   private val s3_compactCondPosition = VecInit(s3_compactCondBtbResult.map(_.bits.cfiPosition))
-
-//  private val s3_condHitMask = VecInit(s3_mbtbResult.map(e => e.valid && e.bits.attribute.isConditional))
 
   s3_prediction       := Mux(s3_taken, s3_finalFirstTakenBranch.bits, s3_fallThroughPrediction)
   s3_prediction.taken := s3_taken
@@ -758,6 +750,13 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   XSPerfAccumulate("toFtqFire", io.toFtq.prediction.fire)
   XSPerfAccumulate("s3Override", io.toFtq.prediction.fire && io.toFtq.prediction.bits.s3Override)
+  XSPerfHistogram(
+    "condBranchNum",
+    PopCount(s2_alignHitCondMask),
+    s2_fire,
+    0,
+    NumBtbs * NumBtbResultEntries + 1
+  )
   XSPerfHistogram(
     "fetchBlockSize",
     Mux(
