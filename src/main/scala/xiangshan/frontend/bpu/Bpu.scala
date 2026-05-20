@@ -388,7 +388,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   }
 
   // when the num of conditional branches > NumBtbResultEntries, need tie-break
-  // we use reversed result as alter
+  // we use reversed result as alternative
   private val s2_alignHitCondCntAfter =
     VecInit.tabulate(NumBtbs * NumBtbResultEntries)(i => PopCount(s2_alignHitCondMask.drop(i + 1)))
 
@@ -448,7 +448,6 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
         ))
     })
   }
-//  private val s3_taken = s3_takenMask.reduce(_ || _)
   private val s3_alignTakenVec = s3_alignTakenMaskVec.map(mask => mask.reduce(_ || _))
   private val s3_taken         = s3_alignTakenVec.reduce(_ || _)
 
@@ -475,11 +474,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     })
   }
 
-  // compacted conditional hit mask is used for ghr
+  // compacted meta for training
   private def compactedVec[T <: Data](select: Seq[Vec[Bool]], src: Seq[T]): Vec[T] =
     VecInit.tabulate(NumBtbResultEntries)(i => Mux1H(select(i), src))
 
-  // compated meta for training
   private val random                  = LFSR64()
   private val s3_alignHitCondSelectOH = Mux(random(0), s3_alignHitCondSelectAfterOH, s3_alignHitCondSelectBeforeOH)
   private val s3_compactCondBtbResult = compactedVec(s3_alignHitCondSelectOH, s3_alignBtbResultVec.flatten)
