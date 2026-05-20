@@ -259,9 +259,16 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   val canIssueMergeAllBusy = Wire(Vec(params.numDeq, UInt(params.numEntries.W)))
   val canIssueMergeAllBusyNoOldest = Wire(UInt(params.numEntries.W))
   val deqCanIssue = Wire(Vec(params.numDeq, UInt(params.numEntries.W)))
+  val oldestIsReady = Wire(Bool())
+  oldestIsReady := false.B
+  dontTouch(oldestIsReady)
   val realOldestSelValid = Wire(Bool())
   val realOldestSelOH = Wire(UInt(params.numEntries.W))
-  io.realOldestSelValid := realOldestSelValid & (!Mux1H(realOldestSelOH, canIssueMergeAllBusyNoOldest))
+  val realOldestSelFuType = Wire(FuType())
+  realOldestSelFuType := Mux1H(realOldestSelOH, fuTypeVec)
+  io.realOldestSelValid := oldestIsReady &&
+    FuType.FuTypeOrR(realOldestSelFuType, Seq(FuType.falu, FuType.alu)) &&
+    (!Mux1H(realOldestSelOH, canIssueMergeAllBusyNoOldest))
   dontTouch(realOldestSelValid)
   dontTouch(realOldestSelOH)
   realOldestSelValid := false.B
@@ -474,7 +481,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
                      else false.B)
   dontTouch(busyTableBlock)
   if (params.enableOldestIssueBypass) {
-    val rawCanIssue = Mux(busyTableBlock, 0.U, canIssueVec.asUInt & VecInit(deqCanAcceptVec.head).asUInt)
+    val rawCanIssue = Mux(busyTableBlock, 0.U, validVec.asUInt)
     dontTouch(rawCanIssue)
     val rawEnqEntryOldestSel = NewAgeDetector(
       numEntries = params.numEnq,
@@ -494,6 +501,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
         rawOthersEntryOldestSel.bits,
         Fill(params.numEnq, !rawOthersEntryOldestSel.valid) & rawEnqEntryOldestSel.bits,
       )
+      oldestIsReady := Mux1H(realOldestSelOH, canIssueVec)
     }
     else {
       val rawSimpEntryOldestSel = AgeDetector(
@@ -513,6 +521,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
         Fill(params.numSimp, !rawCompEntryOldestSel.valid) & rawSimpEntryOldestSel.bits,
         Fill(params.numEnq, !rawCompEntryOldestSel.valid && !rawSimpEntryOldestSel.valid) & rawEnqEntryOldestSel.bits,
       )
+      oldestIsReady := Mux1H(realOldestSelOH, canIssueVec)
     }
   }
 

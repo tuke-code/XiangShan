@@ -492,8 +492,8 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
   s1_toExuData := s1_toExuDataWire
   val s1_toExuReady = Wire(MixedVec(toExu.map(x => MixedVec(x.map(_.ready.cloneType).toSeq))))
   private val wbConflictCancelS1 = Wire(MixedVec(toExu.map(x => MixedVec(x.map(_ => Bool()).toSeq)).toSeq))
-  private val fromIntIQRealOldestSelValidReg = RegNext(io.fromIntIQRealOldestSelValid)
-  private val fromFpIQRealOldestSelValidReg = RegNext(io.fromFpIQRealOldestSelValid)
+  private val fromIntIQRealOldestSelValid = io.fromIntIQRealOldestSelValid
+  private val fromFpIQRealOldestSelValid = io.fromFpIQRealOldestSelValid
   s1_toExuData.zipWithIndex.foreach { case (exus, iqIdx) =>
     exus.zipWithIndex.foreach { case (uop, exuIdx) =>
       wbConflictCancelS1(iqIdx)(exuIdx) := false.B
@@ -598,10 +598,10 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
       } else s0_cancel := false.B
       wbConflictCancelS0 := false.B
       if (s0.bits.exuParams.name.contains("ALU") && s0.bits.exuParams.enableOldestIssueBypass) {
-        wbConflictCancelS0 := s0.valid && FuTypeOrR(s0.bits.fuType, Seq(bku, mul)) && fromIntIQRealOldestSelValidReg(i)
+        wbConflictCancelS0 := s0.valid && FuTypeOrR(s0.bits.fuType, Seq(bku, mul)) && fromIntIQRealOldestSelValid(i)
       }
       else if (s0.bits.exuParams.name.contains("FEX") && s0.bits.exuParams.enableOldestIssueBypass) {
-        wbConflictCancelS0 := s0.valid && FuTypeOrR(s0.bits.fuType, Seq(fmac, fcvt, fcmp, f2v)) && fromFpIQRealOldestSelValidReg(s0.bits.exuParams.name.last.asDigit)
+        wbConflictCancelS0 := s0.valid && FuTypeOrR(s0.bits.fuType, Seq(fmac, fcvt, fcmp, f2v)) && fromFpIQRealOldestSelValid(s0.bits.exuParams.name.last.asDigit)
       }
       val s0_ldCancel = LoadShouldCancel(s0.bits.loadDependency, io.ldCancel)
       when (s0.fire && !s1_flush && !s0_ldCancel) {
