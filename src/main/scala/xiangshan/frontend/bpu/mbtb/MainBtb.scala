@@ -122,6 +122,8 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
   // we don't need to flatten meta entries, keep the alignBank structure, anyway we just use them per alignBank
   io.mbtb.meta.entries := VecInit(alignBanks.map(_.io.read.mbtbResp.metas))
   io.vbtb.meta.entries := VecInit(alignBanks.map(_.io.read.vbtbResp.metas))
+  // conditional branch metas calculated in Bpu module
+  io.btbPorts.foreach(_.meta.conditions := DontCare)
 
   /* *** s3 ***
    * touch replacer using final takenMask (mbtb + tage + sc)
