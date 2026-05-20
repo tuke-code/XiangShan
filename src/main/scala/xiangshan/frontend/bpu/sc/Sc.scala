@@ -270,11 +270,11 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val s2_pathPercsum   = VecInit(s1_pathPercsum.map(RegEnable(_, s1_fire)))   // for performance counter
   private val s2_globalPercsum = VecInit(s1_globalPercsum.map(RegEnable(_, s1_fire))) // for performance counter
 
-  io.btbPorts.foreach { p =>
-    val s2_btbResult         = p.result
-    val s2_providerTakenMask = VecInit(p.providerTakenCtrs.map(_.bits.isPositive))
-    val s2_providerValid     = VecInit(p.providerTakenCtrs.map(_.valid))
-    val s2_providerCtr       = VecInit(p.providerTakenCtrs.map(_.bits))
+  io.btbPorts.foreach { port =>
+    val s2_btbResult         = port.result
+    val s2_providerTakenMask = VecInit(port.providerTakenCtrs.map(_.bits.isPositive))
+    val s2_providerValid     = VecInit(port.providerTakenCtrs.map(_.valid))
+    val s2_providerCtr       = VecInit(port.providerTakenCtrs.map(_.bits))
 
     val s2_hitMask = VecInit(s2_btbResult.map { btbResult =>
       btbResult.valid && btbResult.bits.attribute.isConditional
@@ -341,33 +341,33 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
       dontTouch(conf)
     }
 
-    p.scTakenMask := s2_scPred
-    p.scUsed      := s2_useScPred
+    port.scTakenMask := s2_scPred
+    port.scUsed      := s2_useScPred
 
     s2_useScPred.zip(s2_providerValid).foreach { case (use, valid) =>
       XSError(s2_fire && use && !valid, "SC useScPred is true but tage provider is invalid!\n")
     }
 
-    p.meta.scBiasLowerBits := RegEnable(s2_biasIdxLowBits, s2_fire)
+    port.meta.scBiasLowerBits := RegEnable(s2_biasIdxLowBits, s2_fire)
 
-    p.meta.scPred        := RegEnable(s2_scPred, s2_fire)
-    p.meta.tagePred      := RegEnable(s2_providerTakenMask, s2_fire)
-    p.meta.tageCtr       := RegEnable(VecInit(s2_providerCtr.map(_.value)), s2_fire)
-    p.meta.tagePredValid := RegEnable(s2_providerValid, s2_fire)
-    p.meta.useScPred     := RegEnable(s2_useScPred, s2_fire)
-    p.meta.sumAboveThres := RegEnable(s2_sumAboveThres, s2_fire)
+    port.meta.scPred        := RegEnable(s2_scPred, s2_fire)
+    port.meta.tagePred      := RegEnable(s2_providerTakenMask, s2_fire)
+    port.meta.tageCtr       := RegEnable(VecInit(s2_providerCtr.map(_.value)), s2_fire)
+    port.meta.tagePredValid := RegEnable(s2_providerValid, s2_fire)
+    port.meta.useScPred     := RegEnable(s2_useScPred, s2_fire)
+    port.meta.sumAboveThres := RegEnable(s2_sumAboveThres, s2_fire)
 
-    p.meta.debug_scPathTakenVec.get   := VecInit(s2_pathPred.map(RegEnable(_, s2_fire))) // for performance counter
-    p.meta.debug_scGlobalTakenVec.get := VecInit(s2_globalPred.map(RegEnable(_, s2_fire)))
-    p.meta.debug_scBWTakenVec.get     := VecInit(s2_bwPred.map(RegEnable(_, s2_fire)))
-    p.meta.debug_scImliTakenVec.get   := VecInit(s2_imliPred.map(RegEnable(_, s2_fire)))
-    p.meta.debug_scBiasTakenVec.get   := VecInit(s2_biasPred.map(RegEnable(_, s2_fire)))
+    port.meta.debug_scPathTakenVec.get   := VecInit(s2_pathPred.map(RegEnable(_, s2_fire))) // for performance counter
+    port.meta.debug_scGlobalTakenVec.get := VecInit(s2_globalPred.map(RegEnable(_, s2_fire)))
+    port.meta.debug_scBWTakenVec.get     := VecInit(s2_bwPred.map(RegEnable(_, s2_fire)))
+    port.meta.debug_scImliTakenVec.get   := VecInit(s2_imliPred.map(RegEnable(_, s2_fire)))
+    port.meta.debug_scBiasTakenVec.get   := VecInit(s2_biasPred.map(RegEnable(_, s2_fire)))
 
-    p.meta.debug_predPathIdx.get   := RegEnable(MixedVecInit(s2_pathIdx), s2_fire) // for debug
-    p.meta.debug_predGlobalIdx.get := RegEnable(MixedVecInit(s2_globalIdx), s2_fire)
-    p.meta.debug_predBWIdx.get     := RegEnable(MixedVecInit(s2_bwIdx), s2_fire)
-    p.meta.debug_predImliIdx.get   := RegEnable(s2_imliIdx, s2_fire)
-    p.meta.debug_predBiasIdx.get   := RegEnable(s2_biasIdx, s2_fire)
+    port.meta.debug_predPathIdx.get   := RegEnable(MixedVecInit(s2_pathIdx), s2_fire) // for debug
+    port.meta.debug_predGlobalIdx.get := RegEnable(MixedVecInit(s2_globalIdx), s2_fire)
+    port.meta.debug_predBWIdx.get     := RegEnable(MixedVecInit(s2_bwIdx), s2_fire)
+    port.meta.debug_predImliIdx.get   := RegEnable(s2_imliIdx, s2_fire)
+    port.meta.debug_predBiasIdx.get   := RegEnable(s2_biasIdx, s2_fire)
 
     dontTouch(s2_totalPercsum)
     dontTouch(s2_hitMask)

@@ -557,7 +557,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_resolveMeta.mbtb.entries    := RegEnable(mbtb.io.mbtb.meta.entries, s2_fire)
   s3_resolveMeta.mbtb.conditions := s3_compactCondBtbMeta
   // tage meta
-  s3_resolveMeta.tage := s3_compactCondTageMeta
+  s3_resolveMeta.tage.entries := s3_compactCondTageMeta
   // sc meta, initialize debug field from the first btb port
   s3_resolveMeta.sc := sc.io.btbPorts(0).meta
   s3_resolveMeta.sc.fromEntries(s3_compactCondScMeta)

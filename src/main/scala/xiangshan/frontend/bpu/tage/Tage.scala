@@ -97,9 +97,9 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val s2_startPc  = RegEnable(s1_startPc, s1_fire)
   private val s2_readResp = RegEnable(s1_readResp, s1_fire)
 
-  io.btbPorts.foreach { p =>
+  io.btbPorts.foreach { port =>
     // Vec[NumBtbResultEntries][NumTables]
-    val s1_tag = VecInit(p.fromBtb.s1_positions.map { position =>
+    val s1_tag = VecInit(port.fromBtb.s1_positions.map { position =>
       VecInit((tables zip s1_foldedHist).map { case (table, hist) =>
         table.getTag(s1_startPc, hist.forTag, position)
       })
@@ -112,7 +112,7 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
      -------------------------------------------------------------------------------------------------------------- */
 
     val s2_tag      = RegEnable(s1_tag, s1_fire)
-    val s2_branches = p.fromBtb.result
+    val s2_branches = port.fromBtb.result
 
     s2_branches.zipWithIndex.foreach { case (branch, i) =>
       val position      = branch.bits.cfiPosition
@@ -149,20 +149,20 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
       val useProvider = hasProvider && !(useAltOnNa && provider.takenCtr.isWeak)
 
       // get prediction for each branch
-      p.prediction(i).useProvider  := useProvider
-      p.prediction(i).providerPred := provider.takenCtr.isPositive
-      p.prediction(i).hasAlt       := hasAlt
-      p.prediction(i).altPred      := alt.takenCtr.isPositive
+      port.prediction(i).useProvider  := useProvider
+      port.prediction(i).providerPred := provider.takenCtr.isPositive
+      port.prediction(i).hasAlt       := hasAlt
+      port.prediction(i).altPred      := alt.takenCtr.isPositive
 
-      p.toSc.providerTakenCtrVec(i).valid := hasProvider && branch.valid
-      p.toSc.providerTakenCtrVec(i).bits  := provider.takenCtr
+      port.toSc.providerTakenCtrVec(i).valid := hasProvider && branch.valid
+      port.toSc.providerTakenCtrVec(i).bits  := provider.takenCtr
 
-      p.meta.entries(i).useProvider       := useProvider
-      p.meta.entries(i).providerTableIdx  := OHToUInt(providerTableOH)
-      p.meta.entries(i).providerWayIdx    := OHToUInt(provider.hitWayMaskOH)
-      p.meta.entries(i).providerTakenCtr  := provider.takenCtr
-      p.meta.entries(i).providerUsefulCtr := provider.usefulCtr
-      p.meta.entries(i).altOrBasePred     := Mux(hasAlt, alt.takenCtr.isPositive, branch.bits.taken)
+      port.meta.entries(i).useProvider       := useProvider
+      port.meta.entries(i).providerTableIdx  := OHToUInt(providerTableOH)
+      port.meta.entries(i).providerWayIdx    := OHToUInt(provider.hitWayMaskOH)
+      port.meta.entries(i).providerTakenCtr  := provider.takenCtr
+      port.meta.entries(i).providerUsefulCtr := provider.usefulCtr
+      port.meta.entries(i).altOrBasePred     := Mux(hasAlt, alt.takenCtr.isPositive, branch.bits.taken)
 
       XSPerfAccumulate(
         s"s2_branch_${i}_multihit_on_same_table",
@@ -664,8 +664,8 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   /* --------------------------------------------------------------------------------------------------------------
      performance counter
      -------------------------------------------------------------------------------------------------------------- */
-  private val s2_perfPredictCondNums = io.btbPorts.zipWithIndex.map { case (p, btbIdx) =>
-    val condMask = p.fromBtb.result.map(branch => branch.valid && branch.bits.attribute.isConditional)
+  private val s2_perfPredictCondNums = io.btbPorts.zipWithIndex.map { case (port, btbIdx) =>
+    val condMask = port.fromBtb.result.map(branch => branch.valid && branch.bits.attribute.isConditional)
     val condNum  = PopCount(condMask)
     XSPerfAccumulate(s"predict_cond_num_btb${btbIdx}", Mux(io.stageCtrl.s2_fire, condNum, 0.U))
     condNum
