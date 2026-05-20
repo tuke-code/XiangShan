@@ -552,22 +552,62 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     s1_prediction.taken && s1_prediction.attribute.isConditional &&
       (s1_cfiPc.addr(CompareAddrLowWidth - 1, 0) > s1_prediction.target.addr(CompareAddrLowWidth - 1, 0))
 
-  commonHR.io.stageCtrl               := stageCtrl
-  commonHR.io.s0_startPc.get          := s0_startPc
-  commonHR.io.s1_imliTaken            := s1_imliTaken
-  commonHR.io.update.startPc          := s3_startPc
-  commonHR.io.update.target           := s3_prediction.target
-  commonHR.io.update.taken            := s3_taken
-  commonHR.io.update.s3Override       := s3_override
-  commonHR.io.update.firstTakenBranch := s3_firstTakenBranch
-  commonHR.io.update.position         := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
-  commonHR.io.update.condHitMask      := s3_condHitMask
-  commonHR.io.redirect.valid          := redirect.valid
-  commonHR.io.redirect.cfiPc          := redirect.bits.cfiPc
-  commonHR.io.redirect.target         := redirect.bits.target
-  commonHR.io.redirect.taken          := redirect.bits.taken
-  commonHR.io.redirect.attribute      := redirect.bits.attribute
-  commonHR.io.redirect.meta           := redirect.bits.meta.commonHRMeta
+  commonHR.io.stageCtrl                 := stageCtrl
+  commonHR.io.s0_startPc.get            := s0_startPc
+  commonHR.io.s1_imliTaken              := s1_imliTaken
+  commonHR.io.s2StartPc                 := s2_startPc
+  commonHR.io.s2CondHitMask             := VecInit(mbtb.io.result.map(e => e.valid && e.bits.attribute.isConditional))
+  commonHR.io.s2Position                := VecInit(mbtb.io.result.map(_.bits.cfiPosition))
+  commonHR.io.s2Targets                 := VecInit(mbtb.io.result.map(_.bits.target))
+  commonHR.io.update.startPc            := s3_startPc
+  commonHR.io.update.target             := s3_prediction.target
+  commonHR.io.update.taken              := s3_taken
+  commonHR.io.update.s3Override         := s3_override
+  commonHR.io.update.attributes         := VecInit(s3_mbtbResult.map(_.bits.attribute))
+  commonHR.io.update.targets            := VecInit(s3_mbtbResult.map(_.bits.target))
+  commonHR.io.update.firstTakenBranchOH := s3_firstTakenBranchOH
+  commonHR.io.update.firstTakenBranch   := s3_firstTakenBranch
+  commonHR.io.update.position           := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
+  commonHR.io.update.condHitMask        := s3_condHitMask
+  commonHR.io.redirect.valid            := redirect.valid
+  commonHR.io.redirect.cfiPc            := redirect.bits.cfiPc
+  commonHR.io.redirect.target           := redirect.bits.target
+  commonHR.io.redirect.taken            := redirect.bits.taken
+  commonHR.io.redirect.attribute        := redirect.bits.attribute
+  commonHR.io.redirect.meta             := redirect.bits.meta.commonHRMeta
+
+  commonHRDiff.io.stageCtrl                 := stageCtrl
+  commonHRDiff.io.s0_startPc.get            := s0_startPc
+  commonHRDiff.io.s1_imliTaken              := s1_imliTaken
+  commonHRDiff.io.update.startPc            := s3_startPc
+  commonHRDiff.io.update.target             := s3_prediction.target
+  commonHRDiff.io.update.taken              := s3_taken
+  commonHRDiff.io.update.s3Override         := s3_override
+  commonHRDiff.io.update.attributes         := VecInit(s3_mbtbResult.map(_.bits.attribute))
+  commonHRDiff.io.update.targets            := VecInit(s3_mbtbResult.map(_.bits.target))
+  commonHRDiff.io.update.firstTakenBranchOH := s3_firstTakenBranchOH
+  commonHRDiff.io.update.firstTakenBranch   := s3_firstTakenBranch
+  commonHRDiff.io.update.position           := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
+  commonHRDiff.io.update.condHitMask        := s3_condHitMask
+  commonHRDiff.io.redirect.valid            := redirect.valid
+  commonHRDiff.io.redirect.cfiPc            := redirect.bits.cfiPc
+  commonHRDiff.io.redirect.target           := redirect.bits.target
+  commonHRDiff.io.redirect.taken            := redirect.bits.taken
+  commonHRDiff.io.redirect.attribute        := redirect.bits.attribute
+  commonHRDiff.io.redirect.meta             := redirect.bits.meta.commonHRMetaDiff
+
+  private val s0_imliDiff     = s0_fire && commonHR.io.s0_imli =/= commonHRDiff.io.s0_imli
+  private val s0_commonHRDiff = s0_fire && commonHR.io.s0_commonHR.asUInt =/= commonHRDiff.io.s0_commonHR.asUInt
+  private val s3ResolveDiff   = s3_fire && s3_commonHRMetaDiff.asUInt =/= s3_commonHRMeta.asUInt
+
+  XSError(
+    s0_imliDiff,
+    "IMLI diff at s0: commonHR IMLI = %d, commonHRDiff IMLI = %d",
+    commonHR.io.s0_imli,
+    commonHRDiff.io.s0_imli
+  )
+  XSError(s0_commonHRDiff && !redirect.valid, "CommonHR diff at s0")
+  XSError(s3ResolveDiff, "CommonHR diff at s3 resolve")
 
   commonHRDiff.io.stageCtrl               := stageCtrl
   commonHRDiff.io.s0_startPc.get          := s0_startPc
