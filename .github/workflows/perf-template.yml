@@ -51,7 +51,7 @@ on:
         description: Python executable from the shared TopDown virtual environment
         required: false
         type: string
-        default: /nfs/home/share/xs-perf-workflow-venv/bin/python
+        default: /nfs/home/share/xs-perf-workflow/xs-perf-workflow-venv/bin/python
       perf_report_dir:
         description: Directory for all spec reports
         required: true
@@ -258,7 +258,7 @@ jobs:
       - name: Run TopDown analysis
         if: ${{ !cancelled() && inputs.run_topdown == 'true' }}
         run: |
-          TOPDOWN_OUT="$SPEC_DIR/perf-analysis/topdown"
+          TOPDOWN_OUT="$SPEC_DIR/xs-perf-workflow/topdown"
           TOPDOWN_PYTHON="${{ inputs.topdown_python }}"
 
           if [ ! -f "$TOPDOWN_PYTHON" ] || [ ! -x "$TOPDOWN_PYTHON" ]; then
@@ -266,8 +266,8 @@ jobs:
             TOPDOWN_STATUS="FAILED: missing TopDown Python virtualenv: $TOPDOWN_PYTHON"
             printf '%s\n' "$TOPDOWN_STATUS" | tee "$TOPDOWN_OUT/topdown_status.txt"
             {
-              printf 'Status: `%s`\n\n' "$TOPDOWN_STATUS"
-              printf 'Expected Python: `%s`\n' "$TOPDOWN_PYTHON"
+              printf 'Output: `%s`\n\n' "$TOPDOWN_OUT"
+              printf 'Python executable: `%s`\n' "$TOPDOWN_PYTHON"
             } > "$TOPDOWN_OUT/topdown.md"
             exit 0
           fi
@@ -287,7 +287,7 @@ jobs:
             TOPDOWN_STATUS="FAILED: TopDown wrapper launch failed with exit code $TOPDOWN_RC"
             printf '%s\n' "$TOPDOWN_STATUS" | tee "$TOPDOWN_OUT/topdown_status.txt"
             {
-              printf 'Status: `%s`\n\n' "$TOPDOWN_STATUS"
+              printf 'Output: `%s`\n\n' "$TOPDOWN_OUT"
               printf 'Python executable: `%s`\n' "$TOPDOWN_PYTHON"
             } > "$TOPDOWN_OUT/topdown.md"
           fi
@@ -319,14 +319,14 @@ jobs:
           echo "- fp: **${FP_SCORE}**" >> $GITHUB_STEP_SUMMARY
           echo "- total: **${TOTAL_SCORE}**" >> $GITHUB_STEP_SUMMARY
 
-          if [ -f "$SPEC_DIR/perf-analysis/topdown/topdown_status.txt" ] || [ -f "$SPEC_DIR/perf-analysis/topdown/topdown.md" ]; then
+          if [ -f "$SPEC_DIR/xs-perf-workflow/topdown/topdown_status.txt" ] || [ -f "$SPEC_DIR/xs-perf-workflow/topdown/topdown.md" ]; then
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "### TopDown Analysis" >> $GITHUB_STEP_SUMMARY
-            if [ -f "$SPEC_DIR/perf-analysis/topdown/topdown_status.txt" ]; then
-              cat "$SPEC_DIR/perf-analysis/topdown/topdown_status.txt" >> $GITHUB_STEP_SUMMARY
+            if [ -f "$SPEC_DIR/xs-perf-workflow/topdown/topdown_status.txt" ]; then
+              cat "$SPEC_DIR/xs-perf-workflow/topdown/topdown_status.txt" >> $GITHUB_STEP_SUMMARY
               echo "" >> $GITHUB_STEP_SUMMARY
             fi
-            if [ -f "$SPEC_DIR/perf-analysis/topdown/topdown.md" ]; then
-              cat "$SPEC_DIR/perf-analysis/topdown/topdown.md" >> $GITHUB_STEP_SUMMARY
+            if [ -f "$SPEC_DIR/xs-perf-workflow/topdown/topdown.md" ]; then
+              cat "$SPEC_DIR/xs-perf-workflow/topdown/topdown.md" >> $GITHUB_STEP_SUMMARY
             fi
           fi

@@ -34,15 +34,11 @@ def write_result(output_dir, status, details=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     write_text(output_dir / "topdown_status.txt", status + "\n")
 
-    lines = [
-        f"Status: `{status}`",
-        "",
-        f"Python executable: `{sys.executable}`",
-        "",
-        f"Native output path: `{output_dir / 'results'}`",
-    ]
+    lines = [f"Output: `{output_dir}`"]
+    if not status.startswith("OK"):
+        lines += ["", f"Python executable: `{sys.executable}`"]
     if details:
-        lines.extend(["", details])
+        lines += ["", details]
     write_text(output_dir / "topdown.md", "\n".join(lines) + "\n")
 
 
@@ -160,14 +156,7 @@ def run_topdown(args):
     if not expected_csv.exists():
         return fail(output_dir, f"missing native weighted CSV: {expected_csv}")
 
-    details = "\n".join(
-        [
-            f"Weighted CSV: `{expected_csv}`",
-            f"Native stdout: `{stdout_path}`",
-            f"Native stderr: `{stderr_path}`",
-        ]
-    )
-    write_result(output_dir, "OK", details)
+    write_result(output_dir, "OK")
     print("OK")
     return 0
 

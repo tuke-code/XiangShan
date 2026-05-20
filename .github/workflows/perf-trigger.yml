@@ -81,7 +81,7 @@ on:
         description: Python executable from the shared TopDown virtual environment
         required: false
         type: string
-        default: /nfs/home/share/xs-perf-workflow-venv/bin/python
+        default: /nfs/home/share/xs-perf-workflow/xs-perf-workflow-venv/bin/python
 
 jobs:
   performance-test:
