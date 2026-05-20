@@ -47,11 +47,6 @@ on:
         required: false
         type: string
         default: "false"
-      topdown_python:
-        description: Python executable from the shared TopDown virtual environment
-        required: false
-        type: string
-        default: /nfs/home/share/xs-perf-workflow/xs-perf-workflow-venv/bin/python
       perf_report_dir:
         description: Directory for all spec reports
         required: true
@@ -259,7 +254,7 @@ jobs:
         if: ${{ !cancelled() && inputs.run_topdown == 'true' }}
         run: |
           TOPDOWN_OUT="$SPEC_DIR/xs-perf-workflow/topdown"
-          TOPDOWN_PYTHON="${{ inputs.topdown_python }}"
+          TOPDOWN_PYTHON="/nfs/home/share/xs-perf-workflow/xs-perf-workflow-venv/bin/python"
 
           if [ ! -f "$TOPDOWN_PYTHON" ] || [ ! -x "$TOPDOWN_PYTHON" ]; then
             mkdir -p "$TOPDOWN_OUT"
