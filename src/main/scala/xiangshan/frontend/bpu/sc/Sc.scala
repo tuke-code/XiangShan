@@ -38,18 +38,22 @@ import xiangshan.frontend.bpu.tage.{TakenCounter => TageTakenCounter}
  * This module is the implementation of the Statistical Corrector.
  */
 class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with Helpers {
-
+  class ScBtbPredictIO extends Bundle {
+    // s2 stage btb info
+    val result: Vec[Valid[Prediction]] = Input(Vec(NumBtbResultEntries, Valid(new Prediction)))
+    // s2 stage tage info
+    val providerTakenCtrs: Vec[Valid[SaturateCounter]] = Input(Vec(NumBtbResultEntries, Valid(TageTakenCounter())))
+    // s3 stage output
+    val scTakenMask: Vec[Bool] = Output(Vec(NumBtbResultEntries, Bool()))
+    val scUsed:      Vec[Bool] = Output(Vec(NumBtbResultEntries, Bool()))
+    val meta:        ScMeta    = Output(new ScMeta())
+  }
   class ScIO(implicit p: Parameters) extends BasePredictorIO with HasScParameters {
-    val mbtbResult: Vec[Valid[Prediction]] = Input(Vec(NumBtbResultEntries, Valid(new Prediction)))
-    val providerTakenCtrs: Vec[Valid[SaturateCounter]] =
-      Input(Vec(NumBtbResultEntries, Valid(TageTakenCounter()))) // s2 stage tage info
     val foldedPathHist:      PhrAllFoldedHistories = Input(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
     val imli:                UInt                  = Input(UInt(ImliHistoryLength.W))
     val commonHR:            CommonHREntry         = Input(new CommonHREntry())
     val trainFoldedPathHist: PhrAllFoldedHistories = Input(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
-    val scTakenMask:         Vec[Bool]             = Output(Vec(NumBtbResultEntries, Bool()))
-    val scUsed:              Vec[Bool]             = Output(Vec(NumBtbResultEntries, Bool()))
-    val meta:                ScMeta                = Output(new ScMeta())
+    val btbPorts:            Vec[ScBtbPredictIO]   = Vec(NumBtbs, new ScBtbPredictIO)
   }
   val io: ScIO = IO(new ScIO)
 
@@ -253,6 +257,11 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
    */
   private val s2_startPc = RegEnable(s1_startPc, s1_fire)
 
+  private val s2_totalPercsumAll            = RegEnable(s1_totalPercsumAll, s1_fire)
+  private val s2_sumAboveThresholdShift1All = RegEnable(s1_sumAboveThresholdShift1All, s1_fire)
+  private val s2_sumAboveThresholdShift2All = RegEnable(s1_sumAboveThresholdShift2All, s1_fire)
+  private val s2_sumAboveThresholdShift3All = RegEnable(s1_sumAboveThresholdShift3All, s1_fire)
+
   private val s2_biasPercsum = VecInit(s1_biasPercsum.map(RegEnable(_, s1_fire)))
   private val s2_sumPercsum  = VecInit(s1_sumPercsum.map(RegEnable(_, s1_fire)))
 
@@ -261,109 +270,110 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val s2_pathPercsum   = VecInit(s1_pathPercsum.map(RegEnable(_, s1_fire)))   // for performance counter
   private val s2_globalPercsum = VecInit(s1_globalPercsum.map(RegEnable(_, s1_fire))) // for performance counter
 
-  private val s2_mbtbResult        = io.mbtbResult
-  private val s2_providerTakenMask = VecInit(io.providerTakenCtrs.map(_.bits.isPositive))
-  private val s2_providerValid     = VecInit(io.providerTakenCtrs.map(_.valid))
-  private val s2_providerCtr       = VecInit(io.providerTakenCtrs.map(_.bits))
+  io.btbPorts.foreach { p =>
+    val s2_btbResult         = p.result
+    val s2_providerTakenMask = VecInit(p.providerTakenCtrs.map(_.bits.isPositive))
+    val s2_providerValid     = VecInit(p.providerTakenCtrs.map(_.valid))
+    val s2_providerCtr       = VecInit(p.providerTakenCtrs.map(_.bits))
 
-  private val s2_hitMask = VecInit(s2_mbtbResult.map { mbtbResult =>
-    mbtbResult.valid && mbtbResult.bits.attribute.isConditional
-  })
+    val s2_hitMask = VecInit(s2_btbResult.map { btbResult =>
+      btbResult.valid && btbResult.bits.attribute.isConditional
+    })
 
-  private val s2_wayIdx = s2_mbtbResult.map(mbtbResult => getWayIdx(mbtbResult.bits.cfiPosition))
-  private val s2_biasIdxLowBits = VecInit(s2_providerTakenMask.zip(s2_providerValid).zip(s2_providerCtr).map {
-    case ((taken, valid), ctr) => Cat(valid && ctr.isWeak, valid && taken)
-  })
-  private val s2_biasWayIdx = s2_wayIdx.zipWithIndex.map {
-    case (wayIdx, i) =>
-      val biasIdx = Cat(wayIdx, s2_biasIdxLowBits(i))
-      biasIdx
-  }
+    val s2_wayIdx = s2_btbResult.map(btbResult => getWayIdx(btbResult.bits.cfiPosition))
+    val s2_biasIdxLowBits = VecInit(s2_providerTakenMask.zip(s2_providerValid).zip(s2_providerCtr).map {
+      case ((taken, valid), ctr) => Cat(valid && ctr.isWeak, valid && taken)
+    })
+    val s2_biasWayIdx = s2_wayIdx.zipWithIndex.map {
+      case (wayIdx, i) =>
+        val biasIdx = Cat(wayIdx, s2_biasIdxLowBits(i))
+        biasIdx
+    }
 
-  private val s2_pathPred   = s2_wayIdx.map(wayIdx => s2_pathPercsum(wayIdx) >= 0.S)       // for performance counter
-  private val s2_globalPred = s2_wayIdx.map(wayIdx => s2_globalPercsum(wayIdx) >= 0.S)     // for performance counter
-  private val s2_bwPred     = s2_wayIdx.map(wayIdx => s2_bwPercsum(wayIdx) >= 0.S)         // for performance counter
-  private val s2_imliPred   = s2_wayIdx.map(wayIdx => s2_imliPercsum(wayIdx) >= 0.S)       // for performance counter
-  private val s2_biasPred   = s2_biasWayIdx.map(biasIdx => s2_biasPercsum(biasIdx) >= 0.S) // for performance counter
+    val s2_pathPred   = s2_wayIdx.map(wayIdx => s2_pathPercsum(wayIdx) >= 0.S)       // for performance counter
+    val s2_globalPred = s2_wayIdx.map(wayIdx => s2_globalPercsum(wayIdx) >= 0.S)     // for performance counter
+    val s2_bwPred     = s2_wayIdx.map(wayIdx => s2_bwPercsum(wayIdx) >= 0.S)         // for performance counter
+    val s2_imliPred   = s2_wayIdx.map(wayIdx => s2_imliPercsum(wayIdx) >= 0.S)       // for performance counter
+    val s2_biasPred   = s2_biasWayIdx.map(biasIdx => s2_biasPercsum(biasIdx) >= 0.S) // for performance counter
 
-  private val s2_totalPercsumAll            = RegEnable(s1_totalPercsumAll, s1_fire)
-  private val s2_sumAboveThresholdShift1All = RegEnable(s1_sumAboveThresholdShift1All, s1_fire)
-  private val s2_sumAboveThresholdShift2All = RegEnable(s1_sumAboveThresholdShift2All, s1_fire)
-  private val s2_sumAboveThresholdShift3All = RegEnable(s1_sumAboveThresholdShift3All, s1_fire)
+    val s2_totalPercsum = VecInit(s2_wayIdx.zip(s2_biasIdxLowBits).map { case (wayIdx, lowBits) =>
+      s2_totalPercsumAll(wayIdx)(lowBits)
+    })
 
-  private val s2_totalPercsum = VecInit(s2_wayIdx.zip(s2_biasIdxLowBits).map { case (wayIdx, lowBits) =>
-    s2_totalPercsumAll(wayIdx)(lowBits)
-  })
+    val s2_sumAboveThresholdShift1 = VecInit(s2_wayIdx.zip(s2_biasIdxLowBits).map { case (wayIdx, lowBits) =>
+      s2_sumAboveThresholdShift1All(wayIdx)(lowBits)
+    })
+    val s2_sumAboveThresholdShift2 = VecInit(s2_wayIdx.zip(s2_biasIdxLowBits).map { case (wayIdx, lowBits) =>
+      s2_sumAboveThresholdShift2All(wayIdx)(lowBits)
+    })
+    val s2_sumAboveThresholdShift3 = VecInit(s2_wayIdx.zip(s2_biasIdxLowBits).map { case (wayIdx, lowBits) =>
+      s2_sumAboveThresholdShift3All(wayIdx)(lowBits)
+    })
 
-  private val s2_sumAboveThresholdShift1 = VecInit(s2_wayIdx.zip(s2_biasIdxLowBits).map { case (wayIdx, lowBits) =>
-    s2_sumAboveThresholdShift1All(wayIdx)(lowBits)
-  })
-  private val s2_sumAboveThresholdShift2 = VecInit(s2_wayIdx.zip(s2_biasIdxLowBits).map { case (wayIdx, lowBits) =>
-    s2_sumAboveThresholdShift2All(wayIdx)(lowBits)
-  })
-  private val s2_sumAboveThresholdShift3 = VecInit(s2_wayIdx.zip(s2_biasIdxLowBits).map { case (wayIdx, lowBits) =>
-    s2_sumAboveThresholdShift3All(wayIdx)(lowBits)
-  })
+    require(NumWays == s2_btbResult.length, s"NumWays $NumWays != s2_mbtbHitMask.length ${s2_btbResult.length}")
 
-  require(NumWays == s2_mbtbResult.length, s"NumWays $NumWays != s2_mbtbHitMask.length ${s2_mbtbResult.length}")
+    val s2_scPred        = VecInit(s2_totalPercsum.map(_ >= 0.S))
+    val s2_thresholds    = VecInit(scThreshold.map(_.value >> 3))
+    val s2_useScPred     = WireInit(VecInit.fill(NumWays)(false.B))
+    val s2_sumAboveThres = WireInit(VecInit.fill(NumWays)(false.B))
 
-  private val s2_scPred        = VecInit(s2_totalPercsum.map(_ >= 0.S))
-  private val s2_thresholds    = VecInit(scThreshold.map(_.value >> 3))
-  private val s2_useScPred     = WireInit(VecInit.fill(NumWays)(false.B))
-  private val s2_sumAboveThres = WireInit(VecInit.fill(NumWays)(false.B))
+    for (i <- 0 until NumWays) {
+      val predValid    = s2_hitMask(i) && s2_providerValid(i)
+      val sum          = s2_totalPercsum(i)
+      val thres        = s2_thresholds(s2_wayIdx(i))
+      val tageConfHigh = s2_providerCtr(i).isSaturatePositive || s2_providerCtr(i).isSaturateNegative
+      val tageConfMid  = s2_providerCtr(i).isMid
+      val tageConfLow  = s2_providerCtr(i).isWeak
 
-  for (i <- 0 until NumWays) {
-    val predValid    = s2_hitMask(i) && s2_providerValid(i)
-    val sum          = s2_totalPercsum(i)
-    val thres        = s2_thresholds(s2_wayIdx(i))
-    val tageConfHigh = s2_providerCtr(i).isSaturatePositive || s2_providerCtr(i).isSaturateNegative
-    val tageConfMid  = s2_providerCtr(i).isMid
-    val tageConfLow  = s2_providerCtr(i).isWeak
-
-    val conf = MuxCase(
-      false.B,
-      Seq(
-        (predValid && tageConfHigh) -> s2_sumAboveThresholdShift1(i),
-        (predValid && tageConfMid)  -> s2_sumAboveThresholdShift2(i),
-        (predValid && tageConfLow)  -> s2_sumAboveThresholdShift3(i)
+      val conf = MuxCase(
+        false.B,
+        Seq(
+          (predValid && tageConfHigh) -> s2_sumAboveThresholdShift1(i),
+          (predValid && tageConfMid)  -> s2_sumAboveThresholdShift2(i),
+          (predValid && tageConfLow)  -> s2_sumAboveThresholdShift3(i)
+        )
       )
-    )
-    s2_useScPred(i)     := conf
-    s2_sumAboveThres(i) := Mux(predValid, conf, true.B)
-    dontTouch(tageConfHigh)
-    dontTouch(tageConfMid)
-    dontTouch(tageConfLow)
-    dontTouch(conf)
+      s2_useScPred(i)     := conf
+      s2_sumAboveThres(i) := Mux(predValid, conf, true.B)
+      dontTouch(tageConfHigh)
+      dontTouch(tageConfMid)
+      dontTouch(tageConfLow)
+      dontTouch(conf)
+    }
+
+    p.scTakenMask := s2_scPred
+    p.scUsed      := s2_useScPred
+
+    s2_useScPred.zip(s2_providerValid).foreach { case (use, valid) =>
+      XSError(s2_fire && use && !valid, "SC useScPred is true but tage provider is invalid!\n")
+    }
+
+    p.meta.scBiasLowerBits := RegEnable(s2_biasIdxLowBits, s2_fire)
+
+    p.meta.scPred        := RegEnable(s2_scPred, s2_fire)
+    p.meta.tagePred      := RegEnable(s2_providerTakenMask, s2_fire)
+    p.meta.tageCtr       := RegEnable(VecInit(s2_providerCtr.map(_.value)), s2_fire)
+    p.meta.tagePredValid := RegEnable(s2_providerValid, s2_fire)
+    p.meta.useScPred     := RegEnable(s2_useScPred, s2_fire)
+    p.meta.sumAboveThres := RegEnable(s2_sumAboveThres, s2_fire)
+
+    p.meta.debug_scPathTakenVec.get   := VecInit(s2_pathPred.map(RegEnable(_, s2_fire))) // for performance counter
+    p.meta.debug_scGlobalTakenVec.get := VecInit(s2_globalPred.map(RegEnable(_, s2_fire)))
+    p.meta.debug_scBWTakenVec.get     := VecInit(s2_bwPred.map(RegEnable(_, s2_fire)))
+    p.meta.debug_scImliTakenVec.get   := VecInit(s2_imliPred.map(RegEnable(_, s2_fire)))
+    p.meta.debug_scBiasTakenVec.get   := VecInit(s2_biasPred.map(RegEnable(_, s2_fire)))
+
+    p.meta.debug_predPathIdx.get   := RegEnable(MixedVecInit(s2_pathIdx), s2_fire) // for debug
+    p.meta.debug_predGlobalIdx.get := RegEnable(MixedVecInit(s2_globalIdx), s2_fire)
+    p.meta.debug_predBWIdx.get     := RegEnable(MixedVecInit(s2_bwIdx), s2_fire)
+    p.meta.debug_predImliIdx.get   := RegEnable(s2_imliIdx, s2_fire)
+    p.meta.debug_predBiasIdx.get   := RegEnable(s2_biasIdx, s2_fire)
+
+    dontTouch(s2_totalPercsum)
+    dontTouch(s2_hitMask)
+    dontTouch(s2_scPred)
+    dontTouch(s2_useScPred)
   }
-
-  io.scTakenMask := s2_scPred
-  io.scUsed      := s2_useScPred
-
-  s2_useScPred.zip(s2_providerValid).foreach { case (use, valid) =>
-    XSError(s2_fire && use && !valid, "SC useScPred is true but tage provider is invalid!\n")
-  }
-
-  io.meta.scBiasLowerBits := RegEnable(s2_biasIdxLowBits, s2_fire)
-
-  io.meta.scPred        := RegEnable(s2_scPred, s2_fire)
-  io.meta.tagePred      := RegEnable(s2_providerTakenMask, s2_fire)
-  io.meta.tageCtr       := RegEnable(VecInit(s2_providerCtr.map(_.value)), s2_fire)
-  io.meta.tagePredValid := RegEnable(s2_providerValid, s2_fire)
-  io.meta.useScPred     := RegEnable(s2_useScPred, s2_fire)
-  io.meta.sumAboveThres := RegEnable(s2_sumAboveThres, s2_fire)
-
-  io.meta.debug_scPathTakenVec.get   := VecInit(s2_pathPred.map(RegEnable(_, s2_fire))) // for performance counter
-  io.meta.debug_scGlobalTakenVec.get := VecInit(s2_globalPred.map(RegEnable(_, s2_fire)))
-  io.meta.debug_scBWTakenVec.get     := VecInit(s2_bwPred.map(RegEnable(_, s2_fire)))
-  io.meta.debug_scImliTakenVec.get   := VecInit(s2_imliPred.map(RegEnable(_, s2_fire)))
-  io.meta.debug_scBiasTakenVec.get   := VecInit(s2_biasPred.map(RegEnable(_, s2_fire)))
-
-  io.meta.debug_predPathIdx.get   := RegEnable(MixedVecInit(s2_pathIdx), s2_fire) // for debug
-  io.meta.debug_predGlobalIdx.get := RegEnable(MixedVecInit(s2_globalIdx), s2_fire)
-  io.meta.debug_predBWIdx.get     := RegEnable(MixedVecInit(s2_bwIdx), s2_fire)
-  io.meta.debug_predImliIdx.get   := RegEnable(s2_imliIdx, s2_fire)
-  io.meta.debug_predBiasIdx.get   := RegEnable(s2_biasIdx, s2_fire)
-
   /*
    *  train pipeline stage 0
    */
@@ -845,10 +855,6 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   XSPerfAccumulate(s"threshold_try_underflow", t1_writeValid && t1_thresholdUnderflowVec.reduce(_ || _))
 
   dontTouch(s2_sumPercsum)
-  dontTouch(s2_totalPercsum)
-  dontTouch(s2_hitMask)
-  dontTouch(s2_scPred)
-  dontTouch(s2_useScPred)
   dontTouch(t1_branchesWayIdxVec)
   dontTouch(t1_writeThresVec)
   dontTouch(t1_meta)

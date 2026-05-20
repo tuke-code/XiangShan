@@ -77,7 +77,8 @@ class MainBtbMetaEntry(implicit p: Parameters) extends MainBtbBundle {
 }
 
 class MainBtbMeta(implicit p: Parameters) extends MainBtbBundle {
-  val entries: Vec[Vec[MainBtbMetaEntry]] = Vec(NumAlignBanks, Vec(NumWay, new MainBtbMetaEntry))
+  val entries:    Vec[Vec[MainBtbMetaEntry]] = Vec(NumAlignBanks, Vec(NumWay, new MainBtbMetaEntry))
+  val conditions: Vec[MainBtbMetaEntry]      = Vec(NumBtbResultEntries, new MainBtbMetaEntry)
 }
 
 class MainBtbAlignBankTrace(implicit p: Parameters) extends MainBtbBundle {

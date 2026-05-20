@@ -227,8 +227,6 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   ras.io.specIn.bits.attribute   := s3_prediction.attribute
   ras.io.specIn.bits.cfiPosition := s3_prediction.cfiPosition
 
-  tage.io.fromMainBtb.result             := mbtb.io.result
-  tage.io.fromMainBtb.s1_positions       := mbtb.io.s1_positions
   tage.io.fromPhr.foldedPathHist         := phr.io.s0_foldedPhr
   tage.io.fromPhr.foldedPathHistForTrain := phr.io.trainFoldedPhr
   tage.io.debug_trainValid               := io.fromFtq.train.valid // for perf counters
@@ -236,12 +234,17 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   ittage.io.s1_foldedPhr   := phr.io.s1_foldedPhr
   ittage.io.trainFoldedPhr := phr.io.trainFoldedPhr
 
-  sc.io.mbtbResult          := mbtb.io.result
-  sc.io.providerTakenCtrs   := tage.io.toSc.providerTakenCtrVec
   sc.io.foldedPathHist      := phr.io.s0_foldedPhr
   sc.io.imli                := commonHR.io.s0_imli
   sc.io.trainFoldedPathHist := phr.io.trainFoldedPhr
   sc.io.commonHR            := commonHR.io.s0_commonHR
+
+  (tage.io.btbPorts zip sc.io.btbPorts zip mbtb.io.btbPorts).foreach { case ((tage, sc), btb) =>
+    tage.fromBtb.result       := btb.result
+    tage.fromBtb.s1_positions := btb.s1_positions
+    sc.result                 := btb.result
+    sc.providerTakenCtrs      := tage.toSc.providerTakenCtrVec
+  }
 
   s3_flush := redirect.valid
   s2_flush := s3_flush || s3_override
@@ -340,86 +343,193 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       s2_utageMeta.abtbResult(idx).valid && (s2_utageMeta.abtbResult(idx).cfiPosition <= s2_s1Prediction.cfiPosition)
   }
 
-  private val s2_compareMatrix = CompareMatrix(VecInit(mbtb.io.result.map(_.bits.cfiPosition)))
-  private val s2_jumpTakenVec = VecInit(mbtb.io.result.map {
-    entry => entry.valid && (entry.bits.attribute.isDirect || entry.bits.attribute.isIndirect)
-  })
-  private val s2_isBrVec = VecInit(mbtb.io.result.map {
-    entry => entry.valid && entry.bits.attribute.isConditional
-  })
+  private def alignBankedVec[T <: Data](src: Seq[Vec[T]]): Vec[Vec[T]] =
+    VecInit.tabulate(NumBtbAlignBanks) { bank =>
+      val lo = bank * mbtb.NumWay
+      val hi = lo + mbtb.NumWay
+      VecInit(src.flatMap(_.slice(lo, hi)))
+    }
+  private val s2_alignTagePredictionVec = alignBankedVec(tage.io.btbPorts.map(_.prediction))
+  private val s2_alignTageMetaVec       = alignBankedVec(tage.io.btbPorts.map(_.meta.entries))
+
+  private val s2_alignScUsedVec      = alignBankedVec(sc.io.btbPorts.map(_.scUsed))
+  private val s2_alignScTakenMaskVec = alignBankedVec(sc.io.btbPorts.map(_.scTakenMask))
+  private val s2_alignScMetaVec      = alignBankedVec(sc.io.btbPorts.map(_.meta.toEntries))
+
+  private val s2_alignBtbResultVec = alignBankedVec(mbtb.io.btbPorts.map(_.result))
+  private val s2_alignBtbMetaVec = VecInit.tabulate(NumBtbAlignBanks) { i =>
+    VecInit(mbtb.io.btbPorts.flatMap(_.meta.entries(i)))
+  }
+  private val s2_alignPosHigherBitsVec = VecInit.tabulate(NumBtbAlignBanks) { i =>
+    mbtb.getAlignBankIndexFromPosition(s2_alignBtbResultVec(i)(0).bits.cfiPosition)
+  }
+  // use hierarchical aligned compare matrix to optimize area
+  private val s2_alignCompareMatrixVec = VecInit.tabulate(NumBtbAlignBanks) { i =>
+    CompareMatrix(VecInit(s2_alignBtbMetaVec(i).map(_.position)))
+  }
+  private val s2_alignPosHigherCompareMatrix = CompareMatrix(s2_alignPosHigherBitsVec)
+  private val s2_alignJumpTakenVec = VecInit(s2_alignBtbResultVec.map(result =>
+    VecInit(result.map(entry => entry.valid && (entry.bits.attribute.isDirect || entry.bits.attribute.isIndirect)))
+  ))
+  private val s2_alignIsBrVec = VecInit(s2_alignBtbResultVec.map(result =>
+    VecInit(result.map(entry => entry.valid && entry.bits.attribute.isConditional))
+  ))
+
+//  private val s2_compareMatrix = CompareMatrix(VecInit(mbtb.io.result.map(_.bits.cfiPosition)))
+//  private val s2_jumpTakenVec = VecInit(mbtb.io.result.map {
+//    entry => entry.valid && (entry.bits.attribute.isDirect || entry.bits.attribute.isIndirect)
+//  })
+//  private val s2_isBrVec = VecInit(mbtb.io.result.map {
+//    entry => entry.valid && entry.bits.attribute.isConditional
+//  })
+
+  // conditional meta compact to NumBtbResultEntries
+  private val s2_alignRawCondMask = s2_alignBtbMetaVec.flatMap(_.map(m => m.rawHit && m.attribute.isConditional))
+  private val s2_alignRawCondCntBefore =
+    VecInit.tabulate(NumBtbs * NumBtbResultEntries)(i => PopCount(s2_alignRawCondMask.take(i)))
+  private val s2_alignRawCondSelectOH = VecInit.tabulate(NumBtbResultEntries) { condIdx =>
+    VecInit.tabulate(NumBtbs * NumBtbResultEntries) { rawIdx =>
+      s2_alignRawCondMask(rawIdx) &&
+      s2_alignRawCondCntBefore(rawIdx) === condIdx.U
+    }
+  }
 
   /* *** s3 prediction selection *** */
-  private val s3_mbtbResult     = RegEnable(mbtb.io.result, s2_fire)
-  private val s3_tagePrediction = RegEnable(tage.io.prediction, s2_fire)
-  private val s3_scUsed         = RegEnable(sc.io.scUsed, s2_fire)
-  private val s3_scTakenMask    = RegEnable(sc.io.scTakenMask, s2_fire)
-  private val s3_compareMatrix  = RegEnable(s2_compareMatrix, s2_fire)
-  private val s3_s1Prediction   = RegEnable(s2_s1Prediction, s2_fire)
-  private val s3_jumpTakenVec   = RegEnable(s2_jumpTakenVec, s2_fire)
-  private val s3_isBrVec        = RegEnable(s2_isBrVec, s2_fire)
+//  private val s3_mbtbResult     = RegEnable(mbtb.io.result, s2_fire)
+//  private val s3_tagePrediction = RegEnable(tage.io.prediction, s2_fire)
+//  private val s3_scUsed         = RegEnable(sc.io.scUsed, s2_fire)
+//  private val s3_scTakenMask    = RegEnable(sc.io.scTakenMask, s2_fire)
+//  private val s3_compareMatrix  = RegEnable(s2_compareMatrix, s2_fire)
+//  private val s3_jumpTakenVec   = RegEnable(s2_jumpTakenVec, s2_fire)
+//  private val s3_isBrVec        = RegEnable(s2_isBrVec, s2_fire)
+  private val s3_alignTagePredictionVec = RegEnable(s2_alignTagePredictionVec, s2_fire)
+  private val s3_alignTageMetaVec       = RegEnable(s2_alignTageMetaVec, s2_fire)
+
+  private val s3_alignScUsedVec      = RegEnable(s2_alignScUsedVec, s2_fire)
+  private val s3_alignScTakenMaskVec = RegEnable(s2_alignScTakenMaskVec, s2_fire)
+  private val s3_alignScMetaVec      = RegEnable(s2_alignScMetaVec, s2_fire)
+
+  private val s3_alignBtbResultVec = RegEnable(s2_alignBtbResultVec, s2_fire)
+  private val s3_alignBtbMetaVec   = RegEnable(s2_alignBtbMetaVec, s2_fire)
+
+  private val s3_alignCompareMatrixVec       = RegEnable(s2_alignCompareMatrixVec, s2_fire)
+  private val s3_alignPosHigherCompareMatrix = RegEnable(s2_alignPosHigherCompareMatrix, s2_fire)
+  private val s3_alignJumpTakenVec           = RegEnable(s2_alignJumpTakenVec, s2_fire)
+  private val s3_alignIsBrVec                = RegEnable(s2_alignIsBrVec, s2_fire)
+  private val s3_alignRawCondSelectOH        = RegEnable(s2_alignRawCondSelectOH, s2_fire)
+
+  private val s3_s1Prediction = RegEnable(s2_s1Prediction, s2_fire)
 
   // timing optimization: The comparison of predictions and the generation of the s3_taken are performed in parallel.
-  private val s3_mbtbCfiPositionDiffVec = VecInit(s3_mbtbResult.map(_.bits.cfiPosition =/= s3_s1Prediction.cfiPosition))
-  private val s3_mbtbAttributeDiffVec   = VecInit(s3_mbtbResult.map(_.bits.attribute =/= s3_s1Prediction.attribute))
-  private val s3_mbtbTargetDiffVec      = VecInit(s3_mbtbResult.map(_.bits.target =/= s3_s1Prediction.target))
-  private val s3_ittageTargetDiff       = ittage.io.prediction.target =/= s3_s1Prediction.target
-  private val s3_rasTargetDiff          = ras.io.topRetAddr =/= s3_s1Prediction.target
+//  private val s3_mbtbCfiPositionDiffVec = VecInit(s3_mbtbResult.map(_.bits.cfiPosition =/= s3_s1Prediction.cfiPosition))
+//  private val s3_mbtbAttributeDiffVec   = VecInit(s3_mbtbResult.map(_.bits.attribute =/= s3_s1Prediction.attribute))
+//  private val s3_mbtbTargetDiffVec      = VecInit(s3_mbtbResult.map(_.bits.target =/= s3_s1Prediction.target))
+  private val s3_alignBtbCfiPositionDiffVec =
+    VecInit(s3_alignBtbResultVec.map(r => VecInit(r.map(_.bits.cfiPosition =/= s3_s1Prediction.cfiPosition))))
+  private val s3_alignBtbAttributeDiffVec =
+    VecInit(s3_alignBtbResultVec.map(r => VecInit(r.map(_.bits.attribute =/= s3_s1Prediction.attribute))))
+  private val s3_alignBtbTargetDiffVec =
+    VecInit(s3_alignBtbResultVec.map(r => VecInit(r.map(_.bits.target =/= s3_s1Prediction.target))))
 
-  private val s3_takenMask = VecInit(s3_mbtbResult.zipWithIndex.map { case (entry, i) =>
-    val tagePred = s3_tagePrediction(i)
-    val useSc    = s3_scUsed(i)
-    val scTaken  = s3_scTakenMask(i)
+  private val s3_ittageTargetDiff = ittage.io.prediction.target =/= s3_s1Prediction.target
+  private val s3_rasTargetDiff    = ras.io.topRetAddr =/= s3_s1Prediction.target
 
-    s3_jumpTakenVec(i) ||
-    (s3_isBrVec(i) &&
-      MuxCase(
-        entry.bits.taken, // default: base table
-        Seq(
-          useSc                -> scTaken,
-          tagePred.useProvider -> tagePred.providerPred,
-          tagePred.hasAlt      -> tagePred.altPred
-        )
-      ))
-  })
-  private val s3_taken = s3_takenMask.reduce(_ || _)
+  private val s3_alignTakenMaskVec = VecInit.tabulate(NumBtbAlignBanks) { bankIdx =>
+    VecInit(s3_alignBtbResultVec(bankIdx).zipWithIndex.map { case (entry, i) =>
+      val tagePred = s3_alignTagePredictionVec(bankIdx)(i)
+      val useSc    = s3_alignScUsedVec(bankIdx)(i)
+      val scTaken  = s3_alignScTakenMaskVec(bankIdx)(i)
 
-  private val s3_firstTakenBranchOH = s3_compareMatrix.getLeastElementOH(s3_takenMask)
-  private val s3_firstTakenBranch   = Mux1H(s3_firstTakenBranchOH, s3_mbtbResult)
-  private val s3_useRas             = s3_firstTakenBranch.bits.attribute.isReturn
-  private val s3_useIttage          = s3_firstTakenBranch.bits.attribute.needIttage && ittage.io.prediction.hit
+      s3_alignJumpTakenVec(bankIdx)(i) ||
+      (s3_alignIsBrVec(bankIdx)(i) &&
+        MuxCase(
+          entry.bits.taken, // default: base table
+          Seq(
+            useSc                -> scTaken,
+            tagePred.useProvider -> tagePred.providerPred,
+            tagePred.hasAlt      -> tagePred.altPred
+          )
+        ))
+    })
+  }
+//  private val s3_taken = s3_takenMask.reduce(_ || _)
+  private val s3_alignTakenVec = s3_alignTakenMaskVec.map(mask => mask.reduce(_ || _))
+  private val s3_taken         = s3_alignTakenVec.reduce(_ || _)
+
+//  private val s3_firstTakenBranchOH = s3_compareMatrix.getLeastElementOH(s3_takenMask)
+//  private val s3_firstTakenBranch   = Mux1H(s3_firstTakenBranchOH, s3_mbtbResult)
+//  private val s3_useRas             = s3_firstTakenBranch.bits.attribute.isReturn
+//  private val s3_useIttage          = s3_firstTakenBranch.bits.attribute.needIttage && ittage.io.prediction.hit
+  private val s3_alignFirstTakenBranchOHVec = VecInit.tabulate(NumBtbAlignBanks) { i =>
+    s3_alignCompareMatrixVec(i).getLeastElementOH(s3_alignTakenMaskVec(i))
+  }
+  private val s3_alignFirstTakenBranchVec = VecInit.tabulate(NumBtbAlignBanks) { i =>
+    Mux1H(s3_alignFirstTakenBranchOHVec(i), s3_alignBtbResultVec(i))
+  }
+
+  private val s3_finalFirstTakenBranchOH  = s3_alignPosHigherCompareMatrix.getLeastElementOH(VecInit(s3_alignTakenVec))
+  private val s3_finalFirstTakenBranchIdx = OHToUInt(s3_finalFirstTakenBranchOH)
+  private val s3_finalFirstTakenBranch    = Mux1H(s3_finalFirstTakenBranchOH, s3_alignFirstTakenBranchVec)
+  private val s3_finalUseRas              = s3_finalFirstTakenBranch.bits.attribute.isReturn
+  private val s3_finalUseIttage = s3_finalFirstTakenBranch.bits.attribute.needIttage && ittage.io.prediction.hit
 
   private val s2_fallThroughPrediction = RegEnable(fallThrough.io.prediction, s1_fire)
   private val s3_fallThroughPrediction = RegEnable(s2_fallThroughPrediction, s2_fire)
 
   // used for mainBTB replacer
-  mbtb.io.s3_takenMask := s3_takenMask
+  mbtb.io.btbPorts.zipWithIndex.foreach { case (btbPort, btbIdx) =>
+    btbPort.s3_takenMask := VecInit(s3_alignTakenMaskVec.flatMap { bankTakenMask =>
+      bankTakenMask.slice(btbIdx * mbtb.NumWay, (btbIdx + 1) * mbtb.NumWay)
+    })
+  }
 
-  // used for ghr
-  private val s3_condHitMask = VecInit(s3_mbtbResult.map(e => e.valid && e.bits.attribute.isConditional))
+  // compacted conditional hit mask is used for ghr
+  private def compactedVec[T <: Data](select: Seq[Vec[Bool]], src: Seq[T]): Vec[T] =
+    VecInit.tabulate(NumBtbResultEntries)(i => Mux1H(select(i), src))
 
-  s3_prediction       := Mux(s3_taken, s3_firstTakenBranch.bits, s3_fallThroughPrediction)
+  // compated meta for training
+  private val s3_compactCondBtbResult = compactedVec(s3_alignRawCondSelectOH, s3_alignBtbResultVec.flatten)
+  private val s3_compactCondBtbMeta   = compactedVec(s3_alignRawCondSelectOH, s3_alignBtbMetaVec.flatten)
+  private val s3_compactCondTageMeta  = compactedVec(s3_alignRawCondSelectOH, s3_alignTageMetaVec.flatten)
+  private val s3_compactCondScMeta    = compactedVec(s3_alignRawCondSelectOH, s3_alignScMetaVec.flatten)
+
+  private val s3_compactCondHitMask  = VecInit(s3_compactCondBtbResult.map(_.valid))
+  private val s3_compactCondPosition = VecInit(s3_compactCondBtbResult.map(_.bits.cfiPosition))
+
+//  private val s3_condHitMask = VecInit(s3_mbtbResult.map(e => e.valid && e.bits.attribute.isConditional))
+
+  s3_prediction       := Mux(s3_taken, s3_finalFirstTakenBranch.bits, s3_fallThroughPrediction)
   s3_prediction.taken := s3_taken
   s3_prediction.target :=
     MuxCase(
       s3_fallThroughPrediction.target,
       Seq(
-        (s3_taken && s3_useRas)    -> ras.io.topRetAddr,
-        (s3_taken && s3_useIttage) -> ittage.io.prediction.target,
-        s3_taken                   -> s3_firstTakenBranch.bits.target
+        (s3_taken && s3_finalUseRas)    -> ras.io.topRetAddr,
+        (s3_taken && s3_finalUseIttage) -> ittage.io.prediction.target,
+        s3_taken                        -> s3_finalFirstTakenBranch.bits.target
       )
     )
 
   s3_override := {
-    val takenDiff       = s3_taken =/= s3_s1Prediction.taken
-    val cfiPositionDiff = Mux1H(s3_firstTakenBranchOH, s3_mbtbCfiPositionDiffVec)
-    val attributeDiff   = Mux1H(s3_firstTakenBranchOH, s3_mbtbAttributeDiffVec)
+    val takenDiff = s3_taken =/= s3_s1Prediction.taken
+    val cfiPositionDiff = Mux1H(
+      s3_alignFirstTakenBranchOHVec(s3_finalFirstTakenBranchIdx),
+      s3_alignBtbCfiPositionDiffVec(s3_finalFirstTakenBranchIdx)
+    )
+    val attributeDiff = Mux1H(
+      s3_alignFirstTakenBranchOHVec(s3_finalFirstTakenBranchIdx),
+      s3_alignBtbAttributeDiffVec(s3_finalFirstTakenBranchIdx)
+    )
     val targetDiff =
       MuxCase(
         false.B, // fall-through
         Seq(
-          (s3_taken && s3_useRas)    -> s3_rasTargetDiff,
-          (s3_taken && s3_useIttage) -> s3_ittageTargetDiff,
-          s3_taken                   -> Mux1H(s3_firstTakenBranchOH, s3_mbtbTargetDiffVec)
+          (s3_taken && s3_finalUseRas)    -> s3_rasTargetDiff,
+          (s3_taken && s3_finalUseIttage) -> s3_ittageTargetDiff,
+          s3_taken -> Mux1H(
+            s3_alignFirstTakenBranchOHVec(s3_finalFirstTakenBranchIdx),
+            s3_alignBtbTargetDiffVec(s3_finalFirstTakenBranchIdx)
+          )
         )
       )
 
@@ -433,9 +543,9 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_commonHRMeta.ghr       := commonHR.io.s3ResolveMeta.ghr
   s3_commonHRMeta.bw        := commonHR.io.s3ResolveMeta.bw
   s3_commonHRMeta.imli      := commonHR.io.s3ResolveMeta.imli
-  s3_commonHRMeta.hitMask   := VecInit(s3_mbtbResult.map(_.valid))
-  s3_commonHRMeta.attribute := VecInit(s3_mbtbResult.map(_.bits.attribute))
-  s3_commonHRMeta.position  := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
+  s3_commonHRMeta.hitMask   := s3_compactCondHitMask
+  s3_commonHRMeta.attribute := VecInit.tabulate(NumBtbResultEntries)(_ => BranchAttribute.Conditional)
+  s3_commonHRMeta.position  := s3_compactCondPosition
 
   private val s3_redirectMeta = Wire(new BpuRedirectMeta)
   s3_redirectMeta.phr          := s3_phrMeta
@@ -443,9 +553,15 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_redirectMeta.ras          := ras.io.redirectMeta
 
   private val s3_resolveMeta = Wire(new BpuResolveMeta)
-  s3_resolveMeta.mbtb     := RegEnable(mbtb.io.meta, s2_fire)
-  s3_resolveMeta.tage     := RegEnable(tage.io.meta, s2_fire)
-  s3_resolveMeta.sc       := sc.io.meta
+  // mbtb meta
+  s3_resolveMeta.mbtb.entries    := RegEnable(mbtb.io.mbtb.meta.entries, s2_fire)
+  s3_resolveMeta.mbtb.conditions := s3_compactCondBtbMeta
+  // tage meta
+  s3_resolveMeta.tage := s3_compactCondTageMeta
+  // sc meta, initialize debug field from the first btb port
+  s3_resolveMeta.sc := sc.io.btbPorts(0).meta
+  s3_resolveMeta.sc.fromEntries(s3_compactCondScMeta)
+
   s3_resolveMeta.commonHR := commonHR.io.s3ResolveMeta
   s3_resolveMeta.ittage   := ittage.io.meta
   s3_resolveMeta.phr      := s3_phrMeta
@@ -530,9 +646,9 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   commonHR.io.update.target           := s3_prediction.target
   commonHR.io.update.taken            := s3_taken
   commonHR.io.update.s3Override       := s3_override
-  commonHR.io.update.firstTakenBranch := s3_firstTakenBranch
-  commonHR.io.update.position         := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
-  commonHR.io.update.condHitMask      := s3_condHitMask
+  commonHR.io.update.firstTakenBranch := s3_finalFirstTakenBranch
+  commonHR.io.update.position         := s3_compactCondPosition
+  commonHR.io.update.condHitMask      := s3_compactCondHitMask
   commonHR.io.redirect.valid          := redirect.valid
   commonHR.io.redirect.cfiPc          := redirect.bits.cfiPc
   commonHR.io.redirect.target         := redirect.bits.target
@@ -558,7 +674,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   /* *** Debug Meta *** */
   // used for performance counters
-  private val s3_firstTakenBlameSc = Mux1H(s3_firstTakenBranchOH, s3_scUsed)
+  private val s3_firstTakenBlameSc = Mux1H(
+    s3_alignFirstTakenBranchOHVec(s3_finalFirstTakenBranchIdx),
+    s3_alignScUsedVec(s3_finalFirstTakenBranchIdx)
+  )
   // see class BpuPredictionSource in bpu/Bundles.scala
   private val s1_predictionSource =
     MuxCase(
@@ -571,12 +690,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       )
     )
   private val s3_predictionSource = PriorityEncoder(Seq(
-    s3_taken && s3_useRas,                                                                // RAS
-    s3_taken && s3_useIttage,                                                             // ITTage
-    s3_taken && s3_firstTakenBranch.bits.attribute.isConditional && s3_firstTakenBlameSc, // Sc
-    s3_taken && s3_firstTakenBranch.bits.attribute.isConditional,                         // Tage
-    s3_taken,                                                                             // Mbtb
-    true.B                                                                                // Fallthrough
+    s3_taken && s3_finalUseRas,                                                                // RAS
+    s3_taken && s3_finalUseIttage,                                                             // ITTage
+    s3_taken && s3_finalFirstTakenBranch.bits.attribute.isConditional && s3_firstTakenBlameSc, // Sc
+    s3_taken && s3_finalFirstTakenBranch.bits.attribute.isConditional,                         // Tage
+    s3_taken,                                                                                  // Mbtb
+    true.B                                                                                     // Fallthrough
   ))
 
   private val s2_s1PredictionSource = RegEnable(s1_predictionSource, s1_fire)
@@ -590,8 +709,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_perfMeta.bpSource.s1Source   := s3_s1PredictionSource
   s3_perfMeta.bpSource.s3Source   := s3_predictionSource
   s3_perfMeta.bpSource.s3Override := s3_override
-  s3_perfMeta.mbtbMeta            := RegEnable(mbtb.io.meta, s2_fire)
-  s3_perfMeta.scUsed              := s3_scUsed.asUInt
+  s3_perfMeta.btbMetas            := VecInit(s3_alignBtbMetaVec.flatten)
+  s3_perfMeta.scUsed              := VecInit(s3_alignScUsedVec.flatten)
 
   io.toFtq.perfMeta := s3_perfMeta
   // TODO: override reason and redirect reason
@@ -661,8 +780,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       ("fallThrough", !s1_taken)
     )
   )
-  XSPerfAccumulate("s3_use_ras", s3_fire && s3_taken && s3_useRas)
-  XSPerfAccumulate("s3_use_ittage", s3_fire && s3_taken && !s3_useRas && s3_useIttage)
+  XSPerfAccumulate("s3_use_ras", s3_fire && s3_taken && s3_finalUseRas)
+  XSPerfAccumulate("s3_use_ittage", s3_fire && s3_taken && !s3_finalUseRas && s3_finalUseIttage)
   XSPerfAccumulate("s3_use_mbtb_tage", s3_fire && s3_prediction.attribute.isConditional)
 
   XSPerfSeqAccumulate(

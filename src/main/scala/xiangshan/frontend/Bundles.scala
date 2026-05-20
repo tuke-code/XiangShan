@@ -368,10 +368,10 @@ object BlameBpuSource {
     val src              = perf.bpSource
     val pred             = perf.bpPred
     val attr             = branch.attribute
-    val isMatchMask      = perf.mbtbMeta.entries.flatten.map(e => e.hit(branch) && e.attribute === branch.attribute)
+    val isMatchMask      = perf.btbMetas.map(e => e.hit(branch) && e.attribute === branch.attribute)
     val isMatchInMbtb    = isMatchMask.reduce(_ || _)
     val matchBranchOH    = PriorityEncoderOH(isMatchMask)
-    val matchBranchUseSc = Mux1H(matchBranchOH, perf.scUsed.asBools)
+    val matchBranchUseSc = Mux1H(matchBranchOH, perf.scUsed)
 
     val blame    = WireInit(BTB) // Default to BTB
     val posError = WireInit(false.B)

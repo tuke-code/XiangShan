@@ -28,6 +28,7 @@ import xiangshan.frontend.bpu.history.commonhr.CommonHRResolveMeta
 import xiangshan.frontend.bpu.history.phr.PhrMeta
 import xiangshan.frontend.bpu.ittage.IttageMeta
 import xiangshan.frontend.bpu.mbtb.MainBtbMeta
+import xiangshan.frontend.bpu.mbtb.MainBtbMetaEntry
 import xiangshan.frontend.bpu.ras.RasCommitMeta
 import xiangshan.frontend.bpu.ras.RasRedirectMeta
 import xiangshan.frontend.bpu.sc.ScMeta
@@ -290,13 +291,13 @@ class BpuResolveMeta(implicit p: Parameters) extends BpuBundle {
 }
 
 class BpuPerfMeta(implicit p: Parameters) extends BpuBundle {
-  val bpId:         UInt                = UInt(XLEN.W)
-  val scUsed:       UInt                = UInt(NumBtbResultEntries.W)
-  val startPc:      PrunedAddr          = new PrunedAddr(VAddrBits)
-  val s1Prediction: Prediction          = new Prediction
-  val s3Prediction: Prediction          = new Prediction
-  val mbtbMeta:     MainBtbMeta         = new MainBtbMeta
-  val bpSource:     BpuPredictionSource = new BpuPredictionSource
+  val bpId:         UInt                  = UInt(XLEN.W)
+  val startPc:      PrunedAddr            = new PrunedAddr(VAddrBits)
+  val s1Prediction: Prediction            = new Prediction
+  val s3Prediction: Prediction            = new Prediction
+  val btbMetas:     Vec[MainBtbMetaEntry] = Vec(NumBtbs * NumBtbResultEntries, new MainBtbMetaEntry)
+  val scUsed:       Vec[Bool]             = Vec(NumBtbs * NumBtbResultEntries, Bool())
+  val bpSource:     BpuPredictionSource   = new BpuPredictionSource
 
   def bpPred: Prediction = Mux(bpSource.s3Override, s3Prediction, s1Prediction)
 }

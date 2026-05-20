@@ -39,8 +39,11 @@ class MainBtb(implicit p: Parameters) extends BasePredictor with HasMainBtbParam
     val s3_takenMask: Vec[Bool] = Input(Vec(NumBtbResultEntries, Bool()))
   }
   class MainBtbIO(implicit p: Parameters) extends BasePredictorIO {
-    val mbtb: MainBtbBaseIO = new MainBtbBaseIO
-    val vbtb: MainBtbBaseIO = new MainBtbBaseIO
+    val btbPorts: Vec[MainBtbBaseIO] = Vec(NumBtbs, new MainBtbBaseIO)
+
+    // FIXME: magic number
+    def mbtb: MainBtbBaseIO = btbPorts(0)
+    def vbtb: MainBtbBaseIO = btbPorts(1)
   }
 
   val io: MainBtbIO = IO(new MainBtbIO)
