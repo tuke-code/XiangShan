@@ -763,7 +763,7 @@ object FuConfig {
     piped = true,
     writeFpRf = true,
     writeFflags = true,
-    latency = CertainLatency(3),
+    latency = CertainLatency(3, 1),
     destDataBits = 64,
     needSrcFrm = true,
   )
