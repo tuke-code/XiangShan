@@ -43,9 +43,10 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
     val result: Vec[Valid[Prediction]] = Input(Vec(NumBtbResultEntries, Valid(new Prediction)))
     // s2 stage tage info
     val providerTakenCtrs: Vec[Valid[SaturateCounter]] = Input(Vec(NumBtbResultEntries, Valid(TageTakenCounter())))
-    // s3 stage output
+    // s2 stage output
     val scTakenMask: Vec[Bool] = Output(Vec(NumBtbResultEntries, Bool()))
     val scUsed:      Vec[Bool] = Output(Vec(NumBtbResultEntries, Bool()))
+    // s3 stage output
     val meta:        ScMeta    = Output(new ScMeta())
   }
   class ScIO(implicit p: Parameters) extends BasePredictorIO with HasScParameters {

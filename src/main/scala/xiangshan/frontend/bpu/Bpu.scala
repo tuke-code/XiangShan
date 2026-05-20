@@ -355,7 +355,6 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   private val s2_alignScUsedVec      = alignBankedVec(sc.io.btbPorts.map(_.scUsed))
   private val s2_alignScTakenMaskVec = alignBankedVec(sc.io.btbPorts.map(_.scTakenMask))
-  private val s2_alignScMetaVec      = alignBankedVec(sc.io.btbPorts.map(_.meta.toEntries))
 
   private val s2_alignBtbResultVec = alignBankedVec(mbtb.io.btbPorts.map(_.result))
   private val s2_alignBtbMetaVec = VecInit.tabulate(NumBtbAlignBanks) { i =>
@@ -405,7 +404,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   private val s3_alignScUsedVec      = RegEnable(s2_alignScUsedVec, s2_fire)
   private val s3_alignScTakenMaskVec = RegEnable(s2_alignScTakenMaskVec, s2_fire)
-  private val s3_alignScMetaVec      = RegEnable(s2_alignScMetaVec, s2_fire)
+  // sc meta output at stage 3
+  private val s3_alignScMetaVec = alignBankedVec(sc.io.btbPorts.map(_.meta.toEntries))
 
   private val s3_alignBtbResultVec = RegEnable(s2_alignBtbResultVec, s2_fire)
   private val s3_alignBtbMetaVec   = RegEnable(s2_alignBtbMetaVec, s2_fire)
