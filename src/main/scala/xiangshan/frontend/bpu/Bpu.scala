@@ -609,36 +609,6 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   XSError(s0_commonHRDiff && !redirect.valid, "CommonHR diff at s0")
   XSError(s3ResolveDiff, "CommonHR diff at s3 resolve")
 
-  commonHRDiff.io.stageCtrl               := stageCtrl
-  commonHRDiff.io.s0_startPc.get          := s0_startPc
-  commonHRDiff.io.s1_imliTaken            := s1_imliTaken
-  commonHRDiff.io.update.startPc          := s3_startPc
-  commonHRDiff.io.update.target           := s3_prediction.target
-  commonHRDiff.io.update.taken            := s3_taken
-  commonHRDiff.io.update.s3Override       := s3_override
-  commonHRDiff.io.update.firstTakenBranch := s3_firstTakenBranch
-  commonHRDiff.io.update.position         := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
-  commonHRDiff.io.update.condHitMask      := s3_condHitMask
-  commonHRDiff.io.redirect.valid          := redirect.valid
-  commonHRDiff.io.redirect.cfiPc          := redirect.bits.cfiPc
-  commonHRDiff.io.redirect.target         := redirect.bits.target
-  commonHRDiff.io.redirect.taken          := redirect.bits.taken
-  commonHRDiff.io.redirect.attribute      := redirect.bits.attribute
-  commonHRDiff.io.redirect.meta           := redirect.bits.meta.commonHRMetaDiff
-
-  private val s0_imliDiff     = s0_fire && commonHR.io.s0_imli =/= commonHRDiff.io.s0_imli
-  private val s0_commonHRDiff = s0_fire && commonHR.io.s0_commonHR.asUInt =/= commonHRDiff.io.s0_commonHR.asUInt
-  private val s3ResolveDiff   = s3_fire && s3_commonHRMetaDiff.asUInt =/= s3_commonHRMeta.asUInt
-
-  XSError(
-    s0_imliDiff,
-    "IMLI diff at s0: commonHR IMLI = %d, commonHRDiff IMLI = %d",
-    commonHR.io.s0_imli,
-    commonHRDiff.io.s0_imli
-  )
-  XSError(s0_commonHRDiff && !redirect.valid, "CommonHR diff at s0")
-  XSError(s3ResolveDiff, "CommonHR diff at s3 resolve")
-
   // Power-on reset
   private val powerOnResetState = RegInit(true.B)
   when(s0_fire) {

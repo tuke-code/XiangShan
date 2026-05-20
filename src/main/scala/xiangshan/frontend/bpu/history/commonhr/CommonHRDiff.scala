@@ -91,7 +91,6 @@ class CommonHRDiff(implicit p: Parameters) extends CommonHRModule with Helpers w
   private val s3_firstTakenIsCond = s3_update.firstTakenBranch.bits.attribute.isConditional
   private val s3_cfiPc            = getCfiPcFromPosition(s3_update.startPc, s3_firstTakenPos)
   private val s3_bwTaken          = isBackwardBranch(s3_cfiPc, s3_update.target)
-  private val s3_bwTaken          = isBackwardBranch(s3_cfiPc, s3_update.target)
   private val s3_lessThanFirstTaken = s3_update.position.zip(s3_hitMask).map {
     case (pos, hit) => hit && (pos < s3_firstTakenPos)
   }
