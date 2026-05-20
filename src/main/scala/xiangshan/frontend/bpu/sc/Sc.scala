@@ -397,7 +397,7 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
   private val t0_imliIdx     = imliTable.getTableIdx(io.train.startPc, t0_commonHR.imli)
   private val t0_biasIdx     = biasTable.getBiasTableIdx(io.train.startPc)
   private val t0_branches    = io.train.branches
-  private val t0_mbtbEntries = io.train.meta.mbtb.entries.flatten
+  private val t0_mbtbEntries = io.train.meta.mbtb.conditions
   // if the branch cfi not in mbtbResult, do not train
   // During training, find the predicted scPred and lowBits values in the order of the predicted mbtbResult
   // MBTB may invalidate entry with larger idx during multihit, and the order needs to be reversed

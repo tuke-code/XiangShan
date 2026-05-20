@@ -190,7 +190,7 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val t0_fire = io.stageCtrl.t0_fire && t0_hasCond && io.enable
 
   private val (t0_mbtbHitMask, t0_basePred, t0_meta) = t0_branches.map { branch =>
-    val mbtbMeta  = io.train.meta.mbtb.entries.flatten
+    val mbtbMeta  = io.train.meta.mbtb.conditions
     val tageMeta  = io.train.meta.tage.entries
     val hitMask   = mbtbMeta.map(_.hit(branch.bits))
     val hitMaskOH = PriorityEncoderOH(hitMask)
