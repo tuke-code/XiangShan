@@ -97,7 +97,7 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val s2_startPc  = RegEnable(s1_startPc, s1_fire)
   private val s2_readResp = RegEnable(s1_readResp, s1_fire)
 
-  io.btbPorts.foreach { port =>
+  io.btbPorts.zipWithIndex.foreach { case (port, portIdx) =>
     // Vec[NumBtbResultEntries][NumTables]
     val s1_tag = VecInit(port.fromBtb.s1_positions.map { position =>
       VecInit((tables zip s1_foldedHist).map { case (table, hist) =>
@@ -165,7 +165,7 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
       port.meta.entries(i).altOrBasePred     := Mux(hasAlt, alt.takenCtr.isPositive, branch.bits.taken)
 
       XSPerfAccumulate(
-        s"s2_branch_${i}_multihit_on_same_table",
+        s"btbPort_${portIdx}_s2_branch_${i}_multihit_on_same_table",
         allTableTagMatchResults.map(e => (s2_fire && PopCount(e.hitWayMask) > 1.U).asUInt).reduce(_ +& _)
       )
     }
