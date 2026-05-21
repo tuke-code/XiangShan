@@ -227,17 +227,21 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val s1_mshrMaybeRvcMap =
     fromMiss.bits.maybeRvcMap.asTypeOf(Vec(DataBanks, UInt(MaxInstNumPerBank.W)))
 
+  private val s1_mshrValidReg = RegNext(s1_mshrValid)
+  private val s1_bankMshrValidReg = RegNext(s1_bankMshrValid)
+  private val s1_mshrMaybeRvcMapReg = RegNext(s1_mshrMaybeRvcMap)
+  private val s1_mshrDatasReg = RegNext(s1_mshrDatas)
   private val s1_hits = VecInit(
     VecInit((0 until PortNumber).map { i =>
       DataHoldBypass(
-        s1_mshrValid(0)(i) || s1_sramHits(0)(i),
-        s1_mshrValid(0)(i) || s1_sramValid(0)(i)
+        s1_mshrValidReg(0)(i) || s1_sramHits(0)(i),
+        s1_mshrValidReg(0)(i) || s1_sramValid(0)(i)
       )
     }),
     VecInit((0 until PortNumber).map { i =>
       DataHoldBypass(
-        s1_mshrValid(1)(i) || s1_sramHits(1)(i),
-        s1_mshrValid(1)(i) || s1_sramValid(1)(i)
+        s1_mshrValidReg(1)(i) || s1_sramHits(1)(i),
+        s1_mshrValidReg(1)(i) || s1_sramValid(1)(i)
       )
     })
   )
@@ -247,14 +251,14 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val s1_rawData = VecInit(
     VecInit((0 until DataBanks).map { i =>
       DataHoldBypass(
-        Mux(s1_bankMshrValid(0)(i), s1_mshrDatas(i), s1_sramDatas(0)(i)),
-        s1_bankMshrValid(0)(i) || s1_bankSramValid(0)(i)
+        Mux(s1_bankMshrValidReg(0)(i), s1_mshrDatasReg(i), s1_sramDatas(0)(i)),
+        s1_bankMshrValidReg(0)(i) || s1_bankSramValid(0)(i)
       )
     }).asUInt,
     VecInit((0 until DataBanks).map { i =>
       DataHoldBypass(
-        Mux(s1_bankMshrValid(1)(i), s1_mshrDatas(i), s1_sramDatas(1)(i)),
-        s1_bankMshrValid(1)(i) || s1_bankSramValid(1)(i)
+        Mux(s1_bankMshrValidReg(1)(i), s1_mshrDatasReg(i), s1_sramDatas(1)(i)),
+        s1_bankMshrValidReg(1)(i) || s1_bankSramValid(1)(i)
       )
     }).asUInt
   )
@@ -263,21 +267,21 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     VecInit((0 until DataBanks).map { i =>
       DataHoldBypass(
         Mux(
-          s1_bankMshrValid(0)(i),
-          s1_mshrMaybeRvcMap(i),
+          s1_bankMshrValidReg(0)(i),
+          s1_mshrMaybeRvcMapReg(i),
           Mux(getLineSel(s1_offset(0))(i), s1_sramMaybeRvcMap(0)(1)(i), s1_sramMaybeRvcMap(0)(0)(i))
         ),
-        s1_bankMshrValid(0)(i) || s1_bankSramValid(0)(i)
+        s1_bankMshrValidReg(0)(i) || s1_bankSramValid(0)(i)
       )
     }).asUInt,
     VecInit((0 until DataBanks).map { i =>
       DataHoldBypass(
         Mux(
-          s1_bankMshrValid(1)(i),
-          s1_mshrMaybeRvcMap(i),
+          s1_bankMshrValidReg(1)(i),
+          s1_mshrMaybeRvcMapReg(i),
           Mux(getLineSel(s1_offset(1))(i), s1_sramMaybeRvcMap(1)(1)(i), s1_sramMaybeRvcMap(1)(0)(i))
         ),
-        s1_bankMshrValid(1)(i) || s1_bankSramValid(1)(i)
+        s1_bankMshrValidReg(1)(i) || s1_bankSramValid(1)(i)
       )
     }).asUInt
   )
