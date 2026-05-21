@@ -211,6 +211,9 @@ trait HasDCacheParameters
   val tagWritePort = metaWritePort + 1
   val errWritePort = tagWritePort + 1
   val wbPort = errWritePort + 1
+  val HashTagBits = 4
+  val EnableHashTagPrefilter = true
+  val EnableHashTagMainPipe = false
 
   def set_to_dcache_div(set: UInt) = {
     require(set.getWidth >= DCacheSetBits)
@@ -940,6 +943,8 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
 
   val accessArray = Module(new L1FlagMetaArray(readPorts = AccessArrayReadPort, writePorts = LoadPipelineWidth + 1))
   val tagArray = Module(new DuplicatedTagArray(readPorts = TagReadPort))
+  val hashTagReadPort = LoadPipelineWidth + (if (EnableHashTagMainPipe) 1 else 0)
+  val hashTagArray = Module(new HashTagArray(readPorts = hashTagReadPort, hashBits = HashTagBits))
   val prefetcherMonitor = Module(new PrefetcherMonitor)
   val bloomFilter =  Module(new BloomFilter(BLOOM_FILTER_ENTRY_NUM, true))
   val counterFilter = Module(new CounterFilter)
@@ -1240,8 +1245,19 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     ldu(HybridLoadTagReadPort).io.tag_resp := tagArray.io.resp(TagReadPort)
     stu(HybridStoreTagReadPort).io.tag_resp := tagArray.io.resp(TagReadPort)
   }
+
+  for (i <- 0 until LoadPipelineWidth) {
+    hashTagArray.io.read(i).valid := ldu(i).io.tag_read.valid
+    hashTagArray.io.read(i).bits := ldu(i).io.tag_read.bits
+    ldu(i).io.hash_tag_resp := hashTagArray.io.resp(i)
+  }
+
   tagArray.io.read.last <> mainPipe.io.tag_read
   mainPipe.io.tag_resp := tagArray.io.resp.last
+  if (EnableHashTagMainPipe) {
+    hashTagArray.io.read.last.valid := mainPipe.io.tag_read.valid
+    hashTagArray.io.read.last.bits := mainPipe.io.tag_read.bits
+  }
 
   val fake_tag_read_conflict_this_cycle = PopCount(ldu.map(ld=> ld.io.tag_read.valid))
   XSPerfAccumulate("fake_tag_read_conflict", fake_tag_read_conflict_this_cycle)
@@ -1250,6 +1266,12 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   // tag_write_arb.io.in(0) <> refillPipe.io.tag_write
   tag_write_arb.io.in(0) <> mainPipe.io.tag_write
   tagArray.io.write <> tag_write_arb.io.out
+  hashTagArray.io.write.valid := tagArray.io.write.valid
+  hashTagArray.io.write.bits.idx := tagArray.io.write.bits.idx
+  hashTagArray.io.write.bits.way_en := tagArray.io.write.bits.way_en
+  hashTagArray.io.write.bits.vaddr := tagArray.io.write.bits.vaddr
+  hashTagArray.io.write.bits.tag := tagArray.io.write.bits.tag
+  hashTagArray.io.write.bits.ecc := tagArray.io.write.bits.ecc
 
   ldu.map(m => {
     m.io.vtag_update.valid := tagArray.io.write.valid
