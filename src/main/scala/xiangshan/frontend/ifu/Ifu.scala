@@ -158,9 +158,9 @@ class Ifu(implicit p: Parameters) extends IfuModule
 
   private val s0_rawInstrValid = VecInit(s0_rawInstrVec.map(_.valid)).asUInt
 
-  private val (s0_compactedInstrVec, s0_instrCount) = compact(s0_rawInstrVec)
+  private val (s1_compactedInstrVec, s1_realInstrCount) = compact(s0_rawInstrVec,s0_fire)
 
-  private val s0_instrValid = VecInit(s0_compactedInstrVec.map(_.valid)).asUInt
+
 
   // When invalidTaken is true, we can not flush s2_prevLastIsHalfRvi because the fetch block after it is fall-through.
   when(backendRedirect) {
@@ -186,8 +186,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   // When an exception occurs, forward the exception information immediately instead of
   // waiting for instruction concatenation to complete.
   private val s0_hasException   = s0_icacheMeta(0).exception.hasException
-  private val s0_realInstrValid = Mux(s0_hasException, 1.U(FetchBlockInstNum.W), s0_instrValid)
-  private val s0_realInstrCount = Mux(s0_hasException, 1.U((log2Ceil(FetchBlockInstNum) + 1).W), s0_instrCount)
+
 
   /* --------------------------------------------------------------------------------------------------------------
      stage 1
@@ -203,8 +202,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s1_fetchBlock        = RegEnable(s0_fetchBlock, s0_fire)
   private val s1_predTakenInstrIdx = RegEnable(s0_predTakenInstrIdx, s0_fire)
   private val s1_invalidTaken      = RegEnable(s0_invalidTaken, s0_fire)
-  private val s1_instrCount        = RegEnable(s0_realInstrCount, s0_fire)
-  private val s1_instrValid        = RegEnable(s0_realInstrValid, s0_fire)
+  private val s1_hasException = RegEnable(s0_hasException, s0_fire)
 
   private val s1_prevIBufEnqPtr     = RegInit(0.U.asTypeOf(new IBufPtr))
   private val s1_prevEndIsHalfRvi   = RegEnable(s0_prevEndIsHalfRvi, s0_fire)
@@ -215,7 +213,11 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s1_instrData    = RegEnable(s0_icacheData.data, s0_fire)
   private val s1_totalEndPos  = RegEnable(s0_totalEndPos, s0_fire)
   private val s1_icacheMeta   = RegEnable(s0_icacheMeta, s0_fire)
-  private val s1_instrVec     = RegEnable(s0_compactedInstrVec, s0_fire)
+
+  private val s1_instrVec     = s1_compactedInstrVec
+  private val s1_realInstrValid        = VecInit(s1_compactedInstrVec.map(_.valid)).asUInt
+  private val s1_instrValid = Mux(s0_hasException, 1.U(FetchBlockInstNum.W), s1_realInstrValid)
+  private val s1_instrCount = Mux(s0_hasException, 1.U((log2Ceil(FetchBlockInstNum) + 1).W), s1_realInstrCount)
 
   private val s1_predTakenMask = VecInit((0 until FetchPorts).map { i =>
     Mux(
