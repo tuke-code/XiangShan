@@ -502,12 +502,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_foldedPhr   = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
   private val trainFoldedPhr = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
 
-  private val s1_ubtbPredWithURas = WireInit(s1_ubtbPrediction)
-  when(s1_ubtbPrediction.valid && s1_ubtbPrediction.bits.attribute.isReturn && uras.io.specOut.isCanUse) {
+  private val s1_ubtbPredWithURas = WireInit(ubtb.io.prediction)
+  when(s1_ubtbPredWithURas.valid && s1_ubtbPredWithURas.bits.attribute.isReturn && uras.io.specOut.isCanUse) {
     s1_ubtbPredWithURas.bits.target := uras.io.specOut.retTarget
   }
 
-  private val s1_abtbPredWithURas = WireInit(s1_abtbPrediction)
+  private val s1_abtbPredWithURas = WireInit(abtb.io.prediction)
   s1_abtbPredWithURas.foreach {
     case p => when(p.valid && p.bits.attribute.isReturn && uras.io.specOut.isCanUse) {
         p.bits.target := uras.io.specOut.retTarget
