@@ -135,7 +135,7 @@ trait IfuHelper extends HasIfuParameters with PreDecodeHelper {
     out
   }
 
-  def compact(in: Vec[Instruction]): (Vec[Instruction], UInt) = {
+  def compact(in: Vec[Instruction],fire: Bool): (Vec[Instruction], UInt) = {
     val n = in.length
     require(n > 0)
 
@@ -149,16 +149,18 @@ trait IfuHelper extends HasIfuParameters with PreDecodeHelper {
     }
 
     val count = PopCount(in.map(_.valid))
+    val inReg = RegEnable(in,fire)
+    val rankReg = RegEnable(rank,fire)
 
     for (j <- 0 until n) {
-      val hitMask = (0 until n).map(i => in(i).valid && (rank(i) === j.U))
+      val hitMask = (0 until n).map(i => inReg(i).valid && (rankReg(i) === j.U))
       when(hitMask.reduce(_ || _)) {
-        out(j) := Mux1H(hitMask, in)
+        out(j) := Mux1H(hitMask, inReg)
       }
       out(j).valid := j.U < count
     }
 
-    (out, count)
+    (out, RegEnable(count,fire))
   }
 
   def align[T <: Data](in: Vec[T], shamt: UInt): Vec[T] = {
