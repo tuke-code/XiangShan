@@ -127,7 +127,10 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
 
   private val s3_selectedTakenCommonHR = Mux1H(s3_update.firstTakenBranchOH, s3_takenCommonHR)
   s3_bwTakenDiff := Mux1H(s3_update.firstTakenBranchOH, s3_bwTakenCandidate)
-  XSError(s3_override && s3_bwTaken =/= s3_bwTakenDiff, "s3_bwTaken is not equal s3_bwTakenDiff")
+  XSError(
+    s3_override && s3_taken && s3_firstTakenIsCond && s3_bwTaken =/= s3_bwTakenDiff,
+    "s3_bwTaken is not equal s3_bwTakenDiff"
+  )
 
   s3_takenCommonHR.foreach(_ := 0.U.asTypeOf(new CommonHREntry))
   for (i <- 0 until NumBtbResultEntries) {
@@ -153,7 +156,7 @@ class CommonHR(implicit p: Parameters) extends CommonHRModule with Helpers with 
   s3_defaultCommonHR.ghr             := (commonHR.ghr << s3_numHit)(GhrHistoryLength - 1, 0)
   s3_defaultCommonHR.bw              := (commonHR.bw << s3_numHit)(BWHistoryLength - 1, 0)
 
-  XSError(s3_taken && !s3_update.firstTakenBranchOH.asUInt.orR, "taken but no firstTakenBranchOH")
+  XSError(s3_fire && s3_taken && !s3_update.firstTakenBranchOH.reduce(_ || _), "taken but no firstTakenBranchOH")
   s3_newCommonHR := Mux(s3_taken, s3_selectedTakenCommonHR, s3_defaultCommonHR)
 
   /*
