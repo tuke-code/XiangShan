@@ -168,7 +168,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   }.elsewhen(wbRedirect.valid) {
     s0_prevEndIsHalfRvi := wbRedirect.isHalfInstr
   }.elsewhen(uncacheRedirect.valid) {
-    s0_prevEndIsHalfRvi := uncacheRedirect.isHalfInstr
+    s0_prevEndIsHalfRvi := false.B
   }.elsewhen(s0_fire && !s0_icacheMeta(0).isUncache) {
     s0_prevEndIsHalfRvi := s0_endIsHalfRvi
   }
@@ -212,11 +212,10 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s1_prevEndHalfRviPc   = RegInit(0.U.asTypeOf(PrunedAddr(VAddrBits)))
 
   private val s1_endIsHalfRvi = RegEnable(s0_endIsHalfRvi, s0_fire)
-
-  private val s1_instrData   = RegEnable(s0_icacheData.data, s0_fire)
-  private val s1_totalEndPos = RegEnable(s0_totalEndPos, s0_fire)
-  private val s1_icacheMeta  = RegEnable(s0_icacheMeta, s0_fire)
-  private val s1_instrVec    = RegEnable(s0_compactedInstrVec, s0_fire)
+  private val s1_instrData    = RegEnable(s0_icacheData.data, s0_fire)
+  private val s1_totalEndPos  = RegEnable(s0_totalEndPos, s0_fire)
+  private val s1_icacheMeta   = RegEnable(s0_icacheMeta, s0_fire)
+  private val s1_instrVec     = RegEnable(s0_compactedInstrVec, s0_fire)
 
   private val s1_predTakenMask = VecInit((0 until FetchPorts).map { i =>
     Mux(
@@ -259,6 +258,25 @@ class Ifu(implicit p: Parameters) extends IfuModule
     getInstrPcLowerBits(instr, s1_fetchBlock)
   })
 
+  private val s1_endHalfRviData = s1_instrData(s1_totalEndPos)
+
+  private val s1_endHalfRviBlockSel = s1_totalEndPos > s1_fetchBlock(0).takenCfiOffset.bits
+  private val s1_endHalfRviLocalOffset = Mux(
+    s1_endHalfRviBlockSel,
+    s1_totalEndPos - s1_fetchBlock(0).size,
+    s1_totalEndPos
+  )
+  private val s1_endHalfRviPcLower = Mux(
+    s1_endHalfRviBlockSel,
+    Cat(0.U(1.W), s1_fetchBlock(1).startVAddr(PcCutPoint - 1, 0)),
+    Cat(0.U(1.W), s1_fetchBlock(0).startVAddr(PcCutPoint - 1, 0))
+  ) + (s1_endHalfRviLocalOffset << 1)
+  private val s1_endHalfRviPc = catPC(
+    s1_endHalfRviPcLower,
+    Mux(s1_endHalfRviBlockSel, s1_fetchBlock(1).pcUpperBits, s1_fetchBlock(0).pcUpperBits),
+    Mux(s1_endHalfRviBlockSel, s1_fetchBlock(1).pcUpperBitsPlus1, s1_fetchBlock(0).pcUpperBitsPlus1)
+  )
+
   private val s1_realAlignedInstrPcVec =
     WireDefault(VecInit.fill(IBufferEnqueueWidth)(0.U.asTypeOf(PrunedAddr(VAddrBits))))
   for (i <- 0 until IBufferEnqueueWidth) {
@@ -268,9 +286,6 @@ class Ifu(implicit p: Parameters) extends IfuModule
       s1_alignedInstrPcVec(i)
     )
   }
-
-  private val s1_endHalfRviPc = s1_realAlignedInstrPcVec(s1_instrCount + s1_alignShiftNum)
-  private val s1_endHalfRviData = s1_instrData(s1_totalEndPos)
 
   private val s1_alignedFoldPc =
     VecInit(s1_realAlignedInstrPcVec.map(i => XORFold(i(VAddrBits - 1, 1), MemPredPCWidth)))
@@ -283,11 +298,11 @@ class Ifu(implicit p: Parameters) extends IfuModule
     s1_prevEndHalfRviData := wbRedirect.halfData
     s1_prevEndHalfRviPc   := wbRedirect.halfPc
   }.elsewhen(uncacheRedirect.valid) {
-    s1_prevEndHalfRviData := uncacheRedirect.halfData
-    s1_prevEndHalfRviPc   := uncacheRedirect.halfPc
+    s1_prevEndHalfRviData := 0.U
+    s1_prevEndHalfRviPc   := 0.U.asTypeOf(PrunedAddr(VAddrBits))
   }.elsewhen(s1_fire) {
-    s1_prevEndHalfRviData := s1_endHalfRviData
-    s1_prevEndHalfRviPc   := s1_endHalfRviPc
+    s1_prevEndHalfRviData := Mux(s1_endIsHalfRvi, s1_endHalfRviData, 0.U)
+    s1_prevEndHalfRviPc   := Mux(s1_endIsHalfRvi, s1_endHalfRviPc, 0.U.asTypeOf(PrunedAddr(VAddrBits)))
   }
 
   when(backendRedirect) {
@@ -314,22 +329,15 @@ class Ifu(implicit p: Parameters) extends IfuModule
      -------------------------------------------------------------------------------------------------------------- */
 
   // assign later
-  private val s2_valid       = WireInit(false.B)
-  private val s2_firstValid  = ValidHold(s1_fire && !s1_flush && s1_fetchBlock(0).valid, s2_fire, s2_flush)
-  private val s2_secondValid = ValidHold(s1_fire && !s1_flush && s1_fetchBlock(1).valid, s2_fire, s2_flush)
-  private val s2_fetchBlock  = RegEnable(s1_fetchBlock, s1_fire)
-  dontTouch(s2_fetchBlock)
-
-  private val s2_prevIBufEnqPtr = RegEnable(s1_prevIBufEnqPtr, s1_fire)
-
-  private val s2_prevEndIsHalfRvi   = RegEnable(s1_prevEndIsHalfRvi, false.B, s1_fire)
-  private val s2_prevEndHalfPc      = RegEnable(s1_prevEndHalfRviPc, s1_fire)
-  private val s2_prevEndHalfRviData = RegEnable(s1_prevEndHalfRviData, s1_fire)
-
-  private val s2_endIsHalfRvi   = RegEnable(s1_endIsHalfRvi, false.B, s1_fire)
-  private val s2_endHalfRviData = RegEnable(s1_endHalfRviData, s1_fire)
-  private val s2_endHalfRviPc   = RegEnable(s1_endHalfRviPc, s1_fire)
-
+  private val s2_valid             = WireInit(false.B)
+  private val s2_firstValid        = ValidHold(s1_fire && !s1_flush && s1_fetchBlock(0).valid, s2_fire, s2_flush)
+  private val s2_secondValid       = ValidHold(s1_fire && !s1_flush && s1_fetchBlock(1).valid, s2_fire, s2_flush)
+  private val s2_fetchBlock        = RegEnable(s1_fetchBlock, s1_fire)
+  private val s2_prevIBufEnqPtr    = RegEnable(s1_prevIBufEnqPtr, s1_fire)
+  private val s2_prevLastIsHalfRvi = RegEnable(s1_prevEndIsHalfRvi, s1_fire)
+  private val s2_endHalfRviData    = RegEnable(s1_endHalfRviData, s1_fire)
+  private val s2_endIsHalfRvi      = RegEnable(s1_endIsHalfRvi, s1_fire)
+  private val s2_endHalfRviPc      = RegEnable(s1_endHalfRviPc, s1_fire)
   private val s2_instrCount        = RegEnable(s1_instrCount, s1_fire)
   private val s2_icacheMeta        = RegEnable(s1_icacheMeta, s1_fire)
   private val s2_alignedInstrVec   = RegEnable(s1_alignedInstrVec, s1_fire)
@@ -337,7 +345,6 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s2_alignedFoldPc     = RegEnable(s1_alignedFoldPc, s1_fire)
 
   s2_fire := io.toIBuffer.fire
-  dontTouch(s2_fire)
 
   private val s2_alignShiftNum = s2_prevIBufEnqPtr.value(1, 0)
 
@@ -349,7 +356,6 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s2_expandedInstrDataVec = VecInit(rvcExpanders.map { expander =>
     Mux(expander.io.ill, expander.io.in, expander.io.out.bits)
   })
-  dontTouch(s2_expandedInstrDataVec)
 
   private val s2_expandedInstrVec = Wire(Vec(IBufferEnqueueWidth, new Instruction))
   s2_expandedInstrVec := s2_alignedInstrVec
@@ -360,8 +366,6 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s2_blockSel      = VecInit(s2_expandedInstrVec.map(_.blockSel))
   private val s2_endOffsetVec  = VecInit(s2_expandedInstrVec.map(_.endOffset))
   private val s2_rawInstrValid = VecInit(s2_expandedInstrVec.map(_.valid)).asUInt
-  dontTouch(s2_blockSel)
-  dontTouch(s2_rawInstrValid)
 
   private val s2_pdInfoVec     = Wire(Vec(IBufferEnqueueWidth, new PreDecodeInfo))
   private val s2_jumpOffsetVec = Wire(Vec(IBufferEnqueueWidth, PrunedAddr(VAddrBits)))
@@ -377,7 +381,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s2_uncacheLowerPc = RegEnable(s1_alignedInstrPcLowerBitsVec(s1_alignShiftNum), s1_fire)
   private val s2_uncachePc =
     catPC(s2_uncacheLowerPc, s2_fetchBlock(0).pcUpperBits, s2_fetchBlock(0).pcUpperBitsPlus1)
-  private val s2_reqIsUncache    = RegEnable(s1_reqIsUncache, false.B, s1_fire)
+  private val s2_reqIsUncache    = RegEnable(s1_reqIsUncache, s1_fire)
   private val s2_useUncacheFetch = RegEnable(s1_useUncacheFetch, s1_fire)
   private val s2_uncacheCanGo =
     (uncacheUnit.io.resp.valid && !uncacheUnit.io.resp.bits.needResend) || !s2_useUncacheFetch
@@ -392,11 +396,13 @@ class Ifu(implicit p: Parameters) extends IfuModule
   // Uncache cross-page may hit seq fetch or mispred, check required.
   private val uncacheResendCheck = RegInit(false.B)
   when(s2_flush) {
-    uncacheBusy := false.B
-    uncachePc   := 0.U.asTypeOf(PrunedAddr(VAddrBits))
+    uncacheBusy        := false.B
+    uncachePc          := 0.U.asTypeOf(PrunedAddr(VAddrBits))
+    uncacheResendCheck := false.B
   }.elsewhen(uncacheUnit.io.req.fire) {
-    uncacheBusy := true.B
-    uncachePc   := Mux(s2_prevEndIsHalfRvi, s2_prevEndHalfPc, s2_alignedInstrPcVec(s2_alignShiftNum))
+    uncacheBusy        := true.B
+    uncachePc          := Mux(prevUncacheNeedResend, uncachePc, s2_alignedInstrPcVec(s2_alignShiftNum))
+    uncacheResendCheck := (s2_fetchBlock(0).startVAddr + 2.U) === s2_fetchBlock(0).target
   }.elsewhen(uncacheUnit.io.resp.valid) {
     uncacheBusy := false.B
     // uncachePc := uncachePc
@@ -423,7 +429,12 @@ class Ifu(implicit p: Parameters) extends IfuModule
   // not RVC, no exception, crossing page boundary
   private val uncacheNeedResend = uncacheUnit.io.resp.bits.needResend && uncacheUnit.io.resp.valid
 
-  private val s2_uncacheData = Mux(s2_prevEndIsHalfRvi, Cat(uncacheData(15, 0), s2_prevEndHalfRviData), uncacheData)
+  when(uncacheUnit.io.resp.valid) {
+    prevUncacheNeedResend := uncacheNeedResend
+    prevUncacheData       := uncacheData
+  }
+
+  private val s2_uncacheData = Mux(prevUncacheNeedResend, Cat(uncacheData(15, 0), prevUncacheData), uncacheData)
   private val uncacheIsRvc   = s2_uncacheData(1, 0) =/= "b11".U
   uncacheRvcExpander.io.in      := Mux(s2_reqIsUncache, s2_uncacheData, 0.U)
   uncacheRvcExpander.io.fsIsOff := io.csrFsIsOff
@@ -445,10 +456,11 @@ class Ifu(implicit p: Parameters) extends IfuModule
   checkerIn.bits.jumpOffsetVec    := s2_jumpOffsetVec
   checkerIn.bits.pdInfoVec        := s2_pdInfoVec
   checkerIn.bits.instrPcVec       := s2_alignedInstrPcVec
+  checkerIn.bits.firstTarget      := s2_fetchBlock(0).target
+  checkerIn.bits.secondTarget     := s2_fetchBlock(1).target
   checkerIn.bits.expandedInstrVec := s2_expandedInstrVec
 
   private val s2_fixedInstrValid = checkerOutStage1.fixedInstrValid.asUInt
-  dontTouch(s2_fixedInstrValid)
 
   /* ** frontend Trigger  ** */
   frontendTrigger.io.pds             := s2_pdInfoVec
@@ -505,13 +517,13 @@ class Ifu(implicit p: Parameters) extends IfuModule
   // which is a side effect of the first instruction and actually not necessary.
   io.toIBuffer.bits.isBackendException := s2_icacheMeta(0).isBackendException
   // if we have last half RV-I instruction, and has exception, we need to tell backend to caculate the correct pc
-  io.toIBuffer.bits.exceptionCrossPage := s2_icacheMeta(0).exception.hasException && s2_prevEndIsHalfRvi
+  io.toIBuffer.bits.exceptionCrossPage := s2_icacheMeta(0).exception.hasException && s2_prevLastIsHalfRvi
   // if icache respond with exception, it's marked on entire cacheline,
   // so the first enqueued instr should be marked with exception
   // otherwise, we only have rvcException, so select its offset
   io.toIBuffer.bits.exceptionOffset := Mux(
     s2_icacheMeta(0).exception.hasException,
-    s2_alignShiftNum.pad(log2Ceil(IBufferEnqueueWidth)),
+    0.U,
     s2_rvcExceptionOffset
   )
 
@@ -546,20 +558,20 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val uncachePd           = 0.U.asTypeOf(Vec(FetchBlockInstNum, new PreDecodeInfo))
   private val uncacheMisEndOffset = Wire(Valid(UInt(FetchBlockInstOffsetWidth.W)))
   uncacheMisEndOffset.valid := s2_reqIsUncache
-  uncacheMisEndOffset.bits  := Mux(uncacheIsRvc || uncacheNeedResend, 0.U, 1.U)
+  uncacheMisEndOffset.bits  := Mux(prevUncacheNeedResend || uncacheIsRvc || uncacheCheckFault, 0.U, 1.U)
 
   // Send mmioFlushWb back to FTQ 1 cycle after uncache fetch return
   // When backend redirect, mmioState reset after 1 cycle.
   // In this case, mask .valid to avoid overriding backend redirect
   private val uncacheTarget =
     Mux(
-      uncacheIsRvc || uncacheNeedResend,
+      uncacheIsRvc || prevUncacheNeedResend || uncacheCheckFault,
       s2_fetchBlock(0).startVAddr + 2.U,
       s2_fetchBlock(0).startVAddr + 4.U
     )
   // Due to the presence of uncache requests, s2_valid && io.toIBuffer.ready is not equivalent to s2_fire.
   uncacheFlushWb.valid :=
-    s2_valid && io.toIBuffer.ready && s2_reqIsUncache && !backendRedirect && (s2_uncacheCanGo || uncacheNeedResend)
+    s2_valid && io.toIBuffer.ready && s2_reqIsUncache && !backendRedirect && (s2_uncacheCanGo || uncacheCheckFault)
   uncacheFlushWb.bits.ftqIdx    := s2_fetchBlock(0).ftqIdx
   uncacheFlushWb.bits.pc        := s2_fetchBlock(0).startVAddr.toUInt
   uncacheFlushWb.bits.taken     := false.B
@@ -581,7 +593,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
 
     io.toIBuffer.bits.pc(s2_alignShiftNum)                    := uncachePc
     io.toIBuffer.bits.isRvc(s2_alignShiftNum)                 := uncacheIsRvc
-    io.toIBuffer.bits.instrEndOffset(s2_alignShiftNum).offset := Mux(uncacheIsRvc, 0.U, 1.U)
+    io.toIBuffer.bits.instrEndOffset(s2_alignShiftNum).offset := Mux(prevUncacheNeedResend || uncacheIsRvc, 0.U, 1.U)
 
     io.toIBuffer.bits.exceptionType := s2_icacheMeta(0).exception || uncacheException || uncacheRvcException
     // execption can happen in next page only when cross page.
@@ -598,16 +610,12 @@ class Ifu(implicit p: Parameters) extends IfuModule
     uncacheFlushWb.bits.attribute := brAttribute
   }
 
-  // Core change: Route cross-page uncache data to S1 for unified management.
-  // S2 can now directly concatenate uncache instructions using s2_prevLastIsHalfRvi during fetch.
-  // This fixes the edge case where instructions spanning both cache and uncache channels fell through
-  // the cracks of the existing S1 (cache) and S2 (uncache) cross-page handling logic.
-  uncacheRedirect.valid := s2_valid && io.toIBuffer.ready && s2_reqIsUncache && (s2_uncacheCanGo || uncacheNeedResend)
-  uncacheRedirect.instrCount     := Mux(uncacheNeedResend, 0.U, 1.U)
+  uncacheRedirect.valid := s2_valid && io.toIBuffer.ready && s2_reqIsUncache && (s2_uncacheCanGo || uncacheCheckFault)
+  uncacheRedirect.instrCount     := Mux(uncacheCheckFault, 0.U, 1.U)
   uncacheRedirect.prevIBufEnqPtr := s2_prevIBufEnqPtr
-  uncacheRedirect.isHalfInstr    := uncacheNeedResend
-  uncacheRedirect.halfPc         := uncachePc
-  uncacheRedirect.halfData       := uncacheData(15, 0)
+  uncacheRedirect.isHalfInstr    := false.B
+  uncacheRedirect.halfPc         := 0.U.asTypeOf(PrunedAddr(VAddrBits))
+  uncacheRedirect.halfData       := 0.U
   /* *****************************************************************************
    * IFU Write-back Stage
    * - write back preDecode information to Ftq to update

@@ -57,10 +57,8 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheModule with ICacheDa
       reqReadBankValid(i)              := lineSelOH.orR && r0_req(i).valid
       reqReadSetIdx(i)                 := Mux1H(lineSelOH, r0_req(i).bits.vSetIdx)
       reqReadWayValid(i)               := Mux1H(lineSelOH, r0_req(i).bits.waymask) & Fill(nWays, reqReadBankValid(i))
-      r0_reqPerBankWayMask(i)(bankIdx) := reqReadWayValid(i)
-
+      r0_reqPerBankWayMask(i)(bankIdx) := Mux1H(lineSelOH, r0_req(i).bits.waymask)
       when(r0_valid) {
-        assert(PopCount(lineSelOH) <= 1.U, "ICache Data Array: one req on one bank can only select one line")
         assert(PopCount(reqReadWayValid(i)) <= 1.U, "ICache Data Array: wayMask multi hit")
       }
     }
@@ -72,15 +70,12 @@ class ICacheDataArray(implicit p: Parameters) extends ICacheModule with ICacheDa
     dontTouch(perWayReadSetIdx)
 
     (0 until nWays).foreach { wayIdx =>
-      val reqSel = VecInit((0 until MaxFetchReqNum).map(reqIdx => reqReadWayValid(reqIdx)(wayIdx)))
-      perWayReadValid(wayIdx)  := reqSel.reduce(_ || _)
-      perWayReadSetIdx(wayIdx) := PriorityMux(reqSel, reqReadSetIdx)
+      val reqSelOH = VecInit((0 until MaxFetchReqNum).map(reqIdx => reqReadWayValid(reqIdx)(wayIdx)))
+      perWayReadValid(wayIdx)  := reqSelOH.reduce(_ || _)
+      perWayReadSetIdx(wayIdx) := Mux1H(reqSelOH, reqReadSetIdx)
 
-      when(r0_valid && reqSel.reduce(_ && _)) {
-        assert(
-          reqReadSetIdx(0) === reqReadSetIdx(1),
-          "ICache Data Array: one way cannot be selected by multiple reqs with different setIdx!"
-        )
+      when(r0_valid) {
+        assert(PopCount(reqSelOH) <= 1.U, "ICache Data Array: one way cannot be selected by multiple reqs!")
       }
     }
     bank.io.read.req.valid        := r0_valid && reqReadBankValid.reduce(_ || _)

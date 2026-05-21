@@ -112,10 +112,10 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   fromWayLookup.ready := s0_fire
 
   when(s0_fire) {
-    assert(s0_wayLookupEntry(0).debug_ftqIdx === s0_req(0).ftqIdx)
+    assert(s0_wayLookupEntry(0).ftqIdx === s0_req(0).ftqIdx)
     assert(s0_wayLookupEntry(0).debug_startVAddr === s0_req(0).startVAddr)
     when(s0_req(1).valid) {
-      assert(s0_wayLookupEntry(1).debug_ftqIdx === s0_req(1).ftqIdx)
+      assert(s0_wayLookupEntry(1).ftqIdx === s0_req(1).ftqIdx)
       assert(s0_wayLookupEntry(1).debug_startVAddr === s0_req(1).startVAddr)
     }
   }
@@ -162,7 +162,6 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     assert((s1_req(0).ftqIdx + 1.U) === s1_req(1).ftqIdx)
   }
 
-// the offset of the start pc within the cache line
   private val s1_offset = VecInit(
     s1_req(0).startVAddr(blockOffBits - 1, 0),
     s1_req(1).startVAddr(blockOffBits - 1, 0)
@@ -179,7 +178,10 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
 
   private val s1_sramDatas = fromData.map(_.datas)
   private val s1_sramCodes = fromData.map(_.codes)
+<<<<<<< HEAD
 
+=======
+>>>>>>> 5906bb1ad (feat(Frontend): implement 2-fetch)
   private val s1_sramValid = VecInit(
     VecInit(RegNext(s0_fire), RegNext(s0_fire) && s1_req(0).isCrossLine),
     VecInit(RegNext(s0_fire) && s1_twoFetchValid, RegNext(s0_fire) && s1_twoFetchValid && s1_req(1).isCrossLine)

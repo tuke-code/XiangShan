@@ -35,6 +35,9 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
       val jumpOffsetVec:    Vec[PrunedAddr]    = Vec(IBufferEnqueueWidth, PrunedAddr(VAddrBits))
       val pdInfoVec:        Vec[PreDecodeInfo] = Vec(IBufferEnqueueWidth, new PreDecodeInfo)
       val instrPcVec:       Vec[PrunedAddr]    = Vec(IBufferEnqueueWidth, PrunedAddr(VAddrBits))
+
+      val firstTarget:  PrunedAddr = PrunedAddr(VAddrBits)
+      val secondTarget: PrunedAddr = PrunedAddr(VAddrBits)
     }
 
     class PredCheckerResp(implicit p: Parameters) extends IfuBundle {
@@ -57,9 +60,12 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
 
   val io: PredCheckerIO = IO(new PredCheckerIO)
 
+  private val firstPredTarget  = io.req.bits.firstTarget
+  private val secondPredTarget = io.req.bits.secondTarget
+
   private val expandedInstrVec = io.req.bits.expandedInstrVec
+  private val blockSelVec      = VecInit(expandedInstrVec.map(_.blockSel))
   private val endOffsetVec     = VecInit(expandedInstrVec.map(_.endOffset))
-  private val blockSel         = VecInit(expandedInstrVec.map(_.blockSel))
   private val instrValid       = VecInit(expandedInstrVec.map(_.valid))
   private val isPredTaken      = VecInit(expandedInstrVec.map(_.isPredTaken))
   private val invalidTaken     = VecInit(expandedInstrVec.map(_.invalidTaken))
@@ -68,7 +74,8 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
   private val instrPcVec    = io.req.bits.instrPcVec
   private val jumpOffsetVec = io.req.bits.jumpOffsetVec
 
-  private val jalFaultVec, jalrFaultVec, retFaultVec, notCfiTaken = Wire(Vec(IBufferEnqueueWidth, Bool()))
+  private val jalFaultVec, jalrFaultVec, retFaultVec, notCfiTaken, targetFaultVec =
+    Wire(Vec(IBufferEnqueueWidth, Bool()))
 
   /** Remask faults can occur alongside other faults, whereas other faults are mutually exclusive.
     * Therefore, for non-remask faults, a fixed fault mask must be used to ensure that only one fault
@@ -90,6 +97,11 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
   notCfiTaken := VecInit(pdInfoVec.zipWithIndex.map { case (pd, i) =>
     instrValid(i) && pd.notCFI && isPredTaken(i)
   })
+  targetFaultVec := VecInit(pdInfoVec.zipWithIndex.map { case (pd, i) =>
+    val predTarget = Mux(blockSelVec(i), secondPredTarget, firstPredTarget)
+    pd.brAttribute.isDirect && instrValid(i) && isPredTaken(i) &&
+    (predTarget =/= (instrPcVec(i) + jumpOffsetVec(i)).asTypeOf(PrunedAddr(VAddrBits)))
+  })
 
   private val remaskFault =
     VecInit((0 until IBufferEnqueueWidth).map(i =>
@@ -110,13 +122,13 @@ class PredChecker(implicit p: Parameters) extends IfuModule {
   io.resp.stage1Out.fixedInstrValid := fixedInstrValid
 
   private val firstBlockFixedTaken = VecInit(pdInfoVec.zipWithIndex.map { case (pd, i) =>
-    fixedInstrValid(i) && !blockSel(i) && (
+    fixedInstrValid(i) && !blockSelVec(i) && (
       pd.brAttribute.isIndirect || pd.brAttribute.isDirect || (isPredTaken(i) && !pd.notCFI)
     )
   })
 
   private val secondBlockFixedTaken = VecInit(pdInfoVec.zipWithIndex.map { case (pd, i) =>
-    fixedInstrValid(i) && blockSel(i) && (
+    fixedInstrValid(i) && blockSelVec(i) && (
       pd.brAttribute.isIndirect || pd.brAttribute.isDirect || (isPredTaken(i) && !pd.notCFI)
     )
   })

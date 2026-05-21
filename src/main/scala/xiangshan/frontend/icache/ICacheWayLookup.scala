@@ -104,7 +104,7 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     tailFtqIdx.value := 0.U
     tailFtqIdx.flag  := false.B
   }.elsewhen(io.write.head.fire) {
-    tailFtqIdx := Mux(io.write.last.fire, io.write.last.bits.ftqIdx, io.write.head.bits.ftqIdx)
+    tailFtqIdx := Mux(io.write.last.fire, io.write.last.bits.entry.ftqIdx, io.write.head.bits.entry.ftqIdx)
   }
 
   // we can store only the first exception encountered, as exceptions must trigger a redirection (and thus a flush)
@@ -146,89 +146,82 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
   // if the entry is empty, but there is a valid write, we can bypass it to read port (maybe timing critical)
 //  private val canBypass = empty && io.write.valid && !exceptionEntry.valid
   private val secondWriteValid = if (FetchPorts == 1) false.B else io.write(1).valid
-  private val fetchReq         = io.fromFtq.bits.req
-  private val rawTwoFetchValid = fetchReq(1).valid
-  private val canBypass = empty && io.write(0).valid && !secondWriteValid && !rawTwoFetchValid && !exceptionEntry.valid
-  private val canBypassFirst  = canBypass
-  private val canBypassSecond = false.B // TODO
+  private val rawTwoFetchValid = io.fromFtq.bits.req(1).valid
+  private val canBypassOne =
+    empty && io.write(0).valid && !secondWriteValid && !rawTwoFetchValid && !exceptionEntry.valid
+  private val canBypassTwo =
+    empty && io.write(0).valid && secondWriteValid && rawTwoFetchValid && !exceptionEntry.valid
+  private val canBypass = canBypassOne || canBypassTwo
+  // TODO: 1in 2out / 2in 1out
 
-  private val canDeqFirst            = !empty && !updateStall(0)
-  private val canDeqSecond           = numValidEntries > 1.U && !updateStall(0) && !updateStall(1)
-  private val canServeFirst          = canBypassFirst || canDeqFirst
-  private val canServeSecond         = canBypassSecond || canDeqSecond
-  private val candidateTwoFetchValid = rawTwoFetchValid && canServeSecond
-  private val canServe               = canServeFirst
+  private val canDeqOne = !empty && !updateStall(0)
+  private val canDeqTwo = numValidEntries > 1.U && !updateStall(0) && !updateStall(1)
+  private val canServe = Mux(
+    rawTwoFetchValid,
+    canBypassTwo || canDeqTwo,
+    canBypassOne || canDeqOne
+  )
 
-  private val firstReqEntry  = Mux(canBypassFirst, io.write(0).bits.entry, entries(readPtr.value))
-  private val secondReqEntry = Mux(canBypassSecond, io.write(1).bits.entry, entries((readPtr + 1.U).value))
-  private val firstReqExceptionEntry = Mux(
-    canBypassFirst,
-    io.write(0).bits.exceptionEntry,
-    Mux(exceptionHit(0), exceptionEntry.bits, 0.U.asTypeOf(new WayLookupExceptionEntry))
-  )
-  private val secondReqExceptionEntry = Mux(
-    canBypassSecond,
-    io.write(1).bits.exceptionEntry,
-    Mux(exceptionHit(1), exceptionEntry.bits, 0.U.asTypeOf(new WayLookupExceptionEntry))
-  )
+  private val firstReqWayMask  = entries(readPtr.value).waymask
+  private val secondReqWayMask = entries((readPtr + 1.U).value).waymask
 
   private val isDataSramReadConflict = (0 until DataBanks).map { bankIdx =>
-    val firstReqLineSelOH  = Cat(fetchReq(0).bankSel(1)(bankIdx), fetchReq(0).bankSel(0)(bankIdx))
-    val secondReqLineSelOH = Cat(fetchReq(1).bankSel(1)(bankIdx), fetchReq(1).bankSel(0)(bankIdx))
+    val firstReqLineSelOH  = Cat(io.fromFtq.bits.req(0).bankSel(1)(bankIdx), io.fromFtq.bits.req(0).bankSel(0)(bankIdx))
+    val secondReqLineSelOH = Cat(io.fromFtq.bits.req(1).bankSel(1)(bankIdx), io.fromFtq.bits.req(1).bankSel(0)(bankIdx))
 
-    when(io.fromFtq.fire) {
-      assert(
-        PopCount(firstReqLineSelOH) <= 1.U,
-        "ICache Way Lookup: one req on one bank can only select one line"
-      )
-      assert(
-        PopCount(secondReqLineSelOH) <= 1.U,
-        "ICache Way Lookup: one req on one bank can only select one line"
-      )
-    }
+    val firstReqReadValid  = firstReqLineSelOH.orR
+    val secondReqReadValid = rawTwoFetchValid && secondReqLineSelOH.orR
+    val bothReqReadValid   = firstReqReadValid && secondReqReadValid
 
-    val firstReqReadValid  = firstReqLineSelOH.orR && fetchReq(0).valid
-    val secondReqReadValid = secondReqLineSelOH.orR && fetchReq(1).valid
-    val bothRead           = firstReqReadValid && secondReqReadValid
+    val firstReqReadWayMask  = Mux1H(firstReqLineSelOH, firstReqWayMask)
+    val secondReqReadWayMask = Mux1H(secondReqLineSelOH, secondReqWayMask)
 
-    val firstReqReadWayMask  = Mux1H(firstReqLineSelOH, firstReqEntry.waymask) & Fill(nWays, firstReqReadValid)
-    val secondReqReadWayMask = Mux1H(secondReqLineSelOH, secondReqEntry.waymask) & Fill(nWays, secondReqReadValid)
-    val readSameWay          = firstReqReadWayMask === secondReqReadWayMask
-
-    val firstReqReadSetIdx  = Mux1H(firstReqLineSelOH, fetchReq(0).vSetIdx)
-    val secondReqReadSetIdx = Mux1H(secondReqLineSelOH, fetchReq(1).vSetIdx)
-
-    bothRead && readSameWay && (firstReqReadSetIdx =/= secondReqReadSetIdx)
+    bothReqReadValid && (firstReqReadWayMask & secondReqReadWayMask).orR
   }.reduce(_ || _)
 
-  private val hasMmio             = firstReqEntry.isMmio || secondReqEntry.isMmio
-  private val hasItlbException    = exceptionHit(0) || exceptionHit(1)
-  private val hasBackendException = fetchReq(0).hasBackendException || fetchReq(1).hasBackendException
-  private val realTwoFetchValid =
-    candidateTwoFetchValid &&
-      !isDataSramReadConflict &&
-      !hasMmio &&
-      !hasItlbException &&
-      !hasBackendException
+  private val firstReqIsMmio  = entries(readPtr.value).isMmio
+  private val secondReqIsMmio = entries((readPtr + 1.U).value).isMmio
+  private val hasMmio         = firstReqIsMmio || secondReqIsMmio
+
+  private val firstReqHasException =
+    exceptionHit(0) && exceptionEntry.valid && exceptionEntry.bits.itlbException.hasException
+  private val secondReqHasException =
+    exceptionHit(1) && exceptionEntry.valid && exceptionEntry.bits.itlbException.hasException
+  private val hasItlbException = firstReqHasException || secondReqHasException
+
+  private val realTwoFetchValid = rawTwoFetchValid && !isDataSramReadConflict && !hasMmio && !hasItlbException
   io.realTwoFetchValid := realTwoFetchValid
 
   io.toMainPipe.valid             := io.fromFtq.valid && canServe && !io.flush
-  io.toMainPipe.bits.req          := fetchReq
-  io.toMainPipe.bits.req(1).valid := fetchReq(1).valid && realTwoFetchValid
+  io.toMainPipe.bits.req          := io.fromFtq.bits.req
+  io.toMainPipe.bits.req(1).valid := io.fromFtq.bits.req(1).valid && realTwoFetchValid
 
-  io.toMainPipe.bits.wayLookupInfo(0).entry          := firstReqEntry
-  io.toMainPipe.bits.wayLookupInfo(0).exceptionEntry := firstReqExceptionEntry
-  io.toMainPipe.bits.wayLookupInfo(1).entry          := secondReqEntry
-  io.toMainPipe.bits.wayLookupInfo(1).exceptionEntry := secondReqExceptionEntry
+  when(canBypass) {
+    io.toMainPipe.bits.wayLookupInfo(0) := io.write(0).bits
+    io.toMainPipe.bits.wayLookupInfo(1) := io.write(1).bits
+  }.otherwise {
+    io.toMainPipe.bits.wayLookupInfo(0).entry := entries(readPtr.value)
+    io.toMainPipe.bits.wayLookupInfo(0).exceptionEntry := Mux(
+      exceptionHit(0),
+      exceptionEntry.bits,
+      0.U.asTypeOf(new WayLookupExceptionEntry)
+    )
+    io.toMainPipe.bits.wayLookupInfo(1).entry := entries((readPtr + 1.U).value)
+    io.toMainPipe.bits.wayLookupInfo(1).exceptionEntry := Mux(
+      exceptionHit(1),
+      exceptionEntry.bits,
+      0.U.asTypeOf(new WayLookupExceptionEntry)
+    )
+  }
 
   io.fromFtq.ready := io.toMainPipe.ready && canServe && !io.flush
 
   when(io.toMainPipe.fire) {
-    assert(io.toMainPipe.bits.wayLookupInfo(0).debug_ftqIdx === fetchReq(0).ftqIdx)
-    assert(io.toMainPipe.bits.wayLookupInfo(0).debug_startVAddr === fetchReq(0).startVAddr)
+    assert(io.toMainPipe.bits.wayLookupInfo(0).ftqIdx === io.fromFtq.bits.req(0).ftqIdx)
+    assert(io.toMainPipe.bits.wayLookupInfo(0).debug_startVAddr === io.fromFtq.bits.req(0).startVAddr)
     when(realTwoFetchValid) {
-      assert(io.toMainPipe.bits.wayLookupInfo(1).debug_ftqIdx === fetchReq(1).ftqIdx)
-      assert(io.toMainPipe.bits.wayLookupInfo(1).debug_startVAddr === fetchReq(1).startVAddr)
+      assert(io.toMainPipe.bits.wayLookupInfo(1).ftqIdx === io.fromFtq.bits.req(1).ftqIdx)
+      assert(io.toMainPipe.bits.wayLookupInfo(1).debug_startVAddr === io.fromFtq.bits.req(1).startVAddr)
     }
   }
 
@@ -272,9 +265,9 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     WayLookupSize
   )
   XSPerfAccumulate("emptyWhenWrite", empty && io.write.head.fire)
-  XSPerfAccumulate("emptyBypassOne", canBypassFirst && io.toMainPipe.fire)
-  XSPerfAccumulate("emptyBypassTwo", canBypassSecond && io.toMainPipe.fire)
-  XSPerfAccumulate("emptyNoBypass", empty && !(canBypassFirst || canBypassSecond))
+  XSPerfAccumulate("emptyBypassOne", empty && io.write.head.fire && io.toMainPipe.fire && !realTwoFetchValid)
+  XSPerfAccumulate("emptyBypassTwo", empty && io.write.head.fire && io.toMainPipe.fire && realTwoFetchValid)
+  XSPerfAccumulate("emptyNoBypass", empty && !io.write.head.fire)
   // exception stall cycles
   XSPerfAccumulate("waitingForExceptionRead", exceptionEntry.valid && !empty)
   XSPerfAccumulate("waitingForExceptionFlush", exceptionEntry.valid && empty)
@@ -291,10 +284,6 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     io.toMainPipe.fire && rawTwoFetchValid
   )
   XSPerfAccumulate(
-    "2fetch_candidate",
-    io.toMainPipe.fire && candidateTwoFetchValid
-  )
-  XSPerfAccumulate(
     "2fetch_real",
     io.toMainPipe.fire && realTwoFetchValid
   )
@@ -306,11 +295,9 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
     "2fetch_blocked",
     io.toMainPipe.fire && rawTwoFetchValid && !realTwoFetchValid,
     Seq(
-      ("by_waylookup_unavailable", !candidateTwoFetchValid),
       ("by_sram_conflict", isDataSramReadConflict),
       ("by_mmio", hasMmio),
-      ("by_itlb_exception", hasItlbException),
-      ("by_backend_exception", hasBackendException)
+      ("by_itlb_exception", hasItlbException)
     ),
     withPriority = true
   )

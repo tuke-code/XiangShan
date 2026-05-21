@@ -177,3 +177,13 @@ class InstrCompactBundle(width: Int)(implicit p: Parameters) extends IfuBundle {
   val instrPcLower:   Vec[UInt]            = Vec(width, UInt((PcCutPoint + 1).W))
   val instrEndOffset: Vec[UInt]            = Vec(width, UInt(log2Ceil(FetchBlockInstNum).W))
 }
+
+class PreDecodeInfoNew(implicit p: Parameters) extends IfuBundle {
+  val brAttribute: BranchAttribute = new BranchAttribute
+  val jumpOffset:  PrunedAddr      = PrunedAddr(VAddrBits)
+
+  def isBr:       Bool = brAttribute.isConditional
+  def isDirect:   Bool = brAttribute.isDirect
+  def isIndirect: Bool = brAttribute.isIndirect
+  def notCFI:     Bool = brAttribute.isNone
+}

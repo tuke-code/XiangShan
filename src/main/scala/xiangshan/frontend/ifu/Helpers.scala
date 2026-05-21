@@ -161,6 +161,20 @@ trait IfuHelper extends HasIfuParameters with PreDecodeHelper {
     (out, count)
   }
 
+  def preDecode(in: Vec[Instruction]): Vec[PreDecodeInfoNew] = {
+    val out = Wire(Vec(FetchBlockInstNum, new PreDecodeInfoNew))
+
+    for (i <- 0 until FetchBlockInstNum) {
+      val jalOffset = getJalOffset(in(i).data, in(i).isRvc)
+      val brOffset  = getBrOffset(in(i).data, in(i).isRvc)
+
+      out(i).brAttribute := BranchAttribute.decode(in(i).data, in(i).valid) // for diff purpose only
+      out(i).jumpOffset  := Mux(out(i).isBr, brOffset, jalOffset)
+    }
+
+    out
+  }
+
   def align[T <: Data](in: Vec[T], shamt: UInt): Vec[T] = {
     require(IBufferEnqueueWidth - FetchBlockInstNum == 4)
     require(shamt.getWidth == 2)

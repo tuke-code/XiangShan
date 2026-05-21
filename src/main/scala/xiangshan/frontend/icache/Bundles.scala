@@ -271,6 +271,7 @@ class PrefetchReqBundle(implicit p: Parameters) extends ICacheBundle {
  *      To save area, we separate those signals from WayLookupEntry and store only once.
  */
 class WayLookupEntry(implicit p: Parameters) extends ICacheBundle {
+  val ftqIdx:      FtqPtr    = new FtqPtr
   val vSetIdx:     Vec[UInt] = Vec(PortNumber, UInt(idxBits.W))
   val waymask:     Vec[UInt] = Vec(PortNumber, UInt(nWays.W))
   val maybeRvcMap: Vec[UInt] = Vec(PortNumber, UInt(MaxInstNumPerBlock.W))
@@ -308,6 +309,8 @@ class WayLookupBundle(implicit p: Parameters) extends ICacheBundle {
   val exceptionEntry: WayLookupExceptionEntry = new WayLookupExceptionEntry
 
   // for compatibility
+  def ftqIdx:            FtqPtr        = entry.ftqIdx
+  def debug_startVAddr:  PrunedAddr    = entry.debug_startVAddr
   def vSetIdx:           Vec[UInt]     = entry.vSetIdx
   def waymask:           Vec[UInt]     = entry.waymask
   def maybeRvcMap:       Vec[UInt]     = entry.maybeRvcMap
@@ -323,9 +326,7 @@ class WayLookupBundle(implicit p: Parameters) extends ICacheBundle {
   def debug_startVAddr: PrunedAddr = entry.debug_startVAddr
 }
 
-class WayLookupWriteBundle(implicit p: Parameters) extends WayLookupBundle {
-  val ftqIdx: FtqPtr = new FtqPtr
-}
+class WayLookupWriteBundle(implicit p: Parameters) extends WayLookupBundle
 
 /* ***** Miss ***** */
 // ICacheMainPipe / ICachePrefetchPipe -> MissUnit

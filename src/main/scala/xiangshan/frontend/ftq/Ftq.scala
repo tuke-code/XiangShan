@@ -156,8 +156,8 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // We limit the distance between BP and IF and stall counts of BP train so that branch update can be written back to
   // BPU
   io.fromBpu.prediction.ready := distanceBetween(bpuPtr(0), commitPtr(0)) < FtqSize.U &&
-    distanceBetween(bpuPtr(0), fetchPtr(0)) < BpRunAheadDistance.U &&
-    bpTrainStallCnt < BpTrainStallLimit.U
+    distanceBetween(bpuPtr(0), fetchPtr(0)) < BpRunAheadDistance.U
+  bpTrainStallCnt < BpTrainStallLimit.U
   io.fromBpu.meta.ready := true.B
 
   private val prediction = io.fromBpu.prediction
@@ -308,16 +308,14 @@ class Ftq(implicit p: Parameters) extends FtqModule
     req.target := {
       if (i == 0)
         MuxCase(
-          fetchReq(1).startVAddr,
+          entryQueue(fetchPtr(1).value).startPc,
           Seq(
             (bpuPtr(0) === fetchPtr(0)) -> prediction.bits.target,
             (bpuPtr(0) === fetchPtr(1)) -> prediction.bits.startPc
           )
         )
       else
-        // Ifu do not check target, so the target of the second fetch block is useless
-        // but the target of the first fetch block is used in uncache fetch
-        0.U.asTypeOf(PrunedAddr(VAddrBits))
+        entryQueue(fetchPtr(i + 1).value).startPc
     }
     req.takenCfiOffset      := entryQueue(fetchPtr(i).value).takenCfiOffset
     req.isCrossLine         := fetchReq(i).isCrossLine

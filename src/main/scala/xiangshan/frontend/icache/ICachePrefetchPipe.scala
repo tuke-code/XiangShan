@@ -305,7 +305,7 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
         // first port is always valid, the second port is valid only if we can do 2-prefetch
         (if (i == 0) true.B else s1_twoPrefetchCase.valid)
 
-    port.bits.ftqIdx            := s1_req(i).ftqIdx
+    port.bits.entry.ftqIdx      := s1_req(i).ftqIdx
     port.bits.entry.vSetIdx     := VecInit(get_idx(s1_req(i).startVAddr), get_idx(s1_req(i).nextLineVAddr))
     port.bits.entry.waymask     := VecInit(s1_reqMetaInfo(i).map(_.waymask))
     port.bits.entry.pTag        := s1_pTag
