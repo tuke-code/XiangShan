@@ -446,6 +446,10 @@ case class IssueBlockParams(
     MixedVec(exuBlockParams.filterNot(_.fakeUnit).map(x => new IssueQueueDeqOg1Payload(x)))
   }
 
+  def genIssueDeqFireBundle: Vec[Bool] = {
+    Vec(exuBlockParams.filterNot(_.fakeUnit).size, Bool())
+  }
+
   def genExuWakeUpOutValidBundle(implicit p: Parameters): MixedVec[DecoupledIO[IssueQueueIQWakeUpBundle]] = {
     val uncertainExuParams = this.allExuParams.filter(_.needUncertainWakeup)
     MixedVec(uncertainExuParams.map(param => {

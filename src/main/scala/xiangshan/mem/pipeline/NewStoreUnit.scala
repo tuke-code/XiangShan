@@ -817,6 +817,7 @@ class StoreUnitS3(param: ExeUnitParams)(
 
   io.stout.toRob.valid := sxValid && !sxVector
   io.stout.toRob.bits.robIdx := sxData.uop.robIdx
+  io.stout.toRob.bits.earlyReleaseOwner := sxData.uop.earlyRelease.redefinerRobIdx
   io.stout.toRob.bits.isRVC.foreach(_ := sxData.uop.isRVC)
   io.stout.toRob.bits.trigger.foreach(_ := sxData.uop.trigger)
   io.stout.toRob.bits.sqIdx.foreach(_ := sxData.uop.sqIdx)

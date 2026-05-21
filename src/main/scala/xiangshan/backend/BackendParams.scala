@@ -37,6 +37,9 @@ case class BackendParams(
   schdParams : Map[SchedulerType, SchdBlockParams],
   pregParams : Seq[PregParams],
   iqWakeUpParams : Seq[WakeUpConfig],
+  enableIntEarlyRelease: Boolean = false,
+  intEarlyReleaseTrackedPregs: Int = 8,
+  intEarlyReleaseLedgerEntries: Int = 8,
 ) {
 
   def debugEn(implicit p: Parameters): Boolean = p(DebugOptionsKey).EnableDifftest

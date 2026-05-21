@@ -17,6 +17,7 @@ import xiangshan.backend.fu.fpu.Bundles.Frm
 import xiangshan.backend.fu.vector.Bundles._
 import xiangshan.backend.issue._
 import xiangshan.backend.issue.EntryBundles._
+import xiangshan.backend.rename.{EarlyReleaseMetadata, EarlyReleaseOwner}
 import xiangshan.backend.regfile._
 import xiangshan.backend.rob.RobPtr
 import xiangshan.backend.trace._
@@ -63,6 +64,7 @@ object Bundles {
     connectSamePort(sink.bits, source.bits)
     sink.bits.toRobValid := source.valid
     sink.bits.robIdx     := source.bits.robIdx
+    sink.bits.earlyRelease := source.bits.earlyRelease
   }
 
   def connectExuInput(sink: DecoupledIO[ExuInput], source: DecoupledIO[NewExuInput]) = {
@@ -74,6 +76,7 @@ object Bundles {
     connectSamePort(sink.bits, source.bits.copy)
     connectSamePort(sink.bits, source.bits)
     sink.bits.robIdx := source.bits.robIdx
+    sink.bits.earlyRelease := source.bits.earlyRelease
     sink.bits.selImm := 0.U
   }
 
@@ -83,6 +86,7 @@ object Bundles {
     connectSamePort(sink.bits.toRob.bits, source.bits)
     connectSamePort(sink.bits, source.bits)
     sink.bits.toRob.valid             := source.valid
+    sink.bits.toRob.bits.earlyReleaseOwner := source.bits.earlyReleaseOwner
     sink.bits.toIntRf.foreach(_.valid := source.bits.intWen.get)
     sink.bits.toIntRf.foreach(_.bits  := source.bits.data(0))
     sink.bits.toFpRf. foreach(_.valid := source.bits.fpWen.get)
@@ -98,6 +102,7 @@ object Bundles {
   def connectWriteBackRob(sink: WriteBackRobBundle, source: NewExuOutput) = {
     connectSamePort(sink, source.toRob.bits)
     connectSamePort(sink, source)
+    sink.intWen.foreach(_ := source.toIntRf.map(_.valid).getOrElse(false.B))
     sink.data              := source.toIntRf.map(_.bits).getOrElse(0.U(64.W))
     sink.vecWen. foreach(_ := source.toVecRf.map(_.valid).getOrElse(false.B))
     sink.v0Wen.  foreach(_ := source.toV0Rf.map(_.valid).getOrElse(false.B))
@@ -272,6 +277,7 @@ object Bundles {
     val psrcVl = UInt(VlPhyRegIdxWidth.W)
     val pdest = UInt(PhyRegIdxWidth.W)
     val pdestVl = UInt(VlPhyRegIdxWidth.W)
+    val earlyRelease = new EarlyReleaseMetadata
     val robIdx = new RobPtr
     val dirtyFs = Bool()
     val dirtyVs = Bool()
@@ -358,6 +364,7 @@ object Bundles {
     val psrcVl = UInt(VlPhyRegIdxWidth.W)
     val pdest = UInt(PhyRegIdxWidth.W)
     val pdestVl = UInt(VlPhyRegIdxWidth.W)
+    val earlyRelease = new EarlyReleaseMetadata
     val robIdx = new RobPtr
     val numLsElem = NumLsElem()
     val rasAction = BranchAttribute.RasAction()
@@ -419,6 +426,7 @@ object Bundles {
     val psrcVl    = Option.when(params.readVlRf)(UInt(VlPhyRegIdxWidth.W))
     val pdest     = UInt(PhyRegIdxWidth.W)
     val pdestVl   = Option.when(params.writeVlRf)(UInt(VlPhyRegIdxWidth.W)) // Todo: reuse psrc to store it
+    val earlyRelease = new EarlyReleaseMetadata
     val numLsElem = Option.when(params.isVecMemIQ)(NumLsElem())
     val rasAction = Option.when(params.needRasAction)(BranchAttribute.RasAction())
     // for mdp
@@ -457,6 +465,7 @@ object Bundles {
     val uopIdx   = Option.when(params.inVfSchd)(UopIdx())
     val lastUop  = Option.when(params.inVfSchd)(Bool())
     // from rename
+    val earlyRelease = new EarlyReleaseMetadata
     val numLsElem = Option.when(params.isVecMemIQ)(NumLsElem())
     val rasAction = Option.when(params.needRasAction)(BranchAttribute.RasAction())
     // for mdp
@@ -486,6 +495,7 @@ object Bundles {
     val uopIdx   = Option.when(params.issueBlockParam.inVfSchd)(UopIdx())
     val lastUop  = Option.when(params.issueBlockParam.inVfSchd)(Bool())
     // from rename
+    val earlyRelease = new EarlyReleaseMetadata
     val numLsElem = Option.when(params.issueBlockParam.isVecMemIQ)(NumLsElem())
     val rasAction = Option.when(params.needRasAction)(BranchAttribute.RasAction())
     // psrc are used in datapath to generate regfile's bank Ren
@@ -519,6 +529,7 @@ object Bundles {
     // from rename
     val pdest     = UInt(PhyRegIdxWidth.W)
     val pdestVl   = Option.when(params.writeVlRf)(UInt(VlPhyRegIdxWidth.W))
+    val earlyRelease = new EarlyReleaseMetadata
     // from dispatch
     val srcLoadDependency = Vec(numSrc, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
     val debug             = OptionWrapper(backendParams.debugEn, new IssueQueueInDebug)
@@ -593,6 +604,7 @@ object Bundles {
     val psrc            = Vec(numSrc, UInt(PhyRegIdxWidth.W))
     val pdest           = UInt(PhyRegIdxWidth.W)
     val pdestVl         = UInt(VlPhyRegIdxWidth.W)
+    val earlyRelease    = new EarlyReleaseMetadata
     val rasAction       = BranchAttribute.RasAction()
     // reg cache
     val useRegCache     = Vec(backendParams.numIntRegSrc, Bool())
@@ -934,6 +946,7 @@ object Bundles {
     val vlWen          = Option.when(exuParams.needVlWen )(Bool())
     val pdest          = UInt(exuParams.wbPregIdxWidth.W)
     val pdestVl        = Option.when(exuParams.writeVlRf)(UInt(VlPhyRegIdxWidth.W))
+    val earlyRelease   = new EarlyReleaseMetadata
     val flushPipe      = Option.when(exuParams.flushPipe)    (Bool())
     val ftqIdx         = Option.when(exuParams.needFtqPtr)   (new FtqPtr)
     val ftqOffset      = Option.when(exuParams.needFtqPtrOffset)(UInt(FetchBlockInstOffsetWidth.W))
@@ -966,6 +979,7 @@ object Bundles {
     val vlWen          = Option.when(exuParams.needVlWen )(Bool())
     val pdest          = UInt(exuParams.wbPregIdxWidth.W)
     val pdestVl        = Option.when(exuParams.writeVlRf)(UInt(VlPhyRegIdxWidth.W))
+    val earlyRelease   = new EarlyReleaseMetadata
     val flushPipe      = Option.when(exuParams.flushPipe)    (Bool())
     val ftqIdx         = Option.when(exuParams.needFtqPtr)   (new FtqPtr)
     val ftqOffset      = Option.when(exuParams.needFtqPtrOffset)(UInt(FetchBlockInstOffsetWidth.W))
@@ -1082,6 +1096,7 @@ object Bundles {
     val robIdx        = new RobPtr
     val iqIdx         = UInt(log2Up(params.issueBlockParam.numEntries).W)
     val isFirstIssue  = Bool()
+    val earlyRelease  = new EarlyReleaseMetadata
     val pdestCopy  = OptionWrapper(copyWakeupOut, Vec(copyNum, UInt(params.wbPregIdxWidth.W)))
     val rfWenCopy  = OptionWrapper(copyWakeupOut && params.needIntWen, Vec(copyNum, Bool()))
     val fpWenCopy  = OptionWrapper(copyWakeupOut && params.needFpWen, Vec(copyNum, Bool()))
@@ -1173,6 +1188,7 @@ object Bundles {
       uop.robIdx         := this.robIdx
       uop.pdest          := this.pdest
       uop.pdestVl        := this.pdestVl.getOrElse(0.U)
+      uop.earlyRelease   := this.earlyRelease
       uop.rfWen          := this.rfWen.getOrElse(false.B)
       uop.fpWen          := this.fpWen.getOrElse(false.B)
       uop.vecWen         := this.vecWen.getOrElse(false.B)
@@ -1261,6 +1277,7 @@ object Bundles {
     val copy           = new ExuCopyBundle(params, copyWakeupOut, copyNum, hasCopySrc)
     val iqIdx          = UInt(log2Up(params.issueBlockParam.numEntries).W)
     val isFirstIssue   = Bool()
+    val earlyRelease   = new EarlyReleaseMetadata
     val loadWaitBit    = Option.when(params.hasLoadExu)(Bool())
     val waitForRobIdx  = Option.when(params.hasLoadExu)(new RobPtr) // store set predicted previous store robIdx
     val storeSetHit    = Option.when(params.hasLoadExu || params.hasStoreAddrExu)(Bool())     // inst has been allocated an store set
@@ -1293,6 +1310,7 @@ object Bundles {
     val pdest        = UInt(params.wbPregIdxWidth.W)
     val pdestVl      = Option.when(params.writeVlRf)(UInt(VlPhyRegIdxWidth.W))
     val robIdx       = new RobPtr
+    val earlyReleaseOwner = UInt(EarlyReleaseOwner.width.W)
     val intWen       = if (params.needIntWen)   Some(Bool())                  else None
     val fpWen        = if (params.needFpWen)    Some(Bool())                  else None
     val vecWen       = if (params.needVecWen)   Some(Bool())                  else None
@@ -1346,6 +1364,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
   }
   class ExuOutputToRob(val params: ExeUnitParams)(implicit p: Parameters) extends Bundle {
     val robIdx       = new RobPtr
+    val earlyReleaseOwner = UInt(EarlyReleaseOwner.width.W)
     val fflags       = Option.when(params.writeFflags)(UInt(5.W))
     val wflags       = Option.when(params.writeFflags)(Bool())
     val vxsat        = Option.when(params.writeVxsat)(Bool())
@@ -1624,6 +1643,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
 
   class WriteBackRobBundle(val params: ExeUnitParams, backendParams: BackendParams)(implicit p: Parameters) extends Bundle with BundleSource {
     val robIdx        = new RobPtr()(p)
+    val earlyReleaseOwner = UInt(EarlyReleaseOwner.width.W)
     val flushPipe     = Option.when(params.flushPipe)(Bool())
     val replay        = Option.when(params.replayInst)(Bool())
     val redirect      = Option.when(params.hasRedirect)(ValidIO(new Redirect))
@@ -1637,6 +1657,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
     val vls           = Option.when(params.hasVLoadFu)(new ExuOutputVLoad(params))
     val data          = UInt(params.destDataBitsMax.W)
     val pdest         = UInt(params.wbPregIdxWidth.W)
+    val intWen        = Option.when(params.writeIntRf)(Bool())
     val vecWen        = Option.when(params.writeVecRf)(Bool())
     val v0Wen         = Option.when(params.writeV0Rf)(Bool())
     val debug         = new DebugBundle
@@ -1756,6 +1777,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
       output.data   := VecInit(Seq.fill(param.wbPathNum)(this.data))
       output.pdest  := this.uop.pdest
       output.robIdx := this.uop.robIdx
+      output.earlyReleaseOwner := this.uop.earlyRelease.redefinerRobIdx
       output.intWen.foreach(_ := this.uop.rfWen)
       output.fpWen.foreach(_ := this.uop.fpWen)
       output.vecWen.foreach(_ := this.uop.vecWen)

@@ -304,6 +304,22 @@ class TLMinimalSimConfig(n: Int = 1) extends Config(
 )
 class MinimalSimConfig(n: Int = 1) extends TLMinimalSimConfig(n) with DeprecatedConfigWarning
 
+class WithIntEarlyRelease extends Config((site, here, up) => {
+  case XSTileKey => up(XSTileKey).map(_.copy(
+    EnableIntEarlyRelease = true,
+    IntEarlyReleaseTrackedPregs = 8,
+    IntEarlyReleaseLedgerEntries = 8
+  ))
+})
+
+class TLMinimalIntEarlyReleaseConfig(n: Int = 1) extends Config(
+  new WithIntEarlyRelease ++ new TLMinimalConfig(n)
+)
+
+class TLIntEarlyReleaseConfig(n: Int = 1) extends Config(
+  new WithIntEarlyRelease ++ new TLConfig(n)
+)
+
 case class WithNKBL1D(n: Int, ways: Int = 8) extends Config((site, here, up) => {
   case XSTileKey =>
     val sets = n * 1024 / ways / 64

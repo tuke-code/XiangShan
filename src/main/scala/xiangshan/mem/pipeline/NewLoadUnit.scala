@@ -1427,6 +1427,7 @@ class LoadUnitS3(param: ExeUnitParams)(
   }
   ldout.toRob.valid := ldoutValid
   ldout.toRob.bits.robIdx := uop.robIdx
+  ldout.toRob.bits.earlyReleaseOwner := uop.earlyRelease.redefinerRobIdx
   ldout.toRob.bits.exceptionVec.get := exceptionVec
   ldout.toRob.bits.lqIdx.get := uop.lqIdx
   ldout.toRob.bits.trigger.get := uop.trigger

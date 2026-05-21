@@ -922,6 +922,7 @@ class VSegmentUnit(val param: ExeUnitParams)(implicit p: Parameters) extends VLS
     writebackOut.data := VecInit(Seq.fill(param.wbPathNum)(instMicroOp.exceptionVl.bits))
     writebackOut.pdest := fofBuffer.pdest
     writebackOut.robIdx := fofBuffer.robIdx
+    writebackOut.earlyReleaseOwner := fofBuffer.earlyRelease.redefinerRobIdx
     writebackOut.intWen.foreach(_ := fofBuffer.rfWen)
     writebackOut.fpWen.foreach(_ := fofBuffer.fpWen)
     writebackOut.vecWen.foreach(_ := fofBuffer.vecWen)
@@ -949,6 +950,7 @@ class VSegmentUnit(val param: ExeUnitParams)(implicit p: Parameters) extends VLS
     writebackOut.data := VecInit(Seq.fill(param.wbPathNum)(data(deqPtr.value)))
     writebackOut.pdest := uopq(deqPtr.value).uop.pdest
     writebackOut.robIdx := instMicroOp.uop.robIdx
+    writebackOut.earlyReleaseOwner := instMicroOp.uop.earlyRelease.redefinerRobIdx
     writebackOut.intWen.foreach(_ := uopq(deqPtr.value).uop.rfWen)
     writebackOut.fpWen.foreach(_ := uopq(deqPtr.value).uop.fpWen)
     writebackOut.vecWen.foreach(_ := uopq(deqPtr.value).uop.vecWen)
@@ -1013,4 +1015,3 @@ class VSegmentUnit(val param: ExeUnitParams)(implicit p: Parameters) extends VLS
   io.exceptionInfo.bits.isHyper       := false.B
   io.exceptionInfo.valid              := (state === s_finish) && instMicroOp.uop.exceptionVec.asUInt.orR && !isEmpty(enqPtr, deqPtr)
 }
-

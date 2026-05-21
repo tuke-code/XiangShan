@@ -44,6 +44,7 @@ import xiangshan.backend.fu.FuType
 import xiangshan.backend.fu.NewCSR.Mcontrol6
 import xiangshan.backend.fu.NewCSR.Tdata1Bundle
 import xiangshan.backend.fu.NewCSR.Tdata2Bundle
+import xiangshan.backend.rename.EarlyReleaseMetadata
 import xiangshan.backend.rob.RobBundles.RobCommitEntryBundle
 import xiangshan.backend.rob.RobPtr
 import xiangshan.cache.HasDCacheParameters
@@ -344,6 +345,13 @@ class DiffCommitIO(implicit p: Parameters) extends XSBundle {
   val commitValid = Vec(CommitWidth * MaxUopSize, Bool())
 
   val info = Vec(CommitWidth * MaxUopSize, new RabCommitInfo)
+  val robIdx = Vec(CommitWidth * MaxUopSize, UInt(log2Ceil(RobSize).W))
+  val robIdxFlag = Vec(CommitWidth * MaxUopSize, Bool())
+  val intWdata = Vec(CommitWidth * MaxUopSize, UInt(XLEN.W))
+
+  val robCommitValid = Vec(CommitWidth, Bool())
+  val robCommitInfo = Vec(CommitWidth, new RabCommitInfo)
+  val robCommitIntWdata = Vec(CommitWidth, UInt(XLEN.W))
 }
 
 class DiffVlCommitBundle(commitWidth: Int)(implicit p: Parameters) extends XSBundle {
@@ -377,6 +385,7 @@ class RabCommitInfo(implicit p: Parameters) extends XSBundle {
   val v0Wen = Bool()
   val vlWen = Bool()
   val isMove = Bool()
+  val earlyRelease = new EarlyReleaseMetadata
 }
 
 class RabCommitIO(implicit p: Parameters) extends XSBundle {

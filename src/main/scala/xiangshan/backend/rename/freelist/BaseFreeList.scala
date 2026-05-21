@@ -42,6 +42,9 @@ abstract class BaseFreeList(
 
     val freeReq = Input(Vec(commitWidth, Bool()))
     val freePhyReg = Input(Vec(commitWidth, UInt(PhyRegIdxWidth.W)))
+    val debugEarlyRelease = Input(Vec(commitWidth, Bool()))
+    val debugEarlyReleaseResolve = Input(Vec(commitWidth, Bool()))
+    val debugEarlyReleaseResolvePreg = Input(Vec(commitWidth, UInt(PhyRegIdxWidth.W)))
 
     val commit = Input(new FreeListCommitBundle(commitWidth))
 

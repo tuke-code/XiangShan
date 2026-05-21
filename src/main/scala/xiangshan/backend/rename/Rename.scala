@@ -29,7 +29,7 @@ import xiangshan.backend.decode.{FusionDecodeInfo, ImmUnion, Imm_Z, XSDebugDecod
 import xiangshan.backend.fu.FuType
 import xiangshan.backend.{StoreBubbleReason, PipelineStallReason}
 import xiangshan.backend.rename.freelist._
-import xiangshan.backend.rob.{RobEnqIO, RobPtr}
+import xiangshan.backend.rob.{EarlyReleaseKilledRecoveryEvent, EarlyReleaseNonSpecRedefineEvent, EarlyReleaseRecoveryEvent, RobEarlyReleaseRedirectPolicy, RobEnqIO, RobPtr}
 import xiangshan.mem.mdp._
 import xiangshan.ExceptionNO._
 import xiangshan.backend.fu.FuType._
@@ -74,7 +74,14 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     val ssit = Flipped(Vec(RenameWidth, Output(new SSITEntry)))
     // waittable read result
     val waittable = Flipped(Vec(RenameWidth, Output(Bool())))
+    val earlyReleaseReadComplete = Input(new EarlyReleaseReadComplete)
+    val earlyReleaseNonSpecRedefine = Input(Vec(CommitWidth, Valid(new EarlyReleaseNonSpecRedefineEvent(log2Ceil(RobSize)))))
+    val earlyReleaseCommit = Input(Vec(CommitWidth, Valid(UInt(log2Ceil(RobSize).W))))
+    val earlyReleaseRecovery = Input(Vec(CommitWidth, Valid(new EarlyReleaseRecoveryEvent(log2Ceil(RobSize)))))
+    val earlyReleaseKilledRecovery = Input(Vec(CommitWidth, Valid(new EarlyReleaseKilledRecoveryEvent(log2Ceil(RobSize)))))
+    val earlyReleaseProducerWriteback = Flipped(MixedVec(backendParams.genWrite2RobBundles))
     val intReadPorts = Vec(RenameWidth, Vec(numIntRatPorts, new RatReadPort(log2Ceil(IntLogicRegs))))
+    val intOldDestReadPorts = Vec(RenameWidth, new RatReadPort(log2Ceil(IntLogicRegs)))
     val fpReadPorts  = Vec(RenameWidth, Vec(numFpRatPorts,  new RatReadPort(log2Ceil(FpLogicRegs))))
     val vecReadPorts = Vec(RenameWidth, Vec(numVecRatPorts, new RatReadPort(log2Ceil(VecLogicRegs))))
     val v0ReadPorts  = Vec(RenameWidth, new RatReadPort(log2Ceil(V0LogicRegs)))
@@ -122,6 +129,96 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   val vlFreeList = Module(new StdFreeList(VlPhyRegs - VlLogicRegs, VlLogicRegs, Reg_Vl, RabCommitWidth, 1))
 
   val rat = Module(new RenameTableWrapper)
+  private val releaseOwnerWidth = EarlyReleaseOwner.width
+  private val intEarlyReleaseTrackedPregs = backendParams.intEarlyReleaseTrackedPregs.min(IntPhyRegs)
+  private val intEarlyReleaseLedgerEntries = backendParams.intEarlyReleaseLedgerEntries
+  private val intEarlyReleaseCandidateWidth = 1
+  private val intEarlyReleaseUctSourceWidth = 1
+  private val intEarlyReleaseUctReadCompleteWidth = EarlyReleaseReadCompleteEvents.backendEventWidth
+  private val intEarlyReleaseUctNonSpecRedefineWidth = CommitWidth
+  private val intEarlyReleaseUctProducerWritebackWidth = backendParams.genWrite2RobBundles.length
+  private val intEarlyReleaseRecoveryReadWidth = intEarlyReleaseUctReadCompleteWidth
+  private val intEarlyReleaseRecoveryCancelWidth = CommitWidth * backendParams.numIntRegSrc
+  val intUserCountTable = Module(new UserCountTable(
+    entries = intEarlyReleaseTrackedPregs,
+    ownerWidth = releaseOwnerWidth,
+    pregWidthOverride = PhyRegIdxWidth,
+    earlyFreeCandidateWidth = intEarlyReleaseCandidateWidth,
+    countWidth = 3,
+    allocWidth = RenameWidth,
+    sourceUseWidth = intEarlyReleaseUctSourceWidth,
+    sourceFallbackWidth = intEarlyReleaseUctSourceWidth,
+    readCompleteWidth = intEarlyReleaseUctReadCompleteWidth,
+    nonSpecRedefineWidth = intEarlyReleaseUctNonSpecRedefineWidth,
+    clearWidth = RabCommitWidth + CommitWidth,
+    cancelSourceUseWidth = intEarlyReleaseRecoveryCancelWidth,
+    moveAliasWidth = RenameWidth,
+    traditionalAliasRiskWidth = RabCommitWidth,
+    producerWritebackWidth = intEarlyReleaseUctProducerWritebackWidth
+  ))
+  val intReleaseArbiter = Module(new EarlyReleaseReleaseArbiter(
+    earlyWidth = intEarlyReleaseCandidateWidth,
+    traditionalWidth = RabCommitWidth,
+    outputWidth = RabCommitWidth,
+    pregWidth = PhyRegIdxWidth,
+    ownerWidth = releaseOwnerWidth,
+    ledgerEntries = intEarlyReleaseLedgerEntries,
+    killWidth = CommitWidth,
+    allocWidth = RenameWidth,
+    suppressionPregs = IntPhyRegs
+  ))
+  val earlyReleaseRecoveryTracker = Module(new EarlyReleaseRecoveryTracker(
+    entries = RobSize,
+    walkWidth = CommitWidth,
+    commitWidth = CommitWidth,
+    readCompleteWidth = intEarlyReleaseRecoveryReadWidth,
+    cancelWidth = intEarlyReleaseRecoveryCancelWidth
+  ))
+
+  private def connectFirstValid[T <: Data](sink: ValidIO[T], sources: Seq[ValidIO[T]]): Unit = {
+    val valids = sources.map(_.valid)
+    sink.valid := VecInit(valids).asUInt.orR
+    sink.bits := Mux(sink.valid, PriorityMux(valids, sources.map(_.bits)), 0.U.asTypeOf(sink.bits))
+  }
+
+  private def connectFirstNValid[T <: Data](sinks: Seq[ValidIO[T]], sources: Seq[ValidIO[T]]): Unit = {
+    require(sinks.nonEmpty)
+
+    for (sink <- sinks) {
+      sink.valid := false.B
+      sink.bits := 0.U.asTypeOf(sink.bits)
+    }
+
+    if (sources.nonEmpty) {
+      val countWidth = log2Ceil(sources.length + 1).max(1)
+      val validPrefixCount = Wire(Vec(sources.length + 1, UInt(countWidth.W)))
+      validPrefixCount(0) := 0.U
+      for (idx <- sources.indices) {
+        validPrefixCount(idx + 1) := validPrefixCount(idx) + sources(idx).valid.asUInt
+      }
+
+      for (sourceIdx <- sources.indices) {
+        for (sinkIdx <- sinks.indices) {
+          when(sources(sourceIdx).valid && validPrefixCount(sourceIdx) === sinkIdx.U) {
+            sinks(sinkIdx).valid := true.B
+            sinks(sinkIdx).bits := sources(sourceIdx).bits
+          }
+        }
+      }
+    }
+  }
+
+  private def moreThanOne(valids: Seq[Bool]): Bool =
+    PopCount(valids) > 1.U
+
+  private def anyValid(valids: Seq[Bool]): Bool =
+    if (valids.isEmpty) false.B else VecInit(valids).asUInt.orR
+
+  private def oneHotOrZero(valids: Seq[Bool]): Bool =
+    PopCount(valids) <= 1.U
+
+  private def intEarlyReleasePregTrackable(preg: UInt): Bool =
+    preg =/= 0.U
 
   val intRenamePorts = Wire(Vec(RenameWidth, new RatWritePort(log2Ceil(IntLogicRegs))))
   val fpRenamePorts  = Wire(Vec(RenameWidth, new RatWritePort(log2Ceil(FpLogicRegs))))
@@ -151,6 +248,9 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       }
   }
   intFreeList.io.debug_rat.foreach(_ := debug_int_rat.get)
+  intFreeList.io.debugEarlyRelease := VecInit(Seq.fill(RabCommitWidth)(false.B))
+  intFreeList.io.debugEarlyReleaseResolve := VecInit(Seq.fill(RabCommitWidth)(false.B))
+  intFreeList.io.debugEarlyReleaseResolvePreg := VecInit(Seq.fill(RabCommitWidth)(0.U(PhyRegIdxWidth.W)))
 
   fpFreeList.io.commit match {
     case commit =>
@@ -161,6 +261,9 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       }
   }
   fpFreeList.io.debug_rat.foreach(_ := debug_fp_rat.get)
+  fpFreeList.io.debugEarlyRelease := VecInit(Seq.fill(RabCommitWidth)(false.B))
+  fpFreeList.io.debugEarlyReleaseResolve := VecInit(Seq.fill(RabCommitWidth)(false.B))
+  fpFreeList.io.debugEarlyReleaseResolvePreg := VecInit(Seq.fill(RabCommitWidth)(0.U(PhyRegIdxWidth.W)))
 
   vecFreeList.io.commit match {
     case commit =>
@@ -171,6 +274,9 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       }
   }
   vecFreeList.io.debug_rat.foreach(_ := debug_vec_rat.get)
+  vecFreeList.io.debugEarlyRelease := VecInit(Seq.fill(RabCommitWidth)(false.B))
+  vecFreeList.io.debugEarlyReleaseResolve := VecInit(Seq.fill(RabCommitWidth)(false.B))
+  vecFreeList.io.debugEarlyReleaseResolvePreg := VecInit(Seq.fill(RabCommitWidth)(0.U(PhyRegIdxWidth.W)))
 
   v0FreeList.io.commit match {
     case commit =>
@@ -181,6 +287,9 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       }
   }
   v0FreeList.io.debug_rat.foreach(_ := debug_v0_rat.get)
+  v0FreeList.io.debugEarlyRelease := VecInit(Seq.fill(RabCommitWidth)(false.B))
+  v0FreeList.io.debugEarlyReleaseResolve := VecInit(Seq.fill(RabCommitWidth)(false.B))
+  v0FreeList.io.debugEarlyReleaseResolvePreg := VecInit(Seq.fill(RabCommitWidth)(0.U(PhyRegIdxWidth.W)))
 
   vlFreeList.io.commit match {
     case commit =>
@@ -188,20 +297,26 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       commit.archAlloc := io.vlCommits.commitValid
   }
   vlFreeList.io.debug_rat.foreach(_ := debug_vl_rat.get)
+  vlFreeList.io.debugEarlyRelease := VecInit(Seq.fill(RabCommitWidth)(false.B))
+  vlFreeList.io.debugEarlyReleaseResolve := VecInit(Seq.fill(RabCommitWidth)(false.B))
+  vlFreeList.io.debugEarlyReleaseResolvePreg := VecInit(Seq.fill(RabCommitWidth)(0.U(PhyRegIdxWidth.W)))
 
   val intReadPorts = rat.io.intReadPorts
+  val intOldDestReadPorts = rat.io.intOldDestReadPorts
   val fpReadPorts  = rat.io.fpReadPorts
   val vecReadPorts = rat.io.vecReadPorts
   val v0ReadPorts  = rat.io.v0ReadPorts
   val vlReadPorts  = rat.io.vlReadPorts
 
   val intReadPortsData = VecInit(intReadPorts.map(x => VecInit(x.map(_.data))))
+  val intOldDestReadPortsData = VecInit(intOldDestReadPorts.map(_.data))
   val fpReadPortsData  = VecInit(fpReadPorts.map(x => VecInit(x.map(_.data))))
   val vecReadPortsData = VecInit(vecReadPorts.map(x => VecInit(x.map(_.data))))
   val v0ReadPortsData  = VecInit(v0ReadPorts.map(x => VecInit(x.data)))
   val vlReadPortsData  = VecInit(vlReadPorts.map(x => VecInit(x.data)))
 
   io.intReadPorts <> intReadPorts
+  io.intOldDestReadPorts <> intOldDestReadPorts
   io.fpReadPorts  <> fpReadPorts
   io.vecReadPorts <> vecReadPorts
   io.v0ReadPorts  <> v0ReadPorts
@@ -341,6 +456,17 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
            Mux(canOut, robIdxHead + validCount, // instructions successfully entered next stage: increase robIdx
                       /* default */  robIdxHead))) // no instructions passed by this cycle: stick to old value
   robIdxHead := robIdxHeadNext
+  val earlyReleaseOwnerHead = RegInit(0.U(EarlyReleaseOwner.width.W))
+  val earlyReleaseOwnerForLane = Wire(Vec(RenameWidth, UInt(EarlyReleaseOwner.width.W)))
+  for (i <- 0 until RenameWidth) {
+    earlyReleaseOwnerForLane(i) := earlyReleaseOwnerHead +
+      PopCount(io.in.zip(needRobFlags).zip(io.validVec).take(i).map {
+        case ((in, needRobFlag), valid) => valid && in.bits.lastUop && needRobFlag
+      })
+  }
+  when(canOut && !io.redirect.valid) {
+    earlyReleaseOwnerHead := earlyReleaseOwnerHead + validCount
+  }
 
   /**
     * Rename: allocate free physical register and update rename table
@@ -424,6 +550,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   val walkIntSpecWen = WireDefault(VecInit(Seq.fill(RenameWidth)(false.B)))
 
   val walkPdest = Wire(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
+  val renameTimeOldIntPdest = Wire(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
 
   val instrSize = Wire(Vec(RenameWidth, UInt((log2Ceil(RenameWidth + 1)).W)))
 
@@ -683,6 +810,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     */
   // a simple functional model for now
   io.out(0).bits.pdest := Mux(isMove(0), uops(0).psrc.head, uops(0).pdest)
+  renameTimeOldIntPdest(0) := intOldDestReadPortsData(0)
 
   // psrc(n) + pdest(1)
   // bypassCond(j)(i)(k): src(j) of uop(i) depends on dest of uop(k)
@@ -737,6 +865,11 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       (bypassCondVl(i-1).asBools zip io.out.take(i).map(_.bits.pdestVl)).reverse
     )
     io.out(i).bits.pdest := Mux(isMove(i), io.out(i).bits.psrcIntForMove, uops(i).pdest)
+    renameTimeOldIntPdest(i) := io.out.take(i).map(_.bits.pdest).zip(io.in.take(i).map(prev =>
+      prev.valid && needDestReg(Reg_I, prev.bits) && prev.bits.ldest === io.in(i).bits.ldest
+    )).foldLeft(intOldDestReadPortsData(i)) {
+      (old, next) => Mux(next._2, next._1, old)
+    }
 
     // Todo: better implementation for fields reuse
     // For fused-lui-load, load.src(0) is replaced by the imm.
@@ -753,6 +886,335 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       io.out(i).bits.imm := Cat(lui_imm, ld_imm)
     }
   }
+
+  val renameEarlyReleaseMetadata = Wire(Vec(RenameWidth, new EarlyReleaseMetadata))
+  for (i <- 0 until RenameWidth) {
+    val canTrackNewEr = io.out(i).bits.firstUop
+    renameEarlyReleaseMetadata(i) := EarlyReleaseRenameMetadata.build(
+      enable = backendParams.enableIntEarlyRelease.B && io.out(i).valid && canTrackNewEr && !io.out(i).bits.isMove,
+      srcTypes = io.out(i).bits.srcType.take(numIntRegSrc),
+      psrcs = io.out(i).bits.psrc.take(numIntRegSrc),
+      oldIntPdestValid = io.out(i).valid &&
+        canTrackNewEr &&
+        io.out(i).bits.rfWen &&
+        !io.out(i).bits.isMove &&
+        intEarlyReleasePregTrackable(renameTimeOldIntPdest(i)),
+      oldIntPdest = renameTimeOldIntPdest(i),
+      redefinerRobIdx = earlyReleaseOwnerForLane(i)
+    )
+  }
+
+  intUserCountTable.io.lookup := 0.U
+  private val uctSourceUseSources = Wire(Vec(RenameWidth * numIntRegSrc, Valid(UInt(PhyRegIdxWidth.W))))
+  private val uctSourceFallbackSources = Wire(Vec(RenameWidth * numIntRegSrc, Valid(UInt(PhyRegIdxWidth.W))))
+  uctSourceUseSources.foreach(_ := 0.U.asTypeOf(Valid(UInt(PhyRegIdxWidth.W))))
+  uctSourceFallbackSources.foreach(_ := 0.U.asTypeOf(Valid(UInt(PhyRegIdxWidth.W))))
+  private val sameCycleSourceOwners = Wire(Vec(RenameWidth * numIntRegSrc, Valid(UInt(EarlyReleaseOwner.width.W))))
+  sameCycleSourceOwners.foreach(_ := 0.U.asTypeOf(Valid(UInt(EarlyReleaseOwner.width.W))))
+  for (i <- 0 until RenameWidth) {
+    val metadata = renameEarlyReleaseMetadata(i)
+    val canTrackNewEr = io.out(i).bits.firstUop
+    intUserCountTable.io.alloc(i).valid := backendParams.enableIntEarlyRelease.B &&
+      io.out(i).fire &&
+      canTrackNewEr &&
+      io.out(i).bits.rfWen &&
+      !io.out(i).bits.isMove &&
+      io.out(i).bits.pdest =/= 0.U &&
+      intEarlyReleasePregTrackable(io.out(i).bits.pdest)
+    intUserCountTable.io.alloc(i).bits.preg := io.out(i).bits.pdest
+    intUserCountTable.io.alloc(i).bits.owner :=
+      metadata.redefinerRobIdx
+    intUserCountTable.io.moveAlias(i).valid := backendParams.enableIntEarlyRelease.B &&
+      io.out(i).fire &&
+      canTrackNewEr &&
+      io.out(i).bits.isMove &&
+      io.out(i).bits.rfWen &&
+      io.out(i).bits.pdest =/= 0.U &&
+      intEarlyReleasePregTrackable(io.out(i).bits.pdest)
+    intUserCountTable.io.moveAlias(i).bits := io.out(i).bits.pdest
+
+    for (srcIdx <- 0 until numIntRegSrc) {
+      val sourceIdx = i * numIntRegSrc + srcIdx
+      val sameUopDuplicate = if (srcIdx == 0) {
+        false.B
+      } else {
+        VecInit((0 until srcIdx).map { prev =>
+          SrcType.isXp(io.out(i).bits.srcType(prev)) &&
+            io.out(i).bits.psrc(prev) === io.out(i).bits.psrc(srcIdx)
+        }).asUInt.orR
+      }
+      val compressedNonFirstSourceFallback = backendParams.enableIntEarlyRelease.B &&
+        io.out(i).fire &&
+        !io.out(i).bits.firstUop &&
+        SrcType.isXp(io.out(i).bits.srcType(srcIdx)) &&
+        io.out(i).bits.psrc(srcIdx) =/= 0.U &&
+        intEarlyReleasePregTrackable(io.out(i).bits.psrc(srcIdx)) &&
+        !sameUopDuplicate
+      uctSourceFallbackSources(sourceIdx).valid := compressedNonFirstSourceFallback
+      uctSourceFallbackSources(sourceIdx).bits := io.out(i).bits.psrc(srcIdx)
+      val trackedSourceUse = backendParams.enableIntEarlyRelease.B &&
+        io.out(i).fire &&
+        io.out(i).bits.firstUop &&
+        metadata.countedIntSrcs(srcIdx).valid &&
+        intEarlyReleasePregTrackable(metadata.countedIntSrcs(srcIdx).preg)
+      uctSourceUseSources(sourceIdx).valid := trackedSourceUse
+      uctSourceUseSources(sourceIdx).bits := metadata.countedIntSrcs(srcIdx).preg
+      val sameCycleProducerOwner = Wire(Valid(UInt(EarlyReleaseOwner.width.W)))
+      sameCycleProducerOwner := 0.U.asTypeOf(Valid(UInt(EarlyReleaseOwner.width.W)))
+      for (prev <- 0 until i) {
+        val previousLaneAllocates = intUserCountTable.io.alloc(prev).valid &&
+          intUserCountTable.io.allocAccepted(prev) &&
+          io.out(prev).bits.pdest === metadata.countedIntSrcs(srcIdx).preg
+        when(trackedSourceUse && previousLaneAllocates) {
+          sameCycleProducerOwner.valid := true.B
+          sameCycleProducerOwner.bits := renameEarlyReleaseMetadata(prev).redefinerRobIdx
+        }
+      }
+      val sourceSelectedForUct = !anyValid(uctSourceUseSources.take(sourceIdx).map(_.valid))
+      sameCycleSourceOwners(sourceIdx).valid := trackedSourceUse && (
+        sameCycleProducerOwner.valid ||
+          (sourceSelectedForUct && intUserCountTable.io.sourceUseOwner(0).valid)
+      )
+      sameCycleSourceOwners(sourceIdx).bits := Mux(
+        sameCycleProducerOwner.valid,
+        sameCycleProducerOwner.bits,
+        intUserCountTable.io.sourceUseOwner(0).bits
+      )
+    }
+    io.out(i).bits.earlyRelease := EarlyReleaseRenameMetadata.attachSourceOwners(
+      metadata = metadata,
+      sourceOwners = sameCycleSourceOwners.slice(i * numIntRegSrc, (i + 1) * numIntRegSrc)
+    )
+  }
+  connectFirstValid(intUserCountTable.io.sourceUse(0), uctSourceUseSources)
+  connectFirstValid(intUserCountTable.io.sourceFallback(0), uctSourceFallbackSources)
+  intUserCountTable.io.fallbackAll :=
+    backendParams.enableIntEarlyRelease.B &&
+      (moreThanOne(uctSourceUseSources.map(_.valid)) || moreThanOne(uctSourceFallbackSources.map(_.valid)))
+  for (i <- 0 until RabCommitWidth) {
+    val aliasRisk = EarlyReleaseTraditionalAliasRisk.align(
+      realCommitLane = io.rabCommits.isCommit && io.rabCommits.commitValid(i),
+      renameTableNeedFree = int_need_free(i),
+      oldPdest = int_old_pdest(i)
+    )
+    intUserCountTable.io.traditionalAliasRisk(i).valid := backendParams.enableIntEarlyRelease.B &&
+      aliasRisk.valid &&
+      intEarlyReleasePregTrackable(aliasRisk.bits)
+    intUserCountTable.io.traditionalAliasRisk(i).bits := aliasRisk.bits
+  }
+
+  private val gatedEarlyReleaseReadComplete =
+    Wire(Vec(intEarlyReleaseRecoveryReadWidth, Valid(new EarlyReleaseReadCompleteEvent)))
+  for (i <- 0 until intEarlyReleaseRecoveryReadWidth) {
+    gatedEarlyReleaseReadComplete(i).valid := backendParams.enableIntEarlyRelease.B &&
+      io.earlyReleaseReadComplete.events(i).valid
+    gatedEarlyReleaseReadComplete(i).bits := io.earlyReleaseReadComplete.events(i).bits
+  }
+  earlyReleaseRecoveryTracker.io.readComplete := gatedEarlyReleaseReadComplete
+  private val uctReadCompleteSources =
+    earlyReleaseRecoveryTracker.io.firstReadComplete.map { source =>
+      val event = Wire(Valid(new UserCountTableSourceEvent(PhyRegIdxWidth, releaseOwnerWidth)))
+      event.valid := backendParams.enableIntEarlyRelease.B &&
+        source.valid &&
+        intEarlyReleasePregTrackable(source.bits.preg)
+      event.bits.preg := source.bits.preg
+      event.bits.owner := source.bits.producerOwner
+      event
+    }
+  connectFirstNValid(intUserCountTable.io.readComplete, uctReadCompleteSources)
+
+  for ((sink, source) <- earlyReleaseRecoveryTracker.io.commit.zip(io.earlyReleaseCommit)) {
+    sink.valid := backendParams.enableIntEarlyRelease.B && source.valid
+    sink.bits := source.bits
+  }
+
+  private val recoveryWalkEvents = Wire(Vec(CommitWidth, Valid(new EarlyReleaseRecoveryEvent(log2Ceil(RobSize)))))
+  private val killedRecoveryEvents = Wire(Vec(CommitWidth, Valid(new EarlyReleaseKilledRecoveryEvent(log2Ceil(RobSize)))))
+  for (i <- 0 until CommitWidth) {
+    recoveryWalkEvents(i).valid := backendParams.enableIntEarlyRelease.B && io.earlyReleaseRecovery(i).valid
+    recoveryWalkEvents(i).bits := io.earlyReleaseRecovery(i).bits
+    killedRecoveryEvents(i).valid := backendParams.enableIntEarlyRelease.B && io.earlyReleaseKilledRecovery(i).valid
+    killedRecoveryEvents(i).bits := io.earlyReleaseKilledRecovery(i).bits
+  }
+  earlyReleaseRecoveryTracker.io.walk := recoveryWalkEvents
+  earlyReleaseRecoveryTracker.io.killed := killedRecoveryEvents
+
+  private val uctCancelSourceUseSources =
+    earlyReleaseRecoveryTracker.io.cancelSourceUse.map { source =>
+      val event = Wire(Valid(new UserCountTableSourceEvent(PhyRegIdxWidth, releaseOwnerWidth)))
+      event.valid := backendParams.enableIntEarlyRelease.B &&
+        source.valid &&
+        intEarlyReleasePregTrackable(source.bits.preg)
+      event.bits := source.bits
+      event
+    }
+  connectFirstNValid(intUserCountTable.io.cancelSourceUse, uctCancelSourceUseSources)
+
+  private val uctProducerWritebackSources =
+    io.earlyReleaseProducerWriteback.map { source =>
+      val event = Wire(Valid(new UserCountTableProducerWriteback(PhyRegIdxWidth, releaseOwnerWidth)))
+      event.valid := RobEarlyReleaseRedirectPolicy.allowProducerWriteback(
+        enable = backendParams.enableIntEarlyRelease.B,
+        valid = source.valid,
+        intWen = source.bits.intWen.getOrElse(false.B),
+        pdestNonZero = source.bits.pdest =/= 0.U,
+        robIdx = source.bits.robIdx,
+        redirect = io.redirect
+      ) && intEarlyReleasePregTrackable(source.bits.pdest)
+      event.bits.preg := source.bits.pdest
+      event.bits.owner := source.bits.earlyReleaseOwner
+      event
+    }
+  connectFirstNValid(intUserCountTable.io.producerWriteback, uctProducerWritebackSources)
+
+  private val uctNonSpecRedefineSources =
+    io.earlyReleaseNonSpecRedefine.map { source =>
+      val event = Wire(Valid(new UserCountTableRedefine(PhyRegIdxWidth, releaseOwnerWidth)))
+      event.valid := backendParams.enableIntEarlyRelease.B &&
+        source.valid &&
+        intEarlyReleasePregTrackable(source.bits.oldIntPdest)
+      event.bits.preg := source.bits.oldIntPdest
+      event.bits.owner := source.bits.owner
+      event
+    }
+  connectFirstNValid(intUserCountTable.io.nonSpecRedefine, uctNonSpecRedefineSources)
+
+  private val releasedPregClearValid = VecInit(intReleaseArbiter.io.release.map(release =>
+    RegNext(backendParams.enableIntEarlyRelease.B && release.valid, false.B)
+  ))
+  private val releasedPregClearBits = VecInit(intReleaseArbiter.io.release.map(release =>
+    RegEnable(release.bits, backendParams.enableIntEarlyRelease.B && release.valid)
+  ))
+  for (i <- 0 until RabCommitWidth) {
+    intUserCountTable.io.clear(i).valid := releasedPregClearValid(i) &&
+      intEarlyReleasePregTrackable(releasedPregClearBits(i).preg)
+    intUserCountTable.io.clear(i).bits.preg := releasedPregClearBits(i).preg
+    intUserCountTable.io.clear(i).bits.owner := releasedPregClearBits(i).owner
+  }
+  for (i <- 0 until CommitWidth) {
+    val clearIdx = RabCommitWidth + i
+    if (i < RabCommitWidth) {
+      val producerClear = EarlyReleaseWalkProducerCleanup.build(
+        walkValid = io.rabCommits.isWalk && io.rabCommits.walkValid(i),
+        info = io.rabCommits.info(i),
+        pregWidth = PhyRegIdxWidth,
+        ownerWidth = releaseOwnerWidth
+      )
+      intUserCountTable.io.clear(clearIdx).valid := backendParams.enableIntEarlyRelease.B &&
+        producerClear.valid &&
+        intEarlyReleasePregTrackable(producerClear.bits.preg)
+      intUserCountTable.io.clear(clearIdx).bits := producerClear.bits
+    } else {
+      intUserCountTable.io.clear(clearIdx).valid := false.B
+      intUserCountTable.io.clear(clearIdx).bits := 0.U.asTypeOf(intUserCountTable.io.clear(clearIdx).bits)
+    }
+  }
+  for (i <- 0 until RabCommitWidth) {
+    intUserCountTable.io.traditionalRelease(i).valid := false.B
+    intUserCountTable.io.traditionalRelease(i).bits := 0.U.asTypeOf(intUserCountTable.io.traditionalRelease(i).bits)
+  }
+  for (i <- RabCommitWidth until RabCommitWidth + CommitWidth) {
+    intUserCountTable.io.traditionalRelease(i).valid := false.B
+    intUserCountTable.io.traditionalRelease(i).bits := 0.U.asTypeOf(intUserCountTable.io.traditionalRelease(i).bits)
+  }
+
+  for (i <- 0 until intEarlyReleaseCandidateWidth) {
+    intReleaseArbiter.io.early(i).valid := backendParams.enableIntEarlyRelease.B &&
+      intUserCountTable.io.earlyFreeCandidates(i).valid
+    intReleaseArbiter.io.early(i).bits.preg := intUserCountTable.io.earlyFreeCandidates(i).bits.preg
+    intReleaseArbiter.io.early(i).bits.owner := intUserCountTable.io.earlyFreeCandidates(i).bits.owner
+    intUserCountTable.io.earlyFreeCandidateAccepted(i) := backendParams.enableIntEarlyRelease.B &&
+      intReleaseArbiter.io.earlyAccepted(i)
+  }
+
+  for (i <- 0 until RenameWidth) {
+    val doIntAllocate = intFreeList.io.canAllocate &&
+      intFreeList.io.doAllocate &&
+      !io.rabCommits.isWalk &&
+      !io.redirect.valid &&
+      intFreeList.io.allocateReq(i)
+    intReleaseArbiter.io.alloc(i).valid := backendParams.enableIntEarlyRelease.B && doIntAllocate
+    intReleaseArbiter.io.alloc(i).bits := intFreeList.io.allocatePhyReg(i)
+  }
+
+  val traditionalIntReleaseValid = Wire(Vec(RabCommitWidth, Bool()))
+  val traditionalIntReleasePreg = Wire(Vec(RabCommitWidth, UInt(PhyRegIdxWidth.W)))
+  val traditionalIntReleaseOwner = Wire(Vec(RabCommitWidth, UInt(releaseOwnerWidth.W)))
+  for (i <- 0 until RabCommitWidth) {
+    val traditionalOwnerSource = EarlyReleaseTraditionalReleaseOwner.select(
+      actualRobIdx = None,
+      metadataRobIdx = io.rabCommits.info(i).earlyRelease.redefinerRobIdx
+    )
+    val traditionalRealCommit = io.rabCommits.isCommit && io.rabCommits.commitValid(i)
+    val traditionalCommitStage1 = RegNext(traditionalRealCommit, false.B)
+    val traditionalCommitAligned = RegNext(traditionalCommitStage1, false.B)
+    val renameTableNeedFree = int_need_free(i)
+    val releaseNeedFree = RegNext(renameTableNeedFree, false.B)
+    val releaseCommitAligned = RegNext(traditionalCommitAligned, false.B)
+    val commitOwnerStage1 = RegNext(traditionalOwnerSource, 0.U(releaseOwnerWidth.W))
+    val alignedOldPdest = RegNext(int_old_pdest(i), 0.U(PhyRegIdxWidth.W))
+    val releaseOldPdest = RegNext(alignedOldPdest, 0.U(PhyRegIdxWidth.W))
+    val alignedOwner = RegNext(commitOwnerStage1, 0.U(releaseOwnerWidth.W))
+    val releaseOwner = RegNext(alignedOwner, 0.U(releaseOwnerWidth.W))
+
+    traditionalIntReleaseValid(i) := releaseNeedFree && releaseCommitAligned
+    traditionalIntReleasePreg(i) := releaseOldPdest
+    traditionalIntReleaseOwner(i) := releaseOwner
+    intReleaseArbiter.io.traditional(i).valid :=
+      backendParams.enableIntEarlyRelease.B && traditionalIntReleaseValid(i) && traditionalIntReleasePreg(i) =/= 0.U
+    intReleaseArbiter.io.traditional(i).bits.preg := traditionalIntReleasePreg(i)
+    intReleaseArbiter.io.traditional(i).bits.owner := traditionalIntReleaseOwner(i)
+  }
+
+  for (i <- 0 until CommitWidth) {
+    intReleaseArbiter.io.killOwner(i).valid := backendParams.enableIntEarlyRelease.B &&
+      earlyReleaseRecoveryTracker.io.killOwner(i).valid
+    intReleaseArbiter.io.killOwner(i).bits := earlyReleaseRecoveryTracker.io.killOwner(i).bits
+  }
+
+  private val traditionalAcceptedForUct = VecInit(intReleaseArbiter.io.traditionalAccepted.map(accepted =>
+    RegNext(backendParams.enableIntEarlyRelease.B && accepted, false.B)
+  ))
+  private val traditionalAcceptedBitsForUct = VecInit(intReleaseArbiter.io.traditional.zip(intReleaseArbiter.io.traditionalAccepted).map {
+    case (release, accepted) => RegEnable(release.bits, backendParams.enableIntEarlyRelease.B && accepted)
+  })
+  for (i <- 0 until RabCommitWidth) {
+    intUserCountTable.io.traditionalRelease(i).valid := traditionalAcceptedForUct(i) &&
+      intEarlyReleasePregTrackable(traditionalAcceptedBitsForUct(i).preg)
+    intUserCountTable.io.traditionalRelease(i).bits := traditionalAcceptedBitsForUct(i)
+  }
+
+  private val newErEnabled = backendParams.enableIntEarlyRelease.B
+  private val newErRejectedDecrement = NewErPerfDebug.rejectedDecrement(intUserCountTable.io.rejected)
+  XSError(
+    NewErPerfDebug.duplicateReleaseError(newErEnabled, intReleaseArbiter.io.duplicate),
+    "New-ER attempted duplicate integer physical register release\n"
+  )
+  XSError(
+    NewErPerfDebug.releaseOverflowError(newErEnabled, intReleaseArbiter.io.overflow),
+    "New-ER integer release arbiter overflowed MEFreeList ports\n"
+  )
+  XSError(NewErPerfDebug.underflowError(newErEnabled, intUserCountTable.io.underflow), "New-ER UCT underflow\n")
+  XSError(
+    newErEnabled && newErRejectedDecrement,
+    "New-ER UCT rejected decrement\n"
+  )
+
+  XSPerfAccumulate("new_er_early_release", NewErPerfDebug.countWhenEnabled(newErEnabled, intReleaseArbiter.io.early.map(_.valid)))
+  XSPerfAccumulate(
+    "new_er_traditional_release",
+    NewErPerfDebug.countWhenEnabled(newErEnabled, intReleaseArbiter.io.traditionalAccepted)
+  )
+  XSPerfAccumulate(
+    "new_er_traditional_suppress",
+    NewErPerfDebug.countWhenEnabled(newErEnabled, intReleaseArbiter.io.traditionalSuppressed)
+  )
+  XSPerfAccumulate(
+    "new_er_move_fallback",
+    NewErPerfDebug.countWhenEnabled(newErEnabled, io.out.map(out => out.fire && out.bits.isMove))
+  )
+  XSPerfAccumulate("new_er_walk_cancel", NewErPerfDebug.countWhenEnabled(newErEnabled, earlyReleaseRecoveryTracker.io.cancelSourceUse.map(_.valid)))
+  XSPerfAccumulate("new_er_recovery_walk_observe", NewErPerfDebug.countWhenEnabled(newErEnabled, io.earlyReleaseRecovery.map(_.valid)))
 
   val genSnapshot = Cat(io.out.map(out => out.fire && out.bits.snapshot)).orR
   val lastCycleCreateSnpt = RegInit(false.B)
@@ -814,8 +1276,22 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     vlRenamePorts(i).data := vlFreeList.io.allocatePhyReg(i)
 
     // II. Free List Update
-    intFreeList.io.freeReq(i) := int_need_free(i)
-    intFreeList.io.freePhyReg(i) := RegNext(int_old_pdest(i))
+    intFreeList.io.freeReq(i) := Mux(
+      backendParams.enableIntEarlyRelease.B,
+      intReleaseArbiter.io.release(i).valid,
+      int_need_free(i)
+    )
+    intFreeList.io.debugEarlyRelease(i) := backendParams.enableIntEarlyRelease.B &&
+      intReleaseArbiter.io.release(i).valid &&
+      intReleaseArbiter.io.releaseIsEarly(i)
+    intFreeList.io.debugEarlyReleaseResolve(i) := backendParams.enableIntEarlyRelease.B &&
+      intReleaseArbiter.io.traditionalSuppressed(i)
+    intFreeList.io.debugEarlyReleaseResolvePreg(i) := intReleaseArbiter.io.traditional(i).bits.preg
+    intFreeList.io.freePhyReg(i) := Mux(
+      backendParams.enableIntEarlyRelease.B,
+      intReleaseArbiter.io.release(i).bits.preg,
+      RegNext(int_old_pdest(i))
+    )
     fpFreeList.io.freeReq(i)  := GatedValidRegNext(commitValid && needDestRegCommit(Reg_F, io.rabCommits.info(i)))
     fpFreeList.io.freePhyReg(i) := fp_old_pdest(i)
     vecFreeList.io.freeReq(i)  := GatedValidRegNext(commitValid && needDestRegCommit(Reg_V, io.rabCommits.info(i)))

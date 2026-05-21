@@ -180,6 +180,7 @@ class ExeUnitImp(implicit p: Parameters, val exuParams: ExeUnitParams) extends X
       sink.bits.ctrl.fuOpType    := source.bits.ctrl.fuOpType
       sink.bits.ctrl.toRobValid  := source.bits.toRobValid
       sink.bits.ctrl.robIdx      := source.bits.robIdx
+      sink.bits.ctrl.earlyReleaseOwner := source.bits.earlyRelease.redefinerRobIdx
       sink.bits.ctrl.pdest       := source.bits.toRF.pdest
       sink.bits.ctrl.pdestVl     .foreach(x => x := source.bits.toRF.pdestVl.get)
       sink.bits.ctrl.rfWen       .foreach(x => x := source.bits.ctrl.rfWen.get)
@@ -214,6 +215,7 @@ class ExeUnitImp(implicit p: Parameters, val exuParams: ExeUnitParams) extends X
       sink.fuOpType := source.ctrl.fuOpType
       sink.toRobValid := source.toRobValid
       sink.robIdx := source.robIdx
+      sink.earlyReleaseOwner := source.earlyRelease.redefinerRobIdx
       sink.pdest := source.toRF.pdest
       sink.pdestVl.foreach(_ := source.toRF.pdestVl.get)
       sink.rfWen.foreach(      x => x := source.ctrl.rfWen.get)
@@ -417,6 +419,7 @@ class ExeUnitImp(implicit p: Parameters, val exuParams: ExeUnitParams) extends X
   io.out.bits.redirect.               foreach(x => x := Mux1H((fuOutValidOH zip fuRedirectVec).filter(_._2.isDefined).map(x => (x._1, x._2.get))))
   io.out.bits.toRob.valid                            := Mux1H(fuOutValidOH, funcUnits.map(_.io.out.bits.ctrl.toRobValid))
   io.out.bits.toRob.bits.robIdx                      := Mux1H(fuOutValidOH, fuOutBitsVec.map(_.ctrl.robIdx))
+  io.out.bits.toRob.bits.earlyReleaseOwner           := Mux1H(fuOutValidOH, fuOutBitsVec.map(_.ctrl.earlyReleaseOwner))
   io.out.bits.toRob.bits.fflags.      foreach(x => x := Mux1H(fuOutValidOH, fuOutresVec.map(_.fflags.getOrElse(0.U.asTypeOf(io.out.bits.toRob.bits.fflags.get)))))
   io.out.bits.toRob.bits.wflags.      foreach(x => x := Mux1H(fuOutValidOH, fuOutBitsVec.map(_.ctrl.fpu.getOrElse(0.U.asTypeOf(new FPUCtrlSignals)).wflags)))
   io.out.bits.toRob.bits.vxsat.       foreach(x => x := Mux1H(fuOutValidOH, fuOutresVec.map(_.vxsat.getOrElse(0.U.asTypeOf(io.out.bits.toRob.bits.vxsat.get)))))

@@ -99,6 +99,7 @@ abstract class BaseVMergeBuffer(isVStore: Boolean=false)(implicit p: Parameters)
     sink.data := VecInit(Seq.fill(param.wbPathNum)(source.data))
     sink.pdest := source.uop.pdest
     sink.robIdx := source.uop.robIdx
+    sink.earlyReleaseOwner := source.uop.earlyRelease.redefinerRobIdx
     sink.intWen.foreach(_ := source.uop.rfWen)
     sink.fpWen.foreach(_ := source.uop.fpWen)
     sink.vecWen.foreach(_ := source.uop.vecWen)
@@ -483,6 +484,7 @@ class VSMergeBufferImp(implicit p: Parameters) extends BaseVMergeBuffer(isVStore
     sink := DontCare
     sink.pdest := source.uop.pdest
     sink.robIdx := source.uop.robIdx
+    sink.earlyReleaseOwner := source.uop.earlyRelease.redefinerRobIdx
     sink.intWen.foreach(_ := source.uop.rfWen)
     sink.fpWen.foreach(_ := source.uop.fpWen)
     sink.vecWen.foreach(_ := source.uop.vecWen)

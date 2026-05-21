@@ -52,7 +52,7 @@ class RenameTable(reg_t: RegType, numDiffWritePorts: Int)(implicit p: Parameters
   private val numVecRatPorts = numVecRegSrc
 
   val readPortsNum = reg_t match {
-    case Reg_I => 2
+    case Reg_I => 3
     case Reg_F => 3
     case Reg_V => 3
     case Reg_V0 => 1
@@ -222,6 +222,7 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
     val diffCommits = if (backendParams.basicDebugEn) Some(Input(new DiffCommitIO)) else None
     val diffVlCommits = Option.when(backendParams.basicDebugEn)(Input(new DiffVlCommitBundle(CommitWidth)))
     val intReadPorts = Vec(RenameWidth, Vec(2, new RatReadPort(log2Ceil(IntLogicRegs))))
+    val intOldDestReadPorts = Vec(RenameWidth, new RatReadPort(log2Ceil(IntLogicRegs)))
     val intRenamePorts = Vec(RenameWidth, Input(new RatWritePort(log2Ceil(IntLogicRegs))))
     val fpReadPorts = Vec(RenameWidth, Vec(3, new RatReadPort(log2Ceil(FpLogicRegs))))
     val fpRenamePorts = Vec(RenameWidth, Input(new RatWritePort(log2Ceil(FpLogicRegs))))
@@ -261,7 +262,9 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
   if (env.AlwaysBasicDiff || env.EnableDifftest) {
     // DiffArchIntRenameTable removed: integer arch state now provided directly via diffRegFile in DataPath
   }
-  intRat.io.readPorts <> io.intReadPorts.flatten
+  intRat.io.readPorts.zip(io.intReadPorts.flatten ++ io.intOldDestReadPorts).foreach {
+    case (ratRead, sourceRead) => ratRead <> sourceRead
+  }
   intRat.io.redirect := io.redirect
   intRat.io.snpt := io.snpt
   io.int_old_pdest := intRat.io.old_pdest

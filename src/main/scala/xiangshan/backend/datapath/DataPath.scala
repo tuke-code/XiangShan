@@ -21,6 +21,7 @@ import xiangshan.backend.regcache._
 import xiangshan.backend.fu.FuConfig
 import xiangshan.backend.fu.FuType.is0latency
 import xiangshan.backend.fu.FuType.isUncertain
+import xiangshan.backend.rename.{EarlyReleaseReadComplete, EarlyReleaseReadCompleteEvent, EarlyReleaseReadCompleteEvents}
 import xiangshan.mem.{LqPtr, SqPtr}
 
 class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockParams)
@@ -37,6 +38,15 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
 
   // just refences for convience
   private val fromIQ: Seq[MixedVec[DecoupledIO[Og0InUop]]] = (fromIntIQ ++ fromFpIQ ++ fromVfIQ).toSeq
+
+  private val fpIssueQueueStart = fromIntIQ.length
+  private val vecIssueQueueStart = fpIssueQueueStart + fromFpIQ.length
+  private def ownsEarlyReleaseReadCompleteLane(i: Int): Boolean =
+    (param.isIntSchd && i < fpIssueQueueStart) ||
+      (param.isFpSchd && i >= fpIssueQueueStart && i < vecIssueQueueStart) ||
+      (param.isVecSchd && i >= vecIssueQueueStart)
+
+  private val fromIQDeqFire: Seq[Vec[Bool]] = (io.fromIntIQDeqFire ++ io.fromFpIQDeqFire ++ io.fromVecIQDeqFire).toSeq
 
   private val fromIQDeqOg1Payload: Seq[MixedVec[IssueQueueDeqOg1Payload]] = (io.fromIntIQDeqOg1Payload ++ io.fromFpIQDeqOg1Payload ++ io.fromVecIQDeqOg1Payload).toSeq
 
@@ -335,28 +345,28 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
     regCache.io.writePorts := io.fromBypassNetwork
 
     if (env.AlwaysBasicDiff || env.EnableDifftest) {
-      // Keep DiffPhyIntRegState for DiffCommitData generation in the difftest preprocessor
+      // Keep DiffPhyIntRegState for architectural-state fallback and eliminated MOVE commit data.
       val phyDifftest = DifftestModule(new DiffPhyIntRegState(intSchdParams.numPregs), delay = 2)
       phyDifftest.coreid := io.hartId
       phyDifftest.value := intDiffReadData.get
 
       // Architectural register file for difftest: 32 logical integer registers
       // Only written on commit, only instantiated when difftest is enabled
-      val diffRegFile = RegInit(VecInit(Seq.fill(32)(0.U(XLEN.W))))
       val diffCommitsIn = io.diffCommits.get
-      val numDiffCommitPorts = diffCommitsIn.commitValid.length
-      // Write to diffRegFile on commit (x0 is never written, stays 0)
-      for (i <- 0 until numDiffCommitPorts) {
-        val info = diffCommitsIn.info(i)
-        when(diffCommitsIn.isCommit && diffCommitsIn.commitValid(i) && info.rfWen && info.ldest =/= 0.U) {
-          diffRegFile(info.ldest) := intDiffReadData.get(info.pdest)
-        }
+      val diffIntCommitData = DiffCommitData.buildIntCommitData(diffCommitsIn, intDiffReadData.get)
+      for (idx <- 0 until CommitWidth) {
+        val difftest = DifftestModule(new DiffIntCommitData, delay = DiffCommitData.IntArchStateDifftestDelay)
+        difftest.coreid := io.hartId
+        difftest.index := idx.U
+        difftest.valid := diffCommitsIn.isCommit && diffCommitsIn.robCommitValid(idx) && diffCommitsIn.robCommitInfo(idx).rfWen
+        difftest.data := diffIntCommitData(idx)
       }
+      val diffRegFile = DiffCommitData.buildIntArchState(diffCommitsIn, intDiffReadData.get)
       // Report architectural integer register state directly via diffRegFile.
-      // Use registered (pre-commit) state to match the timing of the old RAT-based approach:
-      // DiffArchIntRenameTable also read registered RAT (before current cycle's commits).
+      // Use the same delayed compare point as DiffInstrCommit; otherwise the xrf packet
+      // can expose a younger commit than the commit packet currently being compared.
       // getArchRegs in Preprocess skips xrf generation when it already exists here.
-      val difftest = DifftestModule(new DiffArchIntRegState, delay = 2)
+      val difftest = DifftestModule(new DiffArchIntRegState, delay = DiffCommitData.IntArchStateDifftestDelay)
       difftest.coreid := io.hartId
       difftest.value := diffRegFile
 
@@ -580,6 +590,8 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
   is_0latency := exuParamsNoLoad.map(x => is0latency(x._1.bits.fuType))
   val og0_cancel_delay = RegNext(VecInit(og0_cancel_no_load.zip(is_0latency).map(x => x._1 && x._2)))
   val flushReg = RegNextWithEnable(io.flush)
+  private val earlyReleaseReadCompleteEvents =
+    scala.collection.mutable.ArrayBuffer.empty[ValidIO[EarlyReleaseReadCompleteEvent]]
   for (i <- fromIQ.indices) {
     for (j <- fromIQ(i).indices) {
       // IQ(s0) --[Ctrl]--> s1Reg ---------- begin
@@ -609,6 +621,16 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
         }.reduce(_ || _) && s0.valid
       } else s0_cancel := false.B
       val s0_ldCancel = LoadShouldCancel(s0.bits.loadDependency, io.ldCancel)
+      if (ownsEarlyReleaseReadCompleteLane(i)) {
+        earlyReleaseReadCompleteEvents ++= EarlyReleaseReadCompleteEvents.build(
+          readFire = fromIQDeqFire(i)(j),
+          flushed = s1_flush,
+          loadCanceled = s0_ldCancel,
+          robIdx = s0.bits.robIdx.value,
+          owner = s0.bits.earlyRelease.redefinerRobIdx,
+          metadata = s0.bits.earlyRelease
+        )
+      }
       when (s0.fire && !s1_flush && !s0_ldCancel) {
         s1_valid := true.B
       }.otherwise {
@@ -624,6 +646,7 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
       // IQ(s0) --[Ctrl]--> s1Reg ---------- end
     }
   }
+  io.earlyReleaseReadComplete := EarlyReleaseReadCompleteEvents.first(earlyReleaseReadCompleteEvents.toSeq)
 
   private val fromIQFire = fromIQ.map(_.map(_.fire))
   private val toExuFire = toExu.map(_.map(_.fire))
@@ -804,6 +827,93 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
   io.uopTopDown.noStoreIssued := noStoreIssued
 }
 
+object DiffCommitData {
+  val IntArchStateDifftestDelay = 3
+
+  private def buildCommitData(
+    valid: Seq[Bool],
+    info: Seq[RabCommitInfo],
+    intWdata: Seq[UInt],
+    rfData: Vec[UInt],
+    robIdx: Option[Seq[UInt]] = None,
+    robIdxFlag: Option[Seq[Bool]] = None
+  )(implicit p: Parameters): Vec[UInt] = {
+    require(valid.length == info.length)
+    require(info.length == intWdata.length)
+    robIdx.foreach(idx => require(idx.length == info.length))
+    robIdxFlag.foreach(flag => require(flag.length == info.length))
+    require(robIdx.isDefined == robIdxFlag.isDefined)
+
+    val commitData = Wire(Vec(valid.length, UInt(rfData.head.getWidth.W)))
+    for (idx <- valid.indices) {
+      val pregIdx = info(idx).pdest(log2Ceil(rfData.length) - 1, 0)
+      val sameRobGroupIntWriter = robIdx.zip(robIdxFlag).map { case (idxSeq, flagSeq) =>
+        if (valid.length == 1) {
+          false.B
+        } else {
+          VecInit(valid.indices.filter(_ != idx).map { otherIdx =>
+            valid(otherIdx) &&
+              idxSeq(otherIdx) === idxSeq(idx) &&
+              flagSeq(otherIdx) === flagSeq(idx) &&
+              info(otherIdx).rfWen &&
+              info(otherIdx).ldest =/= 0.U &&
+              !info(otherIdx).isMove
+          }).asUInt.orR
+        }
+      }.getOrElse(false.B)
+      val (hasOlderBypass, bypassData) = if (idx == 0) {
+        (false.B, 0.U(rfData.head.getWidth.W))
+      } else {
+        val olderBypassHits = VecInit((0 until idx).map { olderIdx =>
+          valid(olderIdx) &&
+            info(olderIdx).rfWen &&
+            info(olderIdx).ldest =/= 0.U &&
+            info(olderIdx).pdest === info(idx).pdest
+        })
+        (olderBypassHits.asUInt.orR, PriorityMux(olderBypassHits.reverse, (0 until idx).map(commitData(_)).reverse))
+      }
+      val moveData = Mux(hasOlderBypass, bypassData, rfData(pregIdx))
+      val ordinaryData = Mux(sameRobGroupIntWriter, rfData(pregIdx), intWdata(idx))
+      commitData(idx) := Mux(info(idx).isMove, moveData, ordinaryData)
+    }
+    commitData
+  }
+
+  def buildIntCommitData(diffCommit: DiffCommitIO, rfData: Vec[UInt])(implicit p: Parameters): Vec[UInt] = {
+    buildCommitData(
+      valid = diffCommit.robCommitValid,
+      info = diffCommit.robCommitInfo,
+      intWdata = diffCommit.robCommitIntWdata,
+      rfData = rfData
+    )
+  }
+
+  def buildIntArchCommitData(diffCommit: DiffCommitIO, rfData: Vec[UInt])(implicit p: Parameters): Vec[UInt] = {
+    buildCommitData(
+      valid = diffCommit.commitValid,
+      info = diffCommit.info,
+      intWdata = diffCommit.intWdata,
+      rfData = rfData,
+      robIdx = Some(diffCommit.robIdx),
+      robIdxFlag = Some(diffCommit.robIdxFlag)
+    )
+  }
+
+  def buildIntArchState(diffCommit: DiffCommitIO, rfData: Vec[UInt])(implicit p: Parameters): Vec[UInt] = {
+    val archState = RegInit(VecInit(Seq.fill(32)(0.U(rfData.head.getWidth.W))))
+    val archStateNext = WireDefault(archState)
+    val commitData = buildIntArchCommitData(diffCommit, rfData)
+    for (idx <- 0 until p(XSCoreParamsKey).CommitWidth * p(XSCoreParamsKey).MaxUopSize) {
+      val info = diffCommit.info(idx)
+      when(diffCommit.isCommit && diffCommit.commitValid(idx) && info.rfWen && info.ldest =/= 0.U) {
+        archStateNext(info.ldest(log2Ceil(32) - 1, 0)) := commitData(idx)
+      }
+    }
+    archState := archStateNext
+    archStateNext
+  }
+}
+
 class DataPathIO()(implicit p: Parameters, params: BackendParams, param: SchdBlockParams) extends XSBundle {
   // params
   private val intSchdParams = params.schdParams(IntScheduler())
@@ -833,6 +943,15 @@ class DataPathIO()(implicit p: Parameters, params: BackendParams, param: SchdBlo
   val fromVecIQDeqOg1Payload: MixedVec[MixedVec[IssueQueueDeqOg1Payload]] =
     Input(MixedVec(vecSchdParams.issueBlockParams.map(_.genIssueDeqOg1PayloadBundle)))
 
+  val fromIntIQDeqFire: MixedVec[Vec[Bool]] =
+    Input(MixedVec(intSchdParams.issueBlockParams.map(_.genIssueDeqFireBundle)))
+
+  val fromFpIQDeqFire: MixedVec[Vec[Bool]] =
+    Input(MixedVec(fpSchdParams.issueBlockParams.map(_.genIssueDeqFireBundle)))
+
+  val fromVecIQDeqFire: MixedVec[Vec[Bool]] =
+    Input(MixedVec(vecSchdParams.issueBlockParams.map(_.genIssueDeqFireBundle)))
+
   val fromVecExcpMod = Option.when(param.isVecSchd)(Input(new ExcpModToVprf(maxMergeNumPerCycle * 2, maxMergeNumPerCycle)))
 
   val toIntIQ = MixedVec(intSchdParams.issueBlockParams.map(_.genOGRespBundle))
@@ -852,6 +971,8 @@ class DataPathIO()(implicit p: Parameters, params: BackendParams, param: SchdBlo
   val og1Cancel = Output(ExuVec())
 
   val ldCancel = Vec(backendParams.LduCnt + backendParams.HyuCnt, Flipped(new LoadCancelIO))
+
+  val earlyReleaseReadComplete = Output(new EarlyReleaseReadComplete)
 
   val toIntExu: MixedVec[MixedVec[DecoupledIO[Og1InUop]]] = intSchdParams.genOg1InUopBundle
 

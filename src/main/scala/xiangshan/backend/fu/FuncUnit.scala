@@ -13,6 +13,7 @@ import xiangshan.backend.datapath.DataConfig._
 import xiangshan.backend.fu.vector.Bundles.{VType, Vl, Vxsat}
 import xiangshan.ExceptionNO.illegalInstr
 import xiangshan.backend.fu.wrapper.{CSRInput, CSRToDecode}
+import xiangshan.backend.rename.EarlyReleaseOwner
 import xiangshan.frontend.bpu.{BranchAttribute, BranchInfo}
 
 trait HasFuLatency {
@@ -48,6 +49,7 @@ class FuncUnitCtrlInput(cfg: FuConfig)(implicit p: Parameters) extends XSBundle 
   val fuOpType    = FuOpType()
   val toRobValid  = Bool()
   val robIdx      = new RobPtr
+  val earlyReleaseOwner = UInt(EarlyReleaseOwner.width.W)
   val pdest       = UInt(PhyRegIdxWidth.W)
   val pdestVl     = Option.when(cfg.writeVlRf)(UInt(VlPhyRegIdxWidth.W))
   val rfWen       = OptionWrapper(cfg.needIntWen, Bool())
@@ -73,6 +75,7 @@ class FuncUnitCtrlInput(cfg: FuConfig)(implicit p: Parameters) extends XSBundle 
 class FuncUnitCtrlOutput(cfg: FuConfig)(implicit p: Parameters) extends XSBundle {
   val toRobValid    = Bool()
   val robIdx        = new RobPtr
+  val earlyReleaseOwner = UInt(EarlyReleaseOwner.width.W)
   val pdest         = UInt(PhyRegIdxWidth.W) // Todo: use maximum of pregIdxWidth of different pregs
   val pdestVl       = Option.when(cfg.writeVlRf)(UInt(VlPhyRegIdxWidth.W))
   val rfWen         = OptionWrapper(cfg.needIntWen, Bool())
@@ -154,6 +157,7 @@ abstract class FuncUnit(val cfg: FuConfig)(implicit p: Parameters) extends XSMod
   def connectNonPipedCtrlSingal: Unit = {
     io.out.bits.ctrl.toRobValid := RegEnable(io.in.bits.ctrl.toRobValid, io.in.fire)
     io.out.bits.ctrl.robIdx := RegEnable(io.in.bits.ctrl.robIdx, io.in.fire)
+    io.out.bits.ctrl.earlyReleaseOwner := RegEnable(io.in.bits.ctrl.earlyReleaseOwner, io.in.fire)
     io.out.bits.ctrl.pdest  := RegEnable(io.in.bits.ctrl.pdest, io.in.fire)
     io.out.bits.ctrl.rfWen  .foreach(_ := RegEnable(io.in.bits.ctrl.rfWen.get, io.in.fire))
     io.out.bits.ctrl.fpWen  .foreach(_ := RegEnable(io.in.bits.ctrl.fpWen.get, io.in.fire))
@@ -171,6 +175,7 @@ abstract class FuncUnit(val cfg: FuConfig)(implicit p: Parameters) extends XSMod
   def connectNonPipedCtrlDataHoldBypass: Unit = {
     io.out.bits.ctrl.toRobValid := DataHoldBypass(io.in.bits.ctrl.toRobValid, io.in.fire)
     io.out.bits.ctrl.robIdx := DataHoldBypass(io.in.bits.ctrl.robIdx, io.in.fire)
+    io.out.bits.ctrl.earlyReleaseOwner := DataHoldBypass(io.in.bits.ctrl.earlyReleaseOwner, io.in.fire)
     io.out.bits.ctrl.pdest := DataHoldBypass(io.in.bits.ctrl.pdest, io.in.fire)
     io.out.bits.ctrl.rfWen.foreach(_ := DataHoldBypass(io.in.bits.ctrl.rfWen.get, io.in.fire))
     io.out.bits.ctrl.fpWen.foreach(_ := DataHoldBypass(io.in.bits.ctrl.fpWen.get, io.in.fire))
@@ -188,6 +193,7 @@ abstract class FuncUnit(val cfg: FuConfig)(implicit p: Parameters) extends XSMod
   def connect0LatencyCtrlSingal: Unit = {
     io.out.bits.ctrl.toRobValid := io.in.bits.ctrl.toRobValid
     io.out.bits.ctrl.robIdx := io.in.bits.ctrl.robIdx
+    io.out.bits.ctrl.earlyReleaseOwner := io.in.bits.ctrl.earlyReleaseOwner
     io.out.bits.ctrl.pdest := io.in.bits.ctrl.pdest
     io.out.bits.ctrl.rfWen.foreach(_ := io.in.bits.ctrl.rfWen.get)
     io.out.bits.ctrl.fpWen.foreach(_ := io.in.bits.ctrl.fpWen.get)
@@ -285,6 +291,7 @@ trait HasPipelineReg { this: FuncUnit =>
   io.out.valid := fixValidVec.last
   io.out.bits.ctrl.toRobValid := ctrlVec.last.toRobValid
   io.out.bits.ctrl.robIdx := ctrlVec.last.robIdx
+  io.out.bits.ctrl.earlyReleaseOwner := ctrlVec.last.earlyReleaseOwner
   io.out.bits.ctrl.pdest := ctrlVec.last.pdest
   io.out.bits.ctrl.rfWen.foreach(_ := ctrlVec.last.rfWen.get)
   io.out.bits.ctrl.fpWen.foreach(_ := ctrlVec.last.fpWen.get)

@@ -26,6 +26,7 @@ import xiangshan.backend.datapath.WbConfig._
 import xiangshan.backend.fu.{CSRFileIO, FenceIO, FuType}
 import xiangshan.backend.regfile.RfWritePortBundle
 import xiangshan.backend.exu.ExuBlock
+import xiangshan.backend.rename.EarlyReleaseReadComplete
 import xiangshan.mem._
 import utility._
 import xiangshan.backend.fu.vector.Bundles.{VType, Vstart}
@@ -329,11 +330,16 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     x.valid := false.B
     x.bits := 0.U.asTypeOf(x.bits)
   })
-
   io.fromIntIQDeqOg1Payload.foreach(pl => dataPath.io.fromIntIQDeqOg1Payload := pl)
   io.fromFpIQDeqOg1Payload.foreach(pl => dataPath.io.fromFpIQDeqOg1Payload := pl)
   io.fromVecIQDeqOg1Payload.foreach(pl => dataPath.io.fromVecIQDeqOg1Payload := pl)
 
+  dataPath.io.fromIntIQDeqFire := 0.U.asTypeOf(dataPath.io.fromIntIQDeqFire)
+  dataPath.io.fromFpIQDeqFire  := 0.U.asTypeOf(dataPath.io.fromFpIQDeqFire )
+  dataPath.io.fromVecIQDeqFire := 0.U.asTypeOf(dataPath.io.fromVecIQDeqFire)
+  io.intIQDeqFireOut.foreach(_ := 0.U.asTypeOf(io.intIQDeqFireOut.get))
+  io.fpIQDeqFireOut.foreach(_ := 0.U.asTypeOf(io.fpIQDeqFireOut.get))
+  io.vecIQDeqFireOut.foreach(_ := 0.U.asTypeOf(io.vecIQDeqFireOut.get))
   val dataPathToExus = (dataPath.io.toIntExu ++ dataPath.io.toFpExu ++ dataPath.io.toVecExu).flatten
   dataPathToExus.map(x => {
     x.ready := false.B
@@ -428,13 +434,16 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     io.csrToDecode.get <> exuBlock.io.csrToDecode.get
 
     dataPath.io.ldCancel := io.ldCancel
-    dataPath.io.fromIntIQ.zip(issueQueues).zip(io.intIQOut.get).map{ case ((sink, source), iqOut) =>
+    dataPath.io.fromIntIQ.zip(issueQueues).zip(io.intIQOut.get).zipWithIndex.map{ case (((sink, source), iqOut), iqIdx) =>
       sink.zipWithIndex.map{ case (s, i) =>
+        val actualDeqFire = source.io.deqDelay(i).valid && s.ready && iqOut(i).ready
         s.valid := source.io.deqDelay(i).valid
         iqOut(i).valid := source.io.deqDelay(i).valid
         s.bits := source.io.deqDelay(i).bits
         iqOut(i).bits := source.io.deqDelay(i).bits
         source.io.deqDelay(i).ready := s.ready && iqOut(i).ready
+        dataPath.io.fromIntIQDeqFire(iqIdx)(i) := actualDeqFire
+        io.intIQDeqFireOut.get(iqIdx)(i) := actualDeqFire
       }
     }
     dataPath.io.fromIntIQDeqOg1Payload.zip(issueQueues).zip(io.intIQDeqOg1PayloadOut.get).map { case ((sink, source), plOut) =>
@@ -447,7 +456,15 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     dataPath.io.fromFpIQ.zip(io.fromFpIQ.get).map { case (sink, source) =>
       sink <> source
     }
-
+    dataPath.io.fromFpIQDeqFire.zip(io.fromFpIQDeqFire.get).map { case (sink, source) =>
+      sink := source
+    }
+    dataPath.io.fromVfIQ.zip(io.fromVecIQ.get).map { case (sink, source) =>
+      sink <> source
+    }
+    dataPath.io.fromVecIQDeqFire.zip(io.fromVecIQDeqFire.get).map { case (sink, source) =>
+      sink := source
+    }
     dataPath.io.fromIntWb.get := wbDataPath.io.toIntPreg
     dataPath.io.fromPcTargetMem <> io.fromPcTargetMem.get
     dataPath.io.fromBypassNetwork := bypassNetwork.io.toDataPath
@@ -548,13 +565,19 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     dataPath.io.fromIntIQ.zip(io.fromIntIQ.get).map { case (sink, source) =>
       sink <> source
     }
-    dataPath.io.fromFpIQ.zip(issueQueues).zip(io.fpIQOut.get).map { case ((sink, source), iqOut) =>
+    dataPath.io.fromIntIQDeqFire.zip(io.fromIntIQDeqFire.get).map { case (sink, source) =>
+      sink := source
+    }
+    dataPath.io.fromFpIQ.zip(issueQueues).zip(io.fpIQOut.get).zipWithIndex.map { case (((sink, source), iqOut), iqIdx) =>
       sink.zipWithIndex.map { case (s, i) =>
+        val actualDeqFire = source.io.deqDelay(i).valid && s.ready && iqOut(i).ready
         s.valid := source.io.deqDelay(i).valid
         iqOut(i).valid := source.io.deqDelay(i).valid
         s.bits := source.io.deqDelay(i).bits
         iqOut(i).bits := source.io.deqDelay(i).bits
         source.io.deqDelay(i).ready := s.ready && iqOut(i).ready
+        dataPath.io.fromFpIQDeqFire(iqIdx)(i) := actualDeqFire
+        io.fpIQDeqFireOut.get(iqIdx)(i) := actualDeqFire
       }
     }
     dataPath.io.fromFpIQDeqOg1Payload.zip(issueQueues).zip(io.fpIQDeqOg1PayloadOut.get).map { case ((sink, source), plOut) =>
@@ -563,7 +586,12 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
         plOut(i) := source.io.deqOg1Payload(i)
       }
     }
-
+    dataPath.io.fromVfIQ.zip(io.fromVecIQ.get).map { case (sink, source) =>
+      sink <> source
+    }
+    dataPath.io.fromVecIQDeqFire.zip(io.fromVecIQDeqFire.get).map { case (sink, source) =>
+      sink := source
+    }
     dataPath.io.fromFpWb.get := wbDataPath.io.toFpPreg
     dataPath.io.fromBypassNetwork <> bypassNetwork.io.toDataPath
     io.toFpPreg := wbDataPath.io.toFpPreg
@@ -643,11 +671,26 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     dataPath.io.fromIntIQ.zip(io.fromIntIQ.get).map { case (sink, source) =>
       sink <> source
     }
+    dataPath.io.fromIntIQDeqFire.zip(io.fromIntIQDeqFire.get).map { case (sink, source) =>
+      sink := source
+    }
     dataPath.io.fromFpIQ.zip(io.fromFpIQ.get).map { case (sink, source) =>
       sink <> source
     }
-    dataPath.io.fromVfIQ.zip(issueQueues).map { case (sink, source) =>
-      sink <> source.io.deqDelay
+    dataPath.io.fromFpIQDeqFire.zip(io.fromFpIQDeqFire.get).map { case (sink, source) =>
+      sink := source
+    }
+    dataPath.io.fromVfIQ.zip(issueQueues).zip(io.vecIQOut.get).zipWithIndex.map { case (((sink, source), iqOut), iqIdx) =>
+      sink.zipWithIndex.map { case (s, i) =>
+        val actualDeqFire = source.io.deqDelay(i).valid && s.ready && iqOut(i).ready
+        s.valid := source.io.deqDelay(i).valid
+        iqOut(i).valid := source.io.deqDelay(i).valid
+        s.bits := source.io.deqDelay(i).bits
+        iqOut(i).bits := source.io.deqDelay(i).bits
+        source.io.deqDelay(i).ready := s.ready && iqOut(i).ready
+        dataPath.io.fromVecIQDeqFire(iqIdx)(i) := actualDeqFire
+        io.vecIQDeqFireOut.get(iqIdx)(i) := actualDeqFire
+      }
     }
     dataPath.io.fromVecIQDeqOg1Payload.zip(issueQueues).zip(io.vecIQDeqOg1PayloadOut.get).map { case ((sink, source), plOut) =>
       sink.zipWithIndex.map { case (s, i) =>
@@ -740,6 +783,7 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
   io.uopTopDown.uopsIssued := dataPath.io.uopTopDown.uopsIssued
   io.uopTopDown.uopsIssuedCnt := dataPath.io.uopTopDown.uopsIssuedCnt
   io.uopTopDown.noStoreIssued := dataPath.io.uopTopDown.noStoreIssued
+  io.earlyReleaseReadComplete := dataPath.io.earlyReleaseReadComplete
 
   // perf counter
   val staValidNum = stAddrIQs.map{ case staIQ =>
@@ -839,6 +883,7 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val hartId = Input(UInt(8.W))
   val flush = Flipped(ValidIO(new Redirect))
   val ldCancel = Vec(backendParams.LduCnt, Flipped(new LoadCancelIO))
+  val earlyReleaseReadComplete = Output(new EarlyReleaseReadComplete)
   val fromPcTargetMem = Option.when(params.isIntSchd)(Flipped(new PcToDataPathIO(backendParams)))
   val diffVlRat = Option.when(backendParams.basicDebugEn && params.isVecSchd)(Input(Vec(1, UInt(log2Up(VlPhyRegs).W))))
   val diffVl = Option.when(backendParams.basicDebugEn && params.isVecSchd)(Output(UInt(VlData().dataWidth.W)))
@@ -918,6 +963,8 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   // to read fp regfile
   val intIQOut  = Option.when(params.isIntSchd)(MixedVec(params.issueBlockParams.map(_.genIssueDecoupledBundle)))
   val fromIntIQ = Option.when(params.isFpSchd || params.isVecSchd)(Flipped(MixedVec(intSchdParam.issueBlockParams.map(_.genIssueDecoupledBundle))))
+  val intIQDeqFireOut = Option.when(params.isIntSchd)(MixedVec(params.issueBlockParams.map(_.genIssueDeqFireBundle)))
+  val fromIntIQDeqFire = Option.when(params.isFpSchd || params.isVecSchd)(Flipped(MixedVec(intSchdParam.issueBlockParams.map(_.genIssueDeqFireBundle))))
   // fp regfile read data
   val fpRfRdataIn = Option.when(params.isIntSchd)(Input(Vec(backendParams.numPregRd(FpData()), UInt(backendParams.fpSchdParams.get.rfDataWidth.W))))
   val fpRfRdataOut = Option.when(params.isFpSchd)(Output(Vec(backendParams.numPregRd(FpData()), UInt(backendParams.fpSchdParams.get.rfDataWidth.W))))
@@ -940,6 +987,12 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val vecIQDeqOg1PayloadOut: Option[MixedVec[MixedVec[IssueQueueDeqOg1Payload]]] =
     Option.when(params.isVecSchd)(Output(MixedVec(backendParams.schdParams(VecScheduler()).issueBlockParams.map(_.genIssueDeqOg1PayloadBundle))))
 
+  val fpIQDeqFireOut = Option.when(params.isFpSchd)(MixedVec(params.issueBlockParams.map(_.genIssueDeqFireBundle)))
+  val fromFpIQDeqFire = Option.when(params.isIntSchd || params.isVecSchd)(Flipped(MixedVec(fpSchdParam.issueBlockParams.map(_.genIssueDeqFireBundle))))
+  val vecIQOut = Option.when(params.isVecSchd)(MixedVec(params.issueBlockParams.map(_.genIssueDecoupledBundle)))
+  val fromVecIQ = Option.when(params.isIntSchd || params.isFpSchd)(Flipped(MixedVec(vecSchdParam.issueBlockParams.map(_.genIssueDecoupledBundle))))
+  val vecIQDeqFireOut = Option.when(params.isVecSchd)(MixedVec(params.issueBlockParams.map(_.genIssueDeqFireBundle)))
+  val fromVecIQDeqFire = Option.when(params.isIntSchd || params.isFpSchd)(Flipped(MixedVec(vecSchdParam.issueBlockParams.map(_.genIssueDeqFireBundle))))
   // TopDown
   val uopTopDown = new UopTopDown
   val iqDeqSum = params.issueBlockParams.map(_.numDeq).sum
@@ -947,4 +1000,3 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val debugIQEnqHasIssuedVec = Option.when(backendParams.debugEn)(Vec(IQNum, Output(Bool())))
   val debugIQDeqRobIdxVec = Option.when(backendParams.debugEn)(Vec(iqDeqSum, ValidIO(new RobPtr())))
 }
-

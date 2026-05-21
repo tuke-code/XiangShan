@@ -43,7 +43,7 @@ import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
 import xiangshan.backend.ctrlblock.{DebugLSIO, DebugLsInfo, LsTopdownInfo}
 import xiangshan.backend.fu.vector.Bundles.VType
-import xiangshan.backend.rename.SnapshotGenerator
+import xiangshan.backend.rename.{EarlyReleaseMetadata, SnapshotGenerator}
 import yunsuan.VfaluType
 import xiangshan.backend.rob.RobBundles._
 import xiangshan.backend.trace._
@@ -54,6 +54,111 @@ class Rob(params: BackendParams)(implicit p: Parameters) extends LazyModule with
   override def shouldBeInlined: Boolean = false
 
   lazy val module = new RobImp(this)(p, params)
+}
+
+object RobDifftestData {
+  def hasDifftestPayload(intWen: Bool, isXSTrap: Bool): Bool = intWen || isXSTrap
+
+  def bypassDataForRead(
+    storedData: UInt,
+    readRobIdx: UInt,
+    readRobFlag: Bool,
+    writebackValid: Seq[Bool],
+    writebackPayloadValid: Seq[Bool],
+    writebackRobIdx: Seq[UInt],
+    writebackRobFlag: Seq[Bool],
+    writebackData: Seq[UInt]
+  ): UInt = {
+    require(writebackValid.length == writebackRobIdx.length)
+    require(writebackValid.length == writebackRobFlag.length)
+    require(writebackValid.length == writebackData.length)
+    require(writebackValid.length == writebackPayloadValid.length)
+
+    writebackValid.lazyZip(writebackPayloadValid).lazyZip(writebackRobIdx).lazyZip(writebackRobFlag).lazyZip(writebackData)
+      .foldLeft(storedData) {
+        case (current, ((valid, payloadValid, robIdx, robFlag), wbData)) =>
+          Mux(valid && payloadValid && robIdx === readRobIdx && robFlag === readRobFlag, wbData, current)
+      }
+  }
+}
+
+object RobEarlyReleaseRecoveryAlignment {
+  def build(
+    stateIsWalk: Bool,
+    shouldWalk: Bool,
+    currentWalkRobIdx: UInt,
+    walkingRobIdx: UInt,
+    metadata: EarlyReleaseMetadata,
+    idxWidth: Int
+  )(implicit p: Parameters): ValidIO[EarlyReleaseRecoveryEvent] = {
+    val event = Wire(Valid(new EarlyReleaseRecoveryEvent(idxWidth)))
+    event.valid := stateIsWalk && shouldWalk
+    event.bits.robIdx := Mux(event.valid, walkingRobIdx, 0.U)
+    event.bits.metadata := Mux(event.valid, metadata, 0.U.asTypeOf(metadata))
+    event
+  }
+}
+
+object RobEarlyReleaseEnqueueOwner {
+  def selectPtrForLane(
+    valid: Vec[Bool],
+    firstUop: Vec[Bool],
+    allocatedRobPtr: Vec[RobPtr],
+    payloadRobPtr: RobPtr,
+    lane: Int
+  ): RobPtr = {
+    require(lane >= 0 && lane < valid.length)
+    require(firstUop.length == valid.length)
+    require(allocatedRobPtr.length == valid.length)
+
+    val owner = Wire(chiselTypeOf(payloadRobPtr))
+    owner := payloadRobPtr
+    for (idx <- 0 to lane) {
+      when(valid(idx) && firstUop(idx)) {
+        owner := allocatedRobPtr(idx)
+      }
+    }
+    owner
+  }
+
+  def selectOwnerForLane(
+    valid: Vec[Bool],
+    firstUop: Vec[Bool],
+    payloadOwner: Vec[UInt],
+    lane: Int
+  ): UInt = {
+    require(lane >= 0 && lane < valid.length)
+    require(firstUop.length == valid.length)
+    require(payloadOwner.length == valid.length)
+
+    val owner = Wire(chiselTypeOf(payloadOwner(lane)))
+    owner := payloadOwner(lane)
+    for (idx <- 0 to lane) {
+      when(valid(idx) && firstUop(idx)) {
+        owner := payloadOwner(idx)
+      }
+    }
+    owner
+  }
+}
+
+object RobNewErPerfDebug {
+  def commitOnlyFallbackCount(
+    enable: Bool,
+    canEnqueue: Seq[Bool],
+    redirectValid: Bool,
+    oldIntPdestValid: Seq[Bool],
+    commitOnlyFallback: Seq[Bool]
+  ): UInt = {
+    require(canEnqueue.length == oldIntPdestValid.length)
+    require(canEnqueue.length == commitOnlyFallback.length)
+
+    val hits = canEnqueue.lazyZip(oldIntPdestValid).lazyZip(commitOnlyFallback).map {
+      case (enq, oldValid, fallback) => enq && !redirectValid && oldValid && fallback
+    }
+    val count = if (hits.isEmpty) 0.U(1.W) else PopCount(hits)
+    Mux(enable, count, 0.U(count.getWidth.W))
+  }
 }
 
 class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendParams) extends LazyModuleImp(wrapper)
@@ -75,6 +180,10 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val writebackNums = Flipped(Vec(writeback.size, ValidIO(UInt(writeback.size.U.getWidth.W))))
     val writebackNeedFlush = Input(Vec(params.allExuParams.filter(_.needExceptionGen).length, Bool()))
     val commits = Output(new RobCommitIO)
+    val nonSpecRedefine = Output(Vec(CommitWidth, Valid(new EarlyReleaseNonSpecRedefineEvent(log2Ceil(RobSize)))))
+    val earlyReleaseCommit = Output(Vec(CommitWidth, Valid(UInt(log2Ceil(RobSize).W))))
+    val earlyReleaseRecovery = Output(Vec(CommitWidth, Valid(new EarlyReleaseRecoveryEvent(log2Ceil(RobSize)))))
+    val earlyReleaseKilledRecovery = Output(Vec(CommitWidth, Valid(new EarlyReleaseKilledRecoveryEvent(log2Ceil(RobSize)))))
     val trace = new Bundle {
       val blockCommit = Input(Bool())
       val traceCommitInfo = new TraceBundle(hasIaddr = false, CommitWidth, IretireWidthCommited)
@@ -171,6 +280,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val bankNum = 8
   assert(RobSize % bankNum == 0, "RobSize % bankNum must be 0")
   val robEntries = RegInit(VecInit.fill(RobSize)((new RobEntryBundle).Lit(_.valid -> false.B)))
+  val debug_isXSTrap = RegInit(VecInit.fill(RobSize)(false.B))
   // pointers
   // For enqueue ptr, we don't duplicate it since only enqueue needs it.
   val enqPtrVec = Wire(Vec(RenameWidth, new RobPtr))
@@ -195,8 +305,29 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val deqPtr = deqPtrVec(0)
   val walkPtr = walkPtrVec(0)
   val allocatePtrVec = VecInit((0 until RenameWidth).map(i => enqPtrVec(PopCount(io.enq.req.take(i).map(req => req.valid && req.bits.firstUop)))))
-  io.enq.canAccept := allowEnqueue && !hasBlockBackward && rab.io.canEnq && vtypeBuffer.io.canEnq && !io.fromVecExcpMod.busy
-  io.enq.canAcceptForDispatch := allowEnqueueForDispatch && !hasBlockBackward && rab.io.canEnqForDispatch && vtypeBuffer.io.canEnqForDispatch && !io.fromVecExcpMod.busy
+  val enqRobIdxForLane = VecInit((0 until RenameWidth).map { i =>
+    RobEarlyReleaseEnqueueOwner.selectPtrForLane(
+      valid = VecInit(io.enq.req.map(_.valid)),
+      firstUop = VecInit(io.enq.req.map(_.bits.firstUop)),
+      allocatedRobPtr = allocatePtrVec,
+      payloadRobPtr = io.enq.req(i).bits.robIdx,
+      lane = i
+    )
+  })
+  val earlyReleaseKilledRecoveryBuffer = Module(new EarlyReleaseKilledRecoveryBuffer(RobSize, CommitWidth))
+  io.earlyReleaseKilledRecovery := earlyReleaseKilledRecoveryBuffer.io.out
+  val baseCanAccept = allowEnqueue && !hasBlockBackward && rab.io.canEnq && vtypeBuffer.io.canEnq && !io.fromVecExcpMod.busy
+  val baseCanAcceptForDispatch =
+    allowEnqueueForDispatch && !hasBlockBackward && rab.io.canEnqForDispatch && vtypeBuffer.io.canEnqForDispatch &&
+      !io.fromVecExcpMod.busy
+  io.enq.canAccept := RobEarlyReleaseEnqueuePolicy.canAccept(
+    baseCanAccept = baseCanAccept,
+    killedRecoveryBusy = earlyReleaseKilledRecoveryBuffer.io.busy
+  )
+  io.enq.canAcceptForDispatch := RobEarlyReleaseEnqueuePolicy.canAcceptForDispatch(
+    baseCanAcceptForDispatch = baseCanAcceptForDispatch,
+    killedRecoveryBusy = earlyReleaseKilledRecoveryBuffer.io.busy
+  )
   io.enq.resp := allocatePtrVec
   val canEnqueue = VecInit(io.enq.req.map(req => req.valid && req.bits.firstUop && io.enq.canAccept))
   val timer = GTimer()
@@ -205,7 +336,9 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val enqOH = VecInit(canEnqueue.zip(allocatePtrVec.map(_.value === i.U)).map(x => x._1 && x._2))
     assert(PopCount(enqOH) < 2.U, s"robEntries$i enqOH is not one hot")
     when(enqOH.asUInt.orR && !io.redirect.valid){
-      connectEnq(robEntries(i), Mux1H(enqOH, io.enq.req.map(_.bits)))
+      val enqBits = WireInit(Mux1H(enqOH, io.enq.req.map(_.bits)))
+      connectEnq(robEntries(i), enqBits)
+      debug_isXSTrap(i) := enqBits.isXSTrap
     }
   }
   // robBanks0 include robidx : 0 8 16 24 32 ...
@@ -309,10 +442,25 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   // Warn: debug_* prefix should not exist in generated verilog.
   val debug_exuData = Reg(Vec(RobSize, UInt(XLEN.W))) //for debug
   val debug_exuDebug = Reg(Vec(RobSize, new DebugBundle)) //for debug
+  val dt_eliminatedMove = Mem(RobSize, Bool())
   val debug_lsInfo = RegInit(VecInit(Seq.fill(RobSize)(DebugLsInfo.init)))
   val debug_lsTopdownInfo = RegInit(VecInit(Seq.fill(RobSize)(LsTopdownInfo.init)))
   val debug_lqIdxValid = RegInit(VecInit.fill(RobSize)(false.B))
   val debug_lsIssued = RegInit(VecInit.fill(RobSize)(false.B))
+  private def debugExuDataFor(readRobIdx: UInt, readRobFlag: Bool): UInt =
+    RobDifftestData.bypassDataForRead(
+      debug_exuData(readRobIdx),
+      readRobIdx,
+      readRobFlag,
+      exuWBs.map(_.valid),
+      exuWBs.map(wb => RobDifftestData.hasDifftestPayload(
+        wb.bits.intWen.getOrElse(false.B),
+        debug_isXSTrap(wb.bits.robIdx.value)
+      )),
+      exuWBs.map(_.bits.robIdx.value),
+      exuWBs.map(_.bits.robIdx.flag),
+      exuWBs.map(_.bits.data(XLEN - 1, 0))
+    )
 
   val isEmpty = enqPtr === deqPtr
   val snptEnq = io.enq.canAccept && io.enq.req.map(x => x.valid && x.bits.snapshot).reduce(_ || _)
@@ -377,9 +525,20 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
    */
   rab.io.redirect.valid := io.redirect.valid
 
-  rab.io.req.zip(io.enq.req).map { case (dest, src) =>
-    dest.bits := src.bits
+  rab.io.req.zip(io.enq.req).zipWithIndex.map { case ((dest, src), i) =>
+    val rabBits = WireInit(src.bits)
+    rabBits.robIdx := enqRobIdxForLane(i)
+    rabBits.earlyRelease.redefinerRobIdx := RobEarlyReleaseEnqueueOwner.selectOwnerForLane(
+      valid = VecInit(io.enq.req.map(_.valid)),
+      firstUop = VecInit(io.enq.req.map(_.bits.firstUop)),
+      payloadOwner = VecInit(io.enq.req.map(_.bits.earlyRelease.redefinerRobIdx)),
+      lane = i
+    )
+    dest.bits := rabBits
     dest.valid := src.valid && io.enq.canAccept
+    when(canEnqueue(i)) {
+      dt_eliminatedMove(allocatePtrVec(i).value) := src.bits.isMove
+    }
   }
 
   val walkDestSizeDeqGroup = RegInit(VecInit(Seq.fill(CommitWidth)(0.U(log2Up(MaxUopSize + 1).W))))
@@ -407,6 +566,24 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.rabCommits := RegNext(rab.io.commits)
   io.vlCommits := RegNext(vtypeBuffer.io.commits)
   io.diffCommits.foreach(_ := rab.io.diffCommits.get)
+  io.diffCommits.foreach { diff =>
+    for (idx <- 0 until CommitWidth * MaxUopSize) {
+      diff.intWdata(idx) := debugExuDataFor(diff.robIdx(idx), diff.robIdxFlag(idx))
+    }
+    for (idx <- 0 until CommitWidth) {
+      val commitInfo = io.commits.info(idx)
+      val commitRobIdx = deqPtrVec(idx).value
+      diff.robCommitValid(idx) := io.commits.isCommit && io.commits.commitValid(idx)
+      diff.robCommitInfo(idx) := 0.U.asTypeOf(new RabCommitInfo)
+      diff.robCommitInfo(idx).ldest := commitInfo.debug_ldest.getOrElse(0.U)
+      diff.robCommitInfo(idx).pdest := commitInfo.debug_pdest.getOrElse(0.U)
+      diff.robCommitInfo(idx).rfWen := commitInfo.rfWen
+      diff.robCommitInfo(idx).fpWen := commitInfo.fpWen
+      diff.robCommitInfo(idx).isMove := dt_eliminatedMove(commitRobIdx)
+      diff.robCommitInfo(idx).earlyRelease := commitInfo.earlyRelease
+      diff.robCommitIntWdata(idx) := debugExuDataFor(commitRobIdx, deqPtrVec(idx).flag)
+    }
+  }
   io.diffVlCommits.foreach(_ := vtypeBuffer.io.diffCommits.get)
 
   /**
@@ -573,8 +750,14 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   for (wb <- exuWBs) {
     val wbIdx = wb.bits.robIdx.value
     val debug_Uop = robEntries(wbIdx)
-    when(wb.valid) {
+    val hasDifftestPayload = RobDifftestData.hasDifftestPayload(
+      wb.bits.intWen.getOrElse(false.B),
+      debug_isXSTrap(wbIdx)
+    )
+    when(wb.valid && hasDifftestPayload) {
       debug_exuData(wbIdx) := wb.bits.data
+    }
+    when(wb.valid) {
       debug_exuDebug(wbIdx) := wb.bits.debug
       wb.bits.perfDebugInfo.foreach { x =>
         robEntries(wbIdx).perfDebugInfo.foreach(_.enqRsTime := x.enqRsTime)
@@ -710,6 +893,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   // T redirect.valid, T+1 use walkPtrVec read robEntries, T+2 start walk, shouldWalkVec used in T+2
   val shouldWalkVec = Wire(Vec(CommitWidth,Bool()))
   val walkingPtrVec = RegNext(walkPtrVec)
+  val walkingInfo = VecInit((0 until CommitWidth).map(i => robDeqGroup(walkingPtrVec(i).value(bankAddrWidth-1, 0)))).toSeq
   when(io.redirect.valid){
     shouldWalkVec := 0.U.asTypeOf(shouldWalkVec)
   }.elsewhen(RegNext(io.redirect.valid)){
@@ -820,6 +1004,16 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     commitValidThisLine(i) := commit_vDeqGroup(i) && commit_wDeqGroup(i) && !isBlocked && !isBlockedByOlder && !hasCommitted(i)
     io.commits.info(i) := commitInfo(i)
     io.commits.robIdx(i) := deqPtrVec(i)
+    io.earlyReleaseCommit(i).valid := io.commits.isCommit && io.commits.commitValid(i)
+    io.earlyReleaseCommit(i).bits := deqPtrVec(i).value
+    io.earlyReleaseRecovery(i) := RobEarlyReleaseRecoveryAlignment.build(
+      stateIsWalk = state === s_walk,
+      shouldWalk = shouldWalkVec(i),
+      currentWalkRobIdx = walkPtrVec(i).value,
+      walkingRobIdx = walkingPtrVec(i).value,
+      metadata = walkingInfo(i).earlyRelease,
+      idxWidth = log2Ceil(RobSize)
+    )
     val deqDebugInst = robEntries(deqPtrVec(i).value)
 
     deqDebugInst.debug_seqNum.foreach{ instSeq: InstSeqNum =>
@@ -907,6 +1101,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   enqPtrGenModule.io.redirect := io.redirect
   enqPtrGenModule.io.allowEnqueue := allowEnqueue && rab.io.canEnq && !io.fromVecExcpMod.busy
   enqPtrGenModule.io.hasBlockBackward := hasBlockBackward
+  enqPtrGenModule.io.killedRecoveryBusy := earlyReleaseKilledRecoveryBuffer.io.busy
   enqPtrGenModule.io.enq := VecInit(io.enq.req.map(req => req.valid && req.bits.firstUop))
   enqPtrVec := enqPtrGenModule.io.out
 
@@ -996,6 +1191,132 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     }
   }
 
+  val speculationTracker = Module(new SpeculationTracker(RobSize, RenameWidth, CommitWidth))
+  speculationTracker.io.scanEnable := backendParams.enableIntEarlyRelease.B && state === s_idle && !io.redirect.valid && !redirectValidReg
+  io.nonSpecRedefine := speculationTracker.io.events
+
+  for (i <- 0 until RenameWidth) {
+    val enqUop = io.enq.req(i).bits
+    val metadata = enqUop.earlyRelease
+    val needsExplicitConfirmation = RobEarlyReleaseSpeculationPolicy.needsExplicitConfirmation(
+      commitType = enqUop.commitType,
+      fuType = enqUop.fuType
+    )
+    val commitOnlyFallback = metadata.commitOnlyFallback ||
+      needsExplicitConfirmation ||
+      enqUop.hasException ||
+      enqUop.flushPipe ||
+      enqUop.singleStep ||
+      TriggerAction.isDmode(enqUop.trigger) ||
+      FuType.isFence(enqUop.fuType) ||
+      FuType.isCsr(enqUop.fuType) ||
+      FuType.isVset(enqUop.fuType) ||
+      FuType.isAMO(enqUop.fuType) ||
+      enqUop.waitForward ||
+      enqUop.blockBackward
+    val canTrack = backendParams.enableIntEarlyRelease.B && canEnqueue(i) && !io.redirect.valid
+
+    speculationTracker.io.enq(i).valid := canTrack
+    speculationTracker.io.enq(i).bits.robIdx := allocatePtrVec(i).value
+    speculationTracker.io.enq(i).bits.owner := metadata.redefinerRobIdx
+    speculationTracker.io.enq(i).bits.initiallySafe := !needsExplicitConfirmation && !commitOnlyFallback
+    speculationTracker.io.enq(i).bits.emitNonSpecRedefine := metadata.oldIntPdestValid && !commitOnlyFallback
+    speculationTracker.io.enq(i).bits.oldIntPdestValid := metadata.oldIntPdestValid && !commitOnlyFallback
+    speculationTracker.io.enq(i).bits.oldIntPdest := metadata.oldIntPdest
+  }
+  private val newErCommitOnlyFallback = (0 until RenameWidth).map { i =>
+      val enqUop = io.enq.req(i).bits
+      val metadata = enqUop.earlyRelease
+      val needsExplicitConfirmation = RobEarlyReleaseSpeculationPolicy.needsExplicitConfirmation(
+        commitType = enqUop.commitType,
+        fuType = enqUop.fuType
+      )
+      metadata.commitOnlyFallback ||
+        needsExplicitConfirmation ||
+        enqUop.hasException ||
+        enqUop.flushPipe ||
+        enqUop.singleStep ||
+        TriggerAction.isDmode(enqUop.trigger) ||
+        FuType.isFence(enqUop.fuType) ||
+        FuType.isCsr(enqUop.fuType) ||
+        FuType.isVset(enqUop.fuType) ||
+        FuType.isAMO(enqUop.fuType) ||
+        enqUop.waitForward ||
+        enqUop.blockBackward
+    }
+  XSPerfAccumulate(
+    "new_er_commit_only_fallback",
+    RobNewErPerfDebug.commitOnlyFallbackCount(
+      enable = backendParams.enableIntEarlyRelease.B,
+      canEnqueue = (0 until RenameWidth).map(canEnqueue),
+      redirectValid = io.redirect.valid,
+      oldIntPdestValid = (0 until RenameWidth).map(i => io.enq.req(i).bits.earlyRelease.oldIntPdestValid),
+      commitOnlyFallback = newErCommitOnlyFallback
+    )
+  )
+
+  def anySignal(xs: Seq[Bool]): Bool = if (xs.isEmpty) false.B else VecInit(xs).asUInt.orR
+  val memoryConfirmationWBs = exceptionWBs.filter { wb =>
+    wb.bits.params.hasLoadFu ||
+    wb.bits.params.hasStoreFu ||
+    wb.bits.params.hasVLoadFu ||
+    wb.bits.params.hasVStoreFu ||
+    wb.bits.params.hasHyldaFu ||
+    wb.bits.params.hasHystaFu
+  }
+  val controlFlowConfirmationWBs = redirectWBs.filter { wb =>
+    wb.bits.params.hasBrhFu || wb.bits.params.hasJmpFu
+  }
+
+  for (i <- 0 until RobSize) {
+    val commitCond = io.commits.isCommit && io.commits.commitValid.zip(deqPtrVec.map(_.value === i.U)).map(x => x._1 && x._2).reduce(_ || _)
+    val redirectKilled = redirectValidReg && (Mux(
+      redirectEnd > redirectBegin,
+      (i.U > redirectBegin) && (i.U < redirectEnd),
+      (i.U > redirectBegin) || (i.U < redirectEnd)
+    ) || redirectAll)
+    // If an entry reaches commit before SH has scanned it, the architectural
+    // traditional release has already had authority. Keep New-ER conservative
+    // by treating it as a commit fallback instead of emitting a late early-free.
+    val commitAsFallback = commitCond
+    val controlFlowSafe = anySignal(controlFlowConfirmationWBs.map { wb =>
+      RobEarlyReleaseSpeculationPolicy.confirmationMatchesOwner(
+        valid = wb.valid && !wb.bits.redirect.get.valid,
+        writebackOwner = wb.bits.earlyReleaseOwner,
+        owner = robEntries(i).earlyRelease.redefinerRobIdx
+      )
+    })
+    val memorySafe = anySignal(memoryConfirmationWBs.map { wb =>
+      val failed = wb.bits.exceptionVec.get.asUInt.orR ||
+        wb.bits.flushPipe.getOrElse(false.B) ||
+        wb.bits.replay.getOrElse(false.B) ||
+        (if (wb.bits.trigger.nonEmpty) TriggerAction.isDmode(wb.bits.trigger.get) else false.B)
+      RobEarlyReleaseSpeculationPolicy.confirmationMatchesOwner(
+        valid = wb.valid && !failed,
+        writebackOwner = wb.bits.earlyReleaseOwner,
+        owner = robEntries(i).earlyRelease.redefinerRobIdx
+      )
+    })
+
+    speculationTracker.io.markSafe(i) := RobEarlyReleaseSpeculationPolicy.markSafe(
+      controlFlowSafe = controlFlowSafe,
+      memorySafe = memorySafe
+    )
+    speculationTracker.io.kill(i) := RobEarlyReleaseSpeculationPolicy.killEntry(
+      redirectKilled = redirectKilled,
+      commitCond = commitAsFallback
+    )
+    speculationTracker.io.clear(i) := false.B
+    earlyReleaseKilledRecoveryBuffer.io.capture(i).valid := backendParams.enableIntEarlyRelease.B &&
+      redirectKilled &&
+      robEntries(i).valid &&
+      (
+        robEntries(i).earlyRelease.oldIntPdestValid ||
+          VecInit(robEntries(i).earlyRelease.countedIntSrcs.map(_.valid)).asUInt.orR
+      )
+    earlyReleaseKilledRecoveryBuffer.io.capture(i).bits := robEntries(i).earlyRelease
+  }
+
   // debug_inst update
   for (i <- 0 until (LduCnt + StaCnt)) {
     debug_lsInfo(io.debug_ls.debugLsInfo(i).s1_robIdx).s1SignalEnable(io.debug_ls.debugLsInfo(i))
@@ -1017,7 +1338,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val instEnqValidSeq = io.enq.req.map(req => io.enq.canAccept && req.valid && req.bits.firstUop)
   val enqNeedWriteRFSeq = io.enq.req.map(_.bits.needEnqRab)
   val enqHasExcpSeq = io.enq.req.map(_.bits.hasException)
-  val enqRobIdxSeq = io.enq.req.map(req => req.bits.robIdx.value)
+  val enqRobIdxSeq = enqRobIdxForLane.map(_.value)
   val enqUopNumVec = VecInit(io.enq.req.map(req => req.bits.numUops))
   val enqWBNumVec = VecInit(io.enq.req.map(req => req.bits.numWB))
   private val enqWriteStdVec = VecInit(io.enq.req.map(req => req.bits.stdwriteNeed))
@@ -1026,7 +1347,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val vxsat_wb = vxsatWBs
   for (i <- 0 until RobSize) {
 
-    val robIdxMatchSeq = io.enq.req.map(_.bits.robIdx.value === i.U)
+    val robIdxMatchSeq = enqRobIdxForLane.map(_.value === i.U)
     val uopCanEnqSeq = uopEnqValidSeq.zip(robIdxMatchSeq).map { case (valid, isMatch) => valid && isMatch }
     val instCanEnqSeq = instEnqValidSeq.zip(robIdxMatchSeq).map { case (valid, isMatch) => valid && isMatch }
     val instCanEnqFlag = Cat(instCanEnqSeq).orR
@@ -1096,7 +1417,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   needUpdate := VecInit(robBanksRdataThisLine ++ robBanksRdataNextLine)
   val needUpdateRobIdx = robIdxThisLine ++ robIdxNextLine
   for (i <- 0 until 2 * CommitWidth) {
-    val robIdxMatchSeq = io.enq.req.map(_.bits.robIdx.value === needUpdateRobIdx(i))
+    val robIdxMatchSeq = enqRobIdxForLane.map(_.value === needUpdateRobIdx(i))
     val uopCanEnqSeq = uopEnqValidSeq.zip(robIdxMatchSeq).map { case (valid, isMatch) => valid && isMatch }
     val instCanEnqSeq = instEnqValidSeq.zip(robIdxMatchSeq).map { case (valid, isMatch) => valid && isMatch }
     val instCanEnqFlag = Cat(instCanEnqSeq).orR
@@ -1183,7 +1504,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val canEnqueueEG = VecInit(io.enq.req.map(req => req.valid && io.enq.canAccept))
   for (i <- 0 until RenameWidth) {
     exceptionGen.io.enq(i).valid := canEnqueueEG(i)
-    exceptionGen.io.enq(i).bits.robIdx := io.enq.req(i).bits.robIdx
+    exceptionGen.io.enq(i).bits.robIdx := enqRobIdxForLane(i)
     exceptionGen.io.enq(i).bits.ftqPtr := io.enq.req(i).bits.ftqPtr
     exceptionGen.io.enq(i).bits.ftqOffset := io.enq.req(i).bits.ftqOffset
     exceptionGen.io.enq(i).bits.exceptionVec := ExceptionNO.selectFrontend(io.enq.req(i).bits.exceptionVec)
@@ -1574,13 +1895,11 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
 
   if (env.EnableDifftest || env.AlwaysBasicDiff) {
     // These are the structures used by difftest only and should be optimized after synthesis.
-    val dt_eliminatedMove = Mem(RobSize, Bool())
     val dt_isRVC = Mem(RobSize, Bool())
     val dt_pcTransType = Option.when(env.EnableDifftest)(Mem(RobSize, new AddrTransType))
     val dt_exuDebug = Reg(Vec(RobSize, new DebugBundle))
     for (i <- 0 until RenameWidth) {
       when(canEnqueue(i)) {
-        dt_eliminatedMove(allocatePtrVec(i).value) := io.enq.req(i).bits.isMove
         dt_isRVC(allocatePtrVec(i).value) := io.enq.req(i).bits.isRVC
         dt_pcTransType.foreach(_(allocatePtrVec(i).value) := io.debugInstrAddrTransType)
       }
@@ -1657,14 +1976,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   }
 
   if (env.EnableDifftest || env.AlwaysBasicDiff) {
-    val dt_isXSTrap = Mem(RobSize, Bool())
-    for (i <- 0 until RenameWidth) {
-      when(canEnqueue(i)) {
-        dt_isXSTrap(allocatePtrVec(i).value) := io.enq.req(i).bits.isXSTrap
-      }
-    }
     val trapVec = io.commits.commitValid.zip(deqPtrVec).map { case (v, d) =>
-      io.commits.isCommit && v && dt_isXSTrap(d.value)
+      io.commits.isCommit && v && debug_isXSTrap(d.value)
     }
     val hitTrap = trapVec.reduce(_ || _)
     val difftest = DifftestModule(new DiffTrapEvent, dontCare = true)

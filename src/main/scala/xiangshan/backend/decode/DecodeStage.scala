@@ -50,6 +50,7 @@ class DecodeStageIO(implicit p: Parameters) extends XSBundle {
   val out = Vec(DecodeWidth, DecoupledIO(new DecodeOutUop))
   // RAT read
   val intRat = Vec(RenameWidth, Vec(numIntRatPorts, Flipped(new RatReadPort(log2Ceil(IntLogicRegs)))))
+  val intOldDestRat = Vec(RenameWidth, Flipped(new RatReadPort(log2Ceil(IntLogicRegs))))
   val fpRat = Vec(RenameWidth, Vec(numFpRatPorts, Flipped(new RatReadPort(log2Ceil(FpLogicRegs)))))
   val vecRat = Vec(RenameWidth, Vec(numVecRatPorts, Flipped(new RatReadPort(log2Ceil(VecLogicRegs)))))
   // no v0Rat and vlRat Bundle because they are only one logic register
@@ -232,9 +233,21 @@ class DecodeStage(implicit p: Parameters) extends XSModule
    * Select final result of DecodeStage. Select all complex decoded insts results at the beginning of final result, and
    * use simple decoded insts to fill the rest space in DecodeWidth.
    */
+  def selectSimpleAfterComplex[T <: Data](i: Int, values: Seq[T]): T = {
+    Mux1H((0 until DecodeWidth).map(j => i.U === (j.U + complexNum)), values)
+  }
+
   for (i <- 0 until DecodeWidth) {
-    finalDecodedInst(i) := Mux(complexNum > i.U, complexDecodedInst(i), simpleDecodedInst(i.U - complexNum))
-    finalDecodedInstValid(i) := Mux(complexNum > i.U, complexDecodedInstValid(i), simplePrefixVec(i.U - complexNum))
+    finalDecodedInst(i) := Mux(
+      complexNum > i.U,
+      complexDecodedInst(i),
+      selectSimpleAfterComplex(i, simpleDecodedInst)
+    )
+    finalDecodedInstValid(i) := Mux(
+      complexNum > i.U,
+      complexDecodedInstValid(i),
+      selectSimpleAfterComplex(i, simplePrefixVec)
+    )
   }
 
   /**
@@ -274,6 +287,8 @@ class DecodeStage(implicit p: Parameters) extends XSModule
     io.intRat(i)(0).addr := io.out(i).bits.lsrc(0)
     io.intRat(i)(1).addr := io.out(i).bits.lsrc(1)
     io.intRat(i).foreach(_.hold := !io.out(i).ready)
+    io.intOldDestRat(i).addr := io.out(i).bits.ldest
+    io.intOldDestRat(i).hold := !io.out(i).ready
 
     // Floating-point instructions can not be fused now.
     io.fpRat(i)(0).addr := io.out(i).bits.lsrc(0)

@@ -41,11 +41,20 @@ import xiangshan.backend.exu.ExeUnitParams
 import xiangshan.backend.fu.vector.Bundles.VType
 import xiangshan.backend.fu.{FenceIO, FuConfig, PerfCounterIO}
 import xiangshan.backend.fu.NewCSR.PFEvent
+import xiangshan.backend.rename.{EarlyReleaseReadComplete, EarlyReleaseReadCompleteEvents}
 import xiangshan.backend.rob.{RobCoreTopDownIO, RobDebugRollingIO, RobLsqIO, RobPtr}
 import xiangshan.backend.trace.TraceCoreInterface
 import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
 
+object BackendEarlyReleaseReadComplete {
+  def mergeRegionEvents(
+    intEvent: EarlyReleaseReadComplete,
+    fpEvent: EarlyReleaseReadComplete,
+    vecEvent: EarlyReleaseReadComplete
+  )(implicit p: Parameters): EarlyReleaseReadComplete =
+    EarlyReleaseReadCompleteEvents.merge(Seq(intEvent, fpEvent, vecEvent))
+}
 
 class Backend(val params: BackendParams)(implicit p: Parameters) extends LazyModule
   with HasXSParameter {
@@ -264,6 +273,11 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   ctrlBlock.io.toDispatch.vlWriteBackInfo.vlFromIntIsVlmax := vlFromIntIsVlmax
   ctrlBlock.io.toDispatch.vlWriteBackInfo.vlFromVfIsZero := vlFromVfIsZero
   ctrlBlock.io.toDispatch.vlWriteBackInfo.vlFromVfIsVlmax := vlFromVfIsVlmax
+  ctrlBlock.io.fromDataPath.earlyReleaseReadComplete := BackendEarlyReleaseReadComplete.mergeRegionEvents(
+    intRegion.io.earlyReleaseReadComplete,
+    fpRegion.io.earlyReleaseReadComplete,
+    vecRegion.io.earlyReleaseReadComplete
+  )
   ctrlBlock.io.csrCtrl <> intRegion.io.csrio.get.customCtrl
   ctrlBlock.io.robio.csr.intrBitSet := intRegion.io.csrio.get.interrupt
   ctrlBlock.io.robio.csr.trapTarget := intRegion.io.csrio.get.trapTarget
@@ -389,12 +403,20 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   vecRegion.io.vfSchdBusyTable := vecRegion.io.wbFuBusyTableWriteOut
   // for intIQ read fp regfile
   fpRegion.io.fromIntIQ.get <> intRegion.io.intIQOut.get
+  fpRegion.io.fromIntIQDeqFire.get := intRegion.io.intIQDeqFireOut.get
   intRegion.io.fpRfRdataIn.get := fpRegion.io.fpRfRdataOut.get
   // for fpIQ write int regfile arbiter
   intRegion.io.fromFpIQ.get <> fpRegion.io.fpIQOut.get
+  intRegion.io.fromFpIQDeqFire.get := fpRegion.io.fpIQDeqFireOut.get
   // for vecIQ read int/fp regfile
   vecRegion.io.fromIntIQ.get <> intRegion.io.intIQOut.get
   vecRegion.io.fromFpIQ.get <> fpRegion.io.fpIQOut.get
+  vecRegion.io.fromIntIQDeqFire.get := intRegion.io.intIQDeqFireOut.get
+  vecRegion.io.fromFpIQDeqFire.get := fpRegion.io.fpIQDeqFireOut.get
+  intRegion.io.fromVecIQ.get <> vecRegion.io.vecIQOut.get
+  fpRegion.io.fromVecIQ.get <> vecRegion.io.vecIQOut.get
+  intRegion.io.fromVecIQDeqFire.get := vecRegion.io.vecIQDeqFireOut.get
+  fpRegion.io.fromVecIQDeqFire.get := vecRegion.io.vecIQDeqFireOut.get
 
   // deqOg1
   Seq(intRegion, fpRegion, vecRegion).map{region =>

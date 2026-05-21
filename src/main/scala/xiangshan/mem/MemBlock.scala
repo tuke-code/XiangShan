@@ -169,6 +169,7 @@ class Std(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg) {
   io.out.bits := 0.U.asTypeOf(io.out.bits)
   io.out.bits.res.data := io.in.bits.data.src(0)
   io.out.bits.ctrl.robIdx := io.in.bits.ctrl.robIdx
+  io.out.bits.ctrl.earlyReleaseOwner := io.in.bits.ctrl.earlyReleaseOwner
 }
 
 class ooo_to_mem(implicit p: Parameters) extends MemBlockBundle {

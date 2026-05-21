@@ -43,6 +43,7 @@ class StdExeUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMod
   // writeback of scalar stds but not vector stds
   io.out.toRob.valid := io.in.valid && !io.vstdIn.valid && !FuType.storeIsAMO(io.in.bits.fuType)
   io.out.toRob.bits.robIdx := io.in.bits.robIdx
+  io.out.toRob.bits.earlyReleaseOwner := io.in.bits.earlyRelease.redefinerRobIdx
   io.out.toRob.bits.isRVC.foreach(_ := DontCare)
   io.out.toRob.bits.sqIdx.foreach(_ := io.in.bits.sqIdx.get)
   io.out.toRob.bits.debugInfo := DontCare

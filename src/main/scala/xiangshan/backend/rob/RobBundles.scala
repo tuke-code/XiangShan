@@ -32,6 +32,7 @@ import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.mem.{LqPtr, LsqEnqIO, SqPtr}
 import xiangshan.backend.fu.NewCSR.CSREvents.TargetPCBundle
 import xiangshan.backend.fu.vector.Bundles.{Nf, VLmul, VSew, VType}
+import xiangshan.backend.rename.EarlyReleaseMetadata
 import xiangshan.backend.rename.SnapshotGenerator
 import xiangshan.backend.trace._
 
@@ -52,6 +53,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val wflags = Bool()
     val dirtyVs = Bool()
     val commitType = CommitType()
+    val earlyRelease = new EarlyReleaseMetadata
     val ftqIdx = new FtqPtr
     val ftqOffset = UInt(FetchBlockInstOffsetWidth.W)
     val isRVC = Bool()
@@ -115,6 +117,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val vls = Bool()
     val mmio = Bool()
     val commitType = CommitType()
+    val earlyRelease = new EarlyReleaseMetadata
     val ftqIdx = new FtqPtr
     val ftqOffset = UInt(FetchBlockInstOffsetWidth.W)
     val fpWen = Bool()
@@ -138,6 +141,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
   def connectEnq(robEntry: RobEntryBundle, robEnq: EnqRobUop): Unit = {
     robEntry.wflags := robEnq.wfflags
     robEntry.commitType := robEnq.commitType
+    robEntry.earlyRelease := robEnq.earlyRelease
     robEntry.ftqIdx := robEnq.ftqPtr
     robEntry.ftqOffset := robEnq.ftqOffset
     robEntry.isRVC := robEnq.isRVC
@@ -191,6 +195,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robCommitEntry.ftqIdx := robEntry.ftqIdx
     robCommitEntry.ftqOffset := robEntry.ftqOffset
     robCommitEntry.commitType := robEntry.commitType
+    robCommitEntry.earlyRelease := robEntry.earlyRelease
     robCommitEntry.dirtyFs := robEntry.fpWen || robEntry.wflags
     robCommitEntry.dirtyVs := robEntry.dirtyVs
     robCommitEntry.needFlush := robEntry.needFlush

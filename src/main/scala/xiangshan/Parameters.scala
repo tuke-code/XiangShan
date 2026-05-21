@@ -115,6 +115,9 @@ case class XSCoreParameters
   IssueQueueCompEntrySize: Int = 12,
   EnableBackendV2Config: Boolean = false,
   EnableDispatchIQBalanceOpt: Boolean = true,
+  EnableIntEarlyRelease: Boolean = false,
+  IntEarlyReleaseTrackedPregs: Int = 8,
+  IntEarlyReleaseLedgerEntries: Int = 8,
   intPreg: PregParams = IntPregParams(
     numEntries = 224,
     numBank    = 4,
@@ -501,6 +504,9 @@ case class XSCoreParameters
       fakeIntPreg
     ),
     (if (EnableBackendV2Config) backend.BackendV2SchdParams.iqWakeUpParams else iqWakeUpParams),
+    enableIntEarlyRelease = EnableIntEarlyRelease,
+    intEarlyReleaseTrackedPregs = IntEarlyReleaseTrackedPregs,
+    intEarlyReleaseLedgerEntries = IntEarlyReleaseLedgerEntries,
   )
 
   // Parameters for trace extension.

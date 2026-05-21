@@ -326,6 +326,8 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   io.outPdestAhead3Cycle.get := pdestReg
   io.out.bits.ctrl.toRobValid := RegEnable(io.in.bits.ctrl.toRobValid, io.in.fire)
   io.out.bits.ctrl.robIdx := Mux(isXRetReg, robIdxReg, DelayNWithValid(robIdxReg, csrModOutValid, 3)._2)
+  val earlyReleaseOwnerReg = RegEnable(io.in.bits.ctrl.earlyReleaseOwner, io.in.fire)
+  io.out.bits.ctrl.earlyReleaseOwner := Mux(isXRetReg, earlyReleaseOwnerReg, DelayNWithValid(earlyReleaseOwnerReg, csrModOutValid, 3)._2)
   io.out.bits.ctrl.pdest := DelayNWithValid(RegEnable(io.in.bits.ctrl.pdest, io.in.fire), csrModOutValid, 3)._2
   io.out.bits.ctrl.rfWen.foreach(_ := Mux(isXRetReg, rfWenReg, DelayNWithValid(rfWenReg, csrModOutValid, 3)._2))
   val isRVCReg = RegEnable(io.in.bits.ctrl.isRVC.get, io.in.fire)

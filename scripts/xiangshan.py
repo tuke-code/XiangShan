@@ -669,33 +669,53 @@ class XiangShan(object):
                 return ret
         return 0
 
+def _get_unset_cores(
+    cpu_count=None,
+    core_usage=None,
+    process_iter=None,
+    reserved_width_limit=None,
+) -> list[int]:
+    # FIXME: SMT is not considered temporaryly
+    if cpu_count is None:
+        cpu_count = psutil.cpu_count(logical=False)
+    if core_usage is None:
+        core_usage = psutil.cpu_percent(interval=0.5, percpu=True)
+    if process_iter is None:
+        process_iter = psutil.process_iter
+    if reserved_width_limit is None:
+        reserved_width_limit = cpu_count
+
+    cpu_affinity_count = {i: 0 for i in range(cpu_count)}
+    valid_list = ["running", "disk-sleep", "waking", "waiting"]
+    for proc in process_iter(["pid", "name", "cpu_affinity", "status"]):
+        try:
+            affinity = proc.info["cpu_affinity"]
+            valid = proc.info["status"] in valid_list
+            broad_unbound_affinity = affinity and (
+                len(affinity) >= reserved_width_limit * 2
+                or len(affinity) * 5 >= cpu_count * 4
+            )
+            explicitly_bound = (
+                affinity
+                and max(affinity) < cpu_count
+                and 1 < len(affinity)
+                and not broad_unbound_affinity
+            )
+            if explicitly_bound and valid:
+                for cpu in affinity:
+                    cpu_affinity_count[cpu] += 1
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+
+    unset_cores = [cpu for cpu, count in cpu_affinity_count.items() if count == 0]
+    return unset_cores
+
+
 def get_free_cores(n):
     def numa_count():
         node_dir = "/sys/devices/system/node/"
         nodes = [node for node in os.listdir(node_dir) if node.startswith("node")]
         return len(nodes)
-
-    def get_unset_cores(cpu_count=None, core_usage=None) -> list[int]:
-        # FIXME: SMT is not considered temporaryly
-        if cpu_count is None:
-            cpu_count = psutil.cpu_count(logical=False)
-        if core_usage is None:
-            core_usage = psutil.cpu_percent(interval=0.5, percpu=True)
-
-        cpu_affinity_count = {i: 0 for i in range(cpu_count)}
-        valid_list = ["running", "disk-sleep", "waking", "waiting"]
-        for proc in psutil.process_iter(["pid", "name", "cpu_affinity", "status"]):
-            try:
-                affinity = proc.info["cpu_affinity"]
-                valid = proc.info["status"] in valid_list
-                if affinity and max(affinity) < cpu_count and len(affinity) > 1 and valid:
-                    for cpu in affinity:
-                        cpu_affinity_count[cpu] += 1
-            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                pass
-
-        unset_cores = [cpu for cpu, count in cpu_affinity_count.items() if count == 0]
-        return unset_cores
 
     def detect(n):
         percpu_use_thres = 30
@@ -707,7 +727,11 @@ def get_free_cores(n):
 
         def check(i):
             core_usage = psutil.cpu_percent(interval=0.5, percpu=True)
-            unset_cores = get_unset_cores(num_core, core_usage)
+            unset_cores = _get_unset_cores(
+                num_core,
+                core_usage,
+                reserved_width_limit=max(n * 2, 2),
+            )
 
             window_cores = range(i * n, i * n + n)
             window_usage = core_usage[i * n : i * n + n]

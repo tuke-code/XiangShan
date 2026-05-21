@@ -783,6 +783,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
             wakeUpQueue.io.enq.bits.uop.v0Wen.foreach(x => x := Mux(wakeupFromExu.valid, wakeupFromExu.bits.v0Wen, deqBeforeDly(i).bits.v0Wen.get))
             wakeUpQueue.io.enq.bits.uop.vlWen.foreach(x => x := Mux(wakeupFromExu.valid, wakeupFromExu.bits.vlWen, deqBeforeDly(i).bits.vlWen.get))
             wakeUpQueue.io.enq.bits.uop.pdest := Mux(wakeupFromExu.valid, wakeupFromExu.bits.pdest, deqBeforeDly(i).bits.pdest)
+            wakeUpQueue.io.enq.bits.uop.earlyRelease := Mux(wakeupFromExu.valid, 0.U.asTypeOf(wakeUpQueue.io.enq.bits.uop.earlyRelease), deqBeforeDly(i).bits.earlyRelease)
             wakeUpQueue.io.enq.bits.uop.fuType := Mux(wakeupFromExu.valid, FuType.div.U, deqBeforeDly(i).bits.fuType)
             wakeUpQueue.io.enq.bits.lat := Mux(wakeupFromExu.valid, 0.U, getDeqLat(i, deqBeforeDly(i).bits.fuType))
             wakeUpQueue.io.enq.bits.uop.is0Lat.foreach(_ := Mux(wakeupFromExu.valid, false.B, getDeqLat(i, deqBeforeDly(i).bits.fuType) === 0.U))
@@ -800,6 +801,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
             wakeUpQueue.io.enq.bits.uop.v0Wen.foreach(x => x := Mux(deqBeforeDly(i).valid, deqBeforeDly(i).bits.v0Wen.get, wakeupFromExu.bits.v0Wen))
             wakeUpQueue.io.enq.bits.uop.vlWen.foreach(x => x := Mux(deqBeforeDly(i).valid, deqBeforeDly(i).bits.vlWen.get, wakeupFromExu.bits.vlWen))
             wakeUpQueue.io.enq.bits.uop.pdest := Mux(deqBeforeDly(i).valid, deqBeforeDly(i).bits.pdest, wakeupFromExu.bits.pdest)
+            wakeUpQueue.io.enq.bits.uop.earlyRelease := Mux(deqBeforeDly(i).valid, deqBeforeDly(i).bits.earlyRelease, 0.U.asTypeOf(wakeUpQueue.io.enq.bits.uop.earlyRelease))
             wakeUpQueue.io.enq.bits.uop.fuType := Mux(deqBeforeDly(i).valid, deqBeforeDly(i).bits.fuType, FuType.fDivSqrt.U)
             wakeUpQueue.io.enq.bits.lat := Mux(deqBeforeDly(i).valid, getDeqLat(i, deqBeforeDly(i).bits.fuType), 0.U)
             // fp don't have 0 lat fu
@@ -878,6 +880,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     deq.bits.flushPipe.foreach(_ := false.B)
     deq.bits.pdest := deqEntryVec(i).bits.payload.pdest
     deq.bits.pdestVl.foreach(_ := deqEntryVec(i).bits.payload.pdestVl.get)
+    deq.bits.earlyRelease := deqEntryVec(i).bits.payload.earlyRelease
     deq.bits.robIdx := deqEntryVec(i).bits.status.robIdx
 
     val deqDataSources = deqEntryVec.map(_.bits.status.srcStatus.map(_.dataSources))

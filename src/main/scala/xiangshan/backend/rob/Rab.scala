@@ -289,6 +289,8 @@ class RenameBuffer(size: Int)(implicit p: Parameters) extends XSModule with HasC
   for(i <- 0 until RabCommitWidth * MaxUopSize) {
     io.diffCommits.foreach(_.commitValid(i) := i.U < newCommitSize)
     io.diffCommits.foreach(_.info(i) := renameBufferEntries((diffPtr + i.U).value).info)
+    io.diffCommits.foreach(_.robIdx(i) := renameBufferEntries((diffPtr + i.U).value).robIdx.get.value)
+    io.diffCommits.foreach(_.robIdxFlag(i) := renameBufferEntries((diffPtr + i.U).value).robIdx.get.flag)
   }
 
   XSError(isBefore(enqPtr, deqPtr) && !isFull(enqPtr, deqPtr), "\ndeqPtr is older than enqPtr!\n")

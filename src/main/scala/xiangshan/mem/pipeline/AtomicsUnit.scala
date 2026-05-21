@@ -524,6 +524,7 @@ class AtomicsUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
     port.bits.pdest := Mux(state === s_finish2, pdest2, pdest1)
   }
   io.out.toRob.bits.robIdx := uop.robIdx
+  io.out.toRob.bits.earlyReleaseOwner := uop.earlyRelease.redefinerRobIdx
   io.out.toRob.bits.exceptionVec.foreach(_ := exceptionVec)
   io.out.toRob.bits.trigger.foreach(_ := trigger)
   io.out.toRob.bits.isRVC.foreach(_ := uop.isRVC)

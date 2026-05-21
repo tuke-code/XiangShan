@@ -31,7 +31,7 @@ import xiangshan.backend.decode.{DecodeStage, FusionDecoder}
 import xiangshan.backend.dispatch._
 import xiangshan.backend.fu.vector.Bundles.{VType, Vl}
 import xiangshan.backend.fu.wrapper.CSRToDecode
-import xiangshan.backend.rename.{Rename, RenameTableWrapper, SnapshotGenerator}
+import xiangshan.backend.rename.{EarlyReleaseReadComplete, Rename, RenameTableWrapper, SnapshotGenerator}
 import xiangshan.backend.rob.{Rob, RobCSRIO, RobCoreTopDownIO, RobDebugRollingIO, RobLsqIO, RobPtr}
 import xiangshan.frontend.ftq.{FtqPtr, FtqRead, HasFtqParameters}
 import xiangshan.frontend.PrunedAddr
@@ -540,6 +540,7 @@ class CtrlBlockImp(
   io.frontend.canAccept := !decodeBufValid(0) || !decodeFromFrontend(0).valid
   decode.io.csrCtrl := RegNext(io.csrCtrl)
   decode.io.intRat <> rename.io.intReadPorts
+  decode.io.intOldDestRat <> rename.io.intOldDestReadPorts
   decode.io.fpRat  <> rename.io.fpReadPorts
   decode.io.vecRat <> rename.io.vecReadPorts
   decode.io.v0Rat  <> rename.io.v0ReadPorts
@@ -674,6 +675,12 @@ class CtrlBlockImp(
     RegEnable(waittable2rename, decodeOut.fire)
   }
   rename.io.ssit := memCtrl.io.ssit2Rename
+  rename.io.earlyReleaseReadComplete := io.fromDataPath.earlyReleaseReadComplete
+  rename.io.earlyReleaseNonSpecRedefine := rob.io.nonSpecRedefine
+  rename.io.earlyReleaseCommit := rob.io.earlyReleaseCommit
+  rename.io.earlyReleaseRecovery := rob.io.earlyReleaseRecovery
+  rename.io.earlyReleaseKilledRecovery := rob.io.earlyReleaseKilledRecovery
+  rename.io.earlyReleaseProducerWriteback := delayedNotFlushedWriteBack
   // disble mdp
   // dispatch.io.lfst.resp := 0.U.asTypeOf(dispatch.io.lfst.resp)
   // rename.io.waittable := 0.U.asTypeOf(rename.io.waittable)
@@ -947,6 +954,9 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
   val toDataPath = new Bundle {
     val flush = ValidIO(new Redirect)
     val pcToDataPathIO = new PcToDataPathIO(params)
+  }
+  val fromDataPath = new Bundle {
+    val earlyReleaseReadComplete = Input(new EarlyReleaseReadComplete)
   }
   val toExuBlock = new Bundle {
     val flush = ValidIO(new Redirect)

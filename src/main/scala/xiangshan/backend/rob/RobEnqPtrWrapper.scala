@@ -39,6 +39,7 @@ class RobEnqPtrWrapper(implicit p: Parameters) extends XSModule with HasCircular
     // for enqueue
     val allowEnqueue = Input(Bool())
     val hasBlockBackward = Input(Bool())
+    val killedRecoveryBusy = Input(Bool())
     val enq = Vec(RenameWidth, Input(Bool()))
     val out = Output(Vec(RenameWidth, new RobPtr))
   })
@@ -46,7 +47,10 @@ class RobEnqPtrWrapper(implicit p: Parameters) extends XSModule with HasCircular
   val enqPtrVec = RegInit(VecInit.tabulate(RenameWidth)(_.U.asTypeOf(new RobPtr)))
 
   // enqueue
-  val canAccept = io.allowEnqueue && !io.hasBlockBackward
+  val canAccept = RobEarlyReleaseEnqueuePolicy.canAccept(
+    baseCanAccept = io.allowEnqueue && !io.hasBlockBackward,
+    killedRecoveryBusy = io.killedRecoveryBusy
+  )
   val dispatchNum = Mux(canAccept, PopCount(io.enq), 0.U)
 
   for ((ptr, i) <- enqPtrVec.zipWithIndex) {
