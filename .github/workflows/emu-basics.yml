@@ -94,6 +94,8 @@ jobs:
             report: true
           - name: linux-hello-opensbi
             report: true
+          - name: iopmp-test
+            extra: --no-diff
           - name: povray
             extra: --max-instr 5000000 --gcpt-restore-bin /nfs/home/share/ci-workloads/fix-gcpt/gcpt.bin
             report: true
