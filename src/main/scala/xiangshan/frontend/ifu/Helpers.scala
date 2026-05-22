@@ -141,19 +141,19 @@ trait IfuHelper extends HasIfuParameters with PreDecodeHelper {
 
     val out = WireDefault(0.U.asTypeOf(in))
 
+    val inReg = RegEnable(in,fire)
     // rank(i) = number of valid elements in [0, i)
     val rank = Wire(Vec(n, UInt(log2Ceil(n + 1).W)))
     rank(0) := 0.U
     for (i <- 1 until n) {
-      rank(i) := rank(i - 1) + in(i - 1).valid
+      rank(i) := rank(i - 1) + inReg(i - 1).valid
     }
 
     val count = PopCount(in.map(_.valid))
-    val inReg = RegEnable(in,fire)
-    val rankReg = RegEnable(rank,fire)
+    
 
     for (j <- 0 until n) {
-      val hitMask = (0 until n).map(i => inReg(i).valid && (rankReg(i) === j.U))
+      val hitMask = (0 until n).map(i => inReg(i).valid && (rank(i) === j.U))
       when(hitMask.reduce(_ || _)) {
         out(j) := Mux1H(hitMask, inReg)
       }

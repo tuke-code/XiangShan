@@ -173,15 +173,6 @@ class Ifu(implicit p: Parameters) extends IfuModule
     s0_prevEndIsHalfRvi := s0_endIsHalfRvi
   }
 
-  private val s0_predTakenInstrIdx = VecInit(
-    PopCount(s0_rawInstrValid & s0_fetchBlock(0).range) - 1.U,
-    PopCount(s0_rawInstrValid & s0_icacheData.range) - 1.U
-  )
-
-  private val s0_invalidTaken = VecInit(
-    s0_fetchBlock(0).takenCfiOffset.valid && !s0_instrEndMask(s0_fetchBlock(0).takenCfiOffset.bits),
-    s0_fetchBlock(1).takenCfiOffset.valid && !s0_instrEndMask(s0_fetchBlock(1).takenCfiOffset.bits)
-  )
 
   // When an exception occurs, forward the exception information immediately instead of
   // waiting for instruction concatenation to complete.
@@ -200,8 +191,6 @@ class Ifu(implicit p: Parameters) extends IfuModule
   s1_ready := s1_fire || !s1_valid
 
   private val s1_fetchBlock        = RegEnable(s0_fetchBlock, s0_fire)
-  private val s1_predTakenInstrIdx = RegEnable(s0_predTakenInstrIdx, s0_fire)
-  private val s1_invalidTaken      = RegEnable(s0_invalidTaken, s0_fire)
   private val s1_hasException = RegEnable(s0_hasException, s0_fire)
 
   private val s1_prevIBufEnqPtr     = RegInit(0.U.asTypeOf(new IBufPtr))
@@ -211,6 +200,9 @@ class Ifu(implicit p: Parameters) extends IfuModule
 
   private val s1_endIsHalfRvi = RegEnable(s0_endIsHalfRvi, s0_fire)
   private val s1_instrData    = RegEnable(s0_icacheData.data, s0_fire)
+  private val s1_instrRange    = RegEnable(s0_icacheData.range, s0_fire)
+  private val s1_rawInstrValid = RegEnable(s0_rawInstrValid, s0_fire)
+  private val s1_instrEndMask = RegEnable(s0_instrEndMask, s0_fire)
   private val s1_totalEndPos  = RegEnable(s0_totalEndPos, s0_fire)
   private val s1_icacheMeta   = RegEnable(s0_icacheMeta, s0_fire)
 
@@ -219,6 +211,16 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s1_instrValid = Mux(s0_hasException, 1.U(FetchBlockInstNum.W), s1_realInstrValid)
   private val s1_instrCount = Mux(s0_hasException, 1.U((log2Ceil(FetchBlockInstNum) + 1).W), s1_realInstrCount)
 
+  private val s1_predTakenInstrIdx = VecInit(
+    PopCount(s1_rawInstrValid & s1_fetchBlock(0).range) - 1.U,
+    PopCount(s1_rawInstrValid & s1_instrRange) - 1.U
+  )
+
+  private val s1_invalidTaken = VecInit(
+    s1_fetchBlock(0).takenCfiOffset.valid && !s1_instrEndMask(s1_fetchBlock(0).takenCfiOffset.bits),
+    s1_fetchBlock(1).takenCfiOffset.valid && !s1_instrEndMask(s1_fetchBlock(1).takenCfiOffset.bits)
+  )
+
   private val s1_predTakenMask = VecInit((0 until FetchPorts).map { i =>
     Mux(
       s1_fetchBlock(i).valid && s1_fetchBlock(i).takenCfiOffset.valid,
@@ -226,6 +228,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
       0.U(FetchBlockInstNum.W)
     )
   })
+
   private val s1_mergedPredTakenMask = s1_predTakenMask(0) | s1_predTakenMask(1)
 
   private val s1_invalidTakenMask = VecInit((0 until FetchPorts).map { i =>
