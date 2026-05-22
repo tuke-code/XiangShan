@@ -1680,13 +1680,13 @@ class LoadUnitS3(param: ExeUnitParams)(
   val perfCCTReplayEn = pipeIn.valid && !kill && endPipe && lqWriteCause.asUInt.orR
   val perfCCTReplayCause = ParallelPriorityMux(Seq(
     lqWriteCause(C_TM) -> PerfCCT.ReplayReason.TLBMiss.id.U,
-    lqWriteCause(C_DM) -> PerfCCT.ReplayReason.CacheMiss.id.U,
-    lqWriteCause(C_RAR) -> PerfCCT.ReplayReason.RARReplay.id.U,
-    lqWriteCause(C_RAW) -> PerfCCT.ReplayReason.RAWReplay.id.U,
-    lqWriteCause(C_BC) -> PerfCCT.ReplayReason.BankConflict.id.U,
-    lqWriteCause(C_SMF) -> PerfCCT.ReplayReason.STDForwardFail.id.U, // TODO
     lqWriteCause(C_FF) -> PerfCCT.ReplayReason.STDForwardFail.id.U,
     lqWriteCause(C_DR) -> PerfCCT.ReplayReason.DcacheStall.id.U,
+    lqWriteCause(C_DM) -> PerfCCT.ReplayReason.CacheMiss.id.U,
+    lqWriteCause(C_BC) -> PerfCCT.ReplayReason.BankConflict.id.U,
+    lqWriteCause(C_RAR) -> PerfCCT.ReplayReason.RARReplay.id.U,
+    lqWriteCause(C_RAW) -> PerfCCT.ReplayReason.RAWReplay.id.U,
+    lqWriteCause(C_SMF) -> PerfCCT.ReplayReason.STDForwardFail.id.U, // TODO
     true.B -> PerfCCT.ReplayReason.OtherReplay.id.U
   ))
   val perfCCTRecordAddrEn = io.ldout.toRob.fire && !kill

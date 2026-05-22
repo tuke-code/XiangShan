@@ -1259,6 +1259,12 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.csr.perfinfo.retiredInstr := retireCounter
   io.robFull := !allowEnqueue
   io.headNotReady := commit_vDeqGroup(deqPtr.value(bankNumWidth-1, 0)) && !commit_wDeqGroup(deqPtr.value(bankNumWidth-1, 0))
+  if (backendParams.debugEn) {
+    val headBlockLoad = io.headNotReady && FuType.isLoadVload(robEntries(deqPtr.value).debug_fuType.getOrElse(0.U.asTypeOf(FuType())))
+    debug_deqUop.debug_seqNum.foreach { instSeq =>
+      PerfCCT.updateInstMeta(instSeq, PerfCCT.InstDetail.BlockStartTick.id.U, timer, headBlockLoad, clock, reset)
+    }
+  }
 
   io.toVecExcpMod.logicPhyRegMap := rab.io.toVecExcpMod.logicPhyRegMap
   io.toVecExcpMod.excpInfo := vecExcpInfo
