@@ -287,27 +287,40 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   private val s1AbtbS0FoldedPhr = Mux1H(io.s1Train.abtbFirstTakenBrOH, s1AbtbS0FoldedPhrCandidates)
   s1S0FoldedPhr := Mux(io.s1Train.abtbValid, s1AbtbS0FoldedPhr, s1UbtbS0FoldedPhr)
 
-  private val updateValid = redirectData.valid || io.s3Train.valid || io.s1Train.valid
-  private val updateTaken = MuxCase(
-    false.B,
-    Seq(
-      redirectData.valid -> redirectData.taken,
-      s3_override        -> io.s3Train.taken,
-      s1_valid           -> io.s1Train.taken
-    )
-  )
-  // If this update includes a taken branch, updatePtr should be s0_phrPtr + Shamt.U; otherwise, it should be s0_phrPtr.
-  private val updatePtr = Mux(updateTaken, s0_phrPtr + Shamt.U, s0_phrPtr)
-  when(updateValid) {
+  private def getNextPhr(
+      basePhrPtr:     PhrPtr,
+      updateTaken:    Bool,
+      nextPhrLowBits: UInt,
+      nextShiftBits:  UInt
+  ): Vec[Bool] = {
+    val nextPhr   = WireInit(phr)
+    val updatePtr = Mux(updateTaken, basePhrPtr + Shamt.U, basePhrPtr)
     for (i <- 1 to PathHashHighWidth) {
-      phr((updatePtr + i.U).value) := updatePhrLowBits(i - 1)
+      nextPhr((updatePtr + i.U).value) := nextPhrLowBits(i - 1)
     }
     when(updateTaken) {
       for (i <- 0 until Shamt) {
-        phr((updatePtr - i.U).value) := shiftBits(Shamt - 1 - i)
+        nextPhr((updatePtr - i.U).value) := nextShiftBits(Shamt - 1 - i)
       }
     }
+    nextPhr
   }
+
+  private val redirectNextPhr =
+    getNextPhr(redirectS0PhrPtr, redirectData.taken, redirectS0PhrLowBits, redirectShiftBits)
+  private val s3NextPhr =
+    getNextPhr(s3S0PhrPtr, io.s3Train.taken, s3S0PhrLowBits, s3ShiftBits)
+  private val s1NextPhr =
+    getNextPhr(s1S0PhrPtr, io.s1Train.taken, s1S0PhrLowBits, s1ShiftBits)
+
+  phr := MuxCase(
+    phr,
+    Seq(
+      redirectData.valid -> redirectNextPhr,
+      s3_override        -> s3NextPhr,
+      s1_valid           -> s1NextPhr
+    )
+  )
 
   /*
    * PHR folded history select
