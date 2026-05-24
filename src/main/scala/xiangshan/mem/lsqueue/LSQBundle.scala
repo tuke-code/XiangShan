@@ -23,6 +23,7 @@ import xiangshan.backend.Bundles.{DynInst, ExuOutput, MemExuOutput, MemToRob, Uo
 import xiangshan.backend.exu.ExeUnitParams
 import xiangshan.backend.fu.FuType
 import xiangshan.backend.fu.vector.Bundles.NumLsElem
+import xiangshan.backend.rename.EarlyReleaseOwner
 import xiangshan.backend.rob.RobPtr
 import xiangshan.cache.{CMOReq, CMOResp, DCacheWordReqWithVaddrAndPfFlag, UncacheWordIO}
 import xiangshan.frontend.ftq.FtqPtr
@@ -47,6 +48,7 @@ class StoreQueueEnqIO(implicit p: Parameters) extends MemBlockBundle {
     val loadWaitStrict  = Bool()
     val ssid            = UInt(SSIDWidth.W)
     val storeSetHit     = Bool() // inst has been allocated an store set
+    val earlyReleaseOwner = UInt(EarlyReleaseOwner.width.W)
     // debug signal
     val pc              = Option.when(debugEn)(UInt(VAddrBits.W))
   }

@@ -27,6 +27,7 @@ import xiangshan.backend.Bundles._
 import xiangshan.backend.exu.ExeUnitParams
 import xiangshan.backend.fu.FuConfig.StaCfg
 import xiangshan.backend.fu.FuType
+import xiangshan.backend.rename.EarlyReleaseOwner
 import xiangshan.backend.rob.RobPtr
 import xiangshan.cache.{DCacheWordReqWithVaddrAndPfFlag, MemoryOpConstants, UncacheWordIO}
 import xiangshan.mem.Bundles.SQForward
@@ -88,6 +89,7 @@ class SQDataEntryBundle(implicit p: Parameters) extends MemBlockBundle {
 
     val robIdx           = new RobPtr
     val uopIdx           = UopIdx()
+    val earlyReleaseOwner = UInt(EarlyReleaseOwner.width.W)
 
   }
   val uop                = new UopInfo
@@ -1026,7 +1028,7 @@ abstract class NewStoreQueueBase(implicit p: Parameters) extends LSQModule {
     val writeBackValid = uncacheState === UncacheState.writeback || cboState === CboState.writeback
     val writeBackToRob = Wire(new MemToRob(staParams.head))
     writeBackToRob.robIdx := dataEntries.head.uop.robIdx
-    writeBackToRob.earlyReleaseOwner := dataEntries.head.uop.earlyRelease.redefinerRobIdx
+    writeBackToRob.earlyReleaseOwner := dataEntries.head.uop.earlyReleaseOwner
     writeBackToRob.exceptionVec.foreach{ case x =>
       x := ExceptionNO.selectByFu(0.U.asTypeOf(ExceptionVec()), StaCfg)
       x(hardwareError) := hasHardwareError

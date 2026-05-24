@@ -164,6 +164,7 @@ class LsqWrapper(implicit p: Parameters) extends XSModule
     storeQueue.io.enq.req(i).bits.needAlloc := io.enq.needAlloc(i)(1)
     storeQueue.io.enq.req(i).valid          := io.enq.needAlloc(i)(1) && io.enq.req(i).valid
     connectSamePort(storeQueue.io.enq.req(i).bits.uop, io.enq.req(i).bits)
+    storeQueue.io.enq.req(i).bits.uop.earlyReleaseOwner := io.enq.req(i).bits.earlyRelease.redefinerRobIdx
     // only enable difftest, it will be used.
     if(env.EnableDifftest){
       storeQueue.io.enq.req(i).bits.debugUop.get := io.enq.req(i).bits
