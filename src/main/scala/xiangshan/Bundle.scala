@@ -223,6 +223,7 @@ class Redirect(implicit p: Parameters) extends FrontendRedirect {
   val isMisPred: Bool = Bool()
 
   val fullTarget: UInt = UInt(XLEN.W) // only used for tval storage in backend
+  val satpFlush = Bool()
 
   val stFtqIdx = new FtqPtr // for load violation predict
   val stFtqOffset: UInt = UInt(FetchBlockInstOffsetWidth.W)
@@ -807,8 +808,8 @@ class UopTopDown(implicit p: Parameters) extends XSBundle {
 
 class LowPowerIO(implicit p: Parameters) extends Bundle {
   /* i_*: SoC -> CPU   o_*: CPU -> SoC */
-  val o_cpu_no_op = Output(Bool()) 
-  //physical power down 
+  val o_cpu_no_op = Output(Bool())
+  //physical power down
   val i_cpu_pwrdown_req_n = Input(Bool())
   val o_cpu_pwrdown_ack_n = Output(Bool())
   // power on/off sequence control for Core iso/rst

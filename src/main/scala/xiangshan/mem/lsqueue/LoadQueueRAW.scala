@@ -376,6 +376,7 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
     redirect.bits.level       := RedirectLevel.flush
     redirect.bits.target      := rollbackLqWb(i).bits.pc
     redirect.bits.debug_runahead_checkpoint_id := rollbackLqWb(i).bits.debugInfo.runahead_checkpoint_id
+    redirect.bits.satpFlush   := false.B
     redirect
   })
   io.rollback := allRedirect

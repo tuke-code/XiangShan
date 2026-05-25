@@ -662,6 +662,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.flushOut.bits.ftqOffset := Mux(needModifyFtqIdxOffset, firstVInstrFtqOffset, deqPtrEntry.ftqOffset)
   io.flushOut.bits.level := Mux(deqHasReplayInst || intrEnable || deqHasException || needModifyFtqIdxOffset, RedirectLevel.flush, RedirectLevel.flushAfter) // TODO use this to implement "exception next"
   io.flushOut.bits.interrupt := !isFlushPipe
+  io.flushOut.bits.satpFlush := isFlushPipe && exceptionDataRead.bits.satpFlushPipe
   XSPerfAccumulate("flush_num", io.flushOut.valid)
   XSPerfAccumulate("interrupt_num", io.flushOut.valid && intrEnable)
   XSPerfAccumulate("exception_num", io.flushOut.valid && deqHasException)
@@ -691,6 +692,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   io.exception.bits.isHls := RegEnable(deqPtrEntry.isHls, exceptionHappen)
   io.exception.bits.vls := RegEnable(deqPtrEntry.vls, exceptionHappen)
   io.exception.bits.trigger := RegEnable(exceptionDataRead.bits.trigger, exceptionHappen)
+  io.exception.bits.satpFlushFirstFetchFault := RegEnable(exceptionDataRead.bits.satpFlushFirstFetchFault && deqHasException, exceptionHappen)
 
   // data will be one cycle after valid
   io.readGPAMemAddr.valid := exceptionHappen
@@ -1191,6 +1193,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     exceptionGen.io.enq(i).bits.isEnqExcp := io.enq.req(i).bits.hasException
     exceptionGen.io.enq(i).bits.isFetchMalAddr := io.enq.req(i).bits.isFetchMalAddr
     exceptionGen.io.enq(i).bits.flushPipe := io.enq.req(i).bits.flushPipe
+    exceptionGen.io.enq(i).bits.satpFlushPipe := io.enq.req(i).bits.satpFlushFirstFetchFault
     exceptionGen.io.enq(i).bits.isVset := io.enq.req(i).bits.isVset
     exceptionGen.io.enq(i).bits.replayInst := false.B
     XSError(canEnqueue(i) && io.enq.req(i).bits.replayInst, "enq should not set replayInst")
@@ -1227,10 +1230,12 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     exc_wb.bits.isEnqExcp       := false.B
     exc_wb.bits.isFetchMalAddr  := false.B
     exc_wb.bits.flushPipe       := wb.bits.flushPipe.getOrElse(false.B)
+    exc_wb.bits.satpFlushPipe   := wb.bits.satpFlushPipe.getOrElse(false.B)
     exc_wb.bits.isVset          := false.B
     exc_wb.bits.replayInst      := wb.bits.replay.getOrElse(false.B)
     exc_wb.bits.singleStep      := false.B
     exc_wb.bits.crossPageIPFFix := false.B
+    exc_wb.bits.satpFlushFirstFetchFault := false.B
     val trigger = wb.bits.trigger.getOrElse(TriggerAction.None).asTypeOf(exc_wb.bits.trigger)
     exc_wb.bits.trigger := trigger
     exc_wb.bits.vstartEn := (if (wb.bits.vls.nonEmpty) wb.bits.exceptionVec.get.asUInt.orR || TriggerAction.isDmode(trigger) else 0.U)

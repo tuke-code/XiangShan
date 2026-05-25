@@ -34,6 +34,8 @@ class TrapEntryHSEventModule(implicit val p: Parameters) extends Module with CSR
   private val satp = current.satp
   private val vsatp = current.vsatp
   private val hgatp = current.hgatp
+  private val oldSatp  = current.oldSatp
+  private val oldVsatp = current.oldVsatp
 
   private val highPrioTrapNO = in.causeNO.ExceptionCode.asUInt
   private val isException = !in.causeNO.Interrupt.asBool
@@ -41,13 +43,19 @@ class TrapEntryHSEventModule(implicit val p: Parameters) extends Module with CSR
 
   private val trapPC = genTrapVA(
     iMode,
-    satp,
-    vsatp,
+    oldSatp,
+    oldVsatp,
     hgatp,
     in.trapPc,
   )
 
-  private val trapPCGPA = in.trapPcGPA
+  private val trapPCGPA = genTrapVA(
+    iMode,
+    oldSatp,
+    oldVsatp,
+    hgatp,
+    in.trapPcGPA,
+  )
 
   private val trapMemVA = in.memExceptionVAddr
 
@@ -68,6 +76,7 @@ class TrapEntryHSEventModule(implicit val p: Parameters) extends Module with CSR
   private val isFetchMalAddr = in.isFetchMalAddr
   private val isFetchMalAddrExcp = isException && isFetchMalAddr
   private val isIllegalInst  = isException && (ExceptionNO.EX_II.U === highPrioTrapNO || ExceptionNO.EX_VI.U === highPrioTrapNO)
+  private val satpFlushFirstFetchFault = in.satpFlushFirstFetchFault
 
   private val isLSGuestExcp    = isException && ExceptionNO.getLSGuestPageFault.map(_.U === highPrioTrapNO).reduce(_ || _)
   private val isFetchGuestExcp = isException && ExceptionNO.EX_IGPF.U === highPrioTrapNO
@@ -119,10 +128,14 @@ class TrapEntryHSEventModule(implicit val p: Parameters) extends Module with CSR
     // SPVP is not PrivMode enum type, so asUInt and shrink the width
   out.hstatus.bits.SPVP         := Mux(!current.privState.isVirtual, in.hstatus.SPVP.asUInt, current.privState.PRVM.asUInt(0, 0))
   out.hstatus.bits.GVA          := tvalFillGVA
-  out.sepc.bits.epc             := Mux(isFetchMalAddr, in.fetchMalTval(63, 1), trapPC(63, 1))
+  out.sepc.bits.epc             := Mux(satpFlushFirstFetchFault,
+                                      trapPC(63, 1),
+                                      Mux(isFetchMalAddr, in.fetchMalTval(63, 1), trapPC(63, 1)))
   out.scause.bits.Interrupt     := isInterrupt
   out.scause.bits.ExceptionCode := highPrioTrapNO
-  out.stval.bits.ALL            := Mux(isFetchMalAddrExcp, in.fetchMalTval, tval)
+  out.stval.bits.ALL            := Mux(satpFlushFirstFetchFault,
+                                      tval,
+                                      Mux(isFetchMalAddrExcp, in.fetchMalTval, tval))
   out.htval.bits.ALL            := tval2 >> 2
   out.htinst.bits.ALL           := Mux(isFetchGuestExcp && in.trapIsForVSnonLeafPTE || isLSGuestExcp && in.memExceptionIsForVSnonLeafPTE, 0x3000.U, 0.U)
 

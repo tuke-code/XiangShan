@@ -128,6 +128,7 @@ class TrapEntryEventInput(implicit val p: Parameters) extends Bundle with HasXSP
   val isFetchBkpt = Input(Bool())
   val trapIsForVSnonLeafPTE = Input(Bool())
   val hasDTExcp = Input(Bool())
+  val satpFlushFirstFetchFault = Input(Bool())
 
   // always current privilege
   val iMode = Input(new PrivState())
@@ -147,6 +148,8 @@ class TrapEntryEventInput(implicit val p: Parameters) extends Bundle with HasXSP
   val vsatp = Input(new SatpBundle)
   val hgatp = Input(new HgatpBundle)
   val mbmc = Input(new MbmcBundle)
+  val oldSatp = Input(new SatpBundle)
+  val oldVsatp = Input(new SatpBundle)
   // from mem
   val memExceptionVAddr = Input(UInt(XLEN.W))
   val memExceptionGPAddr = Input(UInt(XLEN.W))

@@ -118,6 +118,7 @@ object Bundles {
     val isLastInFtqEntry = Bool()
     val instr = UInt(32.W)
     val debug = OptionWrapper(backendParams.debugEn, new DecodeInUopDebug())
+    val satpFlushFirstFetchFault = Bool()
 
     def connectCtrlFlow(source: CtrlFlow): Unit = {
       connectSamePort(this, source)
@@ -125,6 +126,7 @@ object Bundles {
       this.isFetchMalAddr := source.backendException
       this.debug.foreach(_.pc := source.pc)
       this.debug.foreach(_.debug_seqNum := source.debug_seqNum)
+      this.satpFlushFirstFetchFault := source.satpFlushFirstFetchFault
     }
   }
   class DecodeInUopDebug(implicit p: Parameters) extends XSBundle {
@@ -145,6 +147,7 @@ object Bundles {
     val ftqPtr = new FtqPtr
     val ftqOffset = UInt(FetchBlockInstOffsetWidth.W)
     val isLastInFtqEntry = Bool()
+    val satpFlushFirstFetchFault = Bool()
     // DecodeOutUop also needs instr because the fusion decoder uses it.
     val instr = UInt(32.W)
     // commitType will be used in rob to calculate lsq commit count
@@ -556,6 +559,7 @@ object Bundles {
     val ftqOffset       = UInt(FetchBlockInstOffsetWidth.W)
     val ftqLastOffset   = UInt(FetchBlockInstOffsetWidth.W) // store ftqoffset before channge in rename
     val stdwriteNeed    = Bool()
+    val satpFlushFirstFetchFault = Bool()
     // passed from DecodeOutUop
     val srcType         = Vec(numSrc, SrcType())
     val ldest           = UInt(LogicRegsWidth.W)
@@ -1351,6 +1355,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
     val vxsat        = Option.when(params.writeVxsat)(Bool())
     val exceptionVec = Option.when(params.exceptionOut.nonEmpty)(ExceptionVec())
     val flushPipe    = Option.when(params.flushPipe)(Bool())
+    val satpFlushPipe= Option.when(params.satpFlushPipe)(Bool())
     val trigger      = Option.when(params.trigger)(TriggerAction())
     val isRVC        = Option.when(params.needIsRVC)(Bool())
     val replay       = Option.when(params.replayInst)(Bool())
@@ -1377,7 +1382,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
     val perfDebugInfo  = Option.when(backendParams.debugEn)(new PerfDebugInfo())
     val debug_seqNum   = Option.when(backendParams.debugEn)(InstSeqNum())
   }
-  
+
   class MemDebugBundle(implicit p: Parameters) extends XSBundle {
     val isMMIO = Option.when(backendParams.basicDebugEn)(Bool())
     val isNCIO = Option.when(backendParams.basicDebugEn)(Bool())
@@ -1462,6 +1467,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
     val data = UInt(params.dataWidth.W)
     val robIdx = new RobPtr()(p)
     val flushPipe = Bool()
+    val satpFlushPipe = Bool()
     val replayInst = Bool()
     val redirect = ValidIO(new Redirect)
     val fflags = UInt(5.W)
@@ -1485,6 +1491,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
       this.data   := source.data(source.params.wbIndex(typeMap(wbType)))
       this.robIdx := source.robIdx
       this.flushPipe := source.flushPipe.getOrElse(false.B)
+      this.satpFlushPipe := source.satpFlushPipe.getOrElse(false.B)
       this.replayInst := source.replay.getOrElse(false.B)
       this.redirect := source.redirect.getOrElse(0.U.asTypeOf(this.redirect))
       this.fflags := source.fflags.getOrElse(0.U.asTypeOf(this.fflags))
@@ -1670,6 +1677,7 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
     val vls = Bool()
     val trigger = TriggerAction()
     val isForVSnonLeafPTE = Bool()
+    val satpFlushFirstFetchFault = Bool()
   }
 
   object UopIdx {

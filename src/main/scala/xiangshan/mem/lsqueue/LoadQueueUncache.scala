@@ -489,7 +489,7 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
 
   /******************************************************************
    * Forward Logic
-   * 
+   *
    * s1 response paddr, s2 response forwardData
    ******************************************************************/
 
@@ -612,6 +612,7 @@ class LoadQueueUncache(implicit p: Parameters) extends XSModule
     redirect.bits.level       := RedirectLevel.flush
     redirect.bits.target      := reqSelUops(i).pc // TODO: check if need pc
     redirect.bits.debug_runahead_checkpoint_id := reqSelUops(i).perfDebugInfo.runahead_checkpoint_id
+    redirect.bits.satpFlush   := false.B
     redirect
   })
   val oldestOneHot = Redirect.selectOldestRedirect(allRedirect)

@@ -7,7 +7,7 @@ import org.chipsalliance.cde.config.Parameters
 import top.{ArgParser, Generator}
 import utility._
 import utils.OptionWrapper
-import xiangshan.backend.fu.NewCSR.CSRBundles.{CSRCustomState, PrivState, RobCommitCSR}
+import xiangshan.backend.fu.NewCSR.CSRBundles._
 import xiangshan.backend.fu.NewCSR.CSRDefines._
 import xiangshan.backend.fu.NewCSR.CSREnumTypeImplicitCast._
 import xiangshan.backend.fu.NewCSR.CSRFunc._
@@ -150,6 +150,7 @@ class NewCSR(implicit val p: Parameters) extends Module
         val isHls = Bool()
         val isFetchMalAddr = Bool()
         val isForVSnonLeafPTE = Bool()
+        val satpFlushFirstFetchFault = Bool()
       })
       val commit = Input(new RobCommitCSR)
       val robDeqPtr = Input(new RobPtr)
@@ -167,6 +168,8 @@ class NewCSR(implicit val p: Parameters) extends Module
       val privState = new PrivState
       val interrupt = Bool()
       val wfiEvent = Bool()
+      val satp  = ValidIO(UInt(SatpMode.getWidth.W))
+      val vsatp = ValidIO(UInt(SatpMode.getWidth.W))
       // fp
       val fpState = new Bundle {
         val off = Bool()
@@ -229,6 +232,9 @@ class NewCSR(implicit val p: Parameters) extends Module
 
     val fetchMalTval = Input(UInt(XLEN.W))
 
+    val oldPrivState = Input(new PrivState)
+    val oldSatpMode  = Input(UInt(SatpMode.getWidth.W))
+
     val distributedWenLegal = Output(Bool())
 
     val trapTargetPc = ValidIO(new TargetPCBundle)
@@ -268,6 +274,10 @@ class NewCSR(implicit val p: Parameters) extends Module
   val trapIsFetchMalAddr = io.fromRob.trap.bits.isFetchMalAddr
   val trapIsFetchBkpt = io.fromRob.trap.bits.isFetchBkpt
   val trapIsForVSnonLeafPTE = io.fromRob.trap.bits.isForVSnonLeafPTE
+  val trapIsFatpFlushFirstFetchFault = io.fromRob.trap.bits.satpFlushFirstFetchFault
+
+  val oldPrivState = io.oldPirvState
+  val oldSatpMode = io.oldSatpMode
 
   // debug_intrrupt
   val debugIntrEnable = RegInit(true.B) // debug interrupt will be handle only when debugIntrEnable
@@ -825,6 +835,10 @@ class NewCSR(implicit val p: Parameters) extends Module
     }
   }
 
+  def genOldSatpMode(mode: UInt): UInt = {
+    Cat(mode, 0.U((XLEN - SatpMode.getWidth).W)).asTypeOf(new SatpBundle)
+  }
+
   trapEntryMNEvent.valid  := ((hasTrap && nmi) || dbltrpToMN) && !entryDebugMode && !debugMode && mnstatus.regOut.NMIE
   trapEntryMEvent .valid  := hasTrap && entryPrivState.isModeM && !dbltrpToMN && !entryDebugMode && !debugMode && !nmi && mnstatus.regOut.NMIE
   trapEntryHSEvent.valid  := hasTrap && entryPrivState.isModeHS && !entryDebugMode && !debugMode && mnstatus.regOut.NMIE
@@ -844,9 +858,10 @@ class NewCSR(implicit val p: Parameters) extends Module
         in.isFetchBkpt := trapIsFetchBkpt
         in.trapIsForVSnonLeafPTE := trapIsForVSnonLeafPTE
         in.hasDTExcp := hasDTExcp
+        in.satpFlushFirstFetchFault := trapIsSatpFlushFirstFetchFault
 
-        in.iMode.PRVM := PRVM
-        in.iMode.V := V
+        in.iMode.PRVM := Mux(trapIsSatpFlushFirstFetchFault, oldPrivState.PRVM, PRVM)
+        in.iMode.V := Mux(trapIsSatpFlushFirstFetchFault, oldPrivState.V, V)
         // when NMIE is zero, force to behave as MPRV is zero
         in.dMode.PRVM := Mux(mstatus.regOut.MPRV.asBool && mnstatus.regOut.NMIE.asBool, mstatus.regOut.MPP, PRVM)
         in.dMode.V := V.asUInt.asBool || mstatus.regOut.MPRV && mnstatus.regOut.NMIE.asBool && (mstatus.regOut.MPP =/= PrivMode.M) && mstatus.regOut.MPV
@@ -868,6 +883,16 @@ class NewCSR(implicit val p: Parameters) extends Module
         } else {
           in.mbmc := DontCare
         }
+        in.oldSatp := Mux(trapIsSatpFlushFirstFetchFault,
+                        Mux(oldPrivState.V.asBool,
+                          satp.regOut,
+                          genOldSatpMode(oldSatpMode)),
+                        satp.regOut)
+        in.oldVsatp := Mux(trapIsSatpFlushFirstFetchFault,
+                        Mux(oldPrivState.V.asBool,
+                          genOldSatpMode(oldSatpMode),
+                          vsatp.regOut),
+                        vsatp.regOut)
 
         in.memExceptionVAddr := io.fromMem.excpVA
         in.memExceptionGPAddr := io.fromMem.excpGPA
@@ -1159,6 +1184,10 @@ class NewCSR(implicit val p: Parameters) extends Module
   io.status.wfiEvent := debugIntr || (mie.rdata.asUInt & mip.rdata.asUInt).orR || nmip.asUInt.orR
   io.status.debugMode := debugMode
   io.status.singleStepFlag := !debugMode && dcsr.regOut.STEP
+  io.status.satp.valid  := satp.w.wen
+  io.status.stap.bits   := stap.regOut.MODE.asUInt
+  io.status.vsatp.valid := vsatp.w.wen
+  io.status.vsatp.bits  := vsatp.regOut.MODE.asUInt
 
   private val nonDebugTrapEventValid = Cat(Seq(trapEntryMEvent, trapEntryMNEvent, trapEntryHSEvent, trapEntryVSEvent).map(_.valid)).asUInt.orR
   private val delayedPcFromXtvec = RegEnable(trapHandleMod.io.out.pcFromXtvec, nonDebugTrapEventValid)

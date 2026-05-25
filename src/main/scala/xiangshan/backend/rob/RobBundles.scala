@@ -301,10 +301,12 @@ class RobExceptionInfo(implicit p: Parameters) extends XSBundle {
   val exceptionVec = ExceptionVec()
   val isFetchMalAddr = Bool()
   val flushPipe = Bool()
+  val satpFlushPipe = Bool()
   val isVset = Bool()
   val replayInst = Bool() // redirect to that inst itself
   val singleStep = Bool() // TODO add frontend hit beneath
   val crossPageIPFFix = Bool()
+  val satpFlushFirstFetchFault = Bool()
   val trigger = TriggerAction()
   // if vstart is udpated by vector unit
   val vstartEn = Bool()
