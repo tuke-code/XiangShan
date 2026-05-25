@@ -208,8 +208,8 @@ class Ifu(implicit p: Parameters) extends IfuModule
 
   private val s1_instrVec     = s1_compactedInstrVec
   private val s1_realInstrValid        = VecInit(s1_compactedInstrVec.map(_.valid)).asUInt
-  private val s1_instrValid = Mux(s0_hasException, 1.U(FetchBlockInstNum.W), s1_realInstrValid)
-  private val s1_instrCount = Mux(s0_hasException, 1.U((log2Ceil(FetchBlockInstNum) + 1).W), s1_realInstrCount)
+  private val s1_instrValid = Mux(s1_hasException, 1.U(FetchBlockInstNum.W), s1_realInstrValid)
+  private val s1_instrCount = Mux(s1_hasException, 1.U((log2Ceil(FetchBlockInstNum) + 1).W), s1_realInstrCount)
 
   private val s1_predTakenInstrIdx = VecInit(
     PopCount(s1_rawInstrValid & s1_fetchBlock(0).range) - 1.U,
