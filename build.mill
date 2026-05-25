@@ -87,14 +87,10 @@ object utility extends ChiselModule {
 
 object yunsuan extends ChiselModule {}
 
-object huancun extends ChiselModule {
-  def moduleDeps = Seq(`rocket-chip`, utility)
-}
-
 object XSCache extends ChiselModule {
   def millSourcePath = pwd / "XSCache"
 
-  def moduleDeps = Seq(`rocket-chip`, utility, huancun, openNCB)
+  def moduleDeps = Seq(`rocket-chip`, utility, openNCB)
 }
 
 object openNCB extends ChiselModule {
@@ -131,7 +127,6 @@ object xiangshan extends ChiselModule {
   def moduleDeps = Seq(
     `rocket-chip`,
     difftest,
-    huancun,
     XSCache,
     yunsuan,
     utility,

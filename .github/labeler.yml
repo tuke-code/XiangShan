@@ -15,7 +15,6 @@
     - src/main/scala/xiangshan/cache/**
     - src/main/scala/xiangshan/mem/**
     - XSCache
-    - huancun
 
 "module: top":
 - changed-files:
@@ -72,7 +71,6 @@
     - ChiselIOPMP
     - XSCache
     - difftest
-    - huancun
     - ready-to-run
     - rocket-chip
     - utility
