@@ -17,8 +17,6 @@ package xiangshan.frontend.instruncache
 
 import chisel3._
 import chisel3.util._
-import coupledL2.MemBackTypeMM
-import coupledL2.MemPageTypeNC
 import freechips.rocketchip.tilelink.TLBundleA
 import freechips.rocketchip.tilelink.TLBundleD
 import freechips.rocketchip.tilelink.TLEdgeOut
@@ -26,6 +24,8 @@ import org.chipsalliance.cde.config.Parameters
 import utils.EnumUInt
 import xiangshan.WfiReqBundle
 import xiangshan.frontend.ifu.PreDecodeHelper
+import xscache.coupledL2.MemBackTypeMM
+import xscache.coupledL2.MemPageTypeNC
 
 // One miss entry deals with one mmio request
 class InstrUncacheEntry(edge: TLEdgeOut)(implicit p: Parameters) extends InstrUncacheModule with PreDecodeHelper {

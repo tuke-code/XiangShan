@@ -16,7 +16,7 @@ on:
         description: Config for XiangShan core
         required: false
         type: string
-        default: CHIConfig
+        default: DefaultConfig
       benchmark_type:
         required: false
         type: string

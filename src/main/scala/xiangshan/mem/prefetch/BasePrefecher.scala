@@ -18,7 +18,7 @@ package xiangshan.mem.prefetch
 
 import chisel3._
 import chisel3.util._
-import coupledL2.PrefetchCtrlFromCore
+import xscache.coupledL2.PrefetchCtrlFromCore
 import org.chipsalliance.cde.config.Parameters
 import utility.MemReqSource
 import xiangshan._

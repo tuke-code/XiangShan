@@ -98,8 +98,7 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
     val pmp_resp = Vec(prefetcherNum, Flipped(new PMPRespBundle()))
     // prefetch req sender
     val l1_pf_to_l1 = DecoupledIO(new L1PrefetchReq())
-    val l1_pf_to_l2 = Output(new coupledL2.PrefetchRecv())
-    val l1_pf_to_l3 = Output(new huancun.PrefetchRecv())
+    val l1_pf_to_l2 = Output(new xscache.coupledL2.PrefetchRecv())
   })
 
   def isLoadAccess(uop: DynInst): Bool = FuType.isLoad(uop.fuType) || FuType.isVLoad(uop.fuType)
@@ -321,9 +320,6 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
   io.l1_pf_to_l2.addr := l2_pf_req.bits.addr
   io.l1_pf_to_l2.pf_source := l2_pf_req.bits.source
   io.l1_pf_to_l2.l2_pf_en := RegNextN(io.pfCtrlFromCSR.l2_pf_enable, L2_PF_REG_CNT, Some(true.B))
-  io.l1_pf_to_l3.addr_valid := l3_pf_req.valid
-  io.l1_pf_to_l3.addr := l3_pf_req.bits.addr
-  io.l1_pf_to_l3.l2_pf_en := RegNextN(io.pfCtrlFromCSR.l2_pf_enable, L3_PF_REG_CNT, Some(true.B))
 
   val l2_trace = Wire(new LoadPfDbBundle)
   l2_trace.paddr := l2_pf_req.bits.addr
@@ -334,15 +330,6 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
     l2_trace_table.log(l2_trace, l2_pf_req.valid, "L2SMS", clock, reset)
   }.otherwise {
     l2_trace_table.log(l2_trace, l2_pf_req.valid, "L2Unknown", clock, reset)
-  }
-
-  val l3_trace = Wire(new LoadPfDbBundle)
-  l3_trace.paddr := l3_pf_req.bits.addr
-  val l3_trace_table = ChiselDB.createTable(s"L3PrefetchTrace$hartId", new LoadPfDbBundle, basicDB = false)
-  when(l3_pf_req.bits.source === MemReqSource.Prefetch2L3Stream.id.U || l3_pf_req.bits.source === MemReqSource.Prefetch2L3Stride.id.U) {
-    l3_trace_table.log(l3_trace, l3_pf_req.valid, "L3StreamStride", clock, reset)
-  }.otherwise {
-    l3_trace_table.log(l3_trace, l3_pf_req.valid, "L3Unknown", clock, reset)
   }
 
   val arb_seq = Seq(l1_pf_arb, l2_pf_arb, l3_pf_arb)
