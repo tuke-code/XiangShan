@@ -1138,13 +1138,12 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       !needCancel(ptr) &&
       (!waitStoreS2(ptr) || isVec(ptr))) {
       if (i == 0){
-        // TODO: fixme for vector mmio
-        when ((mmioState === s_idle) || (mmioState === s_wait && scommit > 0.U)){
-          when ((isVec(ptr) && vecMbCommit(ptr)) || !isVec(ptr)) {
-            isCommit := true.B
-            committed(ptr) := true.B
-            commitVec(0) := true.B
-          }
+        // Vector does not support MMIO.
+        when (RegNext((mmioState === s_idle) || (mmioState === s_wait && scommit > 0.U))){
+          isCommit := true.B
+          committed(ptr) := true.B
+          commitVec(0) := true.B
+          assert(!isVec(ptr))
         }
       } else {
         when ((isVec(ptr) && vecMbCommit(ptr)) || !isVec(ptr)) {
