@@ -423,7 +423,8 @@ class ICachePrefetchPipe(implicit p: Parameters) extends ICacheModule
 
   s1_ready := s1_nextState === S1FsmState.Idle
   s1_fire  := (s1_nextState === S1FsmState.Idle) && s1_valid && !s1_flush // used to clear s1_valid & itlb_valid_latch
-  private val s1_realFire = s1_fire && io.csrPfEnable // real "s1 fire" that s1 enters s2
+//  private val s1_realFire = s1_fire && io.csrPfEnable // real "s1 fire" that s1 enters s2
+  private val s1_realFire = false.B
 
   /**
     ******************************************************************************
