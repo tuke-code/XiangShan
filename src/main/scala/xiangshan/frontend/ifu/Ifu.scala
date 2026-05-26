@@ -646,7 +646,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   io.toIBuffer.bits.exceptionMask := Mux(
     s3_icacheMeta(0).exception.hasException,
     VecInit.tabulate(IBufferEnqueueWidth)(i => if (i < IfuAlignWidth) i.U === s3_shiftNum else false.B),
-    VecInit.tabulate(IBufferEnqueueWidth)(i => enq(i) & s3_alignRvcIll(i))
+    VecInit.tabulate(IBufferEnqueueWidth)(i => s3_alignInstrValid(i) & s3_alignRvcIll(i))
   )
 
   io.toIBuffer.bits.triggered := s3_alignTriggered
