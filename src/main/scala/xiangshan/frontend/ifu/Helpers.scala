@@ -143,27 +143,25 @@ trait IfuHelper extends HasIfuParameters with PreDecodeHelper {
 
     val inReg = RegEnable(in,fire)
     // rank(i) = number of valid elements in [0, i)
-    val validVec = VecInit(inReg.map(_.valid))
+    val validVec = VecInit(in.map(_.valid))
 
     val rank = VecInit((0 until n).map { i =>
       if (i == 0) 0.U
       else PopCount(validVec.take(i))
     })
-    val rankOH = VecInit((0 until n).map { i =>
-      UIntToOH(rank(i), n).asUInt & Fill(n, validVec(i))
-    })
+    val rankReg = RegEnable(rank,fire)
     val count = PopCount(validVec)
-    
+    val countReg = RegEnable(count,fire)
 
     for (j <- 0 until n) {
-      val hitMask = (0 until n).map(i => rankOH(i)(j))
+      val hitMask = (0 until n).map(i => inReg(i).valid && (rankReg(i) === j.U))
       when(hitMask.reduce(_ || _)) {
         out(j) := Mux1H(hitMask, inReg)
       }
-      out(j).valid := j.U < count
+      out(j).valid := j.U < countReg
     }
 
-    (out, count)
+    (out, countReg)
   }
 
   def align[T <: Data](in: Vec[T], shamt: UInt): Vec[T] = {
