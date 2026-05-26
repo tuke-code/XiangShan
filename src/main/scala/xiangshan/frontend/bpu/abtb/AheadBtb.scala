@@ -18,6 +18,7 @@ package xiangshan.frontend.bpu.abtb
 import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
+import scala.math.min
 import utility.XSPerfAccumulate
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.bpu.BasePredictor
@@ -25,7 +26,6 @@ import xiangshan.frontend.bpu.BasePredictorIO
 import xiangshan.frontend.bpu.FoldedHistoryInfo
 import xiangshan.frontend.bpu.HasFastTrainIO
 import xiangshan.frontend.bpu.Prediction
-import scala.math.min
 import xiangshan.frontend.bpu.history.phr.PhrAllFoldedHistories
 
 /**
