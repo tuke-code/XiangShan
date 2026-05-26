@@ -117,6 +117,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val s0_doubleline      = s0_valid && s0_blkEndOffsetTmp(blockOffBits)
 
   private val s0_isBackendException = fromFtqReq.isBackendException
+  private val s0_hasSatpFlush       = fromFtqReq.hasSatpFlush
 
   /**
     ******************************************************************************
@@ -183,6 +184,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val s1_doubleline         = RegEnable(s0_doubleline, 0.U.asTypeOf(s0_doubleline), s0_fire)
   private val s1_itlbException      = RegEnable(s0_itlbException, 0.U.asTypeOf(s0_itlbException), s0_fire)
   private val s1_isBackendException = RegEnable(s0_isBackendException, false.B, s0_fire)
+  private val s1_hasSatpFlush       = RegEnable(s0_hasSatpFlush, false.B, s0_fire)
   private val s1_itlbPbmt           = RegEnable(s0_itlbPbmt, 0.U.asTypeOf(s0_itlbPbmt), s0_fire)
   private val s1_waymasks           = RegEnable(s0_waymasks, 0.U.asTypeOf(s0_waymasks), s0_fire)
   private val s1_sramMaybeRvcMapRaw = RegEnable(s0_maybeRvcMap, 0.U.asTypeOf(s0_maybeRvcMap), s0_fire)
@@ -419,6 +421,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   toIfu.bits.data               := s1_datas.asUInt
   toIfu.bits.maybeRvcMap        := s1_maybeRvcMap.asUInt
   toIfu.bits.isBackendException := s1_isBackendException
+  toIfu.bits.hasSatpFlush       := s1_hasSatpFlush
   toIfu.bits.vAddr              := s1_vAddr
   toIfu.bits.pAddr              := getPAddrFromPTag(s1_vAddr.head, s1_pTag)
   toIfu.bits.exception          := s1_exceptionOut

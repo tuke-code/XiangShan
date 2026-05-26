@@ -114,6 +114,7 @@ class ICacheMeta(implicit p: Parameters) extends IfuBundle with HasICacheParamet
   val pmpMmio:            Bool          = Bool()
   val itlbPbmt:           UInt          = UInt(Pbmt.width.W)
   val isBackendException: Bool          = Bool()
+  val hasSatpFlush:       Bool          = Bool()
   val isForVSnonLeafPTE:  Bool          = Bool()
   val gpAddr:             PrunedAddr    = PrunedAddr(PAddrBitsMax)
   val pAddr:              PrunedAddr    = PrunedAddr(PAddrBits)
@@ -125,6 +126,7 @@ class ICacheMeta(implicit p: Parameters) extends IfuBundle with HasICacheParamet
     pmpMmio            := fromICache.pmpMmio
     itlbPbmt           := fromICache.itlbPbmt
     isBackendException := fromICache.isBackendException
+    hasSatpFlush       := fromICache.hasSatpFlush
     pAddr              := fromICache.pAddr
     gpAddr             := fromICache.gpAddr
     isForVSnonLeafPTE  := fromICache.isForVSnonLeafPTE

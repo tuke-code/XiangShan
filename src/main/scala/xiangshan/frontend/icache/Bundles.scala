@@ -193,6 +193,7 @@ class ICacheRespBundle(implicit p: Parameters) extends ICacheBundle {
   val pmpMmio:            Bool            = Bool()
   val itlbPbmt:           UInt            = UInt(Pbmt.width.W)
   val isBackendException: Bool            = Bool()
+  val hasSatpFlush:       Bool            = Bool()
   /* NOTE: GPAddrBits(=50bit) is not enough for gpAddr here, refer to PR#3795
    * Sv48*4 only allows 50bit gpAddr, when software violates this requirement
    * it needs to fill the mtval2 register with the full XLEN(=64bit) gpAddr,

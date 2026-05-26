@@ -80,33 +80,36 @@ class IBufEntry(implicit p: Parameters) extends IBufferBundle {
       exception: IBufExceptionEntry
   ): IBufOutEntry = {
     val result = Wire(new IBufOutEntry)
-    result.inst               := inst
-    result.pc                 := pc
-    result.foldpc             := foldpc
-    result.isRvc              := isRvc
-    result.predTaken          := predTaken
-    result.fixedTaken         := fixedTaken
-    result.ftqPtr             := ftqPtr
-    result.exceptionType      := exception.exceptionType
-    result.exceptionCrossPage := exception.exceptionCrossPage
-    result.isBackendException := exception.isBackendException
-    result.triggered          := triggered
-    result.isLastInFtqEntry   := isLastInFtqEntry
-    result.debug_seqNum       := debug_seqNum
-    result.instrEndOffset     := instrEndOffset
+    result.inst                     := inst
+    result.pc                       := pc
+    result.foldpc                   := foldpc
+    result.isRvc                    := isRvc
+    result.predTaken                := predTaken
+    result.fixedTaken               := fixedTaken
+    result.ftqPtr                   := ftqPtr
+    result.exceptionType            := exception.exceptionType
+    result.exceptionCrossPage       := exception.exceptionCrossPage
+    result.isBackendException       := exception.isBackendException
+    result.satpFlushFirstFetchFault := exception.satpFlushFirstFetchFault
+    result.triggered                := triggered
+    result.isLastInFtqEntry         := isLastInFtqEntry
+    result.debug_seqNum             := debug_seqNum
+    result.instrEndOffset           := instrEndOffset
     result
   }
 }
 
 class IBufExceptionEntry(implicit p: Parameters) extends IBufferBundle {
-  val exceptionType:      ExceptionType = new ExceptionType
-  val exceptionCrossPage: Bool          = Bool()
-  val isBackendException: Bool          = Bool()
+  val exceptionType:            ExceptionType = new ExceptionType
+  val exceptionCrossPage:       Bool          = Bool()
+  val isBackendException:       Bool          = Bool()
+  val satpFlushFirstFetchFault: Bool          = Bool()
 
   def fromFetch(fetch: FetchToIBuffer): IBufExceptionEntry = {
-    exceptionType      := fetch.exceptionType
-    exceptionCrossPage := fetch.exceptionCrossPage
-    isBackendException := fetch.isBackendException
+    exceptionType            := fetch.exceptionType
+    exceptionCrossPage       := fetch.exceptionCrossPage
+    isBackendException       := fetch.isBackendException
+    satpFlushFirstFetchFault := fetch.satpFlushFirstFetchFault
     this
   }
 }
@@ -115,20 +118,21 @@ class IBufExceptionEntry(implicit p: Parameters) extends IBufferBundle {
 // In the future, the backend will perform certain computations
 // in the IBuffer, which will be differentiated from IBufEntry.
 class IBufOutEntry(implicit p: Parameters) extends IBufferBundle {
-  val inst:               UInt          = UInt(32.W)
-  val pc:                 PrunedAddr    = PrunedAddr(VAddrBits)
-  val foldpc:             UInt          = UInt(MemPredPCWidth.W)
-  val isRvc:              Bool          = Bool()
-  val predTaken:          Bool          = Bool()
-  val fixedTaken:         Bool          = Bool()
-  val ftqPtr:             FtqPtr        = new FtqPtr
-  val exceptionType:      ExceptionType = new ExceptionType
-  val exceptionCrossPage: Bool          = Bool()
-  val isBackendException: Bool          = Bool()
-  val triggered:          UInt          = TriggerAction()
-  val isLastInFtqEntry:   Bool          = Bool()
-  val instrEndOffset:     UInt          = UInt(FetchBlockInstOffsetWidth.W)
-  val debug_seqNum:       InstSeqNum    = InstSeqNum()
+  val inst:                     UInt          = UInt(32.W)
+  val pc:                       PrunedAddr    = PrunedAddr(VAddrBits)
+  val foldpc:                   UInt          = UInt(MemPredPCWidth.W)
+  val isRvc:                    Bool          = Bool()
+  val predTaken:                Bool          = Bool()
+  val fixedTaken:               Bool          = Bool()
+  val ftqPtr:                   FtqPtr        = new FtqPtr
+  val exceptionType:            ExceptionType = new ExceptionType
+  val exceptionCrossPage:       Bool          = Bool()
+  val isBackendException:       Bool          = Bool()
+  val satpFlushFirstFetchFault: Bool          = Bool()
+  val triggered:                UInt          = TriggerAction()
+  val isLastInFtqEntry:         Bool          = Bool()
+  val instrEndOffset:           UInt          = UInt(FetchBlockInstOffsetWidth.W)
+  val debug_seqNum:             InstSeqNum    = InstSeqNum()
 
   def toCtrlFlow: CtrlFlow = {
     val cf = Wire(new CtrlFlow)
@@ -142,6 +146,7 @@ class IBufOutEntry(implicit p: Parameters) extends IBufferBundle {
     cf.exceptionVec(ExceptionNO.illegalInstr)        := exceptionType.isIll
     cf.exceptionVec(ExceptionNO.hardwareError)       := exceptionType.isHwe
     cf.backendException                              := isBackendException
+    cf.satpFlushFirstFetchFault                      := satpFlushFirstFetchFault
     cf.trigger                                       := triggered
     cf.isRvc                                         := isRvc
     cf.fixedTaken                                    := fixedTaken

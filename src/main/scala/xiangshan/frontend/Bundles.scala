@@ -103,6 +103,7 @@ class FtqFetchRequest(implicit p: Parameters) extends FrontendBundle with ICache
   val ftqIdx:             FtqPtr     = new FtqPtr
   val takenCfiOffset:     UInt       = UInt(CfiPositionWidth.W)
   val isBackendException: Bool       = Bool()
+  val hasSatpFlush:       Bool       = Bool()
 
   def crossCacheline: Bool = super.isCrossLine(this.startVAddr, this.takenCfiOffset)
 }
@@ -321,10 +322,11 @@ class FetchToIBuffer(implicit p: Parameters) extends FrontendBundle {
   val foldpc:         Vec[UInt]           = Vec(IBufferEnqueueWidth, UInt(MemPredPCWidth.W))
   val instrEndOffset: Vec[InstrEndOffset] = Vec(IBufferEnqueueWidth, new InstrEndOffset)
 
-  val exceptionType:      ExceptionType = new ExceptionType
-  val isBackendException: Bool          = Bool()
-  val exceptionCrossPage: Bool          = Bool()
-  val exceptionOffset:    UInt          = UInt(log2Ceil(IBufferEnqueueWidth).W)
+  val exceptionType:            ExceptionType = new ExceptionType
+  val isBackendException:       Bool          = Bool()
+  val satpFlushFirstFetchFault: Bool          = Bool()
+  val exceptionCrossPage:       Bool          = Bool()
+  val exceptionOffset:          UInt          = UInt(log2Ceil(IBufferEnqueueWidth).W)
 
   val triggered:        Vec[UInt] = Vec(IBufferEnqueueWidth, TriggerAction())
   val isLastInFtqEntry: Vec[Bool] = Vec(IBufferEnqueueWidth, Bool())

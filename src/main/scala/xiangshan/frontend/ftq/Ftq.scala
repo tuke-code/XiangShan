@@ -127,21 +127,27 @@ class Ftq(implicit p: Parameters) extends FtqModule
   private val redirect     = RegNext(Mux(backendRedirect.valid, backendRedirect, ifuRedirect))
   private val redirectNext = RegNext(redirect)
 
-  // Instruction page fault and instruction access fault are sent from backend with redirect requests.
-  // When IPF and IAF are sent, backendPcFaultIfuPtr points to the FTQ entry whose first instruction
-  // raises IPF or IAF, which is ifuWbPtr_write or IfuPtr_write.
-  // Only when IFU has written back that FTQ entry can backendIpf and backendIaf be false because this
-  // makes sure that IAF and IPF are correctly raised instead of being flushed by redirect requests.
-  private val backendException    = RegInit(ExceptionType.None)
-  private val backendExceptionPtr = RegInit(FtqPtr(false.B, 0.U))
+  // Both backendException and hasSatpFlush are flags from backend redirect, and
+  // we need to mark them on the first instruction after redirect (i.e. redirect target).
+  // backendException: itlb pre-check, valid when redirect target violates Sv39/48(x4), used to raise exceptions
+  private val backendException = RegInit(ExceptionType.None)
+  // hasSatpFlush: redirect is caused by satp change, used to calculate epc (if exception occurs after satp change)
+  private val hasSatpFlush = RegInit(false.B)
+  // When these flags are valid, backendFlagPtr points to the FTQ entry whose first instruction should be marked,
+  // which is ifuWbPtr_write or IfuPtr_write.
+  // Only when IFU has written back that FTQ entry can reset these states because this
+  // makes sure that the flags are correctly marked instead of being flushed by redirect requests.
+  private val backendFlagPtr = RegInit(FtqPtr(false.B, 0.U))
   when(backendRedirect.valid) {
     val exception = ExceptionType.fromBackend(backendRedirect.bits)
     backendException := exception
-    when(exception.hasException) {
-      backendExceptionPtr := ifuWbPtr(0)
+    hasSatpFlush     := backendRedirect.bits.satpFlush
+    when(exception.hasException || backendRedirect.bits.satpFlush) {
+      backendFlagPtr := ifuWbPtr(0)
     }
-  }.elsewhen(ifuWbPtr(0) =/= backendExceptionPtr) {
+  }.elsewhen(ifuWbPtr(0) =/= backendFlagPtr) {
     backendException := ExceptionType.None
+    hasSatpFlush     := false.B
   }
 
   // --------------------------------------------------------------------------------
@@ -269,7 +275,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
       // they also need to be on the same page, to prevent extra itlb port
       prefetchReq(0).vPageNumber === prefetchReq(1).vPageNumber &&
       // and they cannot have known exception, otherwise we'll prefetch on the wrong path
-      !(backendException.hasException && (backendExceptionPtr === pfPtr(0) || backendExceptionPtr === pfPtr(1)))
+      !(backendException.hasException && (backendFlagPtr === pfPtr(0) || backendFlagPtr === pfPtr(1)))
 
   // (io.toICache.toPrefetch.fire && canTwoPrefetch) is passed to apply(..., canAssert) to prevent assert(x-state)
   private val twoPrefetchCase = TwoPrefetchCase(prefetchReq, io.toICache.toPrefetch.fire && canTwoPrefetch)
@@ -291,7 +297,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
         prefetchReq(i).isCrossLine
     }
     req.ftqIdx           := pfPtr(i)
-    req.backendException := Mux(backendExceptionPtr === pfPtr(i), backendException, ExceptionType.None)
+    req.backendException := Mux(backendFlagPtr === pfPtr(i), backendException, ExceptionType.None)
     req.isSoftPrefetch   := false.B
   }
   io.toICache.toPrefetch.bits.twoPrefetchCase := Mux(canTwoPrefetch, twoPrefetchCase, TwoPrefetchCase.Conflict)
@@ -304,7 +310,8 @@ class Ftq(implicit p: Parameters) extends FtqModule
   io.toICache.fetchReq.bits.nextCachelineVAddr := entryQueue(ifuPtr(0).value).startPc + (CacheLineSize / 8).U
   io.toICache.fetchReq.bits.ftqIdx             := ifuPtr(0)
   io.toICache.fetchReq.bits.takenCfiOffset     := entryQueue(ifuPtr(0).value).takenCfiOffset.bits
-  io.toICache.fetchReq.bits.isBackendException := backendException.hasException && backendExceptionPtr === ifuPtr(0)
+  io.toICache.fetchReq.bits.isBackendException := backendException.hasException && backendFlagPtr === ifuPtr(0)
+  io.toICache.fetchReq.bits.hasSatpFlush       := hasSatpFlush && backendFlagPtr === ifuPtr(0)
 
   io.toIfu.req.valid                    := ifuReqValid
   io.toIfu.req.bits.fetch(0).valid      := ifuReqValid
@@ -622,8 +629,8 @@ class Ftq(implicit p: Parameters) extends FtqModule
     io.toICache.toPrefetch.fire && !io.toICache.toPrefetch.bits.twoPrefetchCase.valid,
     Seq(
       ("fb_not_enough", distanceBetween(bpuPtr(0), pfPtr(0)) <= 3.U),
-      ("fb1_exception", backendException.hasException && backendExceptionPtr === pfPtr(0)),
-      ("fb2_exception", backendException.hasException && backendExceptionPtr === pfPtr(1)),
+      ("fb1_exception", backendException.hasException && backendFlagPtr === pfPtr(0)),
+      ("fb2_exception", backendException.hasException && backendFlagPtr === pfPtr(1)),
       ("page_conflict", prefetchReq(0).vPageNumber =/= prefetchReq(1).vPageNumber),
       ("sram_conflict", twoPrefetchCase.isConflict)
     ),
