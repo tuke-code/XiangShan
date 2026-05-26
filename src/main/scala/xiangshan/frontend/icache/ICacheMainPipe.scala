@@ -119,6 +119,15 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
       assert(s0_wayLookupEntry(1).debug_startVAddr === s0_req(1).startVAddr)
     }
   }
+  private val s0_shamt = VecInit((0 until FetchPorts).map { i =>
+    s0_req(i).startVAddr(5, 0) // unit: byte
+  })
+  private val s0_range = VecInit((0 until FetchPorts).map { i =>
+    Fill(FetchBlockInstNum, 1.U(1.W)) >> (~s0_req(i).takenCfiOffset.bits).asUInt
+  })
+  private val s0_dataMask = VecInit((0 until FetchPorts).map { i =>
+    FillInterleaved(16, s0_range(i))
+  })
 
   /**
     ******************************************************************************
@@ -151,6 +160,9 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val s1_wayLookupEntry = RegEnable(s0_wayLookupEntry, s0_fire)
   private val s1_exceptionInfo  = RegEnable(s0_exceptionInfo, s0_fire)
   private val s1_twoFetchValid  = RegEnable(s0_req(1).valid, s0_fire)
+  private val s1_shamt          = RegEnable(s0_shamt, s0_fire)
+  private val s1_range          = RegEnable(s0_range, s0_fire)
+  private val s1_dataMask       = RegEnable(s0_dataMask, s0_fire)
 
   private val s1_wayMask        = s1_wayLookupEntry.map(_.waymask)
   private val s1_maybeRvcMapRaw = s1_wayLookupEntry.map(_.maybeRvcMap)
@@ -287,15 +299,9 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   )
 
   private val (s1_data, s1_maybeRvcMap) = (0 until FetchPorts).map { i =>
-    val bankIdx    = s1_req(i).startVAddr(5, 3)
-    val bankOffset = s1_req(i).startVAddr(2, 0)
-    val shamt      = bankIdx * 8.U + bankOffset // unit: byte
-    val range      = Fill(FetchBlockInstNum, 1.U(1.W)) >> (~s1_req(i).takenCfiOffset.bits).asUInt
-    val dataMask   = FillInterleaved(16, range)
-
-    val data = (Cat(s1_rawData(i), s1_rawData(i)) >> (shamt * 8.U))(blockBits - 1, 0) & dataMask
+    val data = (Cat(s1_rawData(i), s1_rawData(i)) >> Cat(s1_shamt(i), 0.U(3.W)))(blockBits - 1, 0) & s1_dataMask(i)
     val maybeRvcMap =
-      (Cat(s1_rawMaybeRvcMap(i), s1_rawMaybeRvcMap(i)) >> (shamt / 2.U))(FetchBlockInstNum - 1, 0) & range
+      (Cat(s1_rawMaybeRvcMap(i), s1_rawMaybeRvcMap(i)) >> s1_shamt(i)(5, 1))(FetchBlockInstNum - 1, 0) & s1_range(i)
 
     (data, maybeRvcMap)
   }.unzip
