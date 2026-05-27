@@ -54,6 +54,12 @@ class MissPrefetchStatBundle()(implicit p: Parameters) extends XSBundle with Has
   val refill_hit = Bool()
 }
 
+class RefillPrefetchStatDB(implicit p: Parameters) extends XSBundle with HasDCacheParameters {
+  val refill_valid = Bool()
+  val refill_latency = UInt(LATENCY_WIDTH.W)
+  val refill_hit = Bool()
+}
+
 class PrefetcherMonitorBundle()(implicit p: Parameters) extends XSBundle with HasL1PrefetchSourceParameter {
   val loadinfo = Input(Vec(LoadPipelineWidth, new LoadPrefetchStatBundle))
   val missinfo = Input(new MissPrefetchStatBundle)
@@ -107,6 +113,18 @@ class PrefetcherMonitor()(implicit p: Parameters) extends XSModule with HasStrea
   // ldu 0, 1, 2 can have multiple demand accesses at a time
   val demand_miss_in_ldu = PopCount(io.loadinfo.map(t => t.demand_miss))
   val pollution = PopCount(io.loadinfo.map(t => t.pollution))
+
+  val refill_prefetch_stat_db = Wire(new RefillPrefetchStatDB)
+  refill_prefetch_stat_db.refill_valid := io.missinfo.refill_valid
+  refill_prefetch_stat_db.refill_latency := io.missinfo.refill_latency
+  refill_prefetch_stat_db.refill_hit := io.missinfo.refill_hit
+
+  val refill_prefetch_stat_table = ChiselDB.createTable(
+    s"L1RefillPrefetchStat_hart${p(XSCoreParamsKey).HartId}",
+    new RefillPrefetchStatDB,
+    basicDB = true
+  )
+  refill_prefetch_stat_table.log(refill_prefetch_stat_db, io.missinfo.refill_valid, "PrefetcherMonitor", clock, reset)
   
   XSPerfAccumulate("l1DemandMiss", demand_miss_in_ldu)
   XSPerfAccumulate("l1prefetchSent", total_prefetch)
