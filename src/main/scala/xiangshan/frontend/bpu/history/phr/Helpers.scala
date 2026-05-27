@@ -58,8 +58,19 @@ trait Helpers extends HasPhrParameters with HalfAlignHelper with PhrHelper {
   }
 
   def pathHash(pc: PrunedAddr, target: PrunedAddr): UInt = {
-    val hash = Cat(pc(9, 1), 0.U(4.W)) ^ target(16, 2) // magic numbers
-    hash(PathHashWidth - 1, 0)
+    require(PathHashWidth == 10, "V2-like PHR footprint requires a 10-bit path hash")
+    Cat(
+      pc(11) ^ pc(17) ^ target(6),
+      pc(10) ^ pc(16) ^ target(5),
+      pc(9) ^ pc(15) ^ target(4),
+      pc(8) ^ pc(14) ^ target(3),
+      pc(7) ^ pc(13) ^ target(2),
+      pc(6) ^ pc(12) ^ target(11),
+      pc(5) ^ target(10),
+      pc(4) ^ target(9),
+      pc(3) ^ target(8),
+      pc(2) ^ target(7)
+    )
   }
 
   def getPathHashComponents(pc: PrunedAddr, target: PrunedAddr): (UInt, UInt) = {

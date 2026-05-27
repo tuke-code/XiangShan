@@ -305,8 +305,8 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
     def getCommitHist(ptr: PhrPtr): UInt =
       (Cat(commitHist.asUInt, commitHist.asUInt) >> (ptr.value + 1.U))(PhrHistoryLength - 1, 0)
 
-    def shiftCommitBits(pc: PrunedAddr): UInt =
-      (((pc >> 1) ^ (pc >> 3)) ^ ((pc >> 5) ^ (pc >> 7)))(Shamt - 1, 0)
+    def shiftCommitBits(pc: PrunedAddr, target: PrunedAddr): UInt =
+      pathHash(pc, target)(Shamt - 1, 0)
 
     val commitTaken = commit.branches(0).bits.taken
     val commitTakenPc = Mux(
@@ -314,7 +314,8 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
       commit.startPc,
       getCfiPcFromPosition(commit.startPc, commit.branches(0).bits.cfiPosition)
     )
-    val commitShiftBits = shiftCommitBits(commitTakenPc)
+    val commitTakenTarget = commit.branches(0).bits.target
+    val commitShiftBits   = shiftCommitBits(commitTakenPc, commitTakenTarget)
 
     when(commitValid && commitTaken) {
       commitHist(commitHistPtr.value)         := commitShiftBits(1)
