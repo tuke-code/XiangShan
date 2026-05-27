@@ -92,7 +92,7 @@ class DataSRAMBankWriteReq(implicit p: Parameters) extends DCacheBundle {
   val en = Bool()
   val addr = UInt()
   val way_en = UInt(DCacheWays.W)
-  val data = UInt(encDataBits.W)
+  val data = UInt(encDataSRAMBankBits.W)
 }
 
 // wrap a sram
@@ -168,7 +168,8 @@ class DataSRAMBank(index: Int)(implicit p: Parameters) extends DCacheModule {
     val r = new Bundle() {
       val en = Input(Bool())
       val addr = Input(UInt())
-      val data = Output(Vec(DCacheWays, UInt(encDataBits.W)))
+      val data = Output(Vec(DCacheWays, UInt(DCacheSRAMRowBits.W)))
+      val bankRowEcc = Output(UInt(dataSRAMBankECCBits.W))
     }
   })
 
@@ -178,9 +179,8 @@ class DataSRAMBank(index: Int)(implicit p: Parameters) extends DCacheModule {
   val w_info = io.w
   // val rw_bypass = RegNext(io.w.addr === io.r.addr && io.w.way_en === io.r.way_en && io.w.en)
 
-  private val packedRowBits = DCacheWays * encDataBits
   private val data_bank = Module(new SRAMTemplate(
-    Bits(packedRowBits.W),
+    Bits(encDataSRAMBankBits.W),
     set = DCacheSets / DCacheSetDiv,
     way = 1,
     shouldReset = false,
@@ -193,8 +193,15 @@ class DataSRAMBank(index: Int)(implicit p: Parameters) extends DCacheModule {
     suffix = Some("dcsh_dat")
   ))
 
-  val packedWriteData = Cat((0 until DCacheWays).reverse.map(_ => w_info.data))
-  val packedWriteMask = Cat((0 until DCacheWays).reverse.map(w => Fill(encDataBits, w_info.way_en(w))))
+  val packedWriteData = w_info.data
+  val packedWriteMask = if (EnableDataEcc) {
+    Cat(
+      Fill(dataSRAMBankECCBits, w_info.en),
+      Cat((0 until DCacheWays).reverse.map(w => Fill(DCacheSRAMRowBits, w_info.way_en(w))))
+    )
+  } else {
+    Cat((0 until DCacheWays).reverse.map(w => Fill(DCacheSRAMRowBits, w_info.way_en(w))))
+  }
 
   data_bank.io.w.req.valid := w_info.en
   data_bank.io.w.req.bits.apply(
@@ -208,8 +215,14 @@ class DataSRAMBank(index: Int)(implicit p: Parameters) extends DCacheModule {
   XSPerfAccumulate("part_data_read_counter", data_bank.io.r.req.valid)
 
   val packedReadData = data_bank.io.r.resp.data(0).asUInt
+  val rawReadData = packedReadData(dataSRAMBankRawBits - 1, 0)
+  if (EnableDataEcc) {
+    io.r.bankRowEcc := packedReadData(encDataSRAMBankBits - 1, dataSRAMBankRawBits)
+  } else {
+    io.r.bankRowEcc := 0.U
+  }
   io.r.data := VecInit((0 until DCacheWays).map(w => {
-    packedReadData(encDataBits * (w + 1) - 1, encDataBits * w)
+    rawReadData(DCacheSRAMRowBits * (w + 1) - 1, DCacheSRAMRowBits * w)
   }))
 
   def dump_r() = {
@@ -881,7 +894,12 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
       // read raw data
       val data_bank = data_banks(div_index)(bank_index)
       data_bank.io.r.en := read_enable
-      mbistSramPorts.foreach(_(div_index)(bank_index).rdata := Cat(data_bank.io.r.data.reverse))
+      val mbistReadBankRowData = if (EnableDataEcc) {
+        Cat(Seq(data_bank.io.r.bankRowEcc) ++ data_bank.io.r.data.reverse)
+      } else {
+        Cat(data_bank.io.r.data.reverse)
+      }
+      mbistSramPorts.foreach(_(div_index)(bank_index).rdata := mbistReadBankRowData)
 
       if (DuplicatedQueryBankSeq.contains(bank_index)) {
         data_bank.io.r.addr := bank_set_addr_dup
@@ -890,19 +908,26 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
       }
       for (way_index <- 0 until DCacheWays) {
         val mbistAck = mbistSramPorts.map(_(div_index)(bank_index).ack).getOrElse(false.B)
-        bank_result(div_index)(bank_index)(way_index).ecc := getECCFromEncWord(data_bank.io.r.data(way_index))
-        bank_result(div_index)(bank_index)(way_index).raw_data := getDataFromEncWord(data_bank.io.r.data(way_index)) ^ Mux(mbistAck, 0.U, pseudo_data_toggle_mask(bank_index))
+        bank_result(div_index)(bank_index)(way_index).ecc := 0.U
+        bank_result(div_index)(bank_index)(way_index).raw_data :=
+          data_bank.io.r.data(way_index) ^ Mux(mbistAck, 0.U, pseudo_data_toggle_mask(bank_index))
 
         if (EnableDataEcc) {
-          val ecc_data = bank_result(div_index)(bank_index)(way_index).asECCData()
-          val ecc_data_delayed = RegEnable(ecc_data, RegNext(read_enable))
-          bank_result(div_index)(bank_index)(way_index).error_delayed := dcacheParameters.dataCode.decode(ecc_data_delayed).error
-          read_bank_error_delayed(div_index)(bank_index)(way_index) := bank_result(div_index)(bank_index)(way_index).error_delayed
+          val rawBankRowData = Cat((0 until DCacheWays).reverse.map { w =>
+            data_bank.io.r.data(w) ^ Mux(mbistAck, 0.U, pseudo_data_toggle_mask(bank_index))
+          })
+          val encBankRowData = Cat(data_bank.io.r.bankRowEcc, rawBankRowData)
+          val encBankRowDataDelayed = RegEnable(encBankRowData, RegNext(read_enable))
+          bank_result(div_index)(bank_index)(way_index).error_delayed :=
+            dcacheParameters.dataCode.decode(encBankRowDataDelayed).error
+          read_bank_error_delayed(div_index)(bank_index)(way_index) :=
+            bank_result(div_index)(bank_index)(way_index).error_delayed
         } else {
           bank_result(div_index)(bank_index)(way_index).error_delayed := false.B
           read_bank_error_delayed(div_index)(bank_index)(way_index) := false.B
         }
-        bank_result_delayed(div_index)(bank_index)(way_index) := RegEnable(bank_result(div_index)(bank_index)(way_index), RegNext(read_enable))
+        bank_result_delayed(div_index)(bank_index)(way_index) :=
+          RegEnable(bank_result(div_index)(bank_index)(way_index), RegNext(read_enable))
       }
     }
   }
@@ -936,7 +961,6 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   })
 
   val readline_error = Wire(Vec(DCacheBanks, Bool()))
-  val readline_error_delayed = Wire(Vec(DCacheBanks, Bool()))
   val readline_r_way_addr = RegEnable(OHToUInt(io.readline.bits.way_en), io.readline.fire)
   val readline_rr_way_addr = RegEnable(readline_r_way_addr, RegNext(io.readline.fire))
   val readline_r_div_addr = RegEnable(line_div_addr, io.readline.fire)
@@ -951,17 +975,18 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
 
     if (EnableDataEcc) {
       readline_error(i) := bank_result(readline_rr_div_addr)(i)(readline_rr_way_addr).error_delayed
-     //
-      val ecc_data_delayed = io.readline_resp(i).asECCData()
-      readline_error_delayed(i) := dcacheParameters.dataCode.decode(ecc_data_delayed).error
     } else {
       readline_error(i) := false.B
-      readline_error_delayed(i) := false.B
     }
   })
+  val readlineRespError = RegEnable(
+    readline_error,
+    VecInit(Seq.fill(DCacheBanks)(false.B)),
+    io.readline_can_resp | mbist_ack
+  )
   io.readline_resp := RegEnable(readline_resp, io.readline_can_resp | mbist_ack)
   io.readline_error := readline_error.asUInt.orR
-  io.readline_error_delayed := readline_error_delayed.asUInt.orR
+  io.readline_error_delayed := readlineRespError.asUInt.orR
 
   // write data_banks & ecc_banks
   for (div_index <- 0 until DCacheSetDiv) {
@@ -970,12 +995,22 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
       val wen_reg = write_bank_mask_reg(bank_index) &&
         write_valid_dup_reg(bank_index) &&
         write_div_addr_dup_reg(bank_index) === div_index.U && RegNext(io.write.valid)
-      val write_ecc_reg = RegEnable(getECCFromEncWord(cacheParams.dataCode.encode(io.write.bits.data(bank_index))), io.write.valid)
+      val write_data_by_way = Wire(Vec(DCacheWays, UInt(DCacheSRAMRowBits.W)))
+      for (way_index <- 0 until DCacheWays) {
+        write_data_by_way(way_index) := Mux(
+          write_wayen_dup_reg(bank_index)(way_index),
+          write_data_reg(bank_index),
+          bank_result_delayed(div_index)(bank_index)(way_index).raw_data
+        )
+      }
+      val write_raw_bank_row = Cat((0 until DCacheWays).reverse.map(w => write_data_by_way(w)))
+      val write_enc_bank_row =
+        if (EnableDataEcc) cacheParams.dataCode.encode(write_raw_bank_row) else write_raw_bank_row
       val data_bank = data_banks(div_index)(bank_index)
       data_bank.io.w.en := wen_reg
       data_bank.io.w.way_en := write_wayen_dup_reg(bank_index)
       data_bank.io.w.addr := write_set_addr_dup_reg(bank_index)
-      data_bank.io.w.data := asECCData(write_ecc_reg, write_data_reg(bank_index))
+      data_bank.io.w.data := write_enc_bank_row
     }
   }
 
