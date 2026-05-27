@@ -82,6 +82,7 @@ class PhrMeta(implicit p: Parameters) extends PhrBundle {
   val phrPtr:     PhrPtr = new PhrPtr
   val phrLowBits: UInt   = UInt(PathHashHighWidth.W)
 
+  val predTaken: Option[Bool] = Option.when(!env.FPGAPlatform)(new Bool)
   // for debug
   val predFoldedHist: Option[PhrAllFoldedHistories] =
     Option.when(!env.FPGAPlatform)(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
