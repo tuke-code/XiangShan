@@ -94,6 +94,7 @@ class DataSRAMBankWriteReq(implicit p: Parameters) extends DCacheBundle {
   val en = Bool()
   val addr = UInt()
   val data = UInt(DCachePackedBankRowBits.W)
+  val bitmask = UInt(encPackedDataBits.W)
 }
 
 // wrap a sram
@@ -181,6 +182,7 @@ class DataSRAMBank(index: Int)(implicit p: Parameters) extends DCacheModule {
     shouldReset = false,
     holdRead = false,
     singlePort = true,
+    useBitmask = true,
     withClockGate = true,
     hasMbist = hasMbist,
     hasSramCtl = hasSramCtl,
@@ -197,7 +199,8 @@ class DataSRAMBank(index: Int)(implicit p: Parameters) extends DCacheModule {
   data_bank.io.w.req.bits.apply(
     setIdx = io.w.addr,
     data = writeEncData,
-    waymask = 1.U
+    waymask = 1.U,
+    bitmask = io.w.bitmask
   )
   data_bank.io.r.req.valid := io.r.en
   data_bank.io.r.req.bits.apply(setIdx = io.r.addr)
@@ -225,9 +228,10 @@ class DataSRAMBank(index: Int)(implicit p: Parameters) extends DCacheModule {
 
   def dump_w() = {
     XSDebug(io.w.en,
-      "bank write addr %x data %x\n",
+      "bank write addr %x data %x mask %x\n",
       io.w.addr,
-      io.w.data
+      io.w.data,
+      io.w.bitmask
     )
   }
 
@@ -735,6 +739,7 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   val write_bank_mask_reg = RegEnable(io.write.bits.wmask, 0.U(DCacheSubBanks.W), io.write.valid)
   val write_data_reg = RegEnable(io.write.bits.data, io.write.valid)
   val write_all_way_data_reg = RegEnable(io.write.bits.allWayData, io.write.valid)
+  val write_way_en_reg = RegEnable(io.write.bits.way_en, 0.U(DCacheWays.W), io.write.valid)
   val write_valid_reg = RegNext(io.write.valid, false.B)
   val write_valid_dup_reg = io.write_dup.map(x => RegNext(x.valid, false.B))
   val write_set_addr_dup_reg = io.write_dup.map(x => RegEnable(addr_to_dcache_div_set(x.bits.addr), 0.U, x.valid))
@@ -1034,6 +1039,10 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   io.readline_error_delayed := readline_error_delayed.asUInt.orR
 
   // write data_banks & ecc_banks
+  // Without data ECC, the packed-bank SRAM can update only the selected way slice.
+  // This lets a full 4B subbank overwrite bypass the pre-read while keeping other ways untouched.
+  val selectedWaySliceBitmask = FillInterleaved(DCacheBankBits, write_way_en_reg)
+  val fullPackedWriteBitmask = Fill(encPackedDataBits, true.B)
   for (div_index <- 0 until DCacheSetDiv) {
     for (bank_index <- 0 until DCacheSubBanks) {
       // data write
@@ -1041,12 +1050,22 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
         write_valid_dup_reg(bank_index) &&
         write_div_addr_dup_reg(bank_index) === div_index.U && write_valid_reg
       val data_bank = data_banks(div_index)(bank_index)
-      val packedWriteData = VecInit((0 until DCacheWays).map { way =>
-        get_data_of_subbank(bank_index, write_all_way_data_reg(bank_index >> 1)(way))
-      }).asUInt
+      val packedWriteData = if (EnableDataEcc) {
+        VecInit((0 until DCacheWays).map { way =>
+          get_data_of_subbank(bank_index, write_all_way_data_reg(bank_index >> 1)(way))
+        }).asUInt
+      } else {
+        Fill(DCacheWays, get_data_of_subbank(bank_index, write_data_reg(bank_index >> 1)))
+      }
+      val packedWriteBitmask = if (EnableDataEcc) {
+        fullPackedWriteBitmask
+      } else {
+        selectedWaySliceBitmask
+      }
       data_bank.io.w.en := wen_reg
       data_bank.io.w.addr := write_set_addr_dup_reg(bank_index)
       data_bank.io.w.data := packedWriteData
+      data_bank.io.w.bitmask := packedWriteBitmask
     }
   }
 
