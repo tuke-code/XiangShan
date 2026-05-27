@@ -427,8 +427,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     s3_valid && (takenDiff || cfiPositionDiff || attributeDiff || targetDiff)
   }
 
-  private val s2_phrMeta = RegEnable(phr.io.phrMeta, s1_fire)
-  private val s3_phrMeta = RegEnable(s2_phrMeta, s2_fire)
+  private val s2_phrResloveMeta  = RegEnable(phr.io.phrResloveMeta, s1_fire)
+  private val s3_phrResloveMeta  = RegEnable(s2_phrResloveMeta, s2_fire)
+  private val s2_phrRedirectMeta = RegEnable(phr.io.phrRedirectMeta, s1_fire)
+  private val s3_phrRedirectMeta = RegEnable(s2_phrRedirectMeta, s2_fire)
 
   private val s3_commonHRMeta = WireInit(0.U.asTypeOf(new CommonHRMeta))
   s3_commonHRMeta.ghr       := commonHR.io.s3ResolveMeta.ghr
@@ -439,7 +441,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_commonHRMeta.position  := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
 
   private val s3_redirectMeta = Wire(new BpuRedirectMeta)
-  s3_redirectMeta.phr          := s3_phrMeta
+  s3_redirectMeta.phr          := s3_phrRedirectMeta
   s3_redirectMeta.commonHRMeta := s3_commonHRMeta
   s3_redirectMeta.ras          := ras.io.redirectMeta
 
@@ -449,7 +451,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_resolveMeta.sc       := sc.io.meta
   s3_resolveMeta.commonHR := commonHR.io.s3ResolveMeta
   s3_resolveMeta.ittage   := ittage.io.meta
-  s3_resolveMeta.phr      := s3_phrMeta
+  s3_resolveMeta.phr      := s3_phrResloveMeta
   // s3_resolveMeta.debug_utage.foreach(_ := s3_utageMeta)
   s3_resolveMeta.utage := s3_utageMeta
 
@@ -512,7 +514,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   phr.io.train.stageCtrl            := stageCtrl
   phr.io.train.redirect             := redirect
   phr.io.train.s3_override          := s3_override
-  phr.io.train.s3_phrMeta           := s3_phrMeta
+  phr.io.train.s3_phrMeta           := s3_phrResloveMeta
   phr.io.train.s3_prediction        := s3_prediction
   phr.io.train.s3_startPc           := s3_startPc
   phr.io.s1Train.valid              := s1_fire

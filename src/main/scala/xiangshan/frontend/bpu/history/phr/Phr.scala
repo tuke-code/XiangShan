@@ -18,6 +18,7 @@ package xiangshan.frontend.bpu.history.phr
 import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
+import utility.XSError
 import utility.XSPerfAccumulate
 import utility.XSWarn
 import xiangshan.frontend.PrunedAddr
@@ -27,16 +28,17 @@ import xiangshan.frontend.bpu.BpuTrain
 // PHR: Predicted History Register
 class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with Helpers {
   class PhrIO(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
-    val s0_foldedPhr:   PhrAllFoldedHistories = Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
-    val s1_foldedPhr:   PhrAllFoldedHistories = Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
-    val s2_foldedPhr:   PhrAllFoldedHistories = Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
-    val s3_foldedPhr:   PhrAllFoldedHistories = Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
-    val phr:            Vec[Bool]             = Output(Vec(PhrHistoryLength, Bool()))
-    val phrMeta:        PhrMeta               = Output(new PhrMeta)
-    val train:          PhrUpdate             = Input(new PhrUpdate)       // redirect from backend
-    val s1Train:        S1Train               = Input(new S1Train)
-    val commit:         Valid[BpuTrain]       = Input(Valid(new BpuTrain)) // trian bp data from reslove
-    val trainFoldedPhr: PhrAllFoldedHistories = Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
+    val s0_foldedPhr:    PhrAllFoldedHistories = Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
+    val s1_foldedPhr:    PhrAllFoldedHistories = Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
+    val s2_foldedPhr:    PhrAllFoldedHistories = Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
+    val s3_foldedPhr:    PhrAllFoldedHistories = Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
+    val phr:             Vec[Bool]             = Output(Vec(PhrHistoryLength, Bool()))
+    val phrResloveMeta:  PhrMeta               = Output(new PhrMeta)
+    val phrRedirectMeta: PhrMeta               = Output(new PhrMeta)
+    val train:           PhrUpdate             = Input(new PhrUpdate)       // redirect from backend
+    val s1Train:         S1Train               = Input(new S1Train)
+    val commit:          Valid[BpuTrain]       = Input(Valid(new BpuTrain)) // trian bp data from reslove
+    val trainFoldedPhr:  PhrAllFoldedHistories = Output(new PhrAllFoldedHistories(AllFoldedHistoryInfo))
   }
   val io: PhrIO = IO(new PhrIO)
 
@@ -199,6 +201,15 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   )
 
   redirectPhr := getRedirectPhr(redirectData.phrMeta)
+  private val s3Phr = getRedirectPhr(io.train.s3_phrMeta)
+  private val redirectTakenPhr = Cat(
+    Cat(redirectPhr(PhrHistoryLength - 1, PathHashWidth), redirectHashHigh ^ redirectData.phrMeta.phrLowBits),
+    redirectShiftBits
+  )(PhrHistoryLength - 1, 0)
+  dontTouch(s3Phr)
+  dontTouch(redirectPhr)
+  dontTouch(redirectTakenPhr)
+
   redirectS0FoldedPhr := getNextFoldedPhr(
     redirectData,
     computeAllFoldedPhr(redirectPhr),
@@ -283,15 +294,32 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
       computeFoldedHist(predictHist, info.FoldedLength)(info.HistoryLength)
   }
 
-  io.phrMeta.phrPtr     := s1_phrPtr
-  io.phrMeta.phrLowBits := s1_phrValue(PathHashHighWidth - 1, 0)
-  io.phrMeta.predFoldedHist.foreach(_ := s1_foldedPhrReg)
+  private val s0_oldPhr        = getPhr(updatePtr)
+  private val s1_oldPhrLowBits = RegEnable(s0_oldPhr(PathHashHighWidth - 1, 0), 0.U, s0_fire)
+  private val s1_s0UpdateTaken = RegEnable(updateTaken, false.B, s0_fire)
+
+  io.phrResloveMeta.phrPtr        := s1_phrPtr
+  io.phrResloveMeta.phrLowBits    := s1_phrValue(PathHashHighWidth - 1, 0)
+  io.phrResloveMeta.predTaken.get := s1_s0UpdateTaken
+  io.phrResloveMeta.predFoldedHist.foreach(_ := s1_foldedPhrReg)
+  io.phrRedirectMeta.phrPtr        := Mux(s1_s0UpdateTaken, s1_phrPtr + Shamt.U, s1_phrPtr)
+  io.phrRedirectMeta.phrLowBits    := Mux(s1_s0UpdateTaken, s1_oldPhrLowBits, s1_phrValue(PathHashHighWidth - 1, 0))
+  io.phrRedirectMeta.predTaken.get := s1_s0UpdateTaken
+  io.phrRedirectMeta.predFoldedHist.foreach(_ := s1_foldedPhrReg)
   io.phr            := phr
   io.s0_foldedPhr   := s0_foldedPhr
   io.s1_foldedPhr   := s1_foldedPhrReg
   io.s2_foldedPhr   := s2_foldedPhrReg
   io.s3_foldedPhr   := s3_foldedPhrReg
   io.trainFoldedPhr := metaPhrFolded
+
+  private val redirectPhrHigherDiff = io.train.redirect.valid && io.train.redirect.bits.meta.phr.predTaken.get &&
+    redirectPhr(PhrHistoryLength - 1, PathHashWidth) =/= redirectTakenPhr(MaxHistLens - 1, PathHashWidth)
+  dontTouch(redirectPhrHigherDiff)
+  XSError(
+    redirectPhrHigherDiff,
+    "RedirectMeta using error"
+  )
 
   // TODO: Currently unavailable，waiting for ftq commit info
   // commit time phr checker
