@@ -106,7 +106,8 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
   def isStoreAccess(uop: DynInst): Bool = FuType.isStore(uop.fuType)
 
   val hartId = p(XSCoreParamsKey).HartId
-  val l1D_pf_enable = RegNextN(io.pfCtrlFromCSR.l1D_pf_enable, 2, Some(true.B))
+  //val l1D_pf_enable = RegNextN(io.pfCtrlFromCSR.l1D_pf_enable, 2, Some(true.B))
+  val l1D_pf_enable = false.B
   val pf_train_on_hit = RegNextN(io.pfCtrlFromCSR.l1D_pf_train_on_hit, 2, Some(true.B))
   val s2_loadPcVec = (0 until LD_TRAIN_WIDTH).map{ i=>
     RegEnable(io.fromOOO.s1_loadPc(i), io.trainSource.s1_loadFireHint(i))
@@ -169,8 +170,9 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
   smsOpt.foreach (pf => {
     val enableSMS = Constantin.createRecord(s"pf_enableSMS$hartId", initValue = true)
     // constantinCtrl && master switch csrCtrl && single switch csrCtrl
-    pf.io.enable := enableSMS && l1D_pf_enable &&
-      GatedRegNextN(io.pfCtrlFromCSR.l2_pf_recv_enable, 2, Some(false.B))
+    // pf.io.enable := enableSMS && l1D_pf_enable &&
+    //   GatedRegNextN(io.pfCtrlFromCSR.l2_pf_recv_enable, 2, Some(false.B))
+    pf.io.enable := false.B
     pf.io_agt_en := GatedRegNextN(io.pfCtrlFromCSR.l1D_pf_enable_agt, 2, Some(false.B))
     pf.io_pht_en := GatedRegNextN(io.pfCtrlFromCSR.l1D_pf_enable_pht, 2, Some(false.B))
     pf.io_act_threshold := GatedRegNextN(io.pfCtrlFromCSR.l1D_pf_active_threshold, 2, Some(12.U))
@@ -219,9 +221,9 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
   strideOpt.foreach(pf => {
     val enableL1StreamPrefetcher = Constantin.createRecord(s"pf_enableL1StreamPrefetcher$hartId", initValue = true)
     // constantinCtrl && master switch csrCtrl && single switch csrCtrl
-    pf.io.enable := enableL1StreamPrefetcher && l1D_pf_enable &&
-      GatedRegNextN(io.pfCtrlFromCSR.l1D_pf_enable_stride, 2, Some(false.B))
-
+    // pf.io.enable := enableL1StreamPrefetcher && l1D_pf_enable &&
+    //   GatedRegNextN(io.pfCtrlFromCSR.l1D_pf_enable_stride, 2, Some(false.B))
+    pf.io.enable := false.B
     pf.pf_ctrl <> io.pfCtrlFromDCache
     pf.l2PfqBusy := io.pfCtrlFromTile.l2PfqBusy
     pf.strideEnable := strideModeEnable
@@ -260,9 +262,10 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
   bertiOpt.foreach(pf => {
     val enableBerti = Constantin.createRecord(s"pf_enableBerti$hartId", initValue = true)
     // constantinCtrl && master switch csrCtrl && single switch csrCtrl
-    pf.io.enable := enableBerti && l1D_pf_enable &&
-      GatedRegNextN(io.pfCtrlFromCSR.berti_enable, 2, Some(false.B)) &&
-      bertiModeEnable
+    // pf.io.enable := enableBerti && l1D_pf_enable &&
+    //   GatedRegNextN(io.pfCtrlFromCSR.berti_enable, 2, Some(false.B)) &&
+    //   bertiModeEnable
+    pf.io.enable := false.B
 
     for(i <- 0 until LD_TRAIN_WIDTH){
       val source = io.trainSource.s3_load(i)

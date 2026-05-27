@@ -943,7 +943,8 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   val pf_queue_filter = Module(new MutiLevelPrefetchFilter)
 
   // for now, if the stream is disabled, train and prefetch process will continue, without sending out and reqs
-  val enable = io.enable
+  //val enable = io.enable
+  val enable = false.B
   // Stream 0, Stride 1
   val stream_pf_ctrl = pf_ctrl(0)
   val stride_pf_ctrl = pf_ctrl(1)
