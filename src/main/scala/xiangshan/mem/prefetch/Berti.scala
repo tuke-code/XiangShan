@@ -645,6 +645,7 @@ class DeltaTable()(implicit p: Parameters) extends BertiModule {
         stat_update_isEntryMiss := true.B
         stat_update_isEntryReplace := true.B
         stat_update_evictEntryIdx := way
+        replacer.access(way)
       }.otherwise {
         val way = OHToUInt(matchVec)
         entries(way).updateLite(learn.delta)
@@ -1022,7 +1023,7 @@ class BertiPrefetcher()(implicit p: Parameters) extends BasePrefecher with HasBe
   trainFilter.io.flush := false.B
   trainFilter.io.ldTrainOpt.map(_ := io.ld_in)
   trainFilter.io.stTrainOpt.map(_ := io.st_in)
-  trainFilter.io.trainReq.ready := !demandRefill || trainBits.miss
+  trainFilter.io.trainReq.ready := !demandRefill
 
   // 2. history table && delta
   historyTable.io.access.valid := demandMiss || demandPfHit
