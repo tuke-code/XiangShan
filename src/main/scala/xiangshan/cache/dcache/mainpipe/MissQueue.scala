@@ -29,7 +29,7 @@ import chisel3.util._
 import coupledL2.{IsKeywordKey, MemBackTypeMM, MemPageTypeNC, PCKey, VaddrKey}
 import difftest._
 import freechips.rocketchip.tilelink._
-import huancun.{AliasKey, DirtyKey, PrefetchKey}
+import huancun.{AliasKey, DirtyKey, IsHitKey, PrefetchKey}
 import org.chipsalliance.cde.config.Parameters
 import utility._
 import xiangshan._
@@ -413,6 +413,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     // for main pipe s2
     val refill_info = ValidIO(new MissQueueRefillInfo)
     val refill_train = ValidIO(new TrainReqBundle)
+    val refill_hit = Output(Bool())
 
     val occupy_way = Output(UInt(nWays.W))
 
@@ -527,6 +528,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   val refill_start_time = Reg(UInt(64.W))
   val refill_latency = Reg(UInt(LATENCY_WIDTH.W))
+  val refill_isHit = Reg(Bool())
 
   // allocate current miss queue entry for a miss req
   val primary_fire = WireInit(io.req.valid && io.primary_ready && io.primary_valid && !io.req.bits.cancel && !io.wbq_block_miss_req)
@@ -705,6 +707,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
       val time_delta = refill_end_time - refill_start_time
       val overflow = refill_end_time < refill_start_time || (time_delta >> LATENCY_WIDTH).orR
       refill_latency := Mux(overflow, 0.U, time_delta)
+      refill_isHit := io.mem_grant.bits.user.lift(IsHitKey).getOrElse(false.B)
     }
   }
 
@@ -951,6 +954,8 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   // FIXME lyq: when mshr entry merges, req.pf_source may be cleaned.
   io.refill_train.bits.metaSource := req.pf_source
   io.refill_train.bits.refillLatency := refill_latency
+
+  io.refill_hit := refill_isHit
 
   XSPerfAccumulate("miss_refill_mainpipe_req", io.main_pipe_req.fire)
   XSPerfAccumulate("miss_refill_without_hint", io.main_pipe_req.fire && !mainpipe_req_fired && !w_l2hint)
@@ -1344,6 +1349,9 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     zip
     Seq(miss_req_pipe_reg.req.pf_source) ++ entries.map(_.io.prefetch_info.hit_pf_source)
   )
+  io.prefetch_stat.refill_valid := VecInit(entries.zipWithIndex.map{ case(e,i) => e.io.refill_train.valid && io.mainpipe_info.s2_valid && io.mainpipe_info.s2_miss_id === i.U}).asUInt.orR
+  io.prefetch_stat.refill_latency := Mux1H(entries.zipWithIndex.map{ case(e,i) => (io.mainpipe_info.s2_miss_id === i.U) -> e.io.refill_train.bits.refillLatency })
+  io.prefetch_stat.refill_hit := Mux1H(entries.zipWithIndex.map{ case(e,i) => (io.mainpipe_info.s2_miss_id === i.U) -> e.io.refill_hit })
 
   // L1MissTrace Chisel DB
   val debug_miss_trace = Wire(new L1MissTrace)

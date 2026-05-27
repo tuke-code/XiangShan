@@ -22,8 +22,8 @@ import chisel3.util._
 import coupledL2.{IsKeywordKey, IsKeywordField, MemBackTypeMMField, MemPageTypeNCField, PCField, VaddrField}
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.tilelink._
-import freechips.rocketchip.util.BundleFieldBase
-import huancun.{AliasField, PrefetchField}
+import freechips.rocketchip.util.{BundleFieldBase, BundleKeyBase}
+import huancun.{AliasField, IsHitKey, PrefetchField}
 import org.chipsalliance.cde.config.Parameters
 import utility._
 import utils._
@@ -858,6 +858,7 @@ class DCache()(implicit p: Parameters) extends LazyModule with HasDCacheParamete
   val echoFields: Seq[BundleFieldBase] = Seq(
     IsKeywordField()
   )
+  val respKeys: Seq[BundleKeyBase] = Seq(IsHitKey)
 
   val clientParameters = TLMasterPortParameters.v1(
     Seq(TLMasterParameters.v1(
@@ -866,7 +867,8 @@ class DCache()(implicit p: Parameters) extends LazyModule with HasDCacheParamete
       supportsProbe = TransferSizes(cfg.blockBytes)
     )),
     requestFields = reqFields,
-    echoFields = echoFields
+    echoFields = echoFields,
+    responseKeys = respKeys
   )
 
   val clientNode = TLClientNode(Seq(clientParameters))

@@ -6,6 +6,7 @@ import chisel3.util._
 import utils._
 import utility._
 import xiangshan._
+import xiangshan.cache.HasDCacheParameters
 import xiangshan.mem.L1PrefetchReq
 import xiangshan.mem.Bundles.LsPrefetchTrainBundle
 import xiangshan.mem.HasL1PrefetchSourceParameter
@@ -39,7 +40,7 @@ class MainPrefetchStatBundle()(implicit p: Parameters) extends XSBundle with Has
   val hit_pf_source_in_cache = UInt(L1PfSourceBits.W)
 }
 
-class MissPrefetchStatBundle()(implicit p: Parameters) extends XSBundle with HasL1PrefetchSourceParameter {
+class MissPrefetchStatBundle()(implicit p: Parameters) extends XSBundle with HasL1PrefetchSourceParameter with HasDCacheParameters {
   val pf_late_in_mshr = Bool() // from missqueue, pf req match a existing mshr
   val prefetch_miss = Bool() // from missqueue, pf req allocate a new mshr
   val pf_source = UInt(L1PfSourceBits.W)
@@ -47,6 +48,10 @@ class MissPrefetchStatBundle()(implicit p: Parameters) extends XSBundle with Has
   val hit_pf_in_mshr = Bool() // from missqueue, demand miss match a existing pf mshr, then clear pf flag
   val hit_pf_source_in_mshr = UInt(L1PfSourceBits.W) // from missqueue, the pf source of demand miss matched
   val load_miss = Bool() // from missqueue, load demand miss allocate a new mshr
+
+  val refill_valid = Bool()
+  val refill_latency = UInt(LATENCY_WIDTH.W)
+  val refill_hit = Bool()
 }
 
 class PrefetcherMonitorBundle()(implicit p: Parameters) extends XSBundle with HasL1PrefetchSourceParameter {
