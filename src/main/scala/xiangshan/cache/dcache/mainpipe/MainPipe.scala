@@ -276,11 +276,11 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   req.ready := s0_can_go
 
   val bank_write = VecInit((0 until DCacheSubBanks).map(i => get_mask_of_bank(i, s0_req.store_mask).orR)).asUInt
-  // val bank_full_write = VecInit((0 until DCacheSubBanks).map(i => get_mask_of_bank(i, s0_req.store_mask).andR)).asUInt
-  // val banks_full_overwrite = bank_full_write.andR
+  val bank_full_write = VecInit((0 until DCacheSubBanks).map(i => get_mask_of_bank(i, s0_req.store_mask).andR)).asUInt
 
-  // val banked_store_rmask = bank_write & ~bank_full_write
-  val banked_store_rmask = bank_write
+  // Packed-bank SRAM can skip the read-modify-write path when a store overwrites
+  // one full 4B subbank of the selected way, because masked write preserves other ways.
+  val banked_store_rmask = bank_write & ~bank_full_write
   val banked_full_rmask = ~0.U(DCacheSubBanks.W)
   val banked_none_rmask = 0.U(DCacheSubBanks.W)
 
