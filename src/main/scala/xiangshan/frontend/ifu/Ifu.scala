@@ -155,8 +155,12 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s0_endIsHalfRvi = instrBoundary.io.resp.endIsHalfRvi
   private val s0_rawInstrVec  = instrBoundary.io.resp.rawInstrVec
   private val s0_instrEndMask = instrBoundary.io.resp.instrEndMask
-
+  
+  
   private val s0_rawInstrValid = VecInit(s0_rawInstrVec.map(_.valid)).asUInt
+
+  private val s0_instrPcVec = VecInit(s0_rawInstrVec.map(instr => getInstrPc(instr, s0_fetchBlock)))
+  private val s0_endHalfRviPc = s0_instrPcVec(s0_totalEndPos)
 
   private val (s1_compactedInstrVec, s1_realInstrCount) = compact(s0_rawInstrVec,s0_fire)
 
@@ -205,7 +209,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s1_instrEndMask = RegEnable(s0_instrEndMask, s0_fire)
   private val s1_totalEndPos  = RegEnable(s0_totalEndPos, s0_fire)
   private val s1_icacheMeta   = RegEnable(s0_icacheMeta, s0_fire)
-
+  private val s1_endHalfRviPc = RegEnable(s0_endHalfRviPc, s0_fire)
   private val s1_instrVec     = s1_compactedInstrVec
   private val s1_realInstrValid        = VecInit(s1_compactedInstrVec.map(_.valid)).asUInt
   private val s1_instrValid = Mux(s1_hasException, 1.U(FetchBlockInstNum.W), s1_realInstrValid)
@@ -273,7 +277,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
     )
   }
 
-  private val s1_endHalfRviPc = s1_realAlignedInstrPcVec(s1_instrCount + s1_alignShiftNum)
+  // private val s1_endHalfRviPc = s1_realAlignedInstrPcVec(s1_instrCount + s1_alignShiftNum)
   private val s1_endHalfRviData = s1_instrData(s1_totalEndPos)
 
   private val s1_alignedFoldPc =
