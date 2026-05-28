@@ -225,6 +225,7 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   val hit_pf = hit_pf_in_cache + hit_pf_in_mshr.asUInt
   val pf_late = pf_late_in_cache.asUInt + pf_late_in_mshr.asUInt
 
+  hit_pf_in_cache_cnt := Mux(validity_reset, 0.U, hit_pf_in_cache_cnt + hit_pf_in_cache)
   pf_useless_cnt := Mux(validity_reset, 0.U, pf_useless_cnt + pf_useless)
   back_off_cnt := Mux(back_off_reset, 0.U, back_off_cnt + !enable)
   low_conf_cnt := Mux(conf_reset, 0.U, low_conf_cnt + !confidence.asBool)
