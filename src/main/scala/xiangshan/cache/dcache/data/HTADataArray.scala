@@ -303,8 +303,6 @@ class HTADataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   // readline port: latch read data at readline_can_go (one cycle after readline.fire) and
   // expose at readline_can_resp, matching SramedDataArray / MainPipe timing.
   val readline_error_delayed = Wire(Vec(DCacheBanks, Bool()))
-  val readline_r_way_en = RegEnable(io.readline.bits.way_en, io.readline.fire)
-  assert(PopCount(readline_r_way_en) <= 1.U, "HTADataArray: more than one readline_r_way_en is true")
   val readline_r_way_addr = RegEnable(OHToUInt(io.readline.bits.way_en), io.readline.fire)
   val readline_rr_way_addr = RegEnable(readline_r_way_addr, RegNext(io.readline.fire))
   val readline_r_div_addr = RegEnable(line_div_addr, io.readline.fire)
@@ -313,8 +311,7 @@ class HTADataArray(implicit p: Parameters) extends AbstractBankedDataArray {
   (0 until DCacheBanks).map(i => {
     readline_resp_hold(i) := Mux(
       io.readline_can_go,
-    //   read_result(readline_r_div_addr)(i)(readline_r_way_addr),
-      Mux1H(readline_r_way_en, read_result(readline_r_div_addr)(i)),
+      read_result(readline_r_div_addr)(i)(readline_r_way_addr),
       RegEnable(readline_resp_hold(i), io.readline_stall)
     )
     readline_error_delayed(i) := read_result(readline_rr_div_addr)(i)(readline_rr_way_addr).error_delayed
