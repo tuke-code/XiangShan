@@ -13,7 +13,8 @@ import xiangshan.mem.HasL1PrefetchSourceParameter
 import xiangshan.backend.rob.RobDebugRollingIO
 
 class PrefetchControlBundle()(implicit p: Parameters) extends XSBundle with HasStreamPrefetchHelper {
-  val dynamic_depth = UInt(DEPTH_BITS.W)
+  val l1_depth = UInt(DEPTH_BITS.W)
+  val l2_depth = UInt(DEPTH_BITS.W)
   val flush = Bool()
   val enable = Bool()
   val confidence = UInt(1.W)
@@ -181,7 +182,8 @@ class L1PrefetchMonitorBundle()(implicit p: Parameters) extends XSBundle {
 class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) extends XSModule with HasStreamPrefetchHelper {
   val io = IO(new L1PrefetchMonitorBundle)
 
-  val depth = Reg(UInt(DEPTH_BITS.W))
+  val l1_depth = Reg(UInt(DEPTH_BITS.W))
+  val l2_depth = Reg(UInt(DEPTH_BITS.W))
   val flush = RegInit(false.B)
   val enable = RegInit(true.B)
   val confidence = RegInit(param.confidence.U(1.W))
@@ -190,28 +192,26 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   // mshr full && load miss && load send mshr req && !load match,  -> decr nmax prefetch
   // mshr free
 
-  io.pf_ctrl.dynamic_depth := depth
+  val l1_depth_const = Wire(UInt(DEPTH_BITS.W))
+  l1_depth_const := Constantin.createRecord(s"${param.name}_l1depth${p(XSCoreParamsKey).HartId}", initValue = 64)
+  val l2_depth_const = Wire(UInt(DEPTH_BITS.W))
+  l2_depth_const := Constantin.createRecord(s"${param.name}_l2depth${p(XSCoreParamsKey).HartId}", initValue = 512)
+
+  io.pf_ctrl.l1_depth := l1_depth
+  io.pf_ctrl.l2_depth := l2_depth
   io.pf_ctrl.flush := flush
   io.pf_ctrl.enable := enable
   io.pf_ctrl.confidence := confidence
 
-  val depth_const = Wire(UInt(DEPTH_BITS.W))
-  depth_const := Constantin.createRecord(s"${param.name}_depth${p(XSCoreParamsKey).HartId}", initValue = 32)
-
-  val total_prefetch_cnt = RegInit(0.U((log2Up(param.TIMELY_CHECK_INTERVAL) + 1).W))
-  val pf_late_in_cache_cnt = RegInit(0.U((log2Up(param.TIMELY_CHECK_INTERVAL) + 1).W))
-  val pf_late_in_mshr_cnt = RegInit(0.U((log2Up(param.TIMELY_CHECK_INTERVAL) + 1).W))
-
   val hit_pf_in_cache_cnt = RegInit(0.U((log2Up(param.VALIDITY_CHECK_INTERVAL) + 1).W))
   val pf_useless_cnt = RegInit(0.U((log2Up(param.VALIDITY_CHECK_INTERVAL) + 1).W))
-
   val back_off_cnt = RegInit(0.U((log2Up(param.BACK_OFF_INTERVAL) + 1).W))
   val low_conf_cnt = RegInit(0.U((log2Up(param.LOW_CONF_INTERVAL) + 1).W))
 
-  val timely_reset = (total_prefetch_cnt === param.TIMELY_CHECK_INTERVAL.U) || (pf_late_in_cache_cnt >= param.TIMELY_CHECK_INTERVAL.U)
-  val validity_reset = (hit_pf_in_cache_cnt + pf_useless_cnt) === param.VALIDITY_CHECK_INTERVAL.U
+  val validity_reset = (hit_pf_in_cache_cnt + pf_useless_cnt) >= param.VALIDITY_CHECK_INTERVAL.U
   val back_off_reset = back_off_cnt === param.BACK_OFF_INTERVAL.U
   val conf_reset = low_conf_cnt === param.LOW_CONF_INTERVAL.U
+  val trigger_disable = validity_reset && (pf_useless_cnt >= param.DISABLE_THRESHOLD.U)
 
   val total_prefetch = io.prefetch_info.loadinfo.map(t => t.total_prefetch && param.isMyType(t.pf_source)).reduce(_ || _)
   val pf_late_in_cache = io.prefetch_info.loadinfo.map(t => t.pf_late_in_cache && param.isMyType(t.pf_source)).reduce(_ || _)
@@ -225,57 +225,107 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   val hit_pf = hit_pf_in_cache + hit_pf_in_mshr.asUInt
   val pf_late = pf_late_in_cache.asUInt + pf_late_in_mshr.asUInt
 
-  total_prefetch_cnt := Mux(timely_reset, 0.U, total_prefetch_cnt + total_prefetch)
-  pf_late_in_cache_cnt := Mux(timely_reset, 0.U, pf_late_in_cache_cnt + pf_late_in_cache)
-  pf_late_in_mshr_cnt := Mux(timely_reset, 0.U, pf_late_in_mshr_cnt + pf_late_in_mshr)
-  hit_pf_in_cache_cnt := Mux(validity_reset, 0.U, hit_pf_in_cache_cnt + hit_pf_in_cache)
   pf_useless_cnt := Mux(validity_reset, 0.U, pf_useless_cnt + pf_useless)
-
   back_off_cnt := Mux(back_off_reset, 0.U, back_off_cnt + !enable)
   low_conf_cnt := Mux(conf_reset, 0.U, low_conf_cnt + !confidence.asBool)
-
-  val trigger_late_hit = timely_reset && (pf_late_in_cache_cnt >= param.LATE_HIT_THRESHOLD.U)
-  val trigger_late_miss = timely_reset && (pf_late_in_mshr_cnt >= param.LATE_MISS_THRESHOLD.U)
-  val trigger_pf_useless = validity_reset && (pf_useless_cnt >= param.BAD_THRESHOLD.U)
-  val trigger_disable = validity_reset && (pf_useless_cnt >= param.DISABLE_THRESHOLD.U)
 
   flush := Mux(flush, false.B, flush)
   enable := Mux(back_off_reset, true.B, enable)
   confidence := Mux(conf_reset, 1.U(1.W), confidence)
 
-  when(trigger_pf_useless) {
-    depth := Mux(depth === 1.U, depth, depth >> 1)
-  }
   when(trigger_disable) {
     confidence := 0.U(1.W)
     enable := false.B
     flush := true.B
   }
 
-  when(trigger_late_miss) {
-    depth := Mux(depth === (1 << (DEPTH_BITS - 1)).U, depth, depth << 1)
-  }.elsewhen(trigger_late_hit) {
-    // for now, late hit will disable the prefether
-    confidence := 0.U(1.W)
-    enable := false.B
+  // Moving-average refill latency. MissQueue encodes overflow as latency 0,
+  // so ignore zero-latency samples instead of learning them as fast refills.
+  val refill_l2hit_latency = RegInit(160.U(LATENCY_WIDTH.W))
+  val refill_l2miss_latency = RegInit(1200.U(LATENCY_WIDTH.W))
+
+  val refill_sample_valid = io.prefetch_info.missinfo.refill_valid && io.prefetch_info.missinfo.refill_latency =/= 0.U
+  val refill_valid_s1 = RegNext(refill_sample_valid, false.B)
+  val refill_latency_s1 = RegEnable(io.prefetch_info.missinfo.refill_latency, 0.U, refill_sample_valid)
+  val refill_hit_s1 = RegEnable(io.prefetch_info.missinfo.refill_hit, false.B, refill_sample_valid)
+
+  val ema_avg_s1 = Mux(refill_hit_s1, refill_l2hit_latency, refill_l2miss_latency)
+  val ema_incr_s1 = refill_latency_s1 >= ema_avg_s1
+  val ema_delta_s1 = Mux(ema_incr_s1, refill_latency_s1 - ema_avg_s1, ema_avg_s1 - refill_latency_s1)
+  val ema_step_s1 = ema_delta_s1 >> 3
+
+  val ema_valid_s2 = RegNext(refill_valid_s1, false.B)
+  val ema_hit_s2 = RegEnable(refill_hit_s1, false.B, refill_valid_s1)
+  val ema_incr_s2 = RegEnable(ema_incr_s1, false.B, refill_valid_s1)
+  val ema_step_s2 = RegEnable(ema_step_s1, 0.U, refill_valid_s1)
+
+  val refill_l2hit_latency_next = Mux(ema_incr_s2, refill_l2hit_latency + ema_step_s2, refill_l2hit_latency - ema_step_s2)
+  val refill_l2miss_latency_next = Mux(ema_incr_s2, refill_l2miss_latency + ema_step_s2, refill_l2miss_latency - ema_step_s2)
+
+  when(ema_valid_s2 && ema_hit_s2) {
+    refill_l2hit_latency := refill_l2hit_latency_next
   }
+  when(ema_valid_s2 && !ema_hit_s2) {
+    refill_l2miss_latency := refill_l2miss_latency_next
+  }
+  val refill_latency_updated = ema_valid_s2
+
+  def ceilMapDepth(target: UInt, table: Seq[Int]): UInt = {
+    table.foldRight(table.last.U(DEPTH_BITS.W)) { case (depth, mapped) =>
+      Mux(target <= depth.U, depth.U(DEPTH_BITS.W), mapped)
+    }
+  }
+
+  // D1 = ceil(3 * (10 + l2hit_latency) / 8)
+  // D2 = ceil(3 * (5 + l2hit_latency + l2miss_latency) / 8)
+  val depth_calc_en_s0 = refill_latency_updated
+  val depth_hit_latency_s0 = RegEnable(refill_l2hit_latency, 160.U, depth_calc_en_s0)
+  val depth_miss_latency_s0 = RegEnable(refill_l2miss_latency, 1200.U, depth_calc_en_s0)
+  val depth_calc_en_s1 = RegNext(depth_calc_en_s0, false.B)
+
+  val depth_hit_x2_s1 = RegEnable(depth_hit_latency_s0 << 1, 0.U, depth_calc_en_s1)
+  val depth_miss_x2_s1 = RegEnable(depth_miss_latency_s0 << 1, 0.U, depth_calc_en_s1)
+  val depth_hit_latency_s1 = RegEnable(depth_hit_latency_s0, 0.U, depth_calc_en_s1)
+  val depth_miss_latency_s1 = RegEnable(depth_miss_latency_s0, 0.U, depth_calc_en_s1)
+  val depth_calc_en_s2 = RegNext(depth_calc_en_s1, false.B)
+
+  val depth_hit_x3_s2 = RegEnable(depth_hit_x2_s1 + depth_hit_latency_s1, 0.U, depth_calc_en_s2)
+  val depth_miss_x3_s2 = RegEnable(depth_miss_x2_s1 + depth_miss_latency_s1, 0.U, depth_calc_en_s2)
+  val depth_calc_en_s3 = RegNext(depth_calc_en_s2, false.B)
+
+  val l1_depth_sum_s3 = RegEnable(depth_hit_x3_s2 + 37.U, 0.U, depth_calc_en_s3)
+  val l2_depth_partial_s3 = RegEnable(depth_hit_x3_s2 + depth_miss_x3_s2, 0.U, depth_calc_en_s3)
+  val depth_calc_en_s4 = RegNext(depth_calc_en_s3, false.B)
+
+  val l1_depth_sum_s4 = RegEnable(l1_depth_sum_s3, 0.U, depth_calc_en_s4)
+  val l2_depth_sum_s4 = RegEnable(l2_depth_partial_s3 + 22.U, 0.U, depth_calc_en_s4)
+  val depth_calc_en_s5 = RegNext(depth_calc_en_s4, false.B)
+
+  val l1_depth_target = RegEnable(l1_depth_sum_s4 >> 3, 64.U, depth_calc_en_s5)
+  val l2_depth_target = RegEnable(l2_depth_sum_s4 >> 3, 512.U, depth_calc_en_s5)
+
+  val depth_update_en = RegNext(depth_calc_en_s5, false.B)
+  val l1_depth_dynamic = RegEnable(ceilMapDepth(l1_depth_target, Seq(4, 8, 16, 24, 32, 48, 64)), 64.U, depth_update_en)
+  val l2_depth_dynamic = RegEnable(ceilMapDepth(l2_depth_target, Seq(32, 64, 128, 192, 256, 384, 512)), 512.U, depth_update_en)
+  val depth_write_en = RegNext(depth_update_en, false.B)
 
   val enableDynamicPrefetcher_const = Constantin.createRecord(s"${param.name}_enableDynamicPrefetcher${p(XSCoreParamsKey).HartId}", initValue = 1)
   val enableDynamicPrefetcher = (enableDynamicPrefetcher_const === 1.U)
 
   when(!enableDynamicPrefetcher) {
-    depth := depth_const
+    l1_depth := l1_depth_const
+    l2_depth := l2_depth_const
     flush := false.B
     enable := true.B
     confidence := 1.U
-  }.otherwise {
-    // for now, only dynamically disable prefetcher, without depth and flush
-    depth := depth_const
-    flush := false.B
+  }.elsewhen(depth_write_en) {
+    l1_depth := l1_depth_dynamic
+    l2_depth := l2_depth_dynamic
   }
 
   when(reset.asBool) {
-    depth := depth_const
+    l1_depth := l1_depth_const
+    l2_depth := l2_depth_const
   }
 
   XSPerfAccumulate(s"l1prefetchSent${param.name}", total_prefetch)
@@ -288,33 +338,25 @@ class L1PrefetchMonitor(param : PrefetcherMonitorParam)(implicit p: Parameters) 
   XSPerfAccumulate(s"l1prefetchUseless${param.name}", pf_useless)
   XSPerfAccumulate(s"l1prefetchDropByNack${param.name}", nack_prefetch)
   XSPerfAccumulate(s"mshr_count_Prefetch${param.name}", prefetch_miss)
-  for(i <- (0 until DEPTH_BITS)) {
-    val t = (1 << i)
-    XSPerfAccumulate(s"${param.name}_depth${t}", depth === t.U)
+  for(t <- Seq(4, 8, 16, 24, 32, 48, 64)) {
+    XSPerfAccumulate(s"${param.name}_l1depth${t}", l1_depth === t.U)
+  }
+  for(t <- Seq(32, 64, 128, 192, 256, 384, 512)) {
+    XSPerfAccumulate(s"${param.name}_l2depth${t}", l2_depth === t.U)
   }
   XSPerfAccumulate(s"${param.name}_trigger_disable", trigger_disable)
-  XSPerfAccumulate(s"${param.name}_trigger_late_hit", trigger_late_hit)
-  XSPerfAccumulate(s"${param.name}_trigger_late_miss", trigger_late_miss)
-  XSPerfAccumulate(s"${param.name}_trigger_pf_useless", trigger_pf_useless)
   XSPerfAccumulate(s"${param.name}_disable_time", !enable)
-
-  assert(depth =/= 0.U, s"${param.name}_depth should not be zero")
 }
 
 abstract class PrefetcherMonitorParam {
   val name: String
   def isMyType(value: UInt): Bool
 
-  val TIMELY_CHECK_INTERVAL = 1000
   val VALIDITY_CHECK_INTERVAL = 1000
-
-  val BAD_THRESHOLD = 400
-  val DISABLE_THRESHOLD = 900
-  val LATE_HIT_THRESHOLD = 900
-  val LATE_MISS_THRESHOLD = 200
-
   val BACK_OFF_INTERVAL = 100000
   val LOW_CONF_INTERVAL = 200000
+
+  val DISABLE_THRESHOLD = 900
 
   val confidence = 1
 }

@@ -31,16 +31,11 @@ trait HasStreamPrefetchHelper extends HasL1PrefetchHelper {
   val WIDTH_BYTES = 128
   val WIDTH_CACHE_BLOCKS = WIDTH_BYTES / dcacheParameters.blockBytes
 
-  val L2_DEPTH_RATIO = 3
   val L2_WIDTH_BYTES = WIDTH_BYTES * 2
   val L2_WIDTH_CACHE_BLOCKS = L2_WIDTH_BYTES / dcacheParameters.blockBytes
 
-  val L3_DEPTH_RATIO = 3
   val L3_WIDTH_BYTES = WIDTH_BYTES * 2 * 2
   val L3_WIDTH_CACHE_BLOCKS = L3_WIDTH_BYTES / dcacheParameters.blockBytes
-
-  val DEPTH_LOOKAHEAD = 8
-  val DEPTH_BITS = log2Up(DEPTH_CACHE_BLOCKS) + DEPTH_LOOKAHEAD
 
   val ENABLE_DECR_MODE = true
   val ENABLE_STRICT_ACTIVE_DETECTION = true
@@ -172,7 +167,8 @@ class StreamBitVectorArray(implicit p: Parameters) extends XSModule with HasStre
     val enable = Input(Bool())
     // TODO: flush all entry when process changing happens, or disable stream prefetch for a while
     val flush = Input(Bool())
-    val dynamic_depth = Input(UInt(DEPTH_BITS.W))
+    val l1_depth = Input(UInt(DEPTH_BITS.W))
+    val l2_depth = Input(UInt(DEPTH_BITS.W))
     val confidence = Input(UInt(1.W))
     val train_req = Flipped(DecoupledIO(new PrefetchReqBundle))
     val l1_prefetch_req = ValidIO(new StreamPrefetchReqBundle)
@@ -264,28 +260,9 @@ class StreamBitVectorArray(implicit p: Parameters) extends XSModule with HasStre
   XSPerfAccumulate("s0_req_valid", io.train_req.valid)
   XSPerfAccumulate("s0_req_cannot_accept", io.train_req.valid && !io.train_req.ready)
 
-  val ratio_const = Constantin.createRecord(s"l2DepthRatio${p(XSCoreParamsKey).HartId}", initValue = L2_DEPTH_RATIO)
-  val ratio = ratio_const(3, 0)
-
-  val l3_ratio_const = Constantin.createRecord(s"l3DepthRatio${p(XSCoreParamsKey).HartId}", initValue = L3_DEPTH_RATIO)
-  val l3_ratio = l3_ratio_const(3, 0)
-
-  val l1_depth_const = Constantin.createRecord(s"streamL1Depth${p(XSCoreParamsKey).HartId}", initValue = 64)
-  val l2_depth_const = Constantin.createRecord(s"streamL2Depth${p(XSCoreParamsKey).HartId}", initValue = 640)
-  val l3_depth_const = Constantin.createRecord(s"streamL3Depth${p(XSCoreParamsKey).HartId}", initValue = 640) // l3 is not useful
-
-  val l1_depth = Wire(UInt(DEPTH_BITS.W))
-  val l2_depth = Wire(UInt(DEPTH_BITS.W))
-  val l3_depth = Wire(UInt(DEPTH_BITS.W))
-  if (USE_STREAM_FIXED_DEPTH) {
-    l1_depth := l1_depth_const
-    l2_depth := l2_depth_const
-    l3_depth := l3_depth_const
-  } else {
-    l1_depth := io.dynamic_depth
-    l2_depth := io.dynamic_depth << ratio
-    l3_depth := io.dynamic_depth << l3_ratio
-  }
+  val l1_depth = io.l1_depth
+  val l2_depth = io.l2_depth
+  val l3_depth = io.l2_depth // l3 is not useful
 
   // s1: alloc or update
   val s1_valid = GatedValidRegNext(s0_valid)

@@ -27,6 +27,9 @@ trait HasL1PrefetchHelper extends HasCircularQueuePtrHelper with HasDCacheParame
   val REGION_BITS = log2Up(BIT_VEC_WITDH)
   val REGION_TAG_OFFSET = BLOCK_OFFSET + REGION_BITS
   val REGION_TAG_BITS = VAddrBits - BLOCK_OFFSET - REGION_BITS
+  
+  val DEPTH_LOOKAHEAD = 8
+  val DEPTH_BITS = REGION_BITS + DEPTH_LOOKAHEAD
 
   // hash related
   val VADDR_HASH_WIDTH = 5
@@ -968,13 +971,15 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
 
   stream_bit_vec_array.io.enable := enable
   stream_bit_vec_array.io.flush := stream_pf_ctrl.flush
-  stream_bit_vec_array.io.dynamic_depth := stream_pf_ctrl.dynamic_depth
+  stream_bit_vec_array.io.l1_depth := stream_pf_ctrl.l1_depth
+  stream_bit_vec_array.io.l2_depth := stream_pf_ctrl.l2_depth
   stream_bit_vec_array.io.confidence := stream_pf_ctrl.confidence
   stream_bit_vec_array.io.train_req <> stream_train_filter.io.train_req
 
   stride_meta_array.io.enable := enable && strideEnable
   stride_meta_array.io.flush := stride_pf_ctrl.flush
-  stride_meta_array.io.dynamic_depth := 0.U
+  stride_meta_array.io.l1_depth := 0.U
+  stride_meta_array.io.l2_depth := 0.U
   stride_meta_array.io.confidence := stride_pf_ctrl.confidence
   stride_meta_array.io.train_req <> stride_train_filter.io.train_req
   stride_meta_array.io.stream_lookup_req <> stream_bit_vec_array.io.stream_lookup_req
