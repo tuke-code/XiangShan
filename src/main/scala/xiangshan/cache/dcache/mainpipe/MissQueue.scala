@@ -919,6 +919,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   io.main_pipe_req.bits.pf_source := req.pf_source
   io.main_pipe_req.bits.access := access
   io.main_pipe_req.bits.occupy_way := req.occupy_way
+  io.main_pipe_req.bits.isBtoT := req.isBtoT
   io.main_pipe_req.bits.miss_fail_cause_evict_btot := evict_BtoT_way
 
   io.probe.block := req_valid && w_grantlast &&
