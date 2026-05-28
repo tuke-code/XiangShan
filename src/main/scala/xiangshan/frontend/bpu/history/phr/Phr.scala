@@ -314,7 +314,7 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   io.trainFoldedPhr := metaPhrFolded
 
   private val redirectPhrHigherDiff = io.train.redirect.valid && io.train.redirect.bits.meta.phr.predTaken.get &&
-    redirectPhr(PhrHistoryLength - 1, PathHashWidth) =/= redirectTakenPhr(MaxHistLens - 1, PathHashWidth)
+    redirectPhr(PhrHistoryLength - 1, PathHashWidth) =/= redirectTakenPhr(PhrHistoryLength - 1, PathHashWidth)
   dontTouch(redirectPhrHigherDiff)
   XSError(
     redirectPhrHigherDiff,
