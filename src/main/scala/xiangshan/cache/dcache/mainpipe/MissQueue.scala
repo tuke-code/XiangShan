@@ -1349,9 +1349,12 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     zip
     Seq(miss_req_pipe_reg.req.pf_source) ++ entries.map(_.io.prefetch_info.hit_pf_source)
   )
-  io.prefetch_stat.refill_valid := VecInit(entries.zipWithIndex.map{ case(e,i) => e.io.refill_train.valid && io.mainpipe_info.s2_valid && io.mainpipe_info.s2_miss_id === i.U}).asUInt.orR
-  io.prefetch_stat.refill_latency := Mux1H(entries.zipWithIndex.map{ case(e,i) => (io.mainpipe_info.s2_miss_id === i.U) -> e.io.refill_train.bits.refillLatency })
-  io.prefetch_stat.refill_hit := Mux1H(entries.zipWithIndex.map{ case(e,i) => (io.mainpipe_info.s2_miss_id === i.U) -> e.io.refill_hit })
+  val refill_stat_valid = VecInit(entries.zipWithIndex.map{ case(e,i) =>
+    e.io.refill_train.valid && io.mainpipe_info.s3_valid && io.mainpipe_info.s3_refill_resp && io.mainpipe_info.s3_miss_id === i.U
+  })
+  io.prefetch_stat.refill_valid := refill_stat_valid.asUInt.orR
+  io.prefetch_stat.refill_latency := Mux1H(entries.zipWithIndex.map{ case(e,i) => refill_stat_valid(i) -> e.io.refill_train.bits.refillLatency })
+  io.prefetch_stat.refill_hit := Mux1H(entries.zipWithIndex.map{ case(e,i) => refill_stat_valid(i) -> e.io.refill_hit })
 
   // L1MissTrace Chisel DB
   val debug_miss_trace = Wire(new L1MissTrace)
