@@ -2,15 +2,18 @@
 
 ## 1. 实验目的
 
-本文分析 commit `618d6f8c76543ee345b83e0903f2fde9a7c9bcbc` 的设计意图、RTL 实现方式以及性能结果，回答两个问题：
+本文分析 commit `618d6f8c76543ee345b83e0903f2fde9a7c9bcbc` 的设计意图、RTL 实现方式以及性能结果，并结合后续 commit `20244baa4837c524782bfc856871cb4487142ec3` 的补充实验，回答三个问题：
 
 1. 在不增加 SRAM 总数的前提下，把 DCache 改成按 `set` 维度分 bank，是否仍然能降低 bank conflict。
 2. 为什么 `32 bank * 128 set * 16B` 方案的收益明显低于理想的 `64 bank * 128 set * 8B` 方案。
+3. 如果继续保留 `32 bank * 128 set * 16B` 的 packed SRAM 组织，但解决 `ECC 关闭` 场景下的 SRAM 部分写与 full overwrite fast path 问题，性能上界能到哪里。
 
 本文的结论是：
 
 - 该改动本身是有效的，`set` 维度分 bank 和更细的 `4B` bank 粒度，确实降低了 load 的 bank conflict。
 - 收益打折的根因不是 `set` 维度分 bank 这个思路本身，而是新的 `16B packed SRAM row` 组织方式破坏了原先的全覆盖写优化，导致 sbuffer 写 DCache 时需要额外执行一次 `readline`，从而重新引入 load/readline、load/write 冲突。
+- commit `20244baa4837c524782bfc856871cb4487142ec3` 进一步证明：在 `EnableDataEcc = false` 的前提下，只要 packed-bank SRAM 支持按 way slice 的部分写，并恢复 full overwrite fast path，`32 bank * 128 set * 16B` 的 `int` 分数可以达到 `17.540`（相对 baseline `+2.05%`），不仅覆盖 `64 bank` 的 `+1.61%`，还会额外拿到约 `27%` 的增量收益。
+- 这部分额外收益来自两点同时成立：写侧不再为 full overwrite 额外 `readline`，读侧则继续保留 `4B` 逻辑 bank 比 `8B` 更细的冲突优势。
 
 ## 2. 背景与方案
 
@@ -272,7 +275,7 @@ flowchart LR
 
 ## 4. 实验设置
 
-### 4.1 四组实验
+### 4.1 四组原始实验 + 一组后续优化实验
 
 | 组别 | 目录 | 含义 |
 | --- | --- | --- |
@@ -280,6 +283,7 @@ flowchart LR
 | 64 bank 分法 | `/nfs/home/cirunner/perf-report-custom/cr260508-ba6184847-CHIConfig` | `64 bank * 128 set * 8B` |
 | 本修改 | `/nfs/home/cirunner/perf-report-custom/cr260508-618d6f8c7-CHIConfig` | `32 bank * 128 set * 16B` |
 | 64 bank + 关闭全覆盖写优化 | `/nfs/home/cirunner/perf-report-custom/cr260511-8df401df7-CHIConfig` | 用于验证 root cause |
+| 后续优化（`20244baa`） | `/nfs/home/cirunner/perf-report-custom/cr260527-20244baa4-CHIConfig` | `32 bank * 128 set * 16B`，`EnableDataEcc = false`，packed-bank SRAM 支持部分写并恢复 full overwrite fast path |
 
 ### 4.2 计数器口径
 
@@ -292,6 +296,7 @@ flowchart LR
 | `bankedDataArray: data_array_read_line` | MainPipe 发起的 readline 次数 |
 | `inner.sbuffer: dcache_req_fire` | sbuffer 向 DCache 发起写请求的次数 |
 | `dcache.dcache.ldu_[0-2]: dcache_read_bank_conflict` | 各个 load pipe 观测到的 data bank conflict |
+| `bankedDataArray: data_array_rr_bank_conflict_{0_1,0_2,1_2}` | 不同 load read port 之间的 bank conflict |
 | `bankedDataArray: data_array_rrl_bank_conflict_[0-2]` | load 与 readline 的冲突 |
 | `bankedDataArray: data_array_rw_bank_conflict_[0-2]` | load 与 write 的冲突 |
 | `loadQueueReplay: replay_bank_conflict` | 最终表现为 load replay 的 bank conflict |
@@ -467,17 +472,108 @@ flowchart LR
 - 主要来自“当前 SRAM 数据组织下，全覆盖写优化失效”。
 - 一旦把 `64 bank` 也拉回到同样的写路径约束下，它和本修改的效果就会明显趋近，甚至在 `mcf` 上完全重合。
 
+### 6.4 为什么“`32 bank * 128 set * 16B` + 恢复全覆盖写优化”可以超过 `64 bank`
+
+这一组后续实验的目的，不是再次证明“`32 bank * 128 set * 16B` 且无全覆盖写优化”这版配置的 root cause，而是回答一个更直接的问题：
+
+- 在仍然保持 `32 bank * 128 set * 16B` packed SRAM 组织不变的前提下
+- 如果先不打开 data ECC
+- 并让 packed-bank SRAM 支持部分写，从而恢复 full overwrite fast path
+
+那么这条 `32 sram` 路线的性能上界到底能到哪里。
+
+commit `20244baa4837c524782bfc856871cb4487142ec3` 对应的实验配置，做的就是这件事：
+
+- `BankedDataArray` 打开 `useBitmask`，在 `EnableDataEcc = false` 时只更新选中 way 的 `4B` slice。
+- `MainPipe` 恢复 `banked_store_rmask = bank_write & ~bank_full_write`，让 full overwrite store 不再强制走 `readline + merge + writeback`。
+- 由于当前逻辑 bank 粒度已经是 `4B`，因此它恢复的不是旧的 “full 8B bank overwrite” fast path，而是更细粒度的 “full 4B subbank overwrite” fast path。
+
+![恢复全覆盖写优化后的实验结果](./sram-partial-write.png)
+
+从图上看，“`32 bank * 128 set * 16B` + 恢复全覆盖写优化”的整体 `int` 分数达到 `17.540`：
+
+- 相对 baseline 提升 `2.05%`
+- 相对 `64 bank` 的 `17.464` 再提升 `0.44%`
+- 如果把 `64 bank` 相对 baseline 的收益 `1.61%` 看作 1 倍，那么“`32 bank * 128 set * 16B` + 恢复全覆盖写优化”已经拿到了 `2.05 / 1.61 = 127.3%` 的收益
+
+为了只比较结构本身的效果，下面的计数器仍然只对三组公共 `326` 个切片做 simpoint 加权聚合：
+
+- `64 bank * 128 set * 8B`
+- `32 bank * 128 set * 16B`，无全覆盖写优化
+- `32 bank * 128 set * 16B`，恢复全覆盖写优化
+
+性能分数则按上图结果填写。
+
+| 指标 | `64 bank * 128 set * 8B` | `32 bank * 128 set * 16B`，无全覆盖写优化 | `32 bank * 128 set * 16B`，恢复全覆盖写优化 | 恢复全覆盖写优化 相对 `64 bank * 128 set * 8B` |
+| --- | --- | --- | --- | --- |
+| `data_array_read_line` | `15.44M` | `26.38M` | `10.64M` | `-31.1%` |
+| `sbuffer: dcache_req_fire` | `14.53M` | `14.54M` | `14.55M` | `+0.1%` |
+| `ldu_*: dcache_read_bank_conflict` 求和 | `18.33M` | `22.72M` | `13.95M` | `-23.9%` |
+| `data_array_rr_bank_conflict_*` 求和 | `5.58M` | `4.56M` | `4.25M` | `-23.8%` |
+| `data_array_rrl_bank_conflict_*` 求和 | `11.95M` | `17.18M` | `8.72M` | `-27.0%` |
+| `data_array_rw_bank_conflict_*` 求和 | `2.59M` | `3.18M` | `2.27M` | `-12.5%` |
+| `loadQueueReplay: replay_bank_conflict` | `1.44M` | `2.77M` | `0.70M` | `-51.2%` |
+
+这张表说明了两层结论：
+
+1. 相对“`32 bank * 128 set * 16B`，无全覆盖写优化”，写侧代价确实被修掉了。
+   - `data_array_read_line` 从 `26.38M` 降到 `10.64M`，下降约 `59.7%`
+   - `sbuffer: dcache_req_fire` 基本不变，说明不是 workload 变了，而是每次写回 DCache 前不再需要那么多额外 pre-read
+2. 相对 `64 bank * 128 set * 8B`，“`32 bank * 128 set * 16B`，恢复全覆盖写优化”不只是“回到同一水平”，而是进一步更低。
+   - 原因不是恢复全覆盖写优化后的配置有更多 load 访问，而是它恢复的是 “full `4B` subbank overwrite” fast path
+   - `64 bank * 128 set * 8B` 的 row 仍以 `8B` 为 bank 单位，因此很多只覆盖一个 `4B word` 的 store，在“`32 bank * 128 set * 16B`，恢复全覆盖写优化”里已经可以直写，但在 `64 bank * 128 set * 8B` 里仍然要 pre-read
+   - 写侧 `readline` 更少以后，`4B` 逻辑 bank 本来的读侧优势也完全释放出来，所以 `ldu conflict` / `rrl conflict` / `replay_bank_conflict` 都继续低于 `64 bank`
+
+如果只看最纯粹的 “load-load 是否撞在同一个 bank 上”，`data_array_rr_bank_conflict_*` 的趋势更直接：
+
+- 这组计数器只统计 `BankedDataArray` 多个 `io.read` 端口之间的冲突，不包含 `readline` 或 write 的干扰。
+- 相对 `64 bank * 128 set * 8B`，即使还没有恢复全覆盖写优化，“`32 bank * 128 set * 16B`，无全覆盖写优化”的 `data_array_rr_bank_conflict_*` 也已经从 `5.58M` 降到 `4.56M`，下降约 `18.1%`。
+- 在恢复全覆盖写优化以后，这个值进一步降到 `4.25M`，相对 `64 bank * 128 set * 8B` 下降约 `23.8%`。
+- 三个 pairwise 端口计数器 `0_1` / `0_2` / `1_2` 也都是同方向下降，说明收益不是某一个 load pipe 偶然造成的，而是更细 `4B` bankMask 普遍降低了两条 load 同时命中同一 bank 的概率。
+
+这说明 6.4 里看到的额外收益，不只是写侧 pre-read 被拿掉了；在写侧代价消失以后，`4B` 逻辑 bank 相对 `8B` bank 的 load-load 冲突优势也被更完整地释放出来了。
+
+`h264ref` 是最能说明这个结论的 case：
+
+| 指标 | `64 bank * 128 set * 8B` | `32 bank * 128 set * 16B`，无全覆盖写优化 | `32 bank * 128 set * 16B`，恢复全覆盖写优化 |
+| --- | --- | --- | --- |
+| benchmark score | `22.394` | `21.484` | `22.703` |
+| 相对 baseline | `+3.44%` | `-0.76%` | `+4.87%` |
+| `data_array_read_line` | `0.402M` | `1.173M` | `0.145M` |
+| `ldu_*: dcache_read_bank_conflict` 求和 | `1.565M` | `2.492M` | `1.131M` |
+| `data_array_rr_bank_conflict_*` 求和 | `0.518M` | `0.444M` | `0.369M` |
+| `data_array_rrl_bank_conflict_*` 求和 | `0.493M` | `1.237M` | `0.203M` |
+| `data_array_rw_bank_conflict_*` 求和 | `0.602M` | `0.894M` | `0.577M` |
+| `loadQueueReplay: replay_bank_conflict` | `0.148M` | `0.613M` | `0.049M` |
+
+这里可以直接看到：
+
+- “`32 bank * 128 set * 16B`，恢复全覆盖写优化”先把“`32 bank * 128 set * 16B`，无全覆盖写优化”因为写侧 pre-read 带来的惩罚全部拿掉了
+- 然后又把 `64 bank * 128 set * 8B` 的 `readline` / `rrl conflict` / `replay_bank_conflict` 继续往下压
+- 对应的 `data_array_rr_bank_conflict_*` 也从 `64 bank` 的 `0.518M` 继续降到 `0.369M`，下降约 `28.7%`，说明这里不只是“少了写侧冲突”，load-load 本身也更不容易撞 bank
+- 所以最终分数不仅回到 `64 bank` 水平，而且进一步从 `22.394` 提升到 `22.703`
+
+`perlbench`、`gobmk`、`omnetpp` 也基本呈现出同样趋势：在 `dcache_req_fire` 基本不变的前提下，“`32 bank * 128 set * 16B`，恢复全覆盖写优化”的 `readline`、`ldu conflict` 和 `replay_bank_conflict` 都低于 `64 bank * 128 set * 8B`；对应的 `data_array_rr_bank_conflict_*` 也分别从 `0.437M` / `0.458M` / `0.286M` 下降到 `0.327M` / `0.311M` / `0.275M`。其中 `omnetpp` 的 load-load 冲突降幅只有约 `3.9%`，明显小于 `perlbench` 的 `25.1%` 和 `gobmk` 的 `32.1%`，说明不同 workload 对 `4B` 粒度的敏感度仍然不同；但总体方向仍然支持“更细 `4B` bank 更有利于降低 load-load conflict”这个判断。
+
+因此，这组实验已经可以把结论写得更强：
+
+- `32 bank * 128 set * 16B` 的问题，不在 `32 sram`，也不在 `set` 维度分 bank
+- 一旦解决了 `ECC 关闭` 场景下的 SRAM 部分写 / full overwrite fast path 问题，新的 `32 sram` 数据组织不仅能追平 `64 bank`，还可以依靠更细的 `4B` 逻辑 bank 和更细粒度的 `4B` full-overwrite 直写，在一部分 workload 上继续超过它
+- 因而剩下真正需要解决的，只是如何把这条性质从 `EnableDataEcc = false` 推广到 `EnableDataEcc = true`
+
 ## 7. 后续优化方向
 
 ### 7.1 先解决 packed row 的部分写 / ECC 问题
 
-最优先的方向是恢复 full overwrite fast path。
+`20244baa4837c524782bfc856871cb4487142ec3` 已经证明，在 `EnableDataEcc = false` 的前提下，只要 packed-bank SRAM 支持按 way slice 的部分写，并恢复 full overwrite fast path，`32 sram * 128 set * 16B` 不仅能追平 `64 bank`，还会进一步超过它。
+
+因此最优先的方向已经很清楚：不是重新讨论这条路值不值得做，而是把 `20244baa` 这条性质推广到 `EnableDataEcc = true`。
 
 可以考虑：
 
-- 重新设计 packed row 的 ECC 编码边界，让 ECC 能跟随更小粒度更新，而不是强制整行编码。
-- 如果工艺允许，评估 SRAM 宏是否支持更细粒度 write mask。
-- 在 `MainPipe` / `BankedDataArray` 之间补一条“full overwrite 直写”的专门 fast path，避免所有写都走 `readline + merge + whole-row writeback`。
+- 重新设计 packed row 的 ECC 编码边界，让 `selectedWaySliceBitmask` 这类局部更新在 ECC 打开时也能独立编码，而不是强制整行重编码。
+- 如果工艺允许，评估 SRAM 宏是否支持与当前 `4B` subbank / per-way slice 对齐的 write mask。
+- 在 `MainPipe` / `BankedDataArray` 之间保留 `20244baa` 这条 “full `4B` subbank overwrite” fast path，避免 ECC 打开后又退回到所有写都走 `readline + merge + whole-row writeback`。
 
 ### 7.2 重新评估 16B row 的数据组织方式
 
@@ -507,10 +603,12 @@ flowchart LR
 
 commit `618d6f8c76543ee345b83e0903f2fde9a7c9bcbc` 的核心价值，是在不增加 SRAM 总数的前提下，把 DCache 改造成了“对外按 `4B` 粒度分 bank、对内按 `set` 维度分 bank”的结构。这个方向是成立的，因为它显著减少了 load bank conflict。
 
-但这次实现为了把 `64` 块 SRAM 压回 `32` 块，引入了 `16B packed row`，把多个 way 打包在同一块 SRAM row 里。结果是 sbuffer 的 full overwrite store 不再能直接写 SRAM，而必须先 `readline` 再整行回写。额外的 `readline` 重新引入了 load/readline 与 load/write 冲突，最终让本修改整体只拿到了 `64 bank` 方案约 `42%` 的收益。
+对于 `618d6f8` 这一版实现，问题也已经定位清楚：为了把 `64` 块 SRAM 压回 `32` 块，它引入了 `16B packed row`，把多个 way 打包在同一块 SRAM row 里。结果是 sbuffer 的 full overwrite store 不再能直接写 SRAM，而必须先 `readline` 再整行回写。额外的 `readline` 重新引入了 load/readline 与 load/write 冲突，最终让这版实现整体只拿到了 `64 bank` 方案约 `42%` 的收益。
 
-因此，本次实验最重要的结论不是“这个方向没收益”，而是：
+但后续 commit `20244baa4837c524782bfc856871cb4487142ec3` 已经给出了一个更强的上界实验：在 `EnableDataEcc = false` 且 packed-bank SRAM 支持部分写之后，`32 bank * 128 set * 16B` 的 `int` 分数达到 `17.540`（`+2.05%`），不仅覆盖 `64 bank` 的 `17.464`（`+1.61%`），还把 `data_array_read_line` 压到 `10.64M`，显著低于 `64 bank` 的 `15.44M`。这说明新的 `32 sram` 组织并不是“先天弱于 `64 sram`”，相反它在写侧代价被消掉以后，会同时保留更细 `4B` 读 bank 和更细 `4B` full-overwrite 直写的优势。
 
-- 方向本身有效。
-- 当前收益打折的根因已经定位清楚。
-- 后续应该围绕 “packed row 的 partial write / ECC / full overwrite fast path” 继续优化，而不是回退 `set` 维度分 bank 这个设计思路。
+因此，本文最终结论应当拆成两层：
+
+- 对 `618d6f8` 而言，收益打折的根因已经定位清楚：packed row 破坏了 full overwrite fast path。
+- 对整个 `32 sram * 128 set * 16B` 方向而言，`20244baa` 已经证明它的上界不低于 `64 bank`，在 ECC 关闭条件下甚至可以超过 `64 bank`。
+- 后续真正要攻克的是 `ECC-on` 下如何保留同样的 partial write / full overwrite fast path，而不是回退 `set` 维度分 bank 这个设计思路。
