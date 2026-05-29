@@ -133,8 +133,12 @@ class ICacheWayLookup(implicit p: Parameters) extends ICacheModule
 
   /* *** read *** */
   // if the entry is empty, but there is a valid write, we can bypass it to read port (maybe timing critical)
-  private val canBypass = empty && io.write.head.valid && !exceptionEntry.valid
-  private val canRead   = !empty && !updateStall
+  private val canBypass =
+    if (EnableWayLookupBypass) // timing-performance trade-off, see comments in case class ICacheParameters
+      empty && io.write.head.valid && !exceptionEntry.valid
+    else
+      false.B
+  private val canRead = !empty && !updateStall
   io.read.valid := canRead || canBypass
   when(canBypass) {
     io.read.bits := io.write.head.bits

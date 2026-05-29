@@ -38,6 +38,10 @@ case class ICacheParameters(
     NumPrefetchMshr: Int = 10,
     // wayLookup
     WayLookupSize: Int = 32,
+    // allow bypass enqueue (from prefetchPipe) to dequeue (to mainPipe)
+    // bad for timing (metaArray -> dataArray SRAM2SRAM path)
+    // but reduced redirect penalty (~0.08/GHz, or ~0.5% SPEC06 1.0c score)
+    EnableWayLookupBypass: Boolean = true,
     // ecc
     // NOTE: we call it "ecc" since it can be configured to use ecc like "secded", but by default it is parity
     // TODO: support disabling ecc completely (currently "none" will use "identity", we want to remove entire ecc logic)
@@ -119,7 +123,8 @@ trait HasICacheParameters extends HasFrontendParameters // scalastyle:ignore num
   def NumAllMshr:      Int = NumFetchMshr + NumPrefetchMshr
 
   // wayLookup
-  def WayLookupSize: Int = icacheParameters.WayLookupSize
+  def WayLookupSize:         Int     = icacheParameters.WayLookupSize
+  def EnableWayLookupBypass: Boolean = icacheParameters.EnableWayLookupBypass
 
   // metaArray w/ parity
   def MetaEcc:       String = icacheParameters.MetaEcc
