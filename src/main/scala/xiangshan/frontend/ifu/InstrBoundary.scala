@@ -44,59 +44,12 @@ class InstrBoundary(implicit p: Parameters) extends IfuModule with PreDecodeHelp
   private val mayBeRvc = io.req.icacheData.maybeRvcMap
   private val blockSel = io.req.icacheData.blockSel
 
-  private class BoundaryFunc extends Bundle {
-    val in0: Bool = Bool()
-    val in1: Bool = Bool()
-  }
-
-  private def mergeBoundaryFunc(left: BoundaryFunc, right: BoundaryFunc): BoundaryFunc = {
-    val out = Wire(new BoundaryFunc)
-
-    // The merged function means passing through left first and then right.
-    out.in0 := Mux(left.in0, right.in1, right.in0)
-    out.in1 := Mux(left.in1, right.in1, right.in0)
-
-    out
-  }
-
-  private def genBoundaryPrefix(mayBeRvc: UInt, firstInstrIsHalfRvi: Bool): Vec[Bool] = {
-    require(HasCExtension, "C Extension can not be disabled in XiangShan")
-
-    val n = FetchBlockInstNum
-
-    // funcs(i) summarizes the logic from a boundary input to boundary(i).
-    // in0 is the output when the input is 0; in1 is the output when the input is 1.
-    var funcs = Wire(Vec(n, new BoundaryFunc))
-
-    // boundary(0) is the initial seed, so funcs(0) is an identity function.
-    funcs(0).in0 := false.B
-    funcs(0).in1 := true.B
-
-    for (i <- 1 until n) {
-      // boundary(i) = !boundary(i - 1) || mayBeRvc(i - 1)
-      funcs(i).in0 := true.B
-      funcs(i).in1 := mayBeRvc(i - 1)
-    }
-
-    var step = 1
-    while (step < n) {
-      val next = Wire(Vec(n, new BoundaryFunc))
-
-      for (i <- 0 until n) {
-        if (i >= step) {
-          next(i) := mergeBoundaryFunc(funcs(i - step), funcs(i))
-        } else {
-          next(i) := funcs(i)
-        }
-      }
-
-      funcs = next
-      step = step << 1
-    }
-
-    val seed = !firstInstrIsHalfRvi
-    VecInit((0 until n).map(i => Mux(seed, funcs(i).in1, funcs(i).in0)))
-  }
+  // We compute the boundaries of instructions in the first half of the fetch block directly, and compute the boundaries
+  // of instructions in the latter half in two cases in parallel. Then we can choose the correct case according to
+  // whether the last instruction in the first half is a 16-bit instruction or not.
+  private val boundary            = WireInit(VecInit(Seq.fill(FetchBlockInstNum)(false.B)))
+  private val latterHalfBoundary1 = WireInit(VecInit(Seq.fill(FetchBlockInstNum)(false.B)))
+  private val latterHalfBoundary2 = WireInit(VecInit(Seq.fill(FetchBlockInstNum)(false.B)))
 
   private def generateBoundary(
       boundary:            Vec[Bool],
@@ -112,7 +65,17 @@ class InstrBoundary(implicit p: Parameters) extends IfuModule with PreDecodeHelp
     }
   }
 
-  private val boundary = genBoundaryPrefix(mayBeRvc, io.req.firstInstrIsHalfRvi)
+  generateBoundary(boundary, 0, FetchBlockInstNum / 2, io.req.firstInstrIsHalfRvi)
+  generateBoundary(latterHalfBoundary1, FetchBlockInstNum / 2, FetchBlockInstNum, true.B)
+  generateBoundary(latterHalfBoundary2, FetchBlockInstNum / 2, FetchBlockInstNum, false.B)
+
+  for (i <- FetchBlockInstNum / 2 until FetchBlockInstNum) {
+    boundary(i) := Mux(
+      boundary(FetchBlockInstNum / 2 - 1) && !mayBeRvc(FetchBlockInstNum / 2 - 1),
+      latterHalfBoundary1(i),
+      latterHalfBoundary2(i)
+    )
+  }
 
   io.resp.rawInstrVec := (0 until FetchBlockInstNum).map { i =>
     val instr = Wire(new Instruction)
