@@ -34,6 +34,8 @@ class IssueQueueIO()(implicit p: Parameters, params: IssueBlockParams) extends X
   val wakeupFromF2I: Option[ValidIO[IssueQueueIQWakeUpBundle]] = Option.when(params.needWakeupFromF2I)(Flipped(ValidIO(new IssueQueueIQWakeUpBundle(params.backendParam.getExuIdxF2I, params.backendParam))))
   val wakeupFromWBDelayed: MixedVec[ValidIO[IssueQueueWBWakeUpBundle]] = Flipped(params.genWBWakeUpSinkValidBundle)
   val wakeupFromIQDelayed: MixedVec[ValidIO[IssueQueueIQWakeUpBundle]] = Flipped(params.genIQWakeUpSinkValidBundle)
+  //to Mem, wake up LoadQueueReplay
+  val wakeupToLRQ = Option.when(params.isStAddrIQ || params.isStdIQ)(params.genIOWakeUpLRQValidBundle)
   val vlFromIntIsZero = Input(Bool())
   val vlFromIntIsVlmax = Input(Bool())
   val vlFromVfIsZero = Input(Bool())
@@ -948,6 +950,16 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     dontTouch(io.deqDelay)
     dontTouch(deqBeforeDly)
   }
+  // sta wake up LRQ in og1
+  io.wakeupToLRQ.foreach { case wakeupOption =>
+    wakeupOption.zipWithIndex.foreach { case (wakeup, i) =>
+      val wakeupCancel = LoadShouldCancel(io.deqDelay(i).bits.loadDependency, io.ldCancel)
+      val wakeupValid = io.deqDelay(i).fire && !wakeupCancel
+      wakeup.valid := RegNext(wakeupValid) // next cycle is og1
+      wakeup.bits.sqIdx := RegNext(entries.io.deqOg1Payload(i).sqIdx.get)
+    }
+  }
+
   io.wakeupToIQ.zipWithIndex.foreach { case (wakeup, i) =>
     if (wakeUpQueues(i).nonEmpty) {
       wakeup.valid := wakeUpQueues(i).get.io.deq.valid

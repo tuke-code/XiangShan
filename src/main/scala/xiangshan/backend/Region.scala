@@ -183,6 +183,11 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     imp.io.s2Resp.get.head.lqIdx.foreach(_ := feedBack.bits.lqIdx)
     imp.io.s2Resp.get.head.sqIdx.foreach(_ := feedBack.bits.sqIdx)
   }
+  val stDataIQs = issueQueues.filter(iq => iq.param.StdCnt > 0)
+  if (params.isIntSchd) {
+    val lrqWakeupFromIQ = (stAddrIQs ++ stDataIQs).flatMap(_.io.wakeupToLRQ.get)
+    io.wakeupToLRQ.get.flatten.zip(lrqWakeupFromIQ).foreach { case (sink, source) => sink := source }
+  }
   val vecStuIQs = issueQueues.filter(iq => iq.param.VstuCnt > 0)
   vecStuIQs.zipWithIndex.foreach { case(imp, i) =>
     imp.io.memIO.get.lqDeqPtr.get := io.lqDeqPtr.get
@@ -258,7 +263,6 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     }
   }
   // std dispatch
-  val stDataIQs = issueQueues.filter(iq => iq.param.StdCnt > 0)
   val staEnqs = stAddrIQs.map(_.io.enq).flatten
   val stdEnqs = stDataIQs.map(_.io.enq).flatten.take(staEnqs.size)
   val noStdExuParams = params.issueBlockParams.map(x => Seq.fill(x.numEnq)(x.exuBlockParams)).flatten.filter { x => x.map(!_.hasStdFu).reduce(_ && _) }
@@ -483,6 +487,20 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     io.toMemExu.get <> toMem
     val firstMemExu = bypassNetwork.io.toExus.int.indexWhere(x => x.map(xx => xx.bits.params.isMemExeUnit).reduce(_ || _))
     println(s"[Regin_int] firstMemExu = $firstMemExu")
+    val firstStoreExu = bypassNetwork.io.toExus.int.indexWhere(x => x.map(xx => xx.bits.params.hasStoreFu).reduce(_ || _))
+    println(s"[Regin_int] firstStoreExu = $firstStoreExu")
+
+    val storeWakeupCancel = Wire(io.wakeupToLRQCancel.get.cloneType)
+
+    storeWakeupCancel.zipWithIndex.foreach { case (toMemCancel, i) =>
+      for (j <- toMemCancel.indices) {
+        val toMemExuInput = bypassNetwork.io.toExus.int(firstStoreExu + i)(j)
+        toMemCancel(j).og1Cancel := RegNext(LoadShouldCancel(toMemExuInput.bits.ctrl.loadDependency, io.ldCancel)) //regNext for timing
+      }
+    }
+
+    io.wakeupToLRQCancel.get.flatten.zip(storeWakeupCancel.flatten).foreach { case (sink, source) => sink := source }
+
     for (i <- toMem.indices) {
       for (j <- toMem(i).indices) {
         val toMemExuInput = bypassNetwork.io.toExus.int(firstMemExu + i)(j)
@@ -860,6 +878,9 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val wakeupFromF2I = Option.when(params.isIntSchd)(Flipped(ValidIO(new IssueQueueIQWakeUpBundle(params.backendParam.getExuIdxF2I, params.backendParam))))
   val cross = new ExuCrossRegion(params)
   val toMemExu = Option.when(!params.isFpSchd)(params.genNewExuInputCopySrcBundleMemBlock)
+  //to Mem, wake up LoadQueueReplay
+  val wakeupToLRQ = Option.when(params.isIntSchd)(intSchdParam.genMemWakeupLRQBundle)
+  val wakeupToLRQCancel = Option.when(params.isIntSchd)(intSchdParam.genMemWakeupCancelBundle)
   // fromMem
   val wakeupFromLDU = Option.when(params.isIntSchd)(Vec(params.LdExuCnt, Flipped(Valid(new MemWakeUpBundle))))
   val staFeedback = Option.when(params.isIntSchd)(Flipped(Vec(params.StaCnt, new MemRSFeedbackIO)))
@@ -945,4 +966,3 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val debugIQEnqHasIssuedVec = Option.when(backendParams.debugEn)(Vec(IQNum, Output(Bool())))
   val debugIQDeqRobIdxVec = Option.when(backendParams.debugEn)(Vec(iqDeqSum, ValidIO(new RobPtr())))
 }
-
