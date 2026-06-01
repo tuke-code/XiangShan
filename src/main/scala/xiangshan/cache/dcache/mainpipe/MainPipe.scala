@@ -35,6 +35,7 @@ class MainPipeReq(implicit p: Parameters) extends DCacheBundle {
   val miss_dirty = Bool()
   val occupy_way = UInt(nWays.W)
   val miss_fail_cause_evict_btot = Bool()
+  val isBtoT = Bool()
 
   val probe = Bool()
   val probe_param = UInt(TLPermissions.bdWidth.W)
@@ -97,6 +98,7 @@ class MainPipeReq(implicit p: Parameters) extends DCacheBundle {
     req.error := false.B
     req.id := store.id
     req.miss_fail_cause_evict_btot := false.B
+    req.isBtoT := false.B
     req
   }
 }
@@ -310,10 +312,12 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   val meta_resp = Wire(Vec(nWays, (new Meta).asUInt))
   val s1_repl_way_en = WireInit(0.U(nWays.W))
   val s1_repl_coh = ParallelMux(s1_repl_way_en.asBools, (0 until nWays).map(w => meta_resp(w))).asTypeOf(new ClientMetadata)
+  val s1_miss_need_data = s1_repl_coh.state === ClientStates.Dirty &&
+                          (!s1_req.isBtoT || s1_req.miss_fail_cause_evict_btot)
   val s1_need_data = if (dcacheParameters.alwaysReleaseData) {
     RegEnable(banked_need_data, s0_fire)
   } else {
-    Mux(!s1_req.miss, RegEnable(banked_need_data, s0_fire), s1_repl_coh.state === ClientStates.Dirty)
+    Mux(!s1_req.miss, RegEnable(banked_need_data, s0_fire), s1_miss_need_data)
   }
 
   val s1_banked_rmask = RegEnable(s0_banked_rmask, s0_fire)
