@@ -77,7 +77,7 @@ class Ras(implicit p: Parameters) extends BasePredictor with HasRasParameters wi
 
   private val redirectMeta = Wire(new RasRedirectMeta)
   redirectMeta.ssp        := stack.meta.ssp
-  redirectMeta.sctr       := stack.meta.sctr
+  // redirectMeta.sctr       := stack.meta.sctr
   redirectMeta.tosr       := stack.meta.tosr
   redirectMeta.tosw       := stack.meta.tosw
   redirectMeta.nos        := stack.meta.nos
@@ -124,10 +124,10 @@ class Ras(implicit p: Parameters) extends BasePredictor with HasRasParameters wi
   for (i <- 0 until SpecQueueSize) {
     XSDebug(
       specFire,
-      "  (%d)   0x%x      %d       %d",
+      "  (%d)   0x%x      %d",
       i.U,
       specDebug.specQueue(i).retAddr.toUInt,
-      specDebug.specQueue(i).ctr,
+      // specDebug.specQueue(i).ctr,
       specDebug.specNos(i).value
     )
     XSDebug(specFire && i.U === stack.meta.tosw.value, "   <----TOSW")
@@ -139,10 +139,10 @@ class Ras(implicit p: Parameters) extends BasePredictor with HasRasParameters wi
   for (i <- 0 until CommitStackSize) {
     XSDebug(
       specFire,
-      "  (%d)   0x%x      %d",
+      "  (%d)   0x%x",
       i.U,
       specDebug.commitStack(i).retAddr.toUInt,
-      specDebug.commitStack(i).ctr
+      // specDebug.commitStack(i).ctr
     )
   }
 }
