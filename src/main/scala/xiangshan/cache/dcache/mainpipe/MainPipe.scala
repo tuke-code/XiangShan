@@ -834,7 +834,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   io.data_readline.bits.way_en := s1_way_en
   io.data_readline.bits.way := s1_way
   io.data_readline.bits.addr := s1_req.vaddr
-  io.repl_dirty := s1_valid && s1_need_replacement && (s1_repl_coh.state === ClientStates.Dirty)
+  io.repl_dirty := s1_valid && s1_req.miss && (s1_repl_coh.state === ClientStates.Dirty)
   io.repl_way_en := s1_repl_way_en
 
   io.miss_req.valid := s2_valid && s2_can_go_to_mq
