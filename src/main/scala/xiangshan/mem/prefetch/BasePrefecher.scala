@@ -78,6 +78,7 @@ class TrainReqBundle()(implicit p: Parameters) extends DCacheBundle {
   val robIdx = new RobPtr
   val vaddr = UInt(VAddrBits.W)
   val paddr = UInt(PAddrBits.W)
+  val paddr_valid = Bool()
   val pc = UInt(VAddrBits.W)
   val miss = Bool()
   val metaSource = UInt(L1PfSourceBits.W)
