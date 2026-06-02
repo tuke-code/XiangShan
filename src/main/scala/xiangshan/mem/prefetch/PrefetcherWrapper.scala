@@ -215,14 +215,11 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
 
   val strideOpt: Option[L1Prefetcher] = if(HasStreamStride) Some(Module(new L1Prefetcher())) else None
   strideOpt.foreach(pf => {
-    val enableL1StreamPrefetcher = Constantin.createRecord(s"pf_enableL1StreamPrefetcher$hartId", initValue = true)
-    // constantinCtrl && master switch csrCtrl && single switch csrCtrl
-    pf.io.enable := enableL1StreamPrefetcher && l1D_pf_enable &&
-      GatedRegNextN(io.pfCtrlFromCSR.l1D_pf_enable_stride, 2, Some(false.B))
+    pf.io.enable := false.B
 
     pf.pf_ctrl <> io.pfCtrlFromDCache
     pf.l2PfqBusy := io.pfCtrlFromTile.l2PfqBusy
-    pf.strideEnable := strideModeEnable
+    pf.strideEnable := false.B
 
     // stride will train on miss or prefetch hit
     for(i <- 0 until LD_TRAIN_WIDTH){
@@ -249,12 +246,9 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
     io.tlb_req(IdxStreamStride) <> pf.io.tlb_req
     pf.io.pmp_resp := io.pmp_resp(IdxStreamStride)
 
-    l1_pf_arb.io.in(IdxStreamStride) <> pf.io.l1_req
-    l1_pf_arb.io.in(IdxStreamStride).valid := false.B
-    l2_pf_arb.io.in(IdxStreamStride) <> pf.io.l2_req
-    l2_pf_arb.io.in(IdxStreamStride).valid := false.B
-    l3_pf_arb.io.in(IdxStreamStride) <> pf.io.l3_req
-    l3_pf_arb.io.in(IdxStreamStride).valid := false.B
+    pf.io.l1_req.ready := false.B
+    pf.io.l2_req.ready := false.B
+    pf.io.l3_req.ready := false.B
   })
 
   val bertiOpt: Option[BertiPrefetcher] = if(HasBerti) Some(Module(new BertiPrefetcher())) else None
