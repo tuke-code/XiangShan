@@ -1,4 +1,3 @@
-// Copyright (c) 2024-2025 Beijing Institute of Open Source Chip (BOSC)
 // Copyright (c) 2020-2025 Institute of Computing Technology, Chinese Academy of Sciences
 // Copyright (c) 2020-2021 Peng Cheng Laboratory
 //
@@ -32,6 +31,7 @@ class RasStack(implicit p: Parameters) extends RasModule
       val fire:      Bool       = Input(Bool())
       val pushValid: Bool       = Input(Bool())
       val popValid:  Bool       = Input(Bool())
+      val popAndPushValid: Bool = Input(Bool())
       val pushAddr:  PrunedAddr = Input(PrunedAddr(VAddrBits))
       val popAddr:   PrunedAddr = Output(PrunedAddr(VAddrBits))
     }
@@ -40,6 +40,7 @@ class RasStack(implicit p: Parameters) extends RasModule
       val valid:     Bool       = Input(Bool())
       val pushValid: Bool       = Input(Bool())
       val popValid:  Bool       = Input(Bool())
+      val popAndPushValid: Bool = Input(Bool())
       val pushAddr:  PrunedAddr = Input(PrunedAddr(VAddrBits))
       val metaTosw:  RasPtr     = Input(new RasPtr)
       // for debug purpose only
@@ -51,6 +52,7 @@ class RasStack(implicit p: Parameters) extends RasModule
       val isCall:   Bool            = Input(Bool())
       val callAddr: PrunedAddr      = Input(PrunedAddr(VAddrBits))
       val isRet:    Bool            = Input(Bool())
+      val isRetCall: Bool           = Input(Bool())
       val meta:     RasInternalMeta = Input(new RasInternalMeta)
     }
 
@@ -151,12 +153,19 @@ class RasStack(implicit p: Parameters) extends RasModule
     ssp := ptrDec(currSsp)
   }
 
-  when(io.redirect.valid && io.redirect.isCall) {
+  def specPopAndPush(currSsp: UInt, currTosr: RasPtr, currTosw: RasPtr, currTopNos: RasPtr) {
+    //
+    tosr := currTosw
+    tosw := specPtrInc(currTosw)
+    ssp  := currSsp
+  }
+
+  when(io.redirect.valid && (io.redirect.isCall || io.redirect.isRetCall)) {
     writeBypassValid := true.B
   }.elsewhen(io.redirect.valid) {
     // clear current top writeBypass if doing redirect
     writeBypassValid := false.B
-  }.elsewhen(io.spec.fire && io.spec.pushValid) {
+  }.elsewhen(io.spec.fire && (io.spec.pushValid || io.spec.popAndPushValid)) {
     writeBypassValid := true.B
   }.otherwise {
     writeBypassValid := false.B
@@ -179,20 +188,30 @@ class RasStack(implicit p: Parameters) extends RasModule
   private val specWriteEntry = Wire(new RasEntry)
   redirectWriteEntry.retAddr := io.redirect.callAddr
   specWriteEntry.retAddr := io.spec.pushAddr
-  writeEntry.retAddr := Mux(io.redirect.valid && io.redirect.isCall, io.redirect.callAddr, io.spec.pushAddr)
-  writeNos := Mux(io.redirect.valid && io.redirect.isCall, io.redirect.meta.tosr, tosr)
+  writeEntry.retAddr := Mux(
+    io.redirect.valid && (io.redirect.isCall || io.redirect.isRetCall),
+    io.redirect.callAddr,
+    io.spec.pushAddr
+  )
 
-  when(io.spec.pushValid || (io.redirect.valid && io.redirect.isCall)) {
+  writeNos := Mux(
+    io.redirect.valid,
+    Mux(io.redirect.isCall, io.redirect.meta.tosr, io.redirect.meta.nos),
+    Mux(io.spec.pushValid, tosr, topNos)
+  )
+
+  private val specWriteValid = io.spec.pushValid || io.spec.popAndPushValid
+  private val redirectWriteValid = io.redirect.valid && (io.redirect.isCall || io.redirect.isRetCall)
+  when(specWriteValid || redirectWriteValid) {
     writeBypassEntry := writeEntry
     writeBypassNos   := writeNos
   }
 
-  private val realPush       = Wire(Bool())
+  private val realWrite      = Wire(Bool())
   private val realWriteEntry = Wire(new RasEntry)
   private val timingTop   = RegInit(0.U.asTypeOf(new RasEntry))
-  private val timingNos   = RegInit(0.U.asTypeOf(new RasPtr))
 
-  when(io.redirect.valid && io.redirect.isCall){
+  when(redirectWriteValid) {
     timingTop := redirectWriteEntry
   }.elsewhen(io.redirect.valid && io.redirect.isRet) {
     // getTop using redirect Nos as tosr
@@ -210,7 +229,7 @@ class RasStack(implicit p: Parameters) extends RasModule
     val popTosw = io.redirect.meta.tosw
 
     timingTop := getTop(popSsp, popTosr, popTosw, allowBypass = false)
-  }.elsewhen(io.spec.pushValid) {
+  }.elsewhen(specWriteValid) {
     timingTop := specWriteEntry
   }.elsewhen(io.spec.popValid) {
     val popSsp  = ptrDec(ssp)
@@ -231,25 +250,19 @@ class RasStack(implicit p: Parameters) extends RasModule
   private val diffTop = Mux(writeBypassValid, writeBypassEntry.retAddr, topEntry.retAddr)
   XSPerfAccumulate("ras_top_mismatch", diffTop =/= timingTop.retAddr)
 
-  realWriteEntry := RegEnable(writeEntry, io.spec.fire || (io.redirect.isCall && io.redirect.valid))
+  realWriteEntry := RegEnable(writeEntry, specWriteValid || redirectWriteValid)
 
   private val realWriteTosw = RegEnable(
-    Mux(io.redirect.valid && io.redirect.isCall, io.redirect.meta.tosw, tosw),
-    io.spec.fire || (io.redirect.isCall && io.redirect.valid)
+    Mux(io.redirect.valid, io.redirect.meta.tosw, tosw),
+    specWriteValid || redirectWriteValid
   )
 
-  private val realNos = RegEnable(
-    Mux(io.redirect.valid && io.redirect.isCall, io.redirect.meta.tosr, tosr),
-    io.spec.fire || (io.redirect.valid && io.redirect.isCall)
-  )
+  private val realNos = RegEnable(writeNos, specWriteValid || redirectWriteValid)
 
   // No backpressure at BPU S3 stage; signal holding is not required.
-  realPush := RegNext(io.spec.pushValid, init = false.B) || RegNext(
-    io.redirect.valid && io.redirect.isCall,
-    init = false.B
-  )
+  realWrite := RegNext(specWriteValid, init = false.B) || RegNext(redirectWriteValid, init = false.B)
 
-  when(realPush) {
+  when(realWrite) {
     specQueue(realWriteTosw.value) := realWriteEntry
     specNos(realWriteTosw.value)   := realNos
   }
@@ -303,7 +316,20 @@ class RasStack(implicit p: Parameters) extends RasModule
     // XSError(io.commit.pushAddr =/= commitPushAddr, "addr from commit mismatch with addr from spec")
   }
 
-  when(io.commit.pushValid) {
+  when(io.commit.popAndPushValid) {
+    val nspUpdate = Wire(UInt(log2Up(CommitStackSize).W))
+    when(io.commit.metaSsp =/= nsp) {
+      // force set nsp to commit ssp to avoid permanent errors
+      nspUpdate := io.commit.metaSsp
+    }.otherwise {
+      nspUpdate := nsp
+    }
+
+    nsp := nspUpdate
+    commitStack(nspUpdate).retAddr := commitPushAddr
+  }
+
+  when(io.commit.pushValid || io.commit.popAndPushValid) {
     bos := io.commit.metaTosw
   }.elsewhen(io.commit.valid && (distanceBetween(io.commit.metaTosw, bos) > 2.U)) {
     bos := specPtrDec(io.commit.metaTosw)
@@ -336,6 +362,14 @@ class RasStack(implicit p: Parameters) extends RasModule
         redirectTopNos
       )
     }
+    when(io.redirect.isRetCall) {
+      specPopAndPush(
+        io.redirect.meta.ssp,
+        io.redirect.meta.tosr,
+        io.redirect.meta.tosw,
+        redirectTopNos
+      )
+    }
   }
 
   when(distanceBetween(tosw, bos) > (SpecQueueSize - 2).U) {
@@ -351,7 +385,3 @@ class RasStack(implicit p: Parameters) extends RasModule
   io.debug.specNos.zipWithIndex.foreach { case (a, i) => a := specNos(i) }
   io.debug.specQueue.zipWithIndex.foreach { case (a, i) => a := specQueue(i) }
 }
-
-
-
-

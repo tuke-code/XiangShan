@@ -65,13 +65,14 @@ class Ras(implicit p: Parameters) extends BasePredictor with HasRasParameters wi
   private val stackNearOverflow = stack.specNearOverflow
   private val specPush          = io.specIn.valid && io.specIn.bits.attribute.isCall
   private val specPop           = io.specIn.valid && io.specIn.bits.attribute.isReturn
+  private val specPopAndPush    = io.specIn.valid && io.specIn.bits.attribute.isReturnAndCall
 
   private val specIn       = io.specIn.bits
   private val specAlignPc  = specIn.startPc & alignMask
   private val specPushAddr = specAlignPc + (specIn.cfiPosition << 1.U).asUInt + 2.U
   stack.spec.pushValid := specPush && !stackNearOverflow
   stack.spec.popValid  := specPop && !stackNearOverflow
-
+  stack.spec.popAndPushValid := specPopAndPush && !stackNearOverflow
   stack.spec.pushAddr := PrunedAddrInit(specPushAddr)
   stack.spec.fire     := io.specIn.valid
 
@@ -100,6 +101,7 @@ class Ras(implicit p: Parameters) extends BasePredictor with HasRasParameters wi
   stack.redirect.valid  := redirect.valid && (isBefore(redirectTOSW, stackTOSW) || !stackNearOverflow)
   stack.redirect.isCall := redirect.bits.attribute.isCall
   stack.redirect.isRet  := redirect.bits.attribute.isReturn
+  stack.redirect.isRetCall := redirect.bits.attribute.isReturnAndCall
   stack.redirect.meta   := redirect.bits.meta.ras
   // Redirected branch PC points to end of instruction.
   stack.redirect.callAddr := redirect.bits.cfiPc + 2.U
@@ -110,6 +112,7 @@ class Ras(implicit p: Parameters) extends BasePredictor with HasRasParameters wi
   stack.commit.valid     := commitValid
   stack.commit.pushValid := commitValid && commitInfo.attribute.isCall
   stack.commit.popValid  := commitValid && commitInfo.attribute.isReturn
+  stack.commit.popAndPushValid := commitValid && commitInfo.attribute.isReturnAndCall
   stack.commit.pushAddr  := commitPushAddr
   stack.commit.metaTosw  := commitInfo.meta.ras.tosw
   stack.commit.metaSsp   := commitInfo.meta.ras.ssp
