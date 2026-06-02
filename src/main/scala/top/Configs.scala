@@ -535,16 +535,7 @@ class DefaultConfig(n: Int = 1) extends Config(
   OpenLLCConfig("32MB", ways = 16, banks = 4)
     ++ L2CacheConfig("2MB", inclusive = true, banks = 4, tp = false)
     ++ WithNKBL1D(64, ways = 4)
-    ++ new BaseConfig(n)).alter((site, here, up) => {
-    case XSTileKey => up(XSTileKey).map { p =>
-      p.copy(
-        prefetcher = Nil,
-        L2CacheParamsOpt = p.L2CacheParamsOpt.map { l2 =>
-          l2.copy(prefetch = Seq(NLParameters()))
-        }
-      )
-    }
-  })
+    ++ new BaseConfig(n)
 )
 
 class CVMConfig(n: Int = 1) extends Config(
