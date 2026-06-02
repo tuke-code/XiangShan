@@ -250,8 +250,11 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
     pf.io.pmp_resp := io.pmp_resp(IdxStreamStride)
 
     l1_pf_arb.io.in(IdxStreamStride) <> pf.io.l1_req
+    l1_pf_arb.io.in(IdxStreamStride).valid := false.B
     l2_pf_arb.io.in(IdxStreamStride) <> pf.io.l2_req
+    l2_pf_arb.io.in(IdxStreamStride).valid := false.B
     l3_pf_arb.io.in(IdxStreamStride) <> pf.io.l3_req
+    l3_pf_arb.io.in(IdxStreamStride).valid := false.B
   })
 
   val bertiOpt: Option[BertiPrefetcher] = if(HasBerti) Some(Module(new BertiPrefetcher())) else None
