@@ -129,6 +129,21 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
     FillInterleaved(16, s0_range(i))
   })
 
+  private val s0_offset = VecInit(
+    s0_req(0).startVAddr(blockOffBits - 1, 0),
+    s0_req(1).startVAddr(blockOffBits - 1, 0)
+  )
+
+  private val s0_sramMaybeRvcMapRaw = VecInit(
+    s0_wayLookupEntry(0).maybeRvcMap.asTypeOf(Vec(PortNumber, Vec(DataBanks, UInt(MaxInstNumPerBank.W)))),
+    s0_wayLookupEntry(1).maybeRvcMap.asTypeOf(Vec(PortNumber, Vec(DataBanks, UInt(MaxInstNumPerBank.W))))
+  )
+  private val s0_sramMaybeRvcMapSel = VecInit((0 until FetchPorts).map { p =>
+    VecInit((0 until DataBanks).map { i =>
+      Mux(getLineSel(s0_offset(p))(i), s0_sramMaybeRvcMapRaw(p)(1)(i), s0_sramMaybeRvcMapRaw(p)(0)(i))
+    })
+  })
+
   /**
     ******************************************************************************
     * data SRAM request
@@ -166,6 +181,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
 
   private val s1_wayMask        = s1_wayLookupEntry.map(_.waymask)
   private val s1_maybeRvcMapRaw = s1_wayLookupEntry.map(_.maybeRvcMap)
+  private val s1_sramMaybeRvcMapSel = RegEnable(s0_sramMaybeRvcMapSel, s0_fire)
 
   private val s1_pTag   = s1_wayLookupEntry(0).pTag
   private val s1_ftqIdx = s1_req(0).ftqIdx
@@ -228,12 +244,6 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   )
   private val s1_mshrDatas = fromMiss.bits.data.asTypeOf(Vec(DataBanks, UInt(ICacheDataBits.W)))
 
-  // select maybeRvc
-  private val s1_sramMaybeRvcMap = VecInit(
-    s1_maybeRvcMapRaw(0).asTypeOf(Vec(PortNumber, Vec(DataBanks, UInt(MaxInstNumPerBank.W)))),
-    s1_maybeRvcMapRaw(1).asTypeOf(Vec(PortNumber, Vec(DataBanks, UInt(MaxInstNumPerBank.W))))
-  )
-
   private val s1_mshrMaybeRvcMap =
     fromMiss.bits.maybeRvcMap.asTypeOf(Vec(DataBanks, UInt(MaxInstNumPerBank.W)))
 
@@ -279,7 +289,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
         Mux(
           s1_bankMshrValidReg(0)(i),
           s1_mshrMaybeRvcMapReg(i),
-          Mux(getLineSel(s1_offset(0))(i), s1_sramMaybeRvcMap(0)(1)(i), s1_sramMaybeRvcMap(0)(0)(i))
+          s1_sramMaybeRvcMapSel(0)(i)
         ),
         s1_bankMshrValidReg(0)(i) || s1_bankSramValid(0)(i)
       )
@@ -289,7 +299,7 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
         Mux(
           s1_bankMshrValidReg(1)(i),
           s1_mshrMaybeRvcMapReg(i),
-          Mux(getLineSel(s1_offset(1))(i), s1_sramMaybeRvcMap(1)(1)(i), s1_sramMaybeRvcMap(1)(0)(i))
+          s1_sramMaybeRvcMapSel(1)(i)
         ),
         s1_bankMshrValidReg(1)(i) || s1_bankSramValid(1)(i)
       )
