@@ -6,7 +6,7 @@ import org.chipsalliance.cde.config.Parameters
 
 object XORFoldTA { // for Hash Tag Array of DCache
   def apply(input: UInt, resWidth: Int): UInt = {
-    val nChunks = 4
+    val nChunks = 2
     require(input.getWidth >= nChunks * resWidth)
     (0 until nChunks).map { i =>
       input((i + 1) * resWidth - 1, i * resWidth)

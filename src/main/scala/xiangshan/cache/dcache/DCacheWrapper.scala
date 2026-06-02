@@ -211,7 +211,7 @@ trait HasDCacheParameters
   val tagWritePort = metaWritePort + 1
   val errWritePort = tagWritePort + 1
   val wbPort = errWritePort + 1
-  val HashTagBits = 4
+  val HashTagBits = 8
   val EnableDCacheHashTagArray = true
 
   def set_to_dcache_div(set: UInt) = {
