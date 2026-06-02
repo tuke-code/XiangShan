@@ -73,7 +73,6 @@ class PhrUpdate(implicit p: Parameters) extends PhrBundle {
   val redirect: Valid[BpuRedirect] = Valid(new BpuRedirect)
 
   val s3_override:   Bool       = Bool()
-  val s3_phrMeta:    PhrMeta    = new PhrMeta()
   val s3_prediction: Prediction = new Prediction()
   val s3_startPc:    PrunedAddr = PrunedAddr(VAddrBits)
 }
