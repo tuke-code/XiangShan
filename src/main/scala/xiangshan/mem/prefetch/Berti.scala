@@ -30,7 +30,9 @@ import xiangshan.mem.L1PrefetchReq
 case class BertiParams
 (
   name: String = "berti",
-  ht_set_cnt: Int = 16, // areaOpt. // 64, gem5. // 8 , paper.
+  ht_set_cnt: Int = 1, // areaOpt. // 64, gem5. // 8 , paper.
+  ht_way_cnt: Int = 16,
+  ht_way_replace: String = "plru",
   ht_list_size: Int = 6 , // areaOpt. // 6 , gem5. // 16, paper.
   ht_list_replace: String = "fifo",
   dt_way_cnt: Int = 16,   // 64, gem5. // 16, paper.
@@ -66,12 +68,14 @@ trait HasBertiHelper extends HasCircularQueuePtrHelper with HasDCacheParameters 
   def useFIFO: Boolean = bertiParams.ht_list_replace == "fifo"
   assert(useFIFO, s"unsupported ht replacement policy: ${bertiParams.ht_list_replace}")
   def HtSetSize: Int = bertiParams.ht_set_cnt
+  def HtWaySize: Int = bertiParams.ht_way_cnt
   def DtWaySize: Int = bertiParams.dt_way_cnt
   def HtListSize: Int = bertiParams.ht_list_size
   def DtDeltaSize: Int = bertiParams.dt_delta_size
   def DtDeltaIndexWidth: Int = log2Up(DtDeltaSize)
 
   def HtSetWidth: Int = log2Up(HtSetSize)
+  def HtWayWidth: Int = log2Up(HtWaySize)
   def DtWayWidth: Int = log2Up(DtWaySize)
 
   def DIR_REGION: Int = 256 // 256 lines -> a dcache way
@@ -161,8 +165,9 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val stat_histLineVA = WireInit(0.U(HtLineVAddrWidth.W))
   val stat_currLineVA = WireInit(0.U(HtLineVAddrWidth.W))
   /*** built-in function */
+  def wayMap[T <: Data](f: Int => T) = VecInit((0 until HtWaySize).map(f))
   def listMap[T <: Data](f: Int => T) = VecInit((0 until HtListSize).map(f))
-  def getIndex(pc: UInt): UInt = getPCHash(pc)(HtSetWidth-1, 0)
+  def getIndex(pc: UInt): UInt = 0.U // getPCHash(pc)(HtSetWidth-1, 0)
   def getTag(pc: UInt): UInt = getPCHash(pc)(HtPcTagWidth + HtSetWidth - 1, HtSetWidth)
   def getTrainBaseAddr2HT(vaddr: UInt): UInt = {
     getTrainBaseAddr(vaddr)(HtLineVAddrWidth - 1, 0)
@@ -231,16 +236,17 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   /*** data structure */
   val enableDecrMode = Constantin.createRecord(_name+"_enableDecrMode", 0)
   // TODO lyq: refractor
-  val entries = Reg(Vec(HtSetSize, Vec(HtListSize, new Entry)))
-  val valids = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtListSize, Bool()))))
-  val decrModes = RegInit(0.U.asTypeOf(Vec(HtSetSize, Bool())))
-  val decrModeValids = RegInit(0.U.asTypeOf(Vec(HtSetSize, Bool())))
-  val hysteresis = RegInit(0.U.asTypeOf(Vec(HtSetSize, Bool())))
-  val pcTags = RegInit(0.U.asTypeOf(Vec(HtSetSize, UInt(HtPcTagWidth.W))))
-  // FIFO: for FIFO replace policy
-  val accessPtrs = Option.when(useFIFO)(RegInit(0.U.asTypeOf(Vec(HtSetSize, new HtListPointer))))
-  // FIFO: for easier learning policy
-  val learnPtrs = Option.when(useFIFO)(RegInit(0.U.asTypeOf(Vec(HtSetSize, new HtListPointer))))
+  val entries = Reg(Vec(HtSetSize, Vec(HtWaySize, Vec(HtListSize, new Entry))))
+  val valids = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, Vec(HtListSize, Bool())))))
+  val decrModes = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, Bool()))))
+  val decrModeValids = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, Bool()))))
+  val hysteresis = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, Bool()))))
+  val pcTags = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, UInt(HtPcTagWidth.W)))))
+  val wayReplacer = ReplacementPolicy.fromString("setplru", HtWaySize, HtSetSize)
+  // list: for FIFO replace policy
+  val accessPtrs = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, new HtListPointer))))
+  // list: for easier learning policy
+  val learnPtrs = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, new HtListPointer))))
 
   val currTime = GTimer()
   val currTsp = Wire(UInt(LATENCY_WIDTH.W))
@@ -249,8 +255,8 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   /*** functional function */
   def init(): Unit = {
     valids := 0.U.asTypeOf(chiselTypeOf(valids))
-    accessPtrs.foreach(_ := 0.U.asTypeOf(new HtListPointer))
-    learnPtrs.foreach(_ := 0.U.asTypeOf(new HtListPointer))
+    accessPtrs.foreach(_.foreach(_ := 0.U.asTypeOf(new HtListPointer)))
+    learnPtrs.foreach(_.foreach(_ := 0.U.asTypeOf(new HtListPointer)))
   }
 
   /**
@@ -273,22 +279,29 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val a0_set = getIndex(accessReq.pc)
   val a0_tag = getTag(accessReq.pc)
   val a0_baseVAddr = getTrainBaseAddr2HT(accessReq.vaddr)
-  val a0_listIdx = accessPtrs.get(a0_set).value
-  val a0_pcMatch = valids(a0_set).asUInt.orR && pcTags(a0_set) === a0_tag
-  val a0_vaMatchVec = listMap(idx => valids(a0_set)(idx) && entries(a0_set)(idx).baseVAddr === a0_baseVAddr)
+  val a0_wayValidVec = wayMap(w => valids(a0_set)(w).asUInt.orR)
+  val a0_wayMatchVec = wayMap(w => a0_wayValidVec(w) && pcTags(a0_set)(w) === a0_tag)
+  val a0_pcMatch = a0_wayMatchVec.orR
+  val a0_hitWay = OHToUInt(a0_wayMatchVec)
+  val a0_replaceWay = wayReplacer.way(a0_set)
+  val a0_way = Mux(a0_pcMatch, a0_hitWay, a0_replaceWay)
+  val a0_listIdx = accessPtrs(a0_set)(a0_way).value
+  val a0_vaMatchVec = listMap(idx => valids(a0_set)(a0_way)(idx) && entries(a0_set)(a0_way)(idx).baseVAddr === a0_baseVAddr)
   val a0_vaMatch = a0_vaMatchVec.orR
-  val a0_lastListIdx = (accessPtrs.get(a0_set) - (HtListSize >> 1).U).value
-  val a0_lastValid = valids(a0_set)(a0_lastListIdx)
-  val a0_lastBaseVAddr = entries(a0_set)(a0_lastListIdx).baseVAddr
+  val a0_lastListIdx = (accessPtrs(a0_set)(a0_way) - (HtListSize >> 1).U).value
+  val a0_lastValid = valids(a0_set)(a0_way)(a0_lastListIdx)
+  val a0_lastBaseVAddr = entries(a0_set)(a0_way)(a0_lastListIdx).baseVAddr
   val a0_doInsert = a0_pcMatch && !a0_vaMatch
+  assert(PopCount(a0_wayMatchVec) <= 1.U, s"HistoryTable access way match should be unique in ${this.getClass.getSimpleName}")
 
   when(a0_valid && a0_doInsert) {
-    accessPtrs.get(a0_set) := accessPtrs.get(a0_set) + 1.U
+    accessPtrs(a0_set)(a0_way) := accessPtrs(a0_set)(a0_way) + 1.U
   }
 
   val a1_valid = GatedValidRegNext(a0_valid, false.B)
   val a1_set = RegEnable(a0_set, a0_valid)
   val a1_tag = RegEnable(a0_tag, a0_valid)
+  val a1_way = RegEnable(a0_way, a0_valid)
   val a1_baseVAddr = RegEnable(a0_baseVAddr, a0_valid)
   val a1_listIdx = RegEnable(a0_listIdx, a0_valid)
   val a1_pcMatch = RegEnable(a0_pcMatch, a0_valid)
@@ -300,38 +313,40 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
 
   when(a1_valid) {
     when(a1_pcMatch) {
+      wayReplacer.access(a1_set, a1_way)
       when(!a1_vaMatch) {
         when(a1_lastValid) {
           val isDecr = a1_baseVAddr < a1_lastBaseVAddr
           val isSameRegion = getDirRegionAddr(a1_baseVAddr) === getDirRegionAddr(a1_lastBaseVAddr)
-          decrModes(a1_set) := isDecr
-          decrModeValids(a1_set) := isSameRegion
-          stat_access_dirChange := decrModes(a1_set) ^ isDecr
+          decrModes(a1_set)(a1_way) := isDecr
+          decrModeValids(a1_set)(a1_way) := isSameRegion
+          stat_access_dirChange := decrModes(a1_set)(a1_way) ^ isDecr
           stat_access_dirNotSameRegion := !isSameRegion
         }
-        hysteresis(a1_set) := true.B
-        valids(a1_set)(a1_listIdx) := true.B
-        entries(a1_set)(a1_listIdx).alloc(a1_baseVAddr, currTsp)
+        hysteresis(a1_set)(a1_way) := true.B
+        valids(a1_set)(a1_way)(a1_listIdx) := true.B
+        entries(a1_set)(a1_way)(a1_listIdx).alloc(a1_baseVAddr, currTsp)
 
-        stat_access_update := valids(a1_set)(a1_listIdx)
+        stat_access_update := valids(a1_set)(a1_way)(a1_listIdx)
         stat_access_currVA := a1_baseVAddr
         stat_access_lastVA := a1_lastBaseVAddr
       }
-    }.elsewhen(hysteresis(a1_set)) {
-      hysteresis(a1_set) := false.B
+    }/* .elsewhen(hysteresis(a1_set)(a1_way)) {
+      hysteresis(a1_set)(a1_way) := false.B
       stat_access_pcHysteresis := true.B
-    }.otherwise {
+    } */.otherwise {
+      wayReplacer.access(a1_set, a1_way)
       stat_access_replace := true.B
-      val repWay = 0
-      entries(a1_set)(repWay).alloc(a1_baseVAddr, currTsp)
-      valids(a1_set).map(_ := false.B)
-      valids(a1_set)(repWay) := true.B
-      decrModes(a1_set) := false.B
-      decrModeValids(a1_set) := false.B
-      hysteresis(a1_set) := true.B
-      pcTags(a1_set) := a1_tag
-      accessPtrs.get(a1_set) := 0.U.asTypeOf(new HtListPointer)
-      learnPtrs.get(a1_set) := 0.U.asTypeOf(new HtListPointer)
+      val repListIdx = 0
+      entries(a1_set)(a1_way)(repListIdx).alloc(a1_baseVAddr, currTsp)
+      valids(a1_set)(a1_way).map(_ := false.B)
+      valids(a1_set)(a1_way)(repListIdx) := true.B
+      decrModes(a1_set)(a1_way) := false.B
+      decrModeValids(a1_set)(a1_way) := false.B
+      hysteresis(a1_set)(a1_way) := true.B
+      pcTags(a1_set)(a1_way) := a1_tag
+      accessPtrs(a1_set)(a1_way) := 0.U.asTypeOf(new HtListPointer)
+      learnPtrs(a1_set)(a1_way) := 0.U.asTypeOf(new HtListPointer)
     }
   }
 
@@ -339,15 +354,22 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val searchReq = io.search.req.bits
   val s0_valid = io.search.req.valid
   val s0_set = getIndex(searchReq.pc)
+  val s0_tag = getTag(searchReq.pc)
   val s0_baseVAddr = getTrainBaseAddr2HT(searchReq.vaddr)
-  val s0_listIdx = learnPtrs.get(s0_set).value
-  val s0_histEntry = entries(s0_set)(s0_listIdx)
-  val s0_entryValid = valids(s0_set)(s0_listIdx)
-  val s0_decrMode = decrModes(s0_set)
-  val s0_decrModeValid = decrModeValids(s0_set)
+  val s0_wayValidVec = wayMap(w => valids(s0_set)(w).asUInt.orR)
+  val s0_wayMatchVec = wayMap(w => s0_wayValidVec(w) && pcTags(s0_set)(w) === s0_tag)
+  val s0_hit = s0_wayMatchVec.orR
+  val s0_way = OHToUInt(s0_wayMatchVec)
+  val s0_listIdx = learnPtrs(s0_set)(s0_way).value
+  val s0_histEntry = entries(s0_set)(s0_way)(s0_listIdx)
+  val s0_entryValid = s0_hit && valids(s0_set)(s0_way)(s0_listIdx)
+  val s0_decrMode = decrModes(s0_set)(s0_way)
+  val s0_decrModeValid = s0_hit && decrModeValids(s0_set)(s0_way)
+  assert(PopCount(s0_wayMatchVec) <= 1.U, s"HistoryTable search way match should be unique in ${this.getClass.getSimpleName}")
 
-  when(s0_valid) {
-    learnPtrs.get(s0_set) := learnPtrs.get(s0_set) + 1.U
+  when(s0_valid && s0_hit) {
+    wayReplacer.access(s0_set, s0_way)
+    learnPtrs(s0_set)(s0_way) := learnPtrs(s0_set)(s0_way) + 1.U
   }
 
   val s1_valid = GatedValidRegNext(s0_valid, false.B)
