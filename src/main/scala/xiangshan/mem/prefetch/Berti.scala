@@ -367,7 +367,7 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val s1_result = WireInit(0.U.asTypeOf(new LearnDeltasLiteIO))
   val s1_delta = Wire(SInt(DeltaWidth.W))
   s1_result.pc := s1_pc
-  stat_find_delta := s1_entryValid
+  stat_find_delta := s1_valid && s1_entryValid
   stat_dirDiff := s1_decrMode ^ s1_originDelta(s1_originDelta.getWidth - 1)
   stat_dirDiffNotValid := (s1_decrMode ^ s1_originDelta(s1_originDelta.getWidth - 1)) && !s1_decrModeValid
   stat_dirDiffNotSameRegion := (s1_decrMode ^ s1_originDelta(s1_originDelta.getWidth - 1)) && s1_decrModeValid && !checkDirSameRegion(s1_originDelta)
@@ -398,14 +398,14 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   XSPerfAccumulate("search_req", io.search.req.valid)
   XSPerfAccumulate("search_resp_valid", io.search.resp.valid)
   XSPerfAccumulate("search_resp_find_total", stat_find_delta)
-  XSPerfAccumulate("search_resp_find_overflow", stat_find_delta && stat_overflow) // too large
-  XSPerfAccumulate("search_resp_find_dissatisfy", stat_find_delta && !stat_overflow && stat_dissatisfy) // too small
-  XSPerfAccumulate("search_resp_find_late", stat_find_delta && !stat_overflow && !stat_dissatisfy && stat_late) // too late
-  XSPerfAccumulate("search_resp_find_satisfy", stat_find_delta && !stat_overflow && !stat_dissatisfy && !stat_late) // satisfy
-  XSPerfAccumulate("search_resp_find_directCorrect", io.search.resp.valid && stat_dirDiffCorrect)
-  XSPerfAccumulate("search_resp_find_dirDiff", io.search.resp.valid && stat_dirDiff)
-  XSPerfAccumulate("search_resp_find_dirDiffNotValid", io.search.resp.valid && stat_dirDiffNotValid)
-  XSPerfAccumulate("search_resp_find_dirDiffNotSameRegion", io.search.resp.valid && stat_dirDiffNotSameRegion)
+  XSPerfAccumulate("search_resp_find_overflow", stat_find_delta && stat_overflow)
+  XSPerfAccumulate("search_resp_find_dissatisfy", stat_find_delta && !stat_overflow && stat_dissatisfy)
+  XSPerfAccumulate("search_resp_find_late", stat_find_delta && !stat_overflow && !stat_dissatisfy && stat_late)
+  XSPerfAccumulate("search_resp_find_satisfy", stat_find_delta && !stat_overflow && !stat_dissatisfy && !stat_late)
+  XSPerfAccumulate("search_resp_find_directCorrect", s1_result.valid && stat_dirDiffCorrect)
+  XSPerfAccumulate("search_resp_find_dirDiff", s1_result.valid && stat_dirDiff)
+  XSPerfAccumulate("search_resp_find_dirDiffNotValid", s1_result.valid && stat_dirDiffNotValid)
+  XSPerfAccumulate("search_resp_find_dirDiffNotSameRegion", s1_result.valid && stat_dirDiffNotSameRegion)
 
   class AccessLogDb extends Bundle {
     val pcHysteresis = Bool()
