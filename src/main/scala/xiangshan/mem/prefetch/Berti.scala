@@ -501,6 +501,7 @@ class DeltaTable()(implicit p: Parameters) extends BertiModule {
   val stat_update_evictEntryIdx = WireInit(0.U(DtWayWidth.W)) // TODO lyq: if have chiselMap, it may be eaiser to statistic evicted data
   val stat_update_evictDelta = WireInit(0.S(DeltaWidth.W)) // TODO lyq: have no idea how to output this
   val stat_prefetch_isEntryHit = WireInit(false.B)
+  val stat_prefetch_hitGradeVec = WireInit(VecInit.fill(DeltaStatus.all.size)(false.B))
   /*** built-in function */
   // def thresholdOfReset: UInt = 16.U 
   // def thresholdOfUpdate: UInt = 10.U 
@@ -741,6 +742,7 @@ class DeltaTable()(implicit p: Parameters) extends BertiModule {
   p1_pfReq.triggerVA := p1_train.vaddr
   p1_pfReq.prefetchVA := getPrefetchVAddr(p1_train.vaddr, p1_info.delta)
   p1_pfReq.prefetchTarget := PrefetchTarget.L3.id.U
+  stat_prefetch_hitGradeVec(p1_info.status.asUInt) := p1_valid
   when(p1_info.status === DeltaStatus.L1_PREF) {
     p1_pfReq.prefetchTarget := PrefetchTarget.L1.id.U
     p1_l2PfVA := getPrefetchVAddr(p1_train.vaddr, p1_info.delta, l2DepthRatio)
@@ -787,6 +789,9 @@ class DeltaTable()(implicit p: Parameters) extends BertiModule {
   XSPerfAccumulate("stat_update_isDeltaMiss", stat_update_isDeltaMiss)
   XSPerfAccumulate("stat_update_isDeltaReplace", stat_update_isDeltaReplace)
   XSPerfAccumulate("stat_prefetch_isEntryHit", stat_prefetch_isEntryHit)
+  for (i <- 0 until DeltaStatus.all.size) {
+    XSPerfAccumulate(s"stat_prefetch_hitGrade_${i}", stat_prefetch_hitGradeVec(i))
+  }
 
 }
 
