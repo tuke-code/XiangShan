@@ -56,12 +56,16 @@ trait HasBertiHelper extends HasCircularQueuePtrHelper with HasDCacheParameters 
 
   def _name: String = bertiParams.name
 
+  val VADDR_HASH_WIDTH = 5
+  val BLK_ADDR_RAW_WIDTH = 10
+  val HASH_TAG_WIDTH = VADDR_HASH_WIDTH + BLK_ADDR_RAW_WIDTH
+
   def PcOffsetWidth: Int = 2
   def DeltaWidth: Int = 13
-  def HtPcTagWidth: Int = 7
+  def HtPcTagWidth: Int = HASH_TAG_WIDTH
   def HtLineVAddrWidth: Int = 24
   def HtLineOffsetWidth: Int = DCacheLineOffset
-  def DtPcTagWidth: Int = 10
+  def DtPcTagWidth: Int = HASH_TAG_WIDTH
   def DtCntWidth: Int = 4
 
   def useByteAddr: Boolean = bertiParams.use_byte_addr
@@ -96,8 +100,22 @@ trait HasBertiHelper extends HasCircularQueuePtrHelper with HasDCacheParameters 
     }
   }
 
+  def vaddr_hash(x: UInt): UInt = {
+    val width = VADDR_HASH_WIDTH
+    val low = x(width - 1, 0)
+    val mid = x(2 * width - 1, width)
+    val high = x(3 * width - 1, 2 * width)
+    low ^ mid ^ high
+  }
+  def pc_hash_tag(x: UInt): UInt = {
+    val low = x(BLK_ADDR_RAW_WIDTH - 1, 0)
+    val high = x(BLK_ADDR_RAW_WIDTH - 1 + 3 * VADDR_HASH_WIDTH, BLK_ADDR_RAW_WIDTH)
+    val high_hash = vaddr_hash(high)
+    Cat(high_hash, low)
+  }
+
   // for 16-bit instruction
-  def getPCHash(pc: UInt): UInt = pc >> 1
+  def getPCHash(pc: UInt): UInt = pc_hash_tag(pc) // pc >> 1
 
   def getTrainBaseAddr(vaddr: UInt): UInt = {
     if (useByteAddr) {
@@ -167,8 +185,8 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   /*** built-in function */
   def wayMap[T <: Data](f: Int => T) = VecInit((0 until HtWaySize).map(f))
   def listMap[T <: Data](f: Int => T) = VecInit((0 until HtListSize).map(f))
-  def getIndex(pc: UInt): UInt = 0.U // getPCHash(pc)(HtSetWidth-1, 0)
-  def getTag(pc: UInt): UInt = getPCHash(pc)(HtPcTagWidth + HtSetWidth - 1, HtSetWidth)
+  def getIndex(pc: UInt): UInt = if(HtSetSize == 1) 0.U else getPCHash(pc)(HtSetWidth-1, 0)
+  def getTag(pc: UInt): UInt = if(HtSetSize == 1) getPCHash(pc) else getPCHash(pc)(HtPcTagWidth + HtSetWidth - 1, HtSetWidth)
   def getTrainBaseAddr2HT(vaddr: UInt): UInt = {
     getTrainBaseAddr(vaddr)(HtLineVAddrWidth - 1, 0)
   }
@@ -274,17 +292,22 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
 
   /*** access */
   val accessReq = io.access.bits
+  val a1_valid = Wire(Bool())
+  val a1_set = Wire(UInt(HtSetWidth.W))
+  val a1_tag = Wire(UInt(HtPcTagWidth.W))
+  val a1_way = Wire(UInt(HtWayWidth.W))
 
   val a0_valid = io.access.valid
   val a0_set = getIndex(accessReq.pc)
   val a0_tag = getTag(accessReq.pc)
   val a0_baseVAddr = getTrainBaseAddr2HT(accessReq.vaddr)
-  val a0_wayValidVec = wayMap(w => valids(a0_set)(w).asUInt.orR)
-  val a0_wayMatchVec = wayMap(w => a0_wayValidVec(w) && pcTags(a0_set)(w) === a0_tag)
+  val a0_wayMatchVec = wayMap(w => valids(a0_set)(w).asUInt.orR && pcTags(a0_set)(w) === a0_tag)
   val a0_pcMatch = a0_wayMatchVec.orR
   val a0_hitWay = OHToUInt(a0_wayMatchVec)
+  val a0_wayPrevMatch = a0_valid && a1_valid && a0_tag === a1_tag && a0_set === a1_set
   val a0_replaceWay = wayReplacer.way(a0_set)
-  val a0_way = Mux(a0_pcMatch, a0_hitWay, a0_replaceWay)
+  val a0_way = Mux(a0_wayPrevMatch, a1_way, Mux(a0_pcMatch, a0_hitWay, a0_replaceWay))
+
   val a0_listIdx = accessPtrs(a0_set)(a0_way).value
   val a0_vaMatchVec = listMap(idx => valids(a0_set)(a0_way)(idx) && entries(a0_set)(a0_way)(idx).baseVAddr === a0_baseVAddr)
   val a0_vaMatch = a0_vaMatchVec.orR
@@ -298,10 +321,10 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
     accessPtrs(a0_set)(a0_way) := accessPtrs(a0_set)(a0_way) + 1.U
   }
 
-  val a1_valid = GatedValidRegNext(a0_valid, false.B)
-  val a1_set = RegEnable(a0_set, a0_valid)
-  val a1_tag = RegEnable(a0_tag, a0_valid)
-  val a1_way = RegEnable(a0_way, a0_valid)
+  a1_valid := GatedValidRegNext(a0_valid, false.B)
+  a1_set := RegEnable(a0_set, a0_valid)
+  a1_tag := RegEnable(a0_tag, a0_valid)
+  a1_way := RegEnable(a0_way, a0_valid)
   val a1_baseVAddr = RegEnable(a0_baseVAddr, a0_valid)
   val a1_listIdx = RegEnable(a0_listIdx, a0_valid)
   val a1_pcMatch = RegEnable(a0_pcMatch, a0_valid)
@@ -490,10 +513,7 @@ class DeltaTable()(implicit p: Parameters) extends BertiModule {
   val thresholdOfL2PF = Constantin.createRecord(_name+"_thresholdOfL2PF", 2)      // ((1 << DtCntWidth) * 0.5).toInt
   val thresholdOfL2PFR = Constantin.createRecord(_name+"_thresholdOfL2PFR", 1)    // ((1 << DtCntWidth) * 0.35).toInt
   val l2DepthRatio = Constantin.createRecord(s"${_name}_l2DepthRatio", 2)
-  def getPcTag(pc: UInt): UInt = {
-    val res = getPCHash(pc)
-    res(DtPcTagWidth - 1, 0)
-  }
+  def getPcTag(pc: UInt): UInt = getPCHash(pc)
   def getStatus(conf: UInt): DeltaStatus.Type = {
     val res = Wire(DeltaStatus())
     when(conf >= thresholdOfL1PF){
