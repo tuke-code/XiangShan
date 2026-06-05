@@ -57,7 +57,11 @@ class S3Train(implicit p: Parameters) extends PhrBundle with HasPhrParameters {
   val taken:          Bool                   = Bool() // actual s3_taken
   val startPc:        PrunedAddr             = PrunedAddr(VAddrBits)
   val firstTakenBrOH: Vec[Bool]              = Vec(NumBtbResultEntries, Bool())
-  val phrMeta:        PhrMeta                = new PhrMeta()
+  val cfiPc:          Vec[PrunedAddr]        = Vec(NumBtbResultEntries, PrunedAddr(VAddrBits))
+  val phrMetaDup:     Vec[PhrMeta]           = Vec(3, new PhrMeta())
+  val rasTarget:      PrunedAddr             = PrunedAddr(VAddrBits)
+  val ittageTarget:   PrunedAddr             = PrunedAddr(VAddrBits)
+  val ittageHit:      Bool                   = Bool()
   val s3Prediction:   Vec[Valid[Prediction]] = Vec(NumBtbResultEntries, Valid(new Prediction))
 }
 

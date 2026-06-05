@@ -86,18 +86,19 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   private val s1_phrValue = getPhr(s1_phrPtr)
   private val phrValue    = getPhr(phrPtr)
 
-  private val s1AbtbUpdateData = VecInit.fill(NumAheadBtbPredictionEntries)(0.U.asTypeOf(new PhrUpdateData))
-  private val s1UbtbUpdateData = WireInit(0.U.asTypeOf(new PhrUpdateData))
-  private val redirectData     = WireInit(0.U.asTypeOf(new PhrUpdateData))
-  private val s3_override      = WireInit(false.B)
-  private val s3UpdateData     = VecInit.fill(NumBtbResultEntries)(0.U.asTypeOf(new PhrUpdateData))
+  private val s1AbtbUpdateData   = VecInit.fill(NumAheadBtbPredictionEntries)(0.U.asTypeOf(new PhrUpdateData))
+  private val s1UbtbUpdateData   = WireInit(0.U.asTypeOf(new PhrUpdateData))
+  private val redirectData       = WireInit(0.U.asTypeOf(new PhrUpdateData))
+  private val s3_override        = WireInit(false.B)
+  private val s3MbtbUpdateData   = VecInit.fill(NumBtbResultEntries)(0.U.asTypeOf(new PhrUpdateData))
+  private val s3IttageUpdateData = VecInit.fill(NumBtbResultEntries)(0.U.asTypeOf(new PhrUpdateData))
+  private val s3RasUpdateData    = VecInit.fill(NumBtbResultEntries)(0.U.asTypeOf(new PhrUpdateData))
 
   private val redirectS0PhrPtr     = WireInit(0.U.asTypeOf(new PhrPtr))
   private val redirectS0PhrLowBits = WireInit(0.U(PathHashHighWidth.W))
   private val redirectS0FoldedPhr  = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
   private val redirectUpdate       = WireInit(0.U.asTypeOf(new PhrUpdateResult))
   private val s3S0PhrPtr           = WireInit(0.U.asTypeOf(new PhrPtr))
-  private val s3S0PhrLowBits       = WireInit(0.U(PathHashHighWidth.W))
   private val s3S0FoldedPhr        = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
   private val s3Update             = WireInit(0.U.asTypeOf(new PhrUpdateResult))
   private val s1S0PhrPtr           = WireInit(0.U.asTypeOf(new PhrPtr))
@@ -115,12 +116,33 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   redirectData.phrMeta := io.train.redirect.bits.meta.phr
 
   s3_override := io.s3Train.valid
-  s3UpdateData.zip(io.s3Train.s3Prediction).foreach { case (data, pred) =>
-    data.valid   := pred.valid
-    data.taken   := pred.valid
-    data.cfiPc   := getCfiPcFromPosition(io.s3Train.startPc, pred.bits.cfiPosition)
-    data.target  := pred.bits.target
-    data.phrMeta := io.s3Train.phrMeta
+  private val s3RasTarget    = io.s3Train.rasTarget
+  private val s3IttageTarget = io.s3Train.ittageTarget
+  private val s3IttageHit    = io.s3Train.ittageHit
+  private val s3UseRas       = VecInit(io.s3Train.s3Prediction.map(pred => pred.valid && pred.bits.attribute.isReturn))
+  private val s3UseIttage =
+    VecInit(io.s3Train.s3Prediction.map(pred => pred.valid && pred.bits.attribute.needIttage && s3IttageHit))
+  s3MbtbUpdateData.zip(s3IttageUpdateData).zip(s3RasUpdateData).zip(
+    io.s3Train.s3Prediction.zip(io.s3Train.cfiPc)
+  ).foreach {
+    case (((mbtbData, ittageData), rasData), (pred, cfiPc)) =>
+      mbtbData.valid   := pred.valid
+      mbtbData.taken   := pred.valid
+      mbtbData.cfiPc   := cfiPc
+      mbtbData.target  := pred.bits.target
+      mbtbData.phrMeta := io.s3Train.phrMetaDup(0)
+
+      ittageData.valid   := pred.valid
+      ittageData.taken   := pred.valid
+      ittageData.cfiPc   := cfiPc
+      ittageData.target  := s3IttageTarget
+      ittageData.phrMeta := io.s3Train.phrMetaDup(1)
+
+      rasData.valid   := pred.valid
+      rasData.taken   := pred.valid
+      rasData.cfiPc   := cfiPc
+      rasData.target  := s3RasTarget
+      rasData.phrMeta := io.s3Train.phrMetaDup(2)
   }
 
   s1AbtbUpdateData.zip(io.s1Train.abtbPrediction).foreach { case (data, pred) =>
@@ -144,7 +166,9 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
 
   // Compute all ShiftBits values and the high bits of the hash
   private val redirectHashComponents = getPathHashComponents(redirectData.cfiPc, redirectData.target)
-  private val s3HashComponents       = s3UpdateData.map(data => getPathHashComponents(data.cfiPc, data.target))
+  private val s3MbtbHashComponents   = s3MbtbUpdateData.map(data => getPathHashComponents(data.cfiPc, data.target))
+  private val s3IttageHashComponents = s3IttageUpdateData.map(data => getPathHashComponents(data.cfiPc, data.target))
+  private val s3RasHashComponents    = s3RasUpdateData.map(data => getPathHashComponents(data.cfiPc, data.target))
   private val s1UbtbHashComponents   = getPathHashComponents(s1UbtbUpdateData.cfiPc, s1UbtbUpdateData.target)
   private val s1AbtbHashComponents   = s1AbtbUpdateData.map(data => getPathHashComponents(data.cfiPc, data.target))
 
@@ -153,14 +177,28 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
 
   // Compute all phrPtr and phrLowBits for updates
   redirectUpdate := getUpdatePtrs(redirectData, redirectHashHigh)
-  private val s3UpdateCandidates = s3UpdateData.zip(s3HashComponents).map { case (data, hash) =>
+  private val s3MbtbUpdateCandidates = s3MbtbUpdateData.zip(s3MbtbHashComponents).map { case (data, hash) =>
     getUpdatePtrs(data, hash._2)
   }
+  private val s3IttageUpdateCandidates = s3IttageUpdateData.zip(s3IttageHashComponents).map { case (data, hash) =>
+    getUpdatePtrs(data, hash._2)
+  }
+  private val s3RasUpdateCandidates = s3RasUpdateData.zip(s3RasHashComponents).map { case (data, hash) =>
+    getUpdatePtrs(data, hash._2)
+  }
+  private val s3UpdateCandidates: Seq[PhrUpdateResult] = s3MbtbUpdateCandidates.indices.map { i =>
+    MuxCase(
+      s3MbtbUpdateCandidates(i),
+      Seq(
+        s3UseRas(i)    -> s3RasUpdateCandidates(i),
+        s3UseIttage(i) -> s3IttageUpdateCandidates(i)
+      )
+    )
+  }
   private val s3RecoverResult = WireInit(0.U.asTypeOf(new PhrUpdateResult))
-  s3RecoverResult.phrPtr     := io.s3Train.phrMeta.phrPtr
-  s3RecoverResult.phrLowBits := io.s3Train.phrMeta.phrLowBits
+  s3RecoverResult.phrPtr     := io.s3Train.phrMetaDup(0).phrPtr
+  s3RecoverResult.phrLowBits := io.s3Train.phrMetaDup(0).phrLowBits
 
-  private val s3ShiftBits = Mux1H(io.s3Train.firstTakenBrOH, s3HashComponents.map(_._1))
   s3Update := Mux(io.s3Train.taken, Mux1H(io.s3Train.firstTakenBrOH, s3UpdateCandidates), s3RecoverResult)
 
   private val s1UbtbUpdate = getUpdatePtrs(s1UbtbUpdateData, s1UbtbHashComponents._2)
@@ -176,9 +214,8 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   redirectS0PhrPtr     := redirectUpdate.phrPtr
   redirectS0PhrLowBits := redirectUpdate.phrLowBits
   s3S0PhrPtr           := s3Update.phrPtr
-  s3S0PhrLowBits       := s3Update.phrLowBits
-  s1S0PhrPtr           := Mux(io.s1Train.taken, s1Update.phrPtr, s1_phrPtr)
-  s1S0PhrLowBits       := Mux(io.s1Train.taken, s1Update.phrLowBits, s1_phrValue(PathHashHighWidth - 1, 0))
+  s1S0PhrPtr     := Mux(io.s1Train.taken, s1Update.phrPtr, s1_phrPtr)
+  s1S0PhrLowBits := Mux(io.s1Train.taken, s1Update.phrLowBits, s1_phrValue(PathHashHighWidth - 1, 0))
 
   phrPtr := MuxCase(
     phrPtr,
@@ -214,21 +251,52 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   private val s3_oldestBits =
     RegEnable(s2_oldestBits, 0.U.asTypeOf(new PhrAllFoldedHistoryOldestBits(AllFoldedHistoryInfo)), s2_fire)
 
-  XSError(s3_fire && s3_phrMeta.asUInt =/= io.s3Train.phrMeta.asUInt, f"s3_phrMeta mismatch!\n")
+  XSError(s3_fire && s3_phrMeta.asUInt =/= io.s3Train.phrMetaDup(1).asUInt, f"s3_phrMeta mismatch!\n")
 
-  private val s3S0FoldedPhrCandidates = s3UpdateData.zip(s3HashComponents).map { case (data, hash) =>
-    getNextFoldedPhr(data, s3_oldestBits, s3_foldedPhrReg, hash._2, hash._1)
-  }
-
-  private val s3S0FoldedPhrCandidatesTest = s3UpdateData.zip(s3HashComponents).map { case (data, hash) =>
-    getNextFoldedPhr(
-      data,
-      s3_foldedPhrReg,
-      getRedirectPhr(data.phrMeta),
-      hash._2,
-      hash._1
+  private val s3MbtbS0FoldedPhrCandidates: Seq[PhrAllFoldedHistories] =
+    s3MbtbUpdateData.zip(s3MbtbHashComponents).map { case (data, hash) =>
+      getNextFoldedPhr(data, s3_oldestBits, s3_foldedPhrReg, hash._2, hash._1)
+    }
+  private val s3IttageS0FoldedPhrCandidates: Seq[PhrAllFoldedHistories] =
+    s3IttageUpdateData.zip(s3IttageHashComponents).map { case (data, hash) =>
+      getNextFoldedPhr(data, s3_oldestBits, s3_foldedPhrReg, hash._2, hash._1)
+    }
+  private val s3RasS0FoldedPhrCandidates: Seq[PhrAllFoldedHistories] =
+    s3RasUpdateData.zip(s3RasHashComponents).map { case (data, hash) =>
+      getNextFoldedPhr(data, s3_oldestBits, s3_foldedPhrReg, hash._2, hash._1)
+    }
+  private val s3S0FoldedPhrCandidates: Seq[PhrAllFoldedHistories] = s3MbtbS0FoldedPhrCandidates.indices.map { i =>
+    MuxCase(
+      s3MbtbS0FoldedPhrCandidates(i),
+      Seq(
+        s3UseRas(i)    -> s3RasS0FoldedPhrCandidates(i),
+        s3UseIttage(i) -> s3IttageS0FoldedPhrCandidates(i)
+      )
     )
   }
+
+  private val s3MbtbS0FoldedPhrCandidatesTest: Seq[PhrAllFoldedHistories] =
+    s3MbtbUpdateData.zip(s3MbtbHashComponents).map { case (data, hash) =>
+      getNextFoldedPhr(data, s3_foldedPhrReg, getRedirectPhr(data.phrMeta), hash._2, hash._1)
+    }
+  private val s3IttageS0FoldedPhrCandidatesTest: Seq[PhrAllFoldedHistories] =
+    s3IttageUpdateData.zip(s3IttageHashComponents).map { case (data, hash) =>
+      getNextFoldedPhr(data, s3_foldedPhrReg, getRedirectPhr(data.phrMeta), hash._2, hash._1)
+    }
+  private val s3RasS0FoldedPhrCandidatesTest: Seq[PhrAllFoldedHistories] =
+    s3RasUpdateData.zip(s3RasHashComponents).map { case (data, hash) =>
+      getNextFoldedPhr(data, s3_foldedPhrReg, getRedirectPhr(data.phrMeta), hash._2, hash._1)
+    }
+  private val s3S0FoldedPhrCandidatesTest: Seq[PhrAllFoldedHistories] =
+    s3MbtbS0FoldedPhrCandidatesTest.indices.map { i =>
+      MuxCase(
+        s3MbtbS0FoldedPhrCandidatesTest(i),
+        Seq(
+          s3UseRas(i)    -> s3RasS0FoldedPhrCandidatesTest(i),
+          s3UseIttage(i) -> s3IttageS0FoldedPhrCandidatesTest(i)
+        )
+      )
+    }
 
   private val s3S0FoldedPhrCandidatesDiff =
     s3S0FoldedPhrCandidates.zip(s3S0FoldedPhrCandidatesTest).map { case (a, b) =>
@@ -262,8 +330,29 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
 
   private val redirectNextPhr =
     getNextPhr(phr, redirectS0PhrPtr, redirectData.taken, redirectS0PhrLowBits, redirectShiftBits)
+  private val s3MbtbNextPhrCandidates = s3MbtbUpdateCandidates.zip(s3MbtbHashComponents).map { case (update, hash) =>
+    getNextPhr(phr, update.phrPtr, true.B, update.phrLowBits, hash._1)
+  }
+  private val s3IttageNextPhrCandidates =
+    s3IttageUpdateCandidates.zip(s3IttageHashComponents).map { case (update, hash) =>
+      getNextPhr(phr, update.phrPtr, true.B, update.phrLowBits, hash._1)
+    }
+  private val s3RasNextPhrCandidates = s3RasUpdateCandidates.zip(s3RasHashComponents).map { case (update, hash) =>
+    getNextPhr(phr, update.phrPtr, true.B, update.phrLowBits, hash._1)
+  }
+  private val s3NextPhrCandidates: Seq[Vec[Bool]] = s3MbtbNextPhrCandidates.indices.map { i =>
+    MuxCase(
+      s3MbtbNextPhrCandidates(i),
+      Seq(
+        s3UseRas(i)    -> s3RasNextPhrCandidates(i),
+        s3UseIttage(i) -> s3IttageNextPhrCandidates(i)
+      )
+    )
+  }
+  private val s3RecoverNextPhr =
+    getNextPhr(phr, s3RecoverResult.phrPtr, false.B, s3RecoverResult.phrLowBits, 0.U(Shamt.W))
   private val s3NextPhr =
-    getNextPhr(phr, s3S0PhrPtr, io.s3Train.taken, s3S0PhrLowBits, s3ShiftBits)
+    Mux(io.s3Train.taken, Mux1H(io.s3Train.firstTakenBrOH, s3NextPhrCandidates), s3RecoverNextPhr)
   private val s1NextPhr =
     getNextPhr(phr, s1S0PhrPtr, io.s1Train.taken, s1S0PhrLowBits, s1ShiftBits)
 
@@ -297,7 +386,6 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   /*
    * bpu training folded phr compute
    */
-  private val bpTrainValid  = io.commit.valid
   private val bpTrain       = io.commit.bits
   private val predictHist   = getRedirectPhr(bpTrain.meta.phr)
   private val metaPhrFolded = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))

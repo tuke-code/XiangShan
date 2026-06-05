@@ -347,9 +347,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s2_isBrVec = VecInit(mbtb.io.result.map {
     entry => entry.valid && entry.bits.attribute.isConditional
   })
+  private val s2_mbtbCfiPc = VecInit(mbtb.io.result.map(entry => getCfiPcFromPosition(s2_startPc, entry.bits.cfiPosition)))
 
   /* *** s3 prediction selection *** */
   private val s3_mbtbResult     = RegEnable(mbtb.io.result, s2_fire)
+  private val s3_mbtbCfiPc =
+    RegEnable(s2_mbtbCfiPc, 0.U.asTypeOf(Vec(NumBtbResultEntries, PrunedAddr(VAddrBits))), s2_fire)
   private val s3_tagePrediction = RegEnable(tage.io.prediction, s2_fire)
   private val s3_scUsed         = RegEnable(sc.io.scUsed, s2_fire)
   private val s3_scTakenMask    = RegEnable(sc.io.scTakenMask, s2_fire)
@@ -427,7 +430,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   }
 
   private val s2_phrMeta = RegEnable(phr.io.phrMeta, s1_fire)
-  private val s3_phrMeta = RegEnable(s2_phrMeta, s2_fire)
+  // private val s3_phrMeta = RegEnable(s2_phrMeta, s2_fire)
+  private val s3_phrMeta_dup = VecInit.fill(3)(RegEnable(s2_phrMeta, s2_fire))
 
   private val s3_commonHRMeta = WireInit(0.U.asTypeOf(new CommonHRMeta))
   s3_commonHRMeta.ghr       := commonHR.io.s3ResolveMeta.ghr
@@ -438,7 +442,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_commonHRMeta.position  := VecInit(s3_mbtbResult.map(_.bits.cfiPosition))
 
   private val s3_redirectMeta = Wire(new BpuRedirectMeta)
-  s3_redirectMeta.phr          := s3_phrMeta
+  s3_redirectMeta.phr          := s3_phrMeta_dup(0)
   s3_redirectMeta.commonHRMeta := s3_commonHRMeta
   s3_redirectMeta.ras          := ras.io.redirectMeta
 
@@ -448,7 +452,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_resolveMeta.sc       := sc.io.meta
   s3_resolveMeta.commonHR := commonHR.io.s3ResolveMeta
   s3_resolveMeta.ittage   := ittage.io.meta
-  s3_resolveMeta.phr      := s3_phrMeta
+  s3_resolveMeta.phr      := s3_phrMeta_dup(0)
   // s3_resolveMeta.debug_utage.foreach(_ := s3_utageMeta)
   s3_resolveMeta.utage := s3_utageMeta
 
@@ -507,15 +511,6 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       }
   }
 
-  private val s3_predWithRasAndIttage = WireInit(s3_mbtbResult)
-  s3_predWithRasAndIttage.foreach {
-    case p => when(p.valid && p.bits.attribute.isReturn) {
-        p.bits.target := ras.io.topRetAddr
-      }.elsewhen(p.valid && p.bits.attribute.needIttage && ittage.io.prediction.hit) {
-        p.bits.target := ittage.io.prediction.target
-      }
-  }
-
   phr.io.train.s0_stall             := s0_stall
   phr.io.train.stageCtrl            := stageCtrl
   phr.io.train.redirect             := redirect
@@ -530,8 +525,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   phr.io.s3Train.taken              := s3_prediction.taken
   phr.io.s3Train.startPc            := s3_startPc
   phr.io.s3Train.firstTakenBrOH     := s3_firstTakenBranchOH
-  phr.io.s3Train.phrMeta            := s3_phrMeta
-  phr.io.s3Train.s3Prediction       := s3_predWithRasAndIttage
+  phr.io.s3Train.cfiPc              := s3_mbtbCfiPc
+  phr.io.s3Train.rasTarget          := ras.io.topRetAddr
+  phr.io.s3Train.ittageTarget       := ittage.io.prediction.target
+  phr.io.s3Train.ittageHit          := ittage.io.prediction.hit
+  phr.io.s3Train.phrMetaDup         := s3_phrMeta_dup
+  phr.io.s3Train.s3Prediction       := s3_mbtbResult
 
   phr.io.commit.valid := io.fromFtq.train.fire
   phr.io.commit.bits  := train
