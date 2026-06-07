@@ -151,6 +151,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
     val data_readline_stall = Output(Bool())
     val data_readline_can_resp = Output(Bool())
     val data_resp = Input(Vec(DCacheBanks, new L1BankedDataReadResult()))
+    val data_raw_bank_row_resp = Input(Vec(DCacheBanks, Bits(dataSRAMBankRawBits.W)))
     val readline_error = Input(Bool())
     val readline_error_delayed = Input(Bool())
     val data_write = DecoupledIO(new L1BankedDataWriteReq)
@@ -1052,6 +1053,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   io.data_write.bits.way_en := s3_way_en
   io.data_write.bits.addr := s3_req.vaddr
   io.data_write.bits.wmask := banked_wmask
+  io.data_write.bits.old_raw_bank_row := io.data_raw_bank_row_resp
   io.data_write.bits.data := Mux(
     amo_wait_amoalu,
     s3_amo_data_merged_reg,
