@@ -41,7 +41,7 @@ class JumpUnit(cfg: FuConfig)(implicit p: Parameters) extends PipedFuncUnit(cfg)
 
   val targetWrong = jumpRealTarget =/= jmpPredictTarget
   val needRedirect = !fixedTaken || targetWrong
-  val needTrain = !predTaken || targetWrong
+  val needTrain = !fixedTaken || targetWrong
 
   val redirect = io.out.bits.res.redirect.get.bits
   val redirectValid = io.out.bits.res.redirect.get.valid
