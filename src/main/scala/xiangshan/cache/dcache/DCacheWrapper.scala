@@ -1109,11 +1109,11 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     val extra_flag_prefetch = Mux1H(extra_flag_way_en, prefetchArray.io.resp.last)
     val extra_flag_access = Mux1H(extra_flag_way_en, accessArray.io.resp.last)
 
-    prefetcherMonitor.io.maininfo.pf_useless := extra_flag_valid && !extra_flag_access && isFromL1Prefetch(extra_flag_prefetch)
-    prefetcherMonitor.io.maininfo.pf_source_useless := extra_flag_prefetch
+    prefetcherMonitor.io.replinfo.pf_useless := extra_flag_valid && !extra_flag_access && isFromL1Prefetch(extra_flag_prefetch)
+    prefetcherMonitor.io.replinfo.pf_source_useless := extra_flag_prefetch
 
-    prefetcherMonitor.io.maininfo.hit_pf_in_cache := extra_flag_valid && extra_flag_access && isFromL1Prefetch(extra_flag_prefetch)
-    prefetcherMonitor.io.maininfo.hit_pf_source_in_cache := extra_flag_prefetch
+    prefetcherMonitor.io.replinfo.hit_pf_in_cache := extra_flag_valid && extra_flag_access && isFromL1Prefetch(extra_flag_prefetch)
+    prefetcherMonitor.io.replinfo.hit_pf_source_in_cache := extra_flag_prefetch
   }
 
   // write extra meta
@@ -1311,7 +1311,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   for (w <- 0 until LoadPipelineWidth) {
     prefetcherMonitor.io.loadinfo(w) := ldu(w).io.prefetch_stat
   }
-  prefetcherMonitor.io.mainpipeinfo := mainPipe.io.prefetch_stat
+  prefetcherMonitor.io.maininfo := mainPipe.io.prefetch_stat
   prefetcherMonitor.io.missinfo := missQueue.io.prefetch_stat
   prefetcherMonitor.io.debugRolling := io.debugRolling
   prefetcherMonitor.io.clear_flag := clear_flag
