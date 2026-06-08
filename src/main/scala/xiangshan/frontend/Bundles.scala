@@ -145,8 +145,10 @@ class FtqToIfuIO(implicit p: Parameters) extends FrontendBundle {
 
 class FrontendRedirect(implicit p: Parameters) extends FrontendBundle {
   val ftqIdx: FtqPtr = new FtqPtr
-  val pc:     UInt   = UInt(VAddrBits.W)
-  val taken:  Bool   = Bool()
+  //
+  val canTrain: Bool = Bool()
+  val pc:       UInt = UInt(VAddrBits.W)
+  val taken:    Bool = Bool()
   // The early end position may not always be a branch instruction.
   val ftqOffset: UInt            = UInt(FetchBlockInstOffsetWidth.W) // maybe use later
   val isRVC:     Bool            = Bool()                            // seems unused for now, keep it.

@@ -30,6 +30,7 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
 
   class ResolveQueueIO extends Bundle {
     val backendResolve: Vec[Valid[Resolve]]       = Input(Vec(backendParams.BrhCnt, Valid(new Resolve)))
+    val ifuResolve:     Valid[Resolve]            = Input(Valid(new Resolve))
     val bpuTrain:       DecoupledIO[ResolveEntry] = Decoupled(new ResolveEntry)
 
     val backendRedirect:    Bool   = Input(Bool())
@@ -65,13 +66,18 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
     "Backend resolves branches that should have been flushed\n"
   )
 
-  private val filteredResolve = io.backendResolve.map { backendResolve =>
+  private val backendFilteredResolve = io.backendResolve.map { backendResolve =>
     val filteredResolve = Wire(Valid(new Resolve))
     filteredResolve.valid := backendResolve.valid &&
       !(backendRedirect.reduce(_ || _) && backendResolve.bits.ftqIdx > backendRedirectPtr)
     filteredResolve.bits := backendResolve.bits
     filteredResolve
   }
+  private val ifuFilteredResolve = Wire(Valid(new Resolve))
+  ifuFilteredResolve.valid := io.ifuResolve.valid && !backendRedirect.reduce(_ || _)
+  ifuFilteredResolve.bits  := io.ifuResolve.bits
+
+  private val filteredResolve = backendFilteredResolve ++ Seq(ifuFilteredResolve)
 
   /*
    * When dropResolveCounter saturates,
@@ -124,8 +130,9 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
     branch.valid && !hit(i) && !hitPrevious(i).fold(false.B)(_ || _)
   }
 
-  private val enqIndex = WireDefault(VecInit.fill(backendParams.BrhCnt)(0.U(log2Ceil(ResolveQueueSize).W)))
-  enqIndex := VecInit((0 until backendParams.BrhCnt).map { i =>
+  // Reslove consists of resolves fromt the backend andd the ifu.
+  private val enqIndex = WireDefault(VecInit.fill(backendParams.BrhCnt + 1)(0.U(log2Ceil(ResolveQueueSize).W)))
+  enqIndex := VecInit((0 until backendParams.BrhCnt + 1).map { i =>
     val newIndex = MuxCase(
       (enqPtr + PopCount(needNewEntry.take(i))).value,
       hitPrevious(i).zipWithIndex.map { case (hit, j) => (hit, enqIndex(j)) }
