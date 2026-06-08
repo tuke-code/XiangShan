@@ -509,11 +509,11 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     }
 
     val prefetch_info = new DCacheBundle {
-      val hit_prefetch = Output(Bool())
+      val hit_prefetch = Vec(reqNum, Output(Bool()))
       val hit_pf_source = UInt(L1PfSourceBits.W)
     }
     val nMaxPrefetchEntry = Input(UInt(64.W))
-    val matched = Vec(reqNum, Output(Bool()))
+    val matched = Output(Bool())
     val l1Miss = Output(Bool())
 
     val wfi = Flipped(new WfiReqBundle)
@@ -533,11 +533,10 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   val miss_req_pipe_reg_bits = io.miss_req_pipe_reg.req
 
   val signals_vec = WireInit(VecInit(Seq.fill(reqNum)(0.U.asTypeOf(new MatchSignals))))
-  val signals_pipe_me_vec = WireInit(VecInit(Seq.fill(reqNum)(0.U.asTypeOf(new MatchSignals))))
+  val signals_pipe_prefetch = computeMatchSignals(miss_req_pipe_reg_bits, io.queryME(0).req.bits)
 
   for(i <- 0 until reqNum) {
     signals_vec(i) := computeMatchSignals(req, io.queryME(i).req.bits)
-    signals_pipe_me_vec(i) := computeMatchSignals(miss_req_pipe_reg_bits, io.queryME(i).req.bits)
   }
 
   val input_req_is_prefetch = isPrefetch(miss_req_pipe_reg_bits.cmd)
@@ -626,11 +625,6 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     io.match_signals_vec(i).merge_store := signals_vec(i).merge_store && req_valid
   }
 
-  val prefetch_vec = Wire(Vec(reqNum, Bool()))
-  for(i <- 0 until reqNum) {
-    prefetch_vec(i) := input_req_is_prefetch && !io.miss_req_pipe_reg.prefetch_late_en(signals_pipe_me_vec(i), io.queryME(i).req.bits, io.queryME(i).req.valid)
-  }
-
   // for perf use
   val secondary_fired = RegInit(false.B)
 
@@ -688,7 +682,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     error := false.B
     denied := false.B
     corrupt := false.B
-    prefetch := prefetch_vec.asUInt.orR
+    prefetch := input_req_is_prefetch && !io.miss_req_pipe_reg.prefetch_late_en(signals_pipe_prefetch, io.queryME(0).req.bits, io.queryME(0).req.valid)
     access := false.B
     secondary_fired := false.B
 
@@ -1076,23 +1070,18 @@ for(i <- 0 until reqNum) {
   io.forwardInfo.denied := denied
   io.forwardInfo.corrupt := corrupt
 
-  val matched_vec = Wire(Vec(reqNum, Bool()))
+  // The prefetch_req only in mainPipe, now!
+  // But the miss_req that hits prefetch_req is more than one!
   val hit_prefetch_vec = Wire(Vec(reqNum, Bool()))
-
   for(i <- 0 until reqNum) {
-    matched_vec(i) := req_valid && signals_vec(i).block_match
     hit_prefetch_vec(i) := io.queryME(i).req.valid && !io.queryME(i).req.bits.isFromPrefetch &&
-                            req_valid && signals_vec(i).block_match && prefetch_vec(i)
+                            req_valid && signals_vec(i).block_match && prefetch
   }
-  io.matched := matched_vec
-  io.prefetch_info.hit_prefetch := hit_prefetch_vec.asUInt.orR
-  io.prefetch_info.hit_pf_source := ParallelMux(
-    hit_prefetch_vec
-     zip
-    io.queryME.map(_.req.bits.pf_source)
-  )
+  io.matched := req_valid && signals_vec(0).block_match
+  io.prefetch_info.hit_prefetch := hit_prefetch_vec
+  io.prefetch_info.hit_pf_source := req.pf_source
 
-  when(io.prefetch_info.hit_prefetch) {
+  when(io.prefetch_info.hit_prefetch.asUInt.orR) {
     prefetch := false.B
     req.pf_source := L1_HW_PREFETCH_CLEAR
   }
@@ -1257,6 +1246,7 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   val can_merge_vec = WireInit(VecInit(Seq.fill(reqNum)(false.B)))
   val match_from_pipe = WireInit(VecInit(Seq.fill(reqNum)(false.B)))
+  val match_from_ith_pipe = WireInit(0.U(log2Up(reqNum).W))
   val can_merge_from_pipe = WireInit(VecInit(Seq.fill(reqNum)(false.B)))
   val can_merge_from_pipe_mshr = Wire(Vec(reqNum, UInt(log2Up(cfg.nMissEntries).W)))
   val can_merge_store_from_pipe = WireInit(VecInit(Seq.fill(reqNum)(false.B)))
@@ -1329,17 +1319,21 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   // Detect address conflicts (compress strategy)
   val addr_conflicts = WireInit(VecInit(Seq.fill(reqNum)(VecInit(Seq.fill(reqNum)(false.B)))))
+  // block_match & not_alias_match, should not compress/alloc/merge
+  val req_reject_vec = WireInit(VecInit(Seq.fill(reqNum)(false.B)))
   for (i <- 0 until reqNum) {
-
-    when (io.queryMQ(i).req.valid) {
-      for (j <- 0 until reqNum) {
-        when (j.U =/= i.U) {
-          addr_conflicts(i)(j) := io.queryMQ(j).req.valid && io.queryMQ(i).req.valid &&
-                                  get_block(io.queryMQ(i).req.bits.addr) === get_block(io.queryMQ(j).req.bits.addr) &&
-                                  is_alias_match(io.queryMQ(i).req.bits.vaddr, io.queryMQ(j).req.bits.vaddr)
-        }
-      }
+    for (j <- 0 until reqNum) {
+      addr_conflicts(i)(j) := io.queryMQ(j).req.valid && io.queryMQ(i).req.valid && j.U =/= i.U &&
+                              get_block(io.queryMQ(i).req.bits.addr) === get_block(io.queryMQ(j).req.bits.addr) &&
+                              is_alias_match(io.queryMQ(i).req.bits.vaddr, io.queryMQ(j).req.bits.vaddr)
     }
+
+    // bigger index miss_req will be reject: 
+    req_reject_vec(i) :=(0 until reqNum).map{ j => 
+      io.queryMQ(j).req.valid && io.queryMQ(i).req.valid && j.U < i.U &&
+        get_block(io.queryMQ(i).req.bits.addr) === get_block(io.queryMQ(j).req.bits.addr) &&
+        !is_alias_match(io.queryMQ(i).req.bits.vaddr, io.queryMQ(j).req.bits.vaddr)  
+    }.reduce(_ || _)
   }
 
   for(i <- 0 until reqNum) {
@@ -1363,6 +1357,7 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
       // do not alloc when (addr_match & alias_match)
       when(parallel_pipe_regs(j).alloc && !parallel_pipe_regs(j).cancel && signals_j.block_match) {
         match_from_pipe(i) := true.B
+        match_from_ith_pipe := j.U
       }
     }
   }
@@ -1370,7 +1365,7 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   for(i <- 0 until reqNum) {
     val signals = signals_vec(i)
 
-    can_allocate_vec(i) := free_entry_count =/= 0.U &&
+    can_allocate_vec(i) := free_entry_count =/= 0.U && !req_reject_vec(i) &&
                             !ParallelORR(Cat(block_match_seqs(i) ++ Seq(match_from_pipe(i))))
 
     val can_merge_from_entry = ParallelORR(Cat(secondary_ready_vec(i)))
@@ -1676,7 +1671,7 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   io.mem_grant.ready := false.B
 
-  val nMaxPrefetchEntry = Constantin.createRecord(s"nMaxPrefetchEntry${p(XSCoreParamsKey).HartId}", initValue = 14)
+  val nMaxPrefetchEntry = Constantin.createRecord(s"nMaxPrefetchEntry${p(XSCoreParamsKey).HartId}", initValue = cfg.nMissEntries - 2)
   entries.zipWithIndex.foreach {
     case (e, i) =>
       val former_primary_ready = if(i == 0)
@@ -1808,52 +1803,34 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   io.full := ~Cat(entries.map(_.io.primary_ready)).andR
 
-  val prefetch_late_in_reg_vec = Wire(Vec(reqNum, Bool()))
+  // prefetch related. The prefetch_req only in mainPipe, Now!
+  val late_in_reg = match_from_pipe(0)
+  io.prefetch_stat.pf_late_in_mshr := io.queryMQ(0).req.valid && io.queryMQ(0).req.bits.isFromPrefetch && 
+                                        (late_in_reg || Cat(entries.map(_.io.matched)).orR)
+  io.prefetch_stat.pf_late_in_mshr_source := ParallelMux(
+    Seq(late_in_reg) ++ entries.map(_.io.matched)
+    zip
+    Seq(parallel_pipe_regs(match_from_ith_pipe).req.pf_source) ++ entries.map(_.io.prefetch_info.hit_pf_source)
+  )
+
+  io.prefetch_stat.prefetch_miss := query_fire(0) && io.queryMQ(0).req.bits.isFromPrefetch
+  io.prefetch_stat.pf_source := io.queryMQ(0).req.bits.pf_source
+  io.prefetch_stat.load_miss := PopCount((0 until reqNum).map(j => query_fire(j) && io.queryMQ(j).req.bits.isFromLoad))
+
+  // compute all miss_req hit prefetch_req or not
   val prefetch_hit_in_reg_vec = Wire(Vec(reqNum, Bool()))
-  val prefetch_late_in_mshr_vec = Wire(Vec(reqNum, Bool()))
   val prefetch_hit_in_mshr_vec = Wire(Vec(reqNum, Bool()))
-  val prefetch_miss_vec = Wire(Vec(reqNum, Bool()))
-  val load_miss_vec = Wire(Vec(reqNum, Bool()))
-
   for(i <- 0 until reqNum) {
-
     val signals_ = (0 until reqNum).map(j => computeMatchSignals(parallel_pipe_regs(j).req, io.queryMQ(i).req.bits))
-
-    val matched_in_reg = (0 until reqNum).map(j => parallel_pipe_regs(j).matched(signals_(j)))
-
-    val late_in_reg = io.queryMQ(i).req.valid && io.queryMQ(i).req.bits.isFromPrefetch && matched_in_reg.asUInt.orR
-    prefetch_late_in_reg_vec(i) := late_in_reg
-
     val hit_in_reg = (0 until reqNum).map(j => parallel_pipe_regs(j).prefetch_late_en(signals_(j), io.queryMQ(i).req.bits.toMissReqWoStoreData(), io.queryMQ(i).req.valid))
-    prefetch_hit_in_reg_vec(i) := hit_in_reg.asUInt.orR
-
-    prefetch_late_in_mshr_vec(i) := io.queryMQ(i).req.valid && io.queryMQ(i).req.bits.isFromPrefetch && Cat(entries.map(_.io.matched(i))).orR
     
-    prefetch_hit_in_mshr_vec(i) := io.queryMQ(i).req.valid && !io.queryMQ(i).req.bits.isFromPrefetch && Cat(entries.map(_.io.prefetch_info.hit_prefetch)).orR
-
-    prefetch_miss_vec(i) := query_fire(i) && io.queryMQ(i).req.bits.isFromPrefetch
-
-    load_miss_vec(i) := query_fire(i) && io.queryMQ(i).req.bits.isFromLoad
+    prefetch_hit_in_reg_vec(i) := hit_in_reg.asUInt.orR
+    prefetch_hit_in_mshr_vec(i) := io.queryMQ(i).req.valid && !io.queryMQ(i).req.bits.isFromPrefetch && Cat(entries.map(_.io.prefetch_info.hit_prefetch(i))).orR
   }
-
-  // prefetch related
-  io.prefetch_stat.pf_late_in_mshr := (0 until reqNum).map(i => prefetch_late_in_reg_vec(i) || prefetch_late_in_mshr_vec(i)).asUInt
-  for(i <- 0 until reqNum) {
-    io.prefetch_stat.pf_late_in_mshr_source(i) := ParallelMux(
-      Seq(prefetch_late_in_reg_vec(i)) ++ entries.map(_.io.matched(i))
-      zip
-      Seq(parallel_pipe_regs(i).req.pf_source) ++ entries.map(_.io.prefetch_info.hit_pf_source)
-    )
-  }
-
-  io.prefetch_stat.prefetch_miss := prefetch_miss_vec.asUInt
-  io.prefetch_stat.pf_source := (0 until reqNum).map(i => io.queryMQ(i).req.bits.pf_source)
-  io.prefetch_stat.load_miss := load_miss_vec.asUInt.orR
-
-  io.prefetch_stat.hit_pf_in_mshr := (0 until reqNum).map(i => prefetch_hit_in_reg_vec(i) || prefetch_hit_in_mshr_vec(i)).asUInt
+  io.prefetch_stat.hit_pf_in_mshr := PopCount((0 until reqNum).map(i => prefetch_hit_in_reg_vec(i) || prefetch_hit_in_mshr_vec(i)))
   for(i <- 0 until reqNum) {
     io.prefetch_stat.hit_pf_in_mshr_source(i) := ParallelMux(
-      Seq(prefetch_hit_in_reg_vec(i)) ++ entries.map(_.io.prefetch_info.hit_prefetch)
+      Seq(prefetch_hit_in_reg_vec(i)) ++ entries.map(_.io.prefetch_info.hit_prefetch(i))
       zip
       Seq(parallel_pipe_regs(i).req.pf_source) ++ entries.map(_.io.prefetch_info.hit_pf_source)
     )
