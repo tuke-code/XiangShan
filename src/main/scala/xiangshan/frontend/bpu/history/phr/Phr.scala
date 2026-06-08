@@ -329,17 +329,19 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
   s1S0FoldedPhr := Mux(io.s1Train.abtbValid, s1AbtbS0FoldedPhr, s1UbtbS0FoldedPhr)
 
   private val redirectNextPhr =
-    getNextPhr(phr, redirectS0PhrPtr, redirectData.taken, redirectS0PhrLowBits, redirectShiftBits)
-  private val s3MbtbNextPhrCandidates = s3MbtbUpdateCandidates.zip(s3MbtbHashComponents).map { case (update, hash) =>
-    getNextPhr(phr, update.phrPtr, true.B, update.phrLowBits, hash._1)
+    getNextPhr(phr, redirectData.phrMeta.phrPtr, redirectData.taken, redirectS0PhrLowBits, redirectShiftBits)
+  private val s3MbtbNextPhrCandidates =
+    s3MbtbUpdateData.zip(s3MbtbUpdateCandidates).zip(s3MbtbHashComponents).map { case ((data, update), hash) =>
+      getNextPhr(phr, data.phrMeta.phrPtr, true.B, update.phrLowBits, hash._1)
   }
   private val s3IttageNextPhrCandidates =
-    s3IttageUpdateCandidates.zip(s3IttageHashComponents).map { case (update, hash) =>
-      getNextPhr(phr, update.phrPtr, true.B, update.phrLowBits, hash._1)
+    s3IttageUpdateData.zip(s3IttageUpdateCandidates).zip(s3IttageHashComponents).map { case ((data, update), hash) =>
+      getNextPhr(phr, data.phrMeta.phrPtr, true.B, update.phrLowBits, hash._1)
     }
-  private val s3RasNextPhrCandidates = s3RasUpdateCandidates.zip(s3RasHashComponents).map { case (update, hash) =>
-    getNextPhr(phr, update.phrPtr, true.B, update.phrLowBits, hash._1)
-  }
+  private val s3RasNextPhrCandidates =
+    s3RasUpdateData.zip(s3RasUpdateCandidates).zip(s3RasHashComponents).map { case ((data, update), hash) =>
+      getNextPhr(phr, data.phrMeta.phrPtr, true.B, update.phrLowBits, hash._1)
+    }
   private val s3NextPhrCandidates: Seq[Vec[Bool]] = s3MbtbNextPhrCandidates.indices.map { i =>
     MuxCase(
       s3MbtbNextPhrCandidates(i),
@@ -350,11 +352,11 @@ class Phr(implicit p: Parameters) extends PhrModule with HasPhrParameters with H
     )
   }
   private val s3RecoverNextPhr =
-    getNextPhr(phr, s3RecoverResult.phrPtr, false.B, s3RecoverResult.phrLowBits, 0.U(Shamt.W))
+    getNextPhr(phr, io.s3Train.phrMetaDup(0).phrPtr, false.B, s3RecoverResult.phrLowBits, 0.U(Shamt.W))
   private val s3NextPhr =
     Mux(io.s3Train.taken, Mux1H(io.s3Train.firstTakenBrOH, s3NextPhrCandidates), s3RecoverNextPhr)
   private val s1NextPhr =
-    getNextPhr(phr, s1S0PhrPtr, io.s1Train.taken, s1S0PhrLowBits, s1ShiftBits)
+    getNextPhr(phr, s1_phrPtr, io.s1Train.taken, s1S0PhrLowBits, s1ShiftBits)
 
   phr := MuxCase(
     phr,

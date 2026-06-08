@@ -104,19 +104,18 @@ trait Helpers extends HasPhrParameters with HalfAlignHelper with PhrHelper {
 
   def getNextPhr(
       basePhr:        Vec[Bool],
-      basePhrPtr:     PhrPtr,
+      writePhrPtr:    PhrPtr,
       updateTaken:    Bool,
       nextPhrLowBits: UInt,
       nextShiftBits:  UInt
   ): Vec[Bool] = {
-    val nextPhr   = WireInit(basePhr)
-    val updatePtr = Mux(updateTaken, basePhrPtr + Shamt.U, basePhrPtr)
+    val nextPhr = WireInit(basePhr)
     for (i <- 1 to PathHashHighWidth) {
-      nextPhr((updatePtr + i.U).value) := nextPhrLowBits(i - 1)
+      nextPhr((writePhrPtr + i.U).value) := nextPhrLowBits(i - 1)
     }
     when(updateTaken) {
       for (i <- 0 until Shamt) {
-        nextPhr((updatePtr - i.U).value) := nextShiftBits(Shamt - 1 - i)
+        nextPhr((writePhrPtr - i.U).value) := nextShiftBits(Shamt - 1 - i)
       }
     }
     nextPhr
