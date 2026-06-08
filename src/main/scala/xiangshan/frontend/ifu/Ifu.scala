@@ -694,6 +694,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   // Due to the presence of uncache requests, s3_valid && io.toIBuffer.ready is not equivalent to s3_fire.
   uncacheFlushWb.valid :=
     s3_valid && io.toIBuffer.ready && s3_reqIsUncache && !backendRedirect && (s3_uncacheCanGo || uncacheNeedResend)
+  uncacheFlushWb.bits.canTrain  := false.B
   uncacheFlushWb.bits.ftqIdx    := s3_alignFetchBlock(0).ftqIdx
   uncacheFlushWb.bits.pc        := s3_alignFetchBlock(0).startVAddr.toUInt
   uncacheFlushWb.bits.taken     := false.B
@@ -772,7 +773,10 @@ class Ifu(implicit p: Parameters) extends IfuModule
     val missIdx   = checkerRedirect.bits.misIdx.bits
     val ftqIdx    = VecInit(wbAlignFetchBlock.map(_.ftqIdx))
     val startAddr = VecInit(wbAlignFetchBlock.map(_.startVAddr.toUInt))
+    val attribute = checkerRedirect.bits.attribute
+    val canTrain  = attribute.isDirect || attribute.isReturn
     b.valid          := wbValid && checkerRedirect.valid
+    b.bits.canTrain  := canTrain
     b.bits.ftqIdx    := Mux(checkerRedirect.bits.selectBlock, ftqIdx(1), ftqIdx(0))
     b.bits.pc        := Mux(checkerRedirect.bits.selectBlock, startAddr(1), startAddr(0))
     b.bits.taken     := checkerRedirect.bits.taken
