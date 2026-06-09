@@ -164,6 +164,8 @@ case class XSCoreParameters
   StoreBufferSize: Int = 16,
   StoreBufferThreshold: Int = 9,
   EnsbufferWidth: Int = 2,
+  EnableStVWordBuffer: Boolean = true,
+  StVWordBufferSize: Int = 24,
   LoadDependencyWidth: Int = 2,
   // ============ VLSU ============
   VlMergeBufferSize: Int = 16,
@@ -728,6 +730,8 @@ trait HasXSParameter {
   def StoreBufferSize = coreParams.StoreBufferSize
   def StoreBufferThreshold = coreParams.StoreBufferThreshold
   def EnsbufferWidth = coreParams.EnsbufferWidth
+  def EnableStVWordBuffer = coreParams.EnableStVWordBuffer
+  def StVWordBufferSize = coreParams.StVWordBufferSize
   def LoadDependencyWidth = coreParams.LoadDependencyWidth
   def VlMergeBufferSize = coreParams.VlMergeBufferSize
   def VsMergeBufferSize = coreParams.VsMergeBufferSize
