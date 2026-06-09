@@ -91,20 +91,20 @@ class StrideMetaBundle(implicit p: Parameters) extends XSBundle with HasStridePr
     val stride_valid = new_stride_blk =/= 0.U && new_stride_blk =/= 1.U
     val stride_match = new_stride === stride && isDecrMode === decr_mode
     val low_confidence = confidence <= 1.U
-    val can_send_pf = stride_valid && stride_match && confidence >= CONF_THRESHOLD.U
+    val can_send_pf = stride_valid && confidence >= CONF_THRESHOLD.U
 
     when(stride_valid) {
       when(stride_match) {
         confidence := Mux(confidence === MAX_CONF.U, confidence, confidence + 1.U)
+      }.elsewhen(low_confidence){
+        stride := new_stride
+        decr_mode := isDecrMode
       }.otherwise {
         confidence := Mux(confidence === 0.U, confidence, confidence - 1.U)
-        when(low_confidence) {
-          stride := new_stride
-          decr_mode := isDecrMode
-        }
       }
       pre_vaddr := new_vaddr
     }
+
     when(always_update_pre_vaddr) {
       pre_vaddr := new_vaddr
     }
