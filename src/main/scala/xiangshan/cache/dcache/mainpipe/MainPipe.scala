@@ -967,6 +967,12 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   io.bloom_filter_query.clr.valid := s3_fire && isFromL1Prefetch(s3_req.pf_source)
   io.bloom_filter_query.clr.bits.addr := io.bloom_filter_query.clr.bits.get_addr(s3_req.addr)
 
+  val sbuffer_req_blocked = io.store_req.valid && !(store_req.ready && storeCanAccept)
+  val refill_req_blocked = io.refill_req.valid && !io.refill_req.ready
+  val refill_blocked_by_pipe_resource = refill_req_blocked && !io.probe_req.valid &&
+    (set_conflict || !s1_ready || !io.tag_read.ready)
+  val sbuffer_s2_downstream_blocked = s2_valid && s2_isStore && s2_can_go_to_mq && replay
+
   XSPerfAccumulate("prefetch_write_valid", s3_fire && s3_req.miss)
   XSPerfAccumulate("prefetch_write_valid_pf", io.prefetch_flag_write.valid && isFromL1Prefetch(s3_req.pf_source))
   XSPerfAccumulate("mainpipe_update_prefetchArray", io.prefetch_flag_write.valid)
@@ -976,6 +982,18 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   XSPerfAccumulate("mainpipe_slot_conflict_1_2", (s1_idx === s2_idx && s1_way_en === s2_way_en && s1_req.miss && s2_req.miss && s1_valid && s2_valid ))
   XSPerfAccumulate("mainpipe_slot_conflict_1_3", (s1_idx === s3_idx && s1_way_en === s3_way_en && s1_req.miss && s3_req.miss && s1_valid && s3_valid))
   XSPerfAccumulate("mainpipe_slot_conflict_2_3", (s2_idx === s3_idx && s2_way_en === s3_way_en && s2_req.miss && s3_req.miss && s2_valid && s3_valid))
+  XSPerfAccumulate("mainpipe_refill_s0_fire", s0_fire && s0_req.miss)
+  XSPerfAccumulate("mainpipe_sbuffer_s0_fire", store_req.fire)
+  XSPerfAccumulate("mainpipe_sbuffer_blocked", sbuffer_req_blocked)
+  XSPerfAccumulate("mainpipe_sbuffer_blocked_by_refill", io.store_req.valid && storeCanAccept && io.refill_req.valid)
+  XSPerfAccumulate("mainpipe_sbuffer_blocked_by_other_high_prio", io.store_req.valid && storeCanAccept && (io.probe_req.valid || io.atomic_req.valid))
+  XSPerfAccumulate("mainpipe_sbuffer_blocked_by_set_conflict", io.store_req.valid && storeCanAccept && store_set_conflict)
+  XSPerfAccumulate("mainpipe_sbuffer_blocked_by_s1_backpressure", io.store_req.valid && storeCanAccept && !s1_ready)
+  XSPerfAccumulate("mainpipe_sbuffer_blocked_by_tag_read", io.store_req.valid && storeCanAccept && !io.tag_read.ready)
+  XSPerfAccumulate("mainpipe_refill_blocked", refill_req_blocked)
+  XSPerfAccumulate("mainpipe_refill_blocked_by_pipe_resource", refill_blocked_by_pipe_resource)
+  XSPerfAccumulate("mainpipe_s1_data_blocked", s1_valid && s1_need_data && !io.data_readline.ready)
+  XSPerfAccumulate("mainpipe_sbuffer_s2_downstream_blocked", sbuffer_s2_downstream_blocked)
   // probe / replace will not update access bit
   io.access_flag_write.valid := s3_fire && !s3_req.probe && !s3_req.replace
   io.access_flag_write.bits.idx := s3_idx
