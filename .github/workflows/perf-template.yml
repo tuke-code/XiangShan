@@ -109,9 +109,10 @@ jobs:
             fi
           else
             SERVER_INPUT="${{ inputs.servers }}"
-            # Strip metadata prefix (e.g. "cores=384 status=... [group4] ") if present
-            if [[ "$SERVER_INPUT" == *"]"* ]]; then
-              SERVER_INPUT=$(echo "$SERVER_INPUT" | sed 's/.*\]\s*//')
+            # Strip metadata prefix (e.g. "cores=384 status=... [group4] ") if present.
+            # The metadata pattern contains key=value pairs before a [group] tag.
+            if [[ "$SERVER_INPUT" == *"="*"["*"]"* ]]; then
+              SERVER_INPUT=$(echo "$SERVER_INPUT" | sed 's/^[^[]*\[[^]]*\]\s*//')
             fi
             echo "SERVER_LIST=$SERVER_INPUT" >> $GITHUB_ENV
           fi
