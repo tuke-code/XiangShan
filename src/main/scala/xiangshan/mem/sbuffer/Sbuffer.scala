@@ -693,6 +693,14 @@ class Sbuffer(implicit p: Parameters)
   when (deq_req_svwbuf(0).fire) { valid_svwbuf(deqPtr_svwbuf_vec(0).value) := false.B }
   // when (deq_req_svwbuf(1).fire) { valid_svwbuf(deqPtr_svwbuf_vec(1).value) := false.B }
 
+  // deq_hold : for store-load forwarding, solve the gap after svwbuf deq.fire when valid is cleared but sbuffer mask is not ready
+  val deq_hold_valid = RegNext(deq_req_svwbuf(0).fire)
+  val deq_hold_mask = RegEnable(mask_svwbuf(deqPtr_svwbuf_vec(0).value), deq_req_svwbuf(0).fire)
+  val deq_hold_data = RegEnable(data_svwbuf(deqPtr_svwbuf_vec(0).value), deq_req_svwbuf(0).fire)
+  val deq_hold_vtag = RegEnable(vtag_svwbuf(deqPtr_svwbuf_vec(0).value), deq_req_svwbuf(0).fire)
+  val deq_hold_ptag = RegEnable(ptag_svwbuf(deqPtr_svwbuf_vec(0).value), deq_req_svwbuf(0).fire)
+
+
   // ---------------------- Send Dcache Req ---------------------
 
   // Flush completion must also wait until store misses in MSHR are drained.
@@ -1043,9 +1051,14 @@ class Sbuffer(implicit p: Parameters)
     val vtag_matches = VecInit(widthMap_svwbuf(w => vtag_svwbuf(w) === (s1Req.vaddr >> 4)))
     val ptag_matches = VecInit(widthMap_svwbuf(w => RegEnable(ptag_svwbuf(w), s1ReqValid) === RegEnable((s1Paddr >> 4), s1ReqValid)))
     val tag_matches = vtag_matches
-    val tag_mismatch = RegNext(s1ReqValid) && VecInit(widthMap_svwbuf(w =>
-      GatedValidRegNext(vtag_matches(w)) =/= ptag_matches(w) && GatedValidRegNext(valid_svwbuf(w)))
-    ).asUInt.orR && !RegEnable(s1Kill, s1ReqValid)
+    val deq_hold_vtag_match = deq_hold_valid && (deq_hold_vtag === (s1Req.vaddr >> 4))
+    val deq_hold_ptag_match = deq_hold_valid && (deq_hold_ptag === (s1Paddr >> 4))
+    val tag_mismatch = RegNext(s1ReqValid) && (
+      VecInit(widthMap_svwbuf(w =>
+        GatedValidRegNext(vtag_matches(w)) =/= ptag_matches(w) && GatedValidRegNext(valid_svwbuf(w)))
+      ).asUInt.orR ||
+      (GatedValidRegNext(deq_hold_vtag_match) =/= GatedValidRegNext(deq_hold_ptag_match) && GatedValidRegNext(deq_hold_valid))
+    ) && !RegEnable(s1Kill, s1ReqValid)
     mismatch_svwbuf(i) := tag_mismatch
     when (tag_mismatch) {
       forward_need_uarch_drain := true.B
@@ -1056,8 +1069,11 @@ class Sbuffer(implicit p: Parameters)
     val forward_mask_candidate_reg = RegEnable(mask_svwbuf, s1ReqValid)
     val forward_data_candidate_reg = RegEnable(data_svwbuf, s1ReqValid)
 
-    val selectedValidMask = Mux1H(valid_tag_match_reg, forward_mask_candidate_reg)
-    val selectedValidData = Mux1H(valid_tag_match_reg, forward_data_candidate_reg)
+    val deq_hold_match_reg = RegEnable(deq_hold_vtag_match, s1ReqValid)
+    val bufSelectedValidMask = Mux1H(valid_tag_match_reg, forward_mask_candidate_reg)
+    val bufSelectedValidData = Mux1H(valid_tag_match_reg, forward_data_candidate_reg)
+    val selectedValidMask = Mux(deq_hold_match_reg, deq_hold_mask, bufSelectedValidMask)
+    val selectedValidData = Mux(deq_hold_match_reg, deq_hold_data, bufSelectedValidData)
     selectedValidMask.suggestName("selectedValidMask_svwbuf_"+i)
     selectedValidData.suggestName("selectedValidData_svwbuf_"+i)
 
