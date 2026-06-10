@@ -107,17 +107,19 @@ class PipelineStallReason(reasonW: Int) extends Module {
   io.outReason := reasonNext
 }
 
+// Only Used by Rename2Dispatch
 class PipeGroupConnect[T <: Data](n: Int, gen: => T) extends Module {
   val io = IO(new Bundle {
     val in = Vec(n, Flipped(DecoupledIO(gen)))
     val out = Vec(n, DecoupledIO(gen))
     val flush = Input(Bool())
+    val notFlushWhenFirstVec = Input(Vec(n, Bool()))
     val outAllFire = Input(Bool())
   })
 
   // Input Alias
   // Use private[this] to limit the wrong usage for not IO hardware in object with the same name.
-  private[this] val flush = io.flush
+  private[this] val flush       = io.flush
   private[this] val inValidSeq  = io.in.map(_.valid)
   private[this] val inDataSeq   = io.in.map(_.bits)
   private[this] val outReadySeq = io.out.map(_.ready)
@@ -135,11 +137,26 @@ class PipeGroupConnect[T <: Data](n: Int, gen: => T) extends Module {
   // Todo: no outReadys version for better timing and lower performance
   private[this] val canAcc = io.outAllFire || !valids.orR
 
-  (validVec zip inValids.asBools zip outReadys.asBools).foreach { case ((valid, inValid), outReady) =>
+  val notFirstValidUopVec: Seq[Bool] = (0 until n).map(i =>
+    if (i == 0) {
+      false.B
+    } else {
+      validVec.slice(0, i).reduce(_ || _)
+    }
+  )
+  val firstUopSelVec = validVec.zip(notFirstValidUopVec).map { case (valid, notFirst) =>
+    valid && !notFirst
+  }
+
+  private[this] val flushVec = io.notFlushWhenFirstVec.zip(firstUopSelVec).map { case (notFlushWhenFirst, first) =>
+    flush && !(notFlushWhenFirst && first)
+  }
+
+  (validVec lazyZip inValids.asBools lazyZip outReadys.asBools lazyZip flushVec).foreach { case (valid, inValid, outReady, trueFlush) =>
     valid := MuxCase(
       default = valid /*keep*/,
       Seq(
-        flush               -> false.B,
+        trueFlush           -> false.B,
         (inValid && canAcc) -> true.B,
         outReady            -> false.B
       )
@@ -155,7 +172,7 @@ class PipeGroupConnect[T <: Data](n: Int, gen: => T) extends Module {
   // Output connections
   for (i <- 0 until n) {
     io.in(i).ready  := canAcc
-    io.out(i).valid := validVec(i)
+    io.out(i).valid := validVec(i) && !flush
     io.out(i).bits  := dataVec(i)
   }
 }
@@ -166,13 +183,15 @@ object PipeGroupConnect {
     left: Seq[DecoupledIO[T]],
     right: Vec[DecoupledIO[T]],
     flush: Bool,
+    notFlushWhenFirstVec: Vec[Bool],
     rightAllFire: Bool,
     suggestName: String = null,
   ): Unit =  {
-    require(left.size == right.size, "The sizes of left and right Vec Bundle should be equal in PipeGroupConnect")
+    require(left.size == right.size && left.size == notFlushWhenFirstVec.size, "The sizes of left, right and notFlushWhenFirstVec Vec Bundle should be equal in PipeGroupConnect")
     require(left.size > 0, "The size of Vec Bundle in PipeGroupConnect should be more than 0")
     val mod = Module(new PipeGroupConnect(left.size, chiselTypeOf(left.head.bits)))
     mod.io.flush := flush
+    mod.io.notFlushWhenFirstVec := notFlushWhenFirstVec
     mod.io.in.zipWithIndex.foreach { case (in, i) =>
       in.valid := left(i).valid
       in.bits := left(i).bits
