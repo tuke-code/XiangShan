@@ -68,7 +68,7 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
 
   private val backendFilteredResolve = io.backendResolve.map { backendResolve =>
     val filteredResolve = Wire(Valid(new Resolve))
-    filteredResolve.valid := backendResolve.valid &&
+    filteredResolve.valid := backendResolve.valid && !(backendResolve.bits.attribute.isDirect) &&
       !(backendRedirect.reduce(_ || _) && backendResolve.bits.ftqIdx > backendRedirectPtr)
     filteredResolve.bits := backendResolve.bits
     filteredResolve
