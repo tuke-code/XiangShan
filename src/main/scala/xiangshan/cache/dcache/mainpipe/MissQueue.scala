@@ -1505,18 +1505,15 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   // This allows upstream modules to know immediately if requests are accepted
   for (i <- 0 until reqNum) {
     val has_compress = (analysis.strategy(i) & 4.U) =/= 0.U
-    val has_merge = ((analysis.strategy(i) & 2.U) =/= 0.U)
+    val has_merge = (analysis.strategy(i) & 2.U) =/= 0.U
     val has_alloc = (analysis.strategy(i) & 1.U) =/= 0.U
     val is_valid = analysis.valid(i)
     val target_mshr = analysis.target_mshr(i)  // Explicit use to prevent Chisel optimization
+    val target_group = analysis.compress_group(i)
 
     // Compress: only the first in group is master, others are slaves
-    val is_first_in_group = (analysis.compress_group(i) === i.U)
-    val compress_ready_master = has_compress && is_first_in_group &&
-                         (has_merge || has_alloc)
-    val compress_ready_slave = has_compress && !is_first_in_group &&
-                         (((analysis.strategy(analysis.compress_group(i)) & 2.U) =/= 0.U) || ((analysis.strategy(analysis.compress_group(i)) & 1.U) =/= 0.U))
-    val compress_ready = compress_ready_master || compress_ready_slave
+    val is_first_in_group = target_group === i.U
+    val compress_ready = has_compress && Mux(is_first_in_group, has_merge || has_alloc, (analysis.strategy(target_group) & 3.U) =/= 0.U)
 
     val merge_ready = has_merge && !has_compress && is_valid
 
@@ -1925,8 +1922,9 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   io.debugTopDown.robHeadMissInDCache := rob_head_miss_in_dcache
 
   val perfValidCount = RegNext(PopCount(entries.map(entry => (!entry.io.primary_ready))))
+  val query_fire_next = RegNext(query_fire)
   val perfEvents = Seq(
-    ("dcache_missq_req      ", PopCount(query_fire)),
+    ("dcache_missq_req      ", PopCount(query_fire_next)),
     ("dcache_missq_1_4_valid", (perfValidCount < (cfg.nMissEntries.U/4.U))),
     ("dcache_missq_2_4_valid", (perfValidCount > (cfg.nMissEntries.U/4.U)) & (perfValidCount <= (cfg.nMissEntries.U/2.U))),
     ("dcache_missq_3_4_valid", (perfValidCount > (cfg.nMissEntries.U/2.U)) & (perfValidCount <= (cfg.nMissEntries.U*3.U/4.U))),
