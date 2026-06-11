@@ -112,10 +112,10 @@ class MinimalConfig(n: Int = 1) extends Config(
               tageParameters = TageParameters(
                 TableInfos = Seq(
                   // Size, NumWays, HistoryLength
-                  new TageTableInfo(1024, 2, 6),
-                  new TageTableInfo(1024, 2, 9),
-                  new TageTableInfo(1024, 2, 17),
-                  new TageTableInfo(1024, 2, 31)
+                  new TageTableInfo(2048, 2, 6),
+                  new TageTableInfo(2048, 2, 9),
+                  new TageTableInfo(4096, 2, 17),
+                  new TageTableInfo(12288, 3, 31)
                 ),
               ),
               utageParameters = MicroTageParameters(
