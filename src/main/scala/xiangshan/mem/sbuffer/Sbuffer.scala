@@ -580,8 +580,6 @@ class Sbuffer(implicit p: Parameters)
     in_req_svwbuf(i).bits := io.in.req(i).bits
     deq_req_svwbuf(i).ready := in_req(i).ready
   }
-  deq_req_svwbuf(1).ready := false.B
-
   
   // ---------------------- svwbuf enq ---------------------
   val inptags_svwbuf = in_req_svwbuf.map(in => in.bits.addr(PAddrBits - 1, 4)) // 4 = log2(VLENB)
@@ -660,11 +658,10 @@ class Sbuffer(implicit p: Parameters)
   }
 
   // ---------------------- svwbuf deq ---------------------
-  // val deq1_canMerge_enq = mergeMask_svwbuf(0)(deqPtr_svwbuf_vec(1).value) && in_req_svwbuf(0).valid ||
-  //                         mergeMask_svwbuf(1)(deqPtr_svwbuf_vec(1).value) && in_req_svwbuf(1).valid
+  val deq1_canMerge_enq = mergeMask_svwbuf(0)(deqPtr_svwbuf_vec(1).value) && in_req_svwbuf(0).valid ||
+                          mergeMask_svwbuf(1)(deqPtr_svwbuf_vec(1).value) && in_req_svwbuf(1).valid
   deq_req_svwbuf(0).valid := valid_svwbuf(deqPtr_svwbuf_vec(0).value)
-  // deq_req_svwbuf(1).valid := valid_svwbuf(deqPtr_svwbuf_vec(1).value) && !deq1_canMerge_enq
-  deq_req_svwbuf(1).valid := false.B
+  deq_req_svwbuf(1).valid := valid_svwbuf(deqPtr_svwbuf_vec(1).value) && !deq1_canMerge_enq
   for (i <- 0 until EnsbufferWidth) {
     deq_req_svwbuf(i).bits := DontCare
     deq_req_svwbuf(i).bits.data := Mux(wline_svwbuf(deqPtr_svwbuf_vec(i).value), 0.U(VLEN.W), data_svwbuf(deqPtr_svwbuf_vec(i).value).asUInt)
@@ -677,19 +674,22 @@ class Sbuffer(implicit p: Parameters)
   }
 
   when (deq_req_svwbuf(0).fire) {
-    // deqPtr_svwbuf := deqPtr_svwbuf + Mux(deq_req_svwbuf(1).fire, 2.U, 1.U)
-    deqPtr_svwbuf := deqPtr_svwbuf + 1.U
+    deqPtr_svwbuf := deqPtr_svwbuf + Mux(deq_req_svwbuf(1).fire, 2.U, 1.U)
   }
 
   when (deq_req_svwbuf(0).fire) { valid_svwbuf(deqPtr_svwbuf_vec(0).value) := false.B }
-  // when (deq_req_svwbuf(1).fire) { valid_svwbuf(deqPtr_svwbuf_vec(1).value) := false.B }
+  when (deq_req_svwbuf(1).fire) { valid_svwbuf(deqPtr_svwbuf_vec(1).value) := false.B }
 
   // deq_hold : for store-load forwarding, solve the gap after svwbuf deq.fire when valid is cleared but sbuffer mask is not ready
-  val deq_hold_valid = RegNext(deq_req_svwbuf(0).fire)
-  val deq_hold_mask = RegEnable(mask_svwbuf(deqPtr_svwbuf_vec(0).value), deq_req_svwbuf(0).fire)
-  val deq_hold_data = RegEnable(data_svwbuf(deqPtr_svwbuf_vec(0).value), deq_req_svwbuf(0).fire)
-  val deq_hold_vtag = RegEnable(vtag_svwbuf(deqPtr_svwbuf_vec(0).value), deq_req_svwbuf(0).fire)
-  val deq_hold_ptag = RegEnable(ptag_svwbuf(deqPtr_svwbuf_vec(0).value), deq_req_svwbuf(0).fire)
+  val deq_hold_valid = VecInit((0 until EnsbufferWidth).map(i => RegNext(deq_req_svwbuf(i).fire)))
+  val deq_hold_mask = VecInit((0 until EnsbufferWidth).map(i =>
+    RegEnable(mask_svwbuf(deqPtr_svwbuf_vec(i).value), deq_req_svwbuf(i).fire)))
+  val deq_hold_data = VecInit((0 until EnsbufferWidth).map(i =>
+    RegEnable(data_svwbuf(deqPtr_svwbuf_vec(i).value), deq_req_svwbuf(i).fire)))
+  val deq_hold_vtag = VecInit((0 until EnsbufferWidth).map(i =>
+    RegEnable(vtag_svwbuf(deqPtr_svwbuf_vec(i).value), deq_req_svwbuf(i).fire)))
+  val deq_hold_ptag = VecInit((0 until EnsbufferWidth).map(i =>
+    RegEnable(ptag_svwbuf(deqPtr_svwbuf_vec(i).value), deq_req_svwbuf(i).fire)))
 
 
   // ---------------------- Send Dcache Req ---------------------
@@ -1042,13 +1042,15 @@ class Sbuffer(implicit p: Parameters)
     val vtag_matches = VecInit(widthMap_svwbuf(w => vtag_svwbuf(w) === (s1Req.vaddr >> 4)))
     val ptag_matches = VecInit(widthMap_svwbuf(w => RegEnable(ptag_svwbuf(w), s1ReqValid) === RegEnable((s1Paddr >> 4), s1ReqValid)))
     val tag_matches = vtag_matches
-    val deq_hold_vtag_match = deq_hold_valid && (deq_hold_vtag === (s1Req.vaddr >> 4))
-    val deq_hold_ptag_match = deq_hold_valid && (deq_hold_ptag === (s1Paddr >> 4))
+    val deq_hold_vtag_match = (0 until EnsbufferWidth).map(k => deq_hold_valid(k) && (deq_hold_vtag(k) === (s1Req.vaddr >> 4)))
+    val deq_hold_ptag_match = (0 until EnsbufferWidth).map(k => deq_hold_valid(k) && (deq_hold_ptag(k) === (s1Paddr >> 4)))
     val tag_mismatch = RegNext(s1ReqValid) && (
       VecInit(widthMap_svwbuf(w =>
         GatedValidRegNext(vtag_matches(w)) =/= ptag_matches(w) && GatedValidRegNext(valid_svwbuf(w)))
       ).asUInt.orR ||
-      (GatedValidRegNext(deq_hold_vtag_match) =/= GatedValidRegNext(deq_hold_ptag_match) && GatedValidRegNext(deq_hold_valid))
+      (0 until EnsbufferWidth).map(k =>
+        (GatedValidRegNext(deq_hold_vtag_match(k)) =/= GatedValidRegNext(deq_hold_ptag_match(k))) && GatedValidRegNext(deq_hold_valid(k))
+      ).reduce(_ || _)
     ) && !RegEnable(s1Kill, s1ReqValid)
     mismatch_svwbuf(i) := tag_mismatch
     when (tag_mismatch) {
@@ -1060,11 +1062,13 @@ class Sbuffer(implicit p: Parameters)
     val forward_mask_candidate_reg = RegEnable(mask_svwbuf, s1ReqValid)
     val forward_data_candidate_reg = RegEnable(data_svwbuf, s1ReqValid)
 
-    val deq_hold_match_reg = RegEnable(deq_hold_vtag_match, s1ReqValid)
+    val deq_hold_match_reg = RegEnable(deq_hold_vtag_match.reduce(_ || _), s1ReqValid)
+    val deq_hold_mask_sel = Mux1H(deq_hold_vtag_match, deq_hold_mask)
+    val deq_hold_data_sel = Mux1H(deq_hold_vtag_match, deq_hold_data)
     val bufSelectedValidMask = Mux1H(valid_tag_match_reg, forward_mask_candidate_reg)
     val bufSelectedValidData = Mux1H(valid_tag_match_reg, forward_data_candidate_reg)
-    val selectedValidMask = Mux(deq_hold_match_reg, RegEnable(deq_hold_mask, s1ReqValid), bufSelectedValidMask)
-    val selectedValidData = Mux(deq_hold_match_reg, RegEnable(deq_hold_data, s1ReqValid), bufSelectedValidData)
+    val selectedValidMask = Mux(deq_hold_match_reg, RegEnable(deq_hold_mask_sel, s1ReqValid), bufSelectedValidMask)
+    val selectedValidData = Mux(deq_hold_match_reg, RegEnable(deq_hold_data_sel, s1ReqValid), bufSelectedValidData)
     selectedValidMask.suggestName("selectedValidMask_svwbuf_"+i)
     selectedValidData.suggestName("selectedValidData_svwbuf_"+i)
 
@@ -1075,9 +1079,9 @@ class Sbuffer(implicit p: Parameters)
   }
 
   for (i <- 0 until LoadPipelineWidth) {
+    io.forward(i).s2Resp.valid := forward_sbuf(i).s2Resp.valid
+    io.forward(i).s2Resp.bits.matchInvalid := forward_sbuf(i).s2Resp.bits.matchInvalid || forward_svwbuf(i).s2Resp.bits.matchInvalid
     for (j <- 0 until VDataBytes) {
-      io.forward(i).s2Resp.valid := forward_sbuf(i).s2Resp.valid
-      io.forward(i).s2Resp.bits.matchInvalid := forward_sbuf(i).s2Resp.bits.matchInvalid || forward_svwbuf(i).s2Resp.bits.matchInvalid
       io.forward(i).s2Resp.bits.forwardMask(j) := forward_svwbuf(i).s2Resp.bits.forwardMask(j) || forward_sbuf(i).s2Resp.bits.forwardMask(j)
       io.forward(i).s2Resp.bits.forwardData(j) := Mux(forward_svwbuf(i).s2Resp.bits.forwardMask(j),
                                                       forward_svwbuf(i).s2Resp.bits.forwardData(j), forward_sbuf(i).s2Resp.bits.forwardData(j))
