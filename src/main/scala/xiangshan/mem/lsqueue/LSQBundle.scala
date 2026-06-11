@@ -239,6 +239,8 @@ class VirtualStoreQueueEnqIO(PhysicalQueuePtr: MultiFlagCircularQueuePtr[_]) (im
   class ReqUopInfo (implicit p: Parameters) extends MemBlockBundle {
     val robIdx          = new RobPtr
     val numLsElem       = NumLsElem()
+    val uopIdx          = UopIdx()
+    val isVec           = Bool()
     // debug info
     val ssid            = UInt(SSIDWidth.W) // maybe not used
     val storeSetHit     = Bool() // inst has been allocated an store set. maybe not used
@@ -325,6 +327,7 @@ class VirtualStoreQueueIO[PhysicalQueuePtrType <: MultiFlagCircularQueuePtr[Phys
   val fromPhysicalQueue  = new PhysicalQueueToVirtualStoreQueueIO(PhysicalQueuePtr)
   // to lsqEnqCtrl
   val sqRecoverStall     = Output(Bool())
+  val fromVMergeBuffer   = Vec(VecStorePipelineWidth, Flipped(ValidIO(new FeedbackToLsqIO))) //TODO: will be remove in the feature
 
   val empty              = Output(Bool())
 }
