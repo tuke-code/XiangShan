@@ -1448,9 +1448,11 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
         analysis.target_mshr(i) := 0.U
 
         when (can_merge_vec(i)) {
+          // compress & merge
           analysis.strategy(i) := 4.U | 2.U
           analysis.target_mshr(i) := merge_target_id
         }.elsewhen (can_allocate_vec(i)) {
+          // compress & alloc
           analysis.strategy(i) := 4.U | 1.U
           // Allocate using alloc_order to account for invalid earlier requests
           val has_enough_free = alloc_order(i) < free_entry_count
