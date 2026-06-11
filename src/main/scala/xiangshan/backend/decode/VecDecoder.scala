@@ -11,6 +11,7 @@ import xiangshan.backend.fu.FuType
 import xiangshan._
 import yunsuan.{VfpuType, VipuType, VimacType, VpermType, VialuFixType, VfaluType, VmoveType, VfmaType, VfdivType, VfcvtType, VidivType, FcmpOpCode}
 import xiangshan.backend.decode.Zvbb._
+import xiangshan.backend.decode.Zfbf._
 
 abstract class VecDecode extends XSDecodeBase {
   def generate() : List[BitPat]
@@ -619,6 +620,7 @@ object VecDecoder extends DecodeConstants {
 
     // 13.7. Vector Widening Floating-Point Fused Multiply-Add Instructions
     VFWMACC_VV         -> OPFVV(SrcType.vp, SrcType.vp, FuType.vfma, VfmaType.vfmacc_w , F, T, F, UopSplitType.VEC_VVW),
+    VFWMACCBF16_VV     -> OPFVV(SrcType.vp, SrcType.vp, FuType.vfma, VfmaType.vfwmaccbf16, F, T, F, UopSplitType.VEC_VVW),
     VFWNMACC_VV        -> OPFVV(SrcType.vp, SrcType.vp, FuType.vfma, VfmaType.vfnmacc_w, F, T, F, UopSplitType.VEC_VVW),
     VFWMSAC_VV         -> OPFVV(SrcType.vp, SrcType.vp, FuType.vfma, VfmaType.vfmsac_w , F, T, F, UopSplitType.VEC_VVW),
     VFWNMSAC_VV        -> OPFVV(SrcType.vp, SrcType.vp, FuType.vfma, VfmaType.vfnmsac_w, F, T, F, UopSplitType.VEC_VVW),
@@ -666,6 +668,7 @@ object VecDecoder extends DecodeConstants {
     VFWCVT_F_XU_V      -> OPFVV(SrcType.X , SrcType.vp , FuType.vfcvt, VfcvtType.vfwcvt_fxuv, F, T, F, UopSplitType.VEC_VVW),
     VFWCVT_F_X_V       -> OPFVV(SrcType.X , SrcType.vp , FuType.vfcvt, VfcvtType.vfwcvt_fxv, F, T, F, UopSplitType.VEC_VVW),
     VFWCVT_F_F_V       -> OPFVV(SrcType.X , SrcType.vp , FuType.vfcvt, VfcvtType.vfwcvt_ffv, F, T, F, UopSplitType.VEC_VVW),
+    VFWCVTBF16_F_F_V   -> OPFVV(SrcType.X , SrcType.vp , FuType.vfcvt, VfcvtType.vfwcvtbf16_ffv, F, T, F, UopSplitType.VEC_VVW),
 
     // !
     // 13.19. Narrowing Floating-Point/Integer Type-Convert Instructions
@@ -677,6 +680,7 @@ object VecDecoder extends DecodeConstants {
     VFNCVT_F_X_W       -> OPFVV(SrcType.X , SrcType.vp , FuType.vfcvt, VfcvtType.vfncvt_fxw, F, T, F, UopSplitType.VEC_WVV),
     VFNCVT_F_F_W       -> OPFVV(SrcType.X , SrcType.vp , FuType.vfcvt, VfcvtType.vfncvt_ffw, F, T, F, UopSplitType.VEC_WVV),
     VFNCVT_ROD_F_F_W   -> OPFVV(SrcType.X , SrcType.vp , FuType.vfcvt, VfcvtType.vfncvt_rod_ffw, F, T, F, UopSplitType.VEC_WVV),
+    VFNCVTBF16_F_F_W   -> OPFVV(SrcType.X , SrcType.vp , FuType.vfcvt, VfcvtType.vfncvtbf16_ffw, F, T, F, UopSplitType.VEC_WVV),
     // 14.3. Vector Single-Width Floating-Point Reduction Instructions
     VFREDOSUM_VS -> OPFVV(SrcType.vp, SrcType.vp, FuType.vfalu, VfaluType.vfredosum, F, T, F, UopSplitType.VEC_VFREDOSUM),
     VFREDUSUM_VS -> OPFVV(SrcType.vp, SrcType.vp, FuType.vfalu, VfaluType.vfredusum, F, T, F, UopSplitType.VEC_VFRED),
@@ -721,6 +725,7 @@ object VecDecoder extends DecodeConstants {
 
     // 13.7. Vector Widening Floating-Point Fused Multiply-Add Instructions
     VFWMACC_VF         -> OPFVF(SrcType.fp, SrcType.vp, FuType.vfma, VfmaType.vfmacc_w , F, T, F, UopSplitType.VEC_VFW),
+    VFWMACCBF16_VF     -> OPFVF(SrcType.fp, SrcType.vp, FuType.vfma, VfmaType.vfwmaccbf16, F, T, F, UopSplitType.VEC_VFW),
     VFWNMACC_VF        -> OPFVF(SrcType.fp, SrcType.vp, FuType.vfma, VfmaType.vfnmacc_w, F, T, F, UopSplitType.VEC_VFW),
     VFWMSAC_VF         -> OPFVF(SrcType.fp, SrcType.vp, FuType.vfma, VfmaType.vfmsac_w , F, T, F, UopSplitType.VEC_VFW),
     VFWNMSAC_VF        -> OPFVF(SrcType.fp, SrcType.vp, FuType.vfma, VfmaType.vfnmsac_w, F, T, F, UopSplitType.VEC_VFW),
