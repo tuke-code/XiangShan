@@ -599,72 +599,63 @@ class Sbuffer(implicit p: Parameters)
     
   in_req_svwbuf(0).ready := (hasFreeEntries(enqPtr_svwbuf, deqPtr_svwbuf) > 0.U || canMerge_svwbuf(0)) && enqAllowed &&
                             !(deq_req_svwbuf(0).fire && mergeMask_svwbuf(0)(deqPtr_svwbuf_vec(0).value))
-  in_req_svwbuf(1).ready := false.B
-  // in_req_svwbuf(1).ready := (hasFreeEntries(enqPtr_svwbuf, deqPtr_svwbuf) > 1.U || sameTag_svwbuf || canMerge_svwbuf(1)) &&
-  //                           enqAllowed && !(deq_req_svwbuf(0).fire && mergeMask_svwbuf(1)(deqPtr_svwbuf_vec(0).value)) && in_req_svwbuf(0).ready
+  in_req_svwbuf(1).ready := (hasFreeEntries(enqPtr_svwbuf, deqPtr_svwbuf) > 1.U || sameTag_svwbuf || canMerge_svwbuf(1)) &&
+                            enqAllowed && !(deq_req_svwbuf(0).fire && mergeMask_svwbuf(1)(deqPtr_svwbuf_vec(0).value)) && in_req_svwbuf(0).ready
 
-  // val enqOH_svwbuf = Wire(Vec(EnsbufferWidth, UInt(StVWordBufferSize.W)))
-  val enqOH_svwbuf = UIntToOH(enqPtr_svwbuf.value)
-  // enqOH_svwbuf(1) := enqOH_svwbuf(0).tail(1) ## enqOH_svwbuf(0).head(1)
+  val enqOH_svwbuf = Wire(Vec(EnsbufferWidth, UInt(StVWordBufferSize.W)))
+  enqOH_svwbuf(0) := UIntToOH(enqPtr_svwbuf.value)
+  enqOH_svwbuf(1) := enqOH_svwbuf(0).tail(1) ## enqOH_svwbuf(0).head(1)
 
   for (i <- 0 until StVWordBufferSize) {
     val do_merge_in0 = mergeMask_svwbuf(0)(i) && in_req_svwbuf(0).fire
-    // val can_merge_in1 = mergeMask_svwbuf(1)(i) && in_req_svwbuf(1).fire
-    val do_enq_in0 = enqOH_svwbuf(i) && in_req_svwbuf(0).fire && !canMerge_svwbuf(0)
-    // val can_enq_in1 = enqOH_svwbuf(1)(i) && in_req_svwbuf(1).fire || sameTag_svwbuf && enqOH_svwbuf(0)(i) && in_req_svwbuf(0).fire
+    val do_merge_in1 = mergeMask_svwbuf(1)(i) && in_req_svwbuf(1).fire
+    val do_enq_in0 = enqOH_svwbuf(0)(i) && in_req_svwbuf(0).fire && !canMerge_svwbuf(0)
+    val do_enq_in1 = in_req_svwbuf(1).fire &&
+                     (enqOH_svwbuf(0)(i) && (canMerge_svwbuf(0) && !canMerge_svwbuf(1) || !canMerge_svwbuf(0) && sameTag_svwbuf) ||
+                      enqOH_svwbuf(1)(i) && !canMerge_svwbuf(0) && !canMerge_svwbuf(1) && !sameTag_svwbuf)
     for (k <- 0 until VDataBytes) {
-      // when (can_merge_in1 && in_req_svwbuf(1).bits.mask(k)) {
-      //   data_svwbuf(i)(k) := in_req_svwbuf(1).bits.data.grouped(8)(k)
-      when (do_merge_in0 && in_req_svwbuf(0).bits.mask(k)) {
+      when (do_merge_in1 && in_req_svwbuf(1).bits.mask(k)) {
+        data_svwbuf(i)(k) := in_req_svwbuf(1).bits.data.grouped(8)(k)
+      }.elsewhen (do_merge_in0 && in_req_svwbuf(0).bits.mask(k)) {
         data_svwbuf(i)(k) := in_req_svwbuf(0).bits.data.grouped(8)(k)
-      // }.elsewhen (can_enq_in1 && in_req_svwbuf(1).bits.mask(k)) {
-      //   data_svwbuf(i)(k) := in_req_svwbuf(1).bits.data.grouped(8)(k)
+      }.elsewhen (do_enq_in1 && in_req_svwbuf(1).bits.mask(k)) {
+        data_svwbuf(i)(k) := in_req_svwbuf(1).bits.data.grouped(8)(k)
       }.elsewhen (do_enq_in0 && in_req_svwbuf(0).bits.mask(k)) {
         data_svwbuf(i)(k) := in_req_svwbuf(0).bits.data.grouped(8)(k)
       }
     }
 
-    // when (can_merge_in1 || can_merge_in0) {
-    //   mask_svwbuf(i) := mask_svwbuf(i) |
-    //                     Mux(can_merge_in1, in_req_svwbuf(1).bits.mask, 0.U) |
-    //                     Mux(can_merge_in0, in_req_svwbuf(0).bits.mask, 0.U)
-    // }.elsewhen (can_enq_in1 || can_enq_in0) {
-    //   mask_svwbuf(i) := Mux(can_enq_in1, in_req_svwbuf(1).bits.mask, 0.U) |
-    //                     Mux(can_enq_in0, in_req_svwbuf(0).bits.mask, 0.U)
-    // }
-
-    when (do_merge_in0) {
-      mask_svwbuf(i) := mask_svwbuf(i) | in_req_svwbuf(0).bits.mask
-    }.elsewhen (do_enq_in0) {
-      mask_svwbuf(i) := in_req_svwbuf(0).bits.mask
+    when (do_merge_in1 || do_merge_in0) {
+      mask_svwbuf(i) := mask_svwbuf(i) |
+                        Mux(do_merge_in1, in_req_svwbuf(1).bits.mask, 0.U) |
+                        Mux(do_merge_in0, in_req_svwbuf(0).bits.mask, 0.U)
+    }.elsewhen (do_enq_in1 || do_enq_in0) {
+      mask_svwbuf(i) := Mux(do_enq_in1, in_req_svwbuf(1).bits.mask, 0.U) |
+                        Mux(do_enq_in0, in_req_svwbuf(0).bits.mask, 0.U)
     }
 
     when (!valid_svwbuf(i)) { // TODO: remove this
-      // when (can_enq_in1) {
-      //   ptag_svwbuf(i) := in_req_svwbuf(1).bits.addr(PAddrBits - 1, 4)
-      //   vtag_svwbuf(i) := in_req_svwbuf(1).bits.vaddr(VAddrBits - 1, 4)
-      //   wline_svwbuf(i) := in_req_svwbuf(1).bits.wline
-      //   prefetch_svwbuf(i) := in_req_svwbuf(1).bits.prefetch
-      when (do_enq_in0) {
+      when (do_enq_in1) {
+        ptag_svwbuf(i) := in_req_svwbuf(1).bits.addr(PAddrBits - 1, 4)
+        vtag_svwbuf(i) := in_req_svwbuf(1).bits.vaddr(VAddrBits - 1, 4)
+        wline_svwbuf(i) := in_req_svwbuf(1).bits.wline
+        prefetch_svwbuf(i) := in_req_svwbuf(1).bits.prefetch
+      }.elsewhen (do_enq_in0) {
         ptag_svwbuf(i) := in_req_svwbuf(0).bits.addr(PAddrBits - 1, 4)
         vtag_svwbuf(i) := in_req_svwbuf(0).bits.vaddr(VAddrBits - 1, 4)
         wline_svwbuf(i) := in_req_svwbuf(0).bits.wline
         prefetch_svwbuf(i) := in_req_svwbuf(0).bits.prefetch
       }
 
-      // when (can_enq_in0 || can_enq_in1) { valid_svwbuf(i) := true.B }
-      when (do_enq_in0) { valid_svwbuf(i) := true.B }
+      when (do_enq_in0 || do_enq_in1) { valid_svwbuf(i) := true.B }
     }
   }
 
   val in0_fire_svwbuf_alloc = in_req_svwbuf(0).fire && !canMerge_svwbuf(0)
   val in1_fire_svwbuf_alloc = in_req_svwbuf(1).fire && !canMerge_svwbuf(1)
-  // when (in0_fire_svwbuf_alloc && in1_fire_svwbuf_alloc) {
-  //   enqPtr_svwbuf := enqPtr_svwbuf + Mux(sameTag_svwbuf, 1.U, 2.U)
-  // }.elsewhen (in0_fire_svwbuf_alloc =/= in1_fire_svwbuf_alloc) {
-  //   enqPtr_svwbuf := enqPtr_svwbuf + 1.U
-  // }
-  when (in0_fire_svwbuf_alloc) {
+  when (in0_fire_svwbuf_alloc && in1_fire_svwbuf_alloc) {
+    enqPtr_svwbuf := enqPtr_svwbuf + Mux(sameTag_svwbuf, 1.U, 2.U)
+  }.elsewhen (in0_fire_svwbuf_alloc =/= in1_fire_svwbuf_alloc) {
     enqPtr_svwbuf := enqPtr_svwbuf + 1.U
   }
 

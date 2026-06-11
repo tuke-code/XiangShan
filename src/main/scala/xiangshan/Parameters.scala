@@ -165,7 +165,7 @@ case class XSCoreParameters
   StoreBufferThreshold: Int = 9,
   EnsbufferWidth: Int = 2,
   EnableStVWordBuffer: Boolean = true,
-  StVWordBufferSize: Int = 24,
+  StVWordBufferSize: Int = 32,
   LoadDependencyWidth: Int = 2,
   // ============ VLSU ============
   VlMergeBufferSize: Int = 16,
