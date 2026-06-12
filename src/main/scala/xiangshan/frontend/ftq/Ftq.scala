@@ -540,6 +540,9 @@ class Ftq(implicit p: Parameters) extends FtqModule
   private val perf_commitHasMispredictConditional =
     perf_commitHasMispredict && commitPerfMeta.mispredictBranchInfo.attribute.isConditional
 
+  private val perf_commitHasMispredictInDirectNotRet =
+    perf_commitHasMispredict && commitPerfMeta.mispredictBranchInfo.attribute.isIndirect && !commitPerfMeta.mispredictBranchInfo.attribute.isReturn
+
   XSPerfSeqAccumulate(
     "commit_branch_mispredicts_s1_mispred_s1_source",
     perf_commitHasMispredict && !commitPerfMeta.bpuPerf.bpSource.s3Override,
@@ -569,6 +572,15 @@ class Ftq(implicit p: Parameters) extends FtqModule
     perf_commitHasMispredictConditional,
     BlameBpuSource.BlameType.getValidSeq(BlameBpuSource(
       perf_commitHasMispredictConditional,
+      commitPerfMeta.bpuPerf,
+      commitPerfMeta.mispredictBranchInfo
+    ))
+  )
+  XSPerfSeqAccumulate(
+    "commit_indirectNotRet_branch_mispredicts_reason",
+    perf_commitHasMispredictInDirectNotRet,
+    BlameBpuSource.BlameType.getValidSeq(BlameBpuSource(
+      perf_commitHasMispredictInDirectNotRet,
       commitPerfMeta.bpuPerf,
       commitPerfMeta.mispredictBranchInfo
     ))
