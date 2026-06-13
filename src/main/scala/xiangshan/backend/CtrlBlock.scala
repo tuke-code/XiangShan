@@ -760,7 +760,7 @@ class CtrlBlockImp(
   )
 
   // pipeline between rename and dispatch
-  private val robIdxEqual2Redirect: Vec[Bool] = VecInit(renameOut.map(_.bits.robIdx === s1_s3_redirect.bits.robIdx))
+  private val robIdxEqual2Redirect: Vec[Bool] = VecInit(dispatch.io.fromRename.map(_.bits.robIdx === s1_s3_redirect.bits.robIdx))
   PipeGroupConnect(renameOut, dispatch.io.fromRename, s1_s3_redirect.valid, robIdxEqual2Redirect, dispatch.io.toRenameAllFire, "renamePipeDispatch")
 
   rename.io.debugOutValidVec.foreach(_ := dispatch.io.fromRename.map(_.valid))
