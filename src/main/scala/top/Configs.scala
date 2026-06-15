@@ -301,7 +301,7 @@ case class L2CacheConfig
   banks: Int = 1,
   tp: Boolean = true,
   nl: Boolean = false, 
-  cdp: Boolean = false,
+  cdp: Boolean = true,
   enablePC: Boolean = false, // Enable PC field for L1Param
   enableFlush: Boolean = false
 ) extends Config((site, here, up) => {
