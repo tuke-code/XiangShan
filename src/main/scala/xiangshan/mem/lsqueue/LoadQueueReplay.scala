@@ -408,16 +408,6 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
 
   // generate mask
   val needCancel = Wire(Vec(LoadQueueReplaySize, Bool()))
-  // generate enq mask
-  val enqIndexOH = Wire(Vec(LoadPipelineWidth, UInt(LoadQueueReplaySize.W)))
-  val s0_loadEnqFireMask = newEnqueue.zip(enqIndexOH).map(x => Mux(x._1, x._2, 0.U))
-  val s0_remLoadEnqFireVec = s0_loadEnqFireMask.map(x => VecInit((0 until LoadPipelineWidth).map(rem => getRemBits(x)(rem))))
-  val s0_remEnqSelVec = Seq.tabulate(LoadPipelineWidth)(w => VecInit(s0_remLoadEnqFireVec.map(x => x(w))))
-
-  // generate free mask
-  val s0_loadFreeSelMask = GatedRegNext(freeMaskVec.asUInt)
-  val s0_remFreeSelVec = VecInit(Seq.tabulate(LoadPipelineWidth)(rem => getRemBits(s0_loadFreeSelMask)(rem)))
-
   // l2 hint wakes up cache missed load
   // l2 will send GrantData in next 2/3 cycle, wake up the missed load early and sent them to load pipe, so them will hit the data in D channel or mshr in load S1
   val s0_loadHintWakeMask = VecInit((0 until LoadQueueReplaySize).map(i => {
@@ -430,8 +420,6 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
      s0_loadHintWakeMask & dataInLastBeatReg.asUInt,
      s0_loadHintWakeMask & VecInit(dataInLastBeatReg.map(!_)).asUInt
      )
-  val s0_remLoadHintSelMask = VecInit((0 until LoadPipelineWidth).map(rem => getRemBits(s0_loadHintSelMask)(rem)))
-  val s0_remHintSelValidVec = VecInit((0 until LoadPipelineWidth).map(rem => ParallelORR(s0_remLoadHintSelMask(rem))))
   val s0_hintSelValid = ParallelORR(s0_loadHintSelMask)
 
   // wake up cache missed load
@@ -441,73 +429,25 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     }
   })
 
-  // generate replay mask
-  // replay select priority is given as follow
-  // 1. hint wake up load
-  // 2. higher priority load
-  // 3. lower priority load
-  val s0_loadHigherPriorityReplaySelMask = VecInit((0 until LoadQueueReplaySize).map(i => {
-    val hasHigherPriority = cause(i)(LoadReplayCauses.C_DM) || cause(i)(LoadReplayCauses.C_FF) || cause(i)(LoadReplayCauses.C_UNCACHE)
-    allocated(i) && !scheduled(i) && !blocking(i) && hasHigherPriority
-  })).asUInt // use uint instead vec to reduce verilog lines
-  val s0_remLoadHigherPriorityReplaySelMask = VecInit((0 until LoadPipelineWidth).map(rem => getRemBits(s0_loadHigherPriorityReplaySelMask)(rem)))
-  val s0_loadLowerPriorityReplaySelMask = VecInit((0 until LoadQueueReplaySize).map(i => {
-    val hasLowerPriority = !cause(i)(LoadReplayCauses.C_DM) && !cause(i)(LoadReplayCauses.C_FF)
-    allocated(i) && !scheduled(i) && !blocking(i) && hasLowerPriority
-  })).asUInt // use uint instead vec to reduce verilog lines
-  val s0_remLoadLowerPriorityReplaySelMask = VecInit((0 until LoadPipelineWidth).map(rem => getRemBits(s0_loadLowerPriorityReplaySelMask)(rem)))
-  val s0_loadNormalReplaySelMask = s0_loadLowerPriorityReplaySelMask | s0_loadHigherPriorityReplaySelMask | s0_loadHintSelMask
-  val s0_remPriorityReplaySelVec = VecInit((0 until LoadPipelineWidth).map(rem => {
-        Mux(s0_remHintSelValidVec(rem), s0_remLoadHintSelMask(rem),
-          Mux(ParallelORR(s0_remLoadHigherPriorityReplaySelMask(rem)), s0_remLoadHigherPriorityReplaySelMask(rem), s0_remLoadLowerPriorityReplaySelMask(rem)))
-      }))
-  /******************************************************************************************************
-   * WARNING: Make sure that OldestSelectStride must less than or equal stages of load pipeline.        *
-   ******************************************************************************************************
-   */
-  val OldestSelectStride = 4
-  val oldestPtrExt = (0 until OldestSelectStride).map(i => io.ldWbPtr + i.U)
-  val s0_oldestMatchMaskVec = (0 until LoadQueueReplaySize).map(i => (0 until OldestSelectStride).map(j => s0_loadNormalReplaySelMask(i) && uop(i).lqIdx === oldestPtrExt(j)))
-  val s0_remOldestMatchMaskVec = (0 until LoadPipelineWidth).map(rem => getRemSeq(s0_oldestMatchMaskVec.map(_.take(1)))(rem))
-  val s0_remOlderMatchMaskVec = (0 until LoadPipelineWidth).map(rem => getRemSeq(s0_oldestMatchMaskVec.map(_.drop(1)))(rem))
-  val s0_remOldestMatchMask = (0 until LoadPipelineWidth).map(rem => VecInit(s0_remOldestMatchMaskVec(rem).map(_.head)).asUInt)
-  val s0_remOlderMatchMask = (0 until LoadPipelineWidth).map(rem => VecInit(s0_remOlderMatchMaskVec(rem).map(VecInit(_).asUInt.orR)).asUInt)
-  val s0_remOldestMatch = s0_remOldestMatchMask.map(ParallelORR(_))
-  val s0_remOlderMatch = s0_remOlderMatchMask.map(ParallelORR(_))
-  val s0_remOldestSelVec = (0 until LoadPipelineWidth).map(rem =>
-    Mux(s0_remOldestMatch(rem), s0_remOldestMatchMask(rem), s0_remOlderMatchMask(rem))
-  )
-  val s0_remOldestHintSelVec_ = s0_remOldestMatchMask.zip(s0_remLoadHintSelMask).map { case (oldestVec, hintVec) =>
-    oldestVec & hintVec
-  }
-  val s0_remOlderHintSelVec_ = s0_remOlderMatchMask.zip(s0_remLoadHintSelMask).map { case (olderVec, hintVec) =>
-    olderVec & hintVec
-  }
-  val s0_remOldestHintSel = (0 until LoadPipelineWidth).map(rem =>
-    Mux(s0_remOldestMatch(rem), ParallelORR(s0_remOldestHintSelVec_(rem)), ParallelORR(s0_remOlderHintSelVec_(rem)))
-  )
-  val s0_remOldestHintSelOH = (0 until LoadPipelineWidth).map(rem =>
-    Mux(s0_remOldestMatch(rem), PriorityEncoderOH(s0_remOldestHintSelVec_(rem)), PriorityEncoderOH(s0_remOlderHintSelVec_(rem)))
-  )
-  val s0_remOldestSelOH = (0 until LoadPipelineWidth).map(rem =>
-    Mux(s0_remOldestMatch(rem), PriorityEncoderOH(s0_remOldestMatchMask(rem)), PriorityEncoderOH(s0_remOlderMatchMask(rem)))
-  )
+  // Generate unified replay candidate mask. L2 hint only makes a blocked C_DM entry
+  // eligible in the hint-selected beat; it no longer has a separate select priority.
+  val s0_loadReplaySelMask = VecInit((0 until LoadQueueReplaySize).map(i => {
+    allocated(i) && !scheduled(i) && (!blocking(i) || s0_loadHintSelMask(i))
+  })).asUInt
+  val s0_remReplaySelMask = VecInit((0 until LoadPipelineWidth).map(rem => getRemBits(s0_loadReplaySelMask)(rem)))
 
   // select oldest logic
   s0_oldestSel := VecInit((0 until LoadPipelineWidth).map(rport => {
-    // select enqueue earlest inst
-    val ageOldest = AgeDetector(LoadQueueReplaySize / LoadPipelineWidth, s0_remEnqSelVec(rport), s0_remFreeSelVec(rport), s0_remPriorityReplaySelVec(rport))
-    assert(!(ageOldest.valid && PopCount(ageOldest.bits) > 1.U), "oldest index must be one-hot!")
-    val ageOldestValid = ageOldest.valid
-    val ageOldestIndexOH = ageOldest.bits
-
-    // select program order oldest
-    val l2HintFirst = io.l2_hint.valid && s0_remOldestHintSel(rport)
-    val issOldestValid = l2HintFirst || s0_remOldestMatch(rport) || s0_remOlderMatch(rport)
-    val issOldestIndexOH = Mux(l2HintFirst, s0_remOldestHintSelOH(rport), s0_remOldestSelOH(rport))
-
-    val oldest = Wire(Valid(UInt()))
-    val oldestSel = Mux(issOldestValid, issOldestIndexOH, ageOldestIndexOH)
+    val oldest = Wire(Valid(UInt(LoadQueueReplaySize.W)))
+    val remReplaySelMask = s0_remReplaySelMask(rport)
+    val oldestByLqIdxMask = VecInit((0 until LoadQueueReplaySize / LoadPipelineWidth).map(i => {
+      val entryIdx = i * LoadPipelineWidth + rport
+      remReplaySelMask(i) && VecInit((0 until LoadQueueReplaySize / LoadPipelineWidth).map(j => {
+        val otherEntryIdx = j * LoadPipelineWidth + rport
+        !remReplaySelMask(j) || !isAfter(uop(entryIdx).lqIdx, uop(otherEntryIdx).lqIdx)
+      })).asUInt.andR
+    })).asUInt
+    val oldestSel = PriorityEncoderOH(oldestByLqIdxMask)
     val oldestBitsVec = Wire(Vec(LoadQueueReplaySize, Bool()))
 
     require((LoadQueueReplaySize % LoadPipelineWidth) == 0)
@@ -516,8 +456,9 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
       oldestBitsVec(i * LoadPipelineWidth + rport) := oldestSel(i)
     }
 
-    oldest.valid := ageOldestValid || issOldestValid
+    oldest.valid := remReplaySelMask.orR
     oldest.bits := oldestBitsVec.asUInt
+    assert(!(oldest.valid && PopCount(oldest.bits) > 1.U), "oldest index must be one-hot!")
     oldest
   }))
 
@@ -647,7 +588,6 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     //  Allocated ready
     val offset = PopCount(newEnqueue.take(w))
     val enqIndex = Mux(enq.bits.isLoadReplay, enq.bits.schedIndex, freeList.io.allocateSlot(offset))
-    enqIndexOH(w) := UIntToOH(enqIndex)
     enq.ready := true.B
 
     val debug_robIdx = enq.bits.uop.robIdx.asUInt
