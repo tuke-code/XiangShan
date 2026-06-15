@@ -301,7 +301,7 @@ case class L2CacheConfig
   banks: Int = 1,
   tp: Boolean = true,
   nl: Boolean = false, 
-  cdp: Boolean = true,
+  cdp: Boolean = false,
   enablePC: Boolean = false, // Enable PC field for L1Param
   enableFlush: Boolean = false
 ) extends Config((site, here, up) => {
@@ -338,7 +338,7 @@ case class L2CacheConfig
         prefetch = Seq(BOPParameters()) ++
           (if (tp) Seq(TPParameters()) else Nil) ++
           (if (nl) Seq(NLParameters()) else Nil) ++
-          (if (cdp) Seq(CDPParameters(UseDynamicDegree = true)) else Nil) ++
+          (if (cdp) Seq(CDPParameters()) else Nil) ++
           (if (p.prefetcher.nonEmpty) Seq(PrefetchReceiverParams()) else Nil),
         enableL2Flush = enableFlush,
         enablePerf = !site(DebugOptionsKey).FPGAPlatform && site(DebugOptionsKey).EnablePerfDebug,
@@ -533,7 +533,7 @@ class FuzzConfig(dummy: Int = 0) extends Config(
 ) with DeprecatedConfigWarning
 
 class DefaultConfig(n: Int = 1) extends Config(
-  OpenLLCConfig("16MB", ways = 16, banks = 4)
+  OpenLLCConfig("32MB", ways = 16, banks = 4)
     ++ L2CacheConfig("2MB", inclusive = true, banks = 4, tp = false)
     ++ WithNKBL1D(64, ways = 4)
     ++ new BaseConfig(n)
