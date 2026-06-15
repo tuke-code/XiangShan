@@ -322,6 +322,8 @@ class Sbuffer(implicit p: Parameters)
   val sameTag = inptags(0) === inptags(1) && io.in.req(0).valid && io.in.req(1).valid && io.in.req(0).bits.vecValid && io.in.req(1).bits.vecValid
   val firstWord = getVWord(io.in.req(0).bits.addr)
   val secondWord = getVWord(io.in.req(1).bits.addr)
+  val sameWord = sameTag && firstWord === secondWord
+
   // merge condition
   val mergeMask = Wire(Vec(EnsbufferWidth, Vec(StoreBufferSize, Bool())))
   val mergeIdx = mergeMask.map(PriorityEncoder(_)) // avoid using mergeIdx for better timing
@@ -376,8 +378,9 @@ class Sbuffer(implicit p: Parameters)
     firstInsertVec,
     Mux(~enbufferSelReg, evenInsertVec, oddInsertVec)
   ) // slow to generate, for debug only
-  val firstCanInsert = sbuffer_state =/= x_drain_sbuffer && Mux(enbufferSelReg, evenCanInsert, oddCanInsert)
-  val secondCanInsert = sbuffer_state =/= x_drain_sbuffer && Mux(sameTag,
+  val canAcceptReq = sbuffer_state =/= x_drain_sbuffer
+  val firstCanInsert = canAcceptReq && Mux(enbufferSelReg, evenCanInsert, oddCanInsert)
+  val secondCanInsert = canAcceptReq && Mux(sameTag,
     firstCanInsert,
     Mux(~enbufferSelReg, evenCanInsert, oddCanInsert)
   ) && (EnsbufferWidth >= 1).B
@@ -386,8 +389,12 @@ class Sbuffer(implicit p: Parameters)
   val do_uarch_drain = GatedValidRegNext(forward_need_uarch_drain) || GatedValidRegNext(GatedValidRegNext(merge_need_uarch_drain))
   XSPerfAccumulate("do_uarch_drain", do_uarch_drain)
 
-  io.in.req(0).ready := firstCanInsert
-  io.in.req(1).ready := secondCanInsert && io.in.req(0).ready
+  val reqCanMerge = io.in.req.zip(canMerge).map { case (in, merge) =>
+    canAcceptReq && in.valid && in.bits.vecValid && merge
+  }
+
+  io.in.req(0).ready := firstCanInsert || reqCanMerge(0)
+  io.in.req(1).ready := (secondCanInsert || reqCanMerge(1)) && !sameWord && io.in.req(0).ready
 
   for (i <- 0 until EnsbufferWidth) {
     // train
