@@ -118,6 +118,11 @@ class TageMetaEntry(implicit p: Parameters) extends TageBundle {
   val providerTakenCtr:  SaturateCounter = TakenCounter()
   val providerUsefulCtr: SaturateCounter = UsefulCounter()
   val altOrBasePred:     Bool            = Bool()
+
+  val debug_tagePredValid: Bool = Bool()
+  val debug_tageFinalPred: Bool = Bool()
+  val debug_useSc:         Bool = Bool()
+  val debug_scPred:        Bool = Bool()
 }
 
 class TageMeta(implicit p: Parameters) extends TageBundle {
@@ -172,6 +177,7 @@ class TrainInfo(implicit p: Parameters) extends TageBundle {
   val incUseAltOnNa: Bool = Bool()
   val decUseAltOnNa: Bool = Bool()
 
+  val useMeta:     Bool = Bool()
   val finalPred:   Bool = Bool()
   val actualTaken: Bool = Bool() // used for writeBuffer
 

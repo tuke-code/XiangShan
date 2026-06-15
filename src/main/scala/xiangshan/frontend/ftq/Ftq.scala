@@ -380,12 +380,13 @@ class Ftq(implicit p: Parameters) extends FtqModule
   when(flushTrain) {
     trainCache.valid := false.B
   }.elsewhen(resolveQueue.io.bpuTrain.fire) {
-    trainCache.bits.meta     := metaQueueResolve(resolveQueue.io.bpuTrain.bits.ftqIdx.value)
-    trainCache.bits.startPc  := resolveQueue.io.bpuTrain.bits.startPc
-    trainCache.bits.branches := resolveQueue.io.bpuTrain.bits.branches
-    trainCache.bits.perfMeta := perfQueue(resolveQueue.io.bpuTrain.bits.ftqIdx.value).bpuPerf
-    trainCache.valid         := true.B
-    trainIndexCache          := resolveQueue.io.bpuTrain.bits.ftqIdx
+    trainCache.bits.meta         := metaQueueResolve(resolveQueue.io.bpuTrain.bits.ftqIdx.value)
+    trainCache.bits.startPc      := resolveQueue.io.bpuTrain.bits.startPc
+    trainCache.bits.branches     := resolveQueue.io.bpuTrain.bits.branches
+    trainCache.bits.perfMeta     := perfQueue(resolveQueue.io.bpuTrain.bits.ftqIdx.value).bpuPerf
+    trainCache.bits.debug_ftqIdx := resolveQueue.io.bpuTrain.bits.ftqIdx
+    trainCache.valid             := true.B
+    trainIndexCache              := resolveQueue.io.bpuTrain.bits.ftqIdx
   }.elsewhen(io.toBpu.train.fire) {
     trainCache.valid := false.B
   }

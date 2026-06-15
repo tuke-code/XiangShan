@@ -556,7 +556,11 @@ class Ifu(implicit p: Parameters) extends IfuModule
 
   io.toIBuffer.bits.isLastInFtqEntry := (0 until IBufferEnqueueWidth).map { i =>
     if (i == IBufferEnqueueWidth - 1) enq(i)
-    else enq(i) ^ ((select(i) === select(i + 1)) & enq(i + 1))
+    else Mux(
+      s2_blockSel(i),
+      enq(i) && !enq(i + 1),
+      enq(i) && Mux(s2_blockSel(i + 1), enq(i + 1), !enq(i + 1))
+    )
   }
   io.toIBuffer.bits.instrEndOffset.zipWithIndex.foreach { case (a, i) =>
     a.predTaken  := s2_expandedInstrVec(i).isPredTaken && !s2_reqIsUncache

@@ -24,6 +24,7 @@ import utility.DelayN
 import utility.XSError
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
+import utility.XSPerfRolling
 import utility.XSPerfSeqAccumulate
 import xiangshan.frontend.BpuToFtqIO
 import xiangshan.frontend.FrontendTopDownBundle
@@ -443,8 +444,12 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_redirectMeta.ras          := ras.io.redirectMeta
 
   private val s3_resolveMeta = Wire(new BpuResolveMeta)
-  s3_resolveMeta.mbtb     := RegEnable(mbtb.io.meta, s2_fire)
-  s3_resolveMeta.tage     := RegEnable(tage.io.meta, s2_fire)
+  s3_resolveMeta.mbtb := RegEnable(mbtb.io.meta, s2_fire)
+  s3_resolveMeta.tage := RegEnable(tage.io.meta, s2_fire)
+  s3_resolveMeta.tage.entries.zipWithIndex.foreach { case (e, i) =>
+    e.debug_useSc  := s3_scUsed(i)
+    e.debug_scPred := s3_scTakenMask(i)
+  }
   s3_resolveMeta.sc       := sc.io.meta
   s3_resolveMeta.commonHR := commonHR.io.s3ResolveMeta
   s3_resolveMeta.ittage   := ittage.io.meta
@@ -795,5 +800,34 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
       ("conditional", t0_mispredictBranch.bits.attribute.isConditional),
       ("conditional_because_mbtb_miss", t0_mispredictBranch.bits.attribute.isConditional && !t0_mbtbHit)
     )
+  )
+  XSPerfRolling(
+    "train_branch_total",
+    Mux(io.fromFtq.train.fire, PopCount(io.fromFtq.train.bits.branches.map(_.valid)), 0.U),
+    10000,
+    clock,
+    reset
+  )
+  XSPerfRolling(
+    "train_cond",
+    Mux(
+      io.fromFtq.train.fire,
+      PopCount(io.fromFtq.train.bits.branches.map(b => b.valid && b.bits.attribute.isConditional)),
+      0.U
+    ),
+    10000,
+    clock,
+    reset
+  )
+  XSPerfRolling(
+    "train_cond_mispredict",
+    Mux(
+      io.fromFtq.train.fire,
+      PopCount(io.fromFtq.train.bits.branches.map(b => b.valid && b.bits.attribute.isConditional && b.bits.mispredict)),
+      0.U
+    ),
+    10000,
+    clock,
+    reset
   )
 }

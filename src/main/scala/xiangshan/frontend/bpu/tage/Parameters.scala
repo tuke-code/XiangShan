@@ -43,7 +43,7 @@ case class TageParameters(
     UsefulResetCtrWidth:   Int = 8,
     UseAltOnNaWidth:       Int = 7,
     NumUseAltOnNa:         Int = 128,
-    EnableTageTrace:       Boolean = false
+    EnableTageTrace:       Boolean = true
 ) {}
 
 trait HasTageParameters extends HasBpuParameters {

@@ -33,6 +33,7 @@ import xiangshan.frontend.bpu.ras.RasRedirectMeta
 import xiangshan.frontend.bpu.sc.ScMeta
 import xiangshan.frontend.bpu.tage.TageMeta
 import xiangshan.frontend.bpu.utage.MicroTageMeta
+import xiangshan.frontend.ftq.FtqPtr
 
 /* *** public const & type *** */
 class BranchAttribute extends Bundle {
@@ -242,6 +243,8 @@ class BpuTrain(implicit p: Parameters) extends BpuBundle with HalfAlignHelper {
   val branches: Vec[Valid[BranchInfo]] = Vec(ResolveEntryBranchNumber, Valid(new BranchInfo))
   val meta:     BpuResolveMeta         = new BpuResolveMeta
   val perfMeta: BpuPerfMeta            = new BpuPerfMeta
+
+  val debug_ftqIdx: FtqPtr = new FtqPtr
 
   // we masked out all branches after the first mispredict branch in Bpu top (refer to Bpu.scala t0_firstMispredictMask)
   // so, we can assert that branches.map(b => b.valid && b.bits.mispredict) is at-most-one-hot

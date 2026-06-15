@@ -111,6 +111,8 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
 
   private val s2_branches = io.fromMainBtb.result
 
+  dontTouch(s2_branches)
+
   s2_branches.zipWithIndex.foreach { case (branch, i) =>
     val position      = branch.bits.cfiPosition
     val cfiPc         = getCfiPcFromPosition(s2_startPc, position)
@@ -161,6 +163,15 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
     io.meta.entries(i).providerUsefulCtr := provider.usefulCtr
     io.meta.entries(i).altOrBasePred     := Mux(hasAlt, alt.takenCtr.isPositive, branch.bits.taken)
 
+    io.meta.entries(i).debug_tagePredValid := useProvider || hasAlt
+    io.meta.entries(i).debug_tageFinalPred := Mux(
+      useProvider,
+      provider.takenCtr.isPositive,
+      Mux(hasAlt, alt.takenCtr.isPositive, branch.bits.taken)
+    )
+    io.meta.entries(i).debug_useSc  := false.B
+    io.meta.entries(i).debug_scPred := false.B
+
     XSPerfAccumulate(
       s"s2_branch_${i}_multihit_on_same_table",
       allTableTagMatchResults.map(e => (s2_fire && PopCount(e.hitWayMask) > 1.U).asUInt).reduce(_ +& _)
@@ -175,6 +186,9 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
 
   private val t0_startPc  = io.train.startPc
   private val t0_branches = io.train.branches
+
+  private val t0_ftqIdx = io.train.debug_ftqIdx
+  dontTouch(t0_ftqIdx)
 
   // currently all tables share the same bank index
   private val t0_bankIdx  = tables.head.getBankIndex(t0_startPc)
@@ -268,6 +282,9 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val t1_startPc  = RegEnable(t0_startPc, t0_fire)
   private val t1_branches = RegEnable(t0_branches, t0_fire)
 
+  private val t1_ftqIdx = RegEnable(t0_ftqIdx, t0_fire)
+  dontTouch(t1_ftqIdx)
+
   private val t1_setIdx   = RegEnable(t0_setIdx, t0_fire)
   private val t1_bankMask = RegEnable(t0_bankMask, t0_fire)
 
@@ -292,6 +309,9 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val t2_branches = RegEnable(t1_branches, t1_fire)
   private val t2_startPc  = RegEnable(t1_startPc, t1_fire)
   dontTouch(t2_startPc)
+
+  private val t2_ftqIdx = RegEnable(t1_ftqIdx, t1_fire)
+  dontTouch(t2_ftqIdx)
 
   private val t2_setIdx   = RegEnable(t1_setIdx, t1_fire)
   private val t2_bankMask = RegEnable(t1_bankMask, t1_fire)
@@ -432,6 +452,7 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
     trainInfo.incUseAltOnNa := incUseAltOnNa
     trainInfo.decUseAltOnNa := decUseAltOnNa
 
+    trainInfo.useMeta     := t2_useMeta
     trainInfo.finalPred   := finalPred
     trainInfo.actualTaken := actualTaken
 
@@ -459,6 +480,13 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val t3_cfiUseAltOnNaIdxVec = RegEnable(t2_cfiUseAltOnNaIdxVec, t2_fire)
   private val t3_trainInfoVec        = RegEnable(t2_trainInfoVec, t2_fire)
 
+  private val t3_meta = RegEnable(t2_meta, t2_fire)
+
+  dontTouch(t3_startPc)
+
+  private val t3_ftqIdx = RegEnable(t2_ftqIdx, t2_fire)
+  dontTouch(t3_ftqIdx)
+
   private val t3_needAllocateBranchOH = t3_trainInfoVec.map(info => info.valid && info.needAllocate)
   when(t3_fire) {
     assert(PopCount(t3_needAllocateBranchOH) <= 1.U)
@@ -466,6 +494,9 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
   private val t3_needAllocate            = t3_needAllocateBranchOH.reduce(_ || _)
   private val t3_allocateBranch          = Mux1H(t3_needAllocateBranchOH, t3_branches)
   private val t3_allocateBranchTrainInfo = Mux1H(t3_needAllocateBranchOH, t3_trainInfoVec)
+
+  dontTouch(t3_allocateBranch)
+  dontTouch(t3_allocateBranchTrainInfo)
 
   // allocate new entry to the table with a longer history
   private val t3_longerHistoryTableMask = {
@@ -704,6 +735,25 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
       t3_fire && t3_allocateBranchTrainInfo.hasProvider && t3_allocateBranchTrainInfo.providerTableOH(i)
     )
   }
+  XSPerfAccumulate(
+    "train_cond_mispredicted",
+    t3_fire && t3_trainInfoVec.map(info => info.valid && info.mispredicted).reduce(_ || _)
+  )
+  XSPerfAccumulate(
+    "train_cond_mispredicted_tage_right",
+    t3_fire && t3_trainInfoVec.zip(t3_meta).map { case (info, meta) =>
+      info.valid && info.mispredicted &&
+      meta.debug_tagePredValid && meta.debug_tageFinalPred === info.actualTaken
+    }.reduce(_ || _)
+  )
+  XSPerfAccumulate(
+    "train_cond_mispredicted_tage_right_sc_wrong",
+    t3_fire && t3_trainInfoVec.zip(t3_meta).map { case (info, meta) =>
+      info.valid && info.mispredicted &&
+      meta.debug_tagePredValid && meta.debug_tageFinalPred === info.actualTaken &&
+      meta.debug_useSc && meta.debug_scPred =/= info.actualTaken
+    }.reduce(_ || _)
+  )
   XSPerfAccumulate(
     "mispredict_diff",
     Mux(
