@@ -244,10 +244,14 @@ class MLPReqFilterBundle(implicit p: Parameters) extends XSBundle with HasL1Pref
     (tag === new_tag) && valid1 && valid2
   }
 
-  def update(update_bit_vec: UInt, update_sink: UInt) = {
+  def update(update_bit_vec: UInt, update_sink: UInt): Unit = {
+    update(update_bit_vec, update_sink, sent_vec)
+  }
+
+  def update(update_bit_vec: UInt, update_sink: UInt, forwardSentVec: UInt): Unit = {
     bit_vec := bit_vec | update_bit_vec
     when(update_sink < sink) {
-      bit_vec := (bit_vec & ~sent_vec) | update_bit_vec
+      bit_vec := (bit_vec & ~forwardSentVec) | update_bit_vec
       sink := update_sink
     }
 
@@ -263,8 +267,12 @@ class MLPReqFilterBundle(implicit p: Parameters) extends XSBundle with HasL1Pref
   }
 
   def may_be_replace(valid: Bool): Bool = {
+    may_be_replace(valid, sent_vec)
+  }
+
+  def may_be_replace(valid: Bool, forwardSentVec: UInt): Bool = {
     // either invalid or has sent out all reqs out
-    !valid || RegNext(PopCount(sent_vec) === BIT_VEC_WITDH.U)
+    !valid || RegNext(PopCount(forwardSentVec) === BIT_VEC_WITDH.U)
   }
 
   def get_pf_addr(forwardSentVec: UInt): UInt = {
@@ -378,8 +386,36 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
   }, MLP_L2L3_SIZE))
   val l3_pf_req_arb = Module(new RRArbiterInit(new L3PrefetchReq, MLP_L2L3_SIZE))
 
-  val l1_opt_replace_vec = VecInit(l1_array.zip(l1_valids).map{case (e, v) => e.may_be_replace(v)})
-  val l2_opt_replace_vec = VecInit(l2_array.zip(l2_valids).map{case (e, v) => e.may_be_replace(v)})
+  val s1_l1_sent_wen = RegInit(false.B)
+  val s1_l1_sent_chosenOH = RegInit(0.U(MLP_L1_SIZE.W))
+  val s1_l1_sent_candOH = RegInit(0.U(BIT_VEC_WITDH.W))
+  val s1_l2_sent_wen = RegInit(false.B)
+  val s1_l2_sent_chosenOH = RegInit(0.U(MLP_L2L3_SIZE.W))
+  val s1_l2_sent_candOH = RegInit(0.U(BIT_VEC_WITDH.W))
+  val s1_l3_sent_wen = RegInit(false.B)
+  val s1_l3_sent_chosenOH = RegInit(0.U(MLP_L2L3_SIZE.W))
+  val s1_l3_sent_candOH = RegInit(0.U(BIT_VEC_WITDH.W))
+
+  val l1_issue_forward_sent_vec = VecInit((0 until MLP_L1_SIZE).map { i =>
+    Mux(s1_l1_sent_wen && s1_l1_sent_chosenOH(i), s1_l1_sent_candOH, 0.U(BIT_VEC_WITDH.W))
+  })
+  val l2_issue_forward_sent_vec = VecInit((0 until MLP_L2L3_SIZE).map { i =>
+    Mux(s1_l2_sent_wen && s1_l2_sent_chosenOH(i), s1_l2_sent_candOH, 0.U(BIT_VEC_WITDH.W)) |
+      Mux(s1_l3_sent_wen && s1_l3_sent_chosenOH(i), s1_l3_sent_candOH, 0.U(BIT_VEC_WITDH.W))
+  })
+  val l1_forward_sent_vec = VecInit((0 until MLP_L1_SIZE).map { i =>
+    l1_array(i).sent_vec | l1_issue_forward_sent_vec(i)
+  })
+  val l2_forward_sent_vec = VecInit((0 until MLP_L2L3_SIZE).map { i =>
+    l2_array(i).sent_vec | l2_issue_forward_sent_vec(i)
+  })
+
+  val l1_opt_replace_vec = VecInit(l1_array.zip(l1_valids).zip(l1_forward_sent_vec).map { case ((e, v), forwardSentVec) =>
+    e.may_be_replace(v, forwardSentVec)
+  })
+  val l2_opt_replace_vec = VecInit(l2_array.zip(l2_valids).zip(l2_forward_sent_vec).map { case ((e, v), forwardSentVec) =>
+    e.may_be_replace(v, forwardSentVec)
+  })
   // if we have something to replace, then choose it, otherwise follow the plru manner
   val l1_real_replace_vec = Mux(Cat(l1_opt_replace_vec).orR, l1_opt_replace_vec, VecInit(Seq.fill(MLP_L1_SIZE)(true.B)))
   val l2_real_replace_vec = Mux(Cat(l2_opt_replace_vec).orR, l2_opt_replace_vec, VecInit(Seq.fill(MLP_L2L3_SIZE)(true.B)))
@@ -424,7 +460,8 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
   }.elsewhen(s1_l1_update) {
     l1_array(s1_l1_index).update(
       update_bit_vec = s1_l1_prefetch_req.bit_vec,
-      update_sink = s1_l1_prefetch_req.sink
+      update_sink = s1_l1_prefetch_req.sink,
+      forwardSentVec = l1_forward_sent_vec(s1_l1_index)
     )
   }
 
@@ -474,7 +511,8 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
   }.elsewhen(s1_l2_update) {
     l2_array(s1_l2_index).update(
       update_bit_vec = s1_l2_prefetch_req.bit_vec,
-      update_sink = s1_l2_prefetch_req.sink
+      update_sink = s1_l2_prefetch_req.sink,
+      forwardSentVec = l2_forward_sent_vec(s1_l2_index)
     )
   }
 
@@ -661,10 +699,6 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
   XSPerfAccumulate("s3_tlb_resp_uncache", s3_update_valid && (Pbmt.isUncache(s3_tlb_resp.pbmt.head) || s3_pmp_resp.mmio))
 
   // l1 pf
-  val s1_l1_sent_wen = RegInit(false.B)
-  val s1_l1_sent_chosenOH = RegInit(0.U(MLP_L1_SIZE.W))
-  val s1_l1_sent_candOH = RegInit(0.U(BIT_VEC_WITDH.W))
-
   // s0: generate prefetch req paddr per entry, arb them
   val s0_pf_fire_vec = VecInit((0 until MLP_L1_SIZE).map{case i => l1_pf_req_arb.io.in(i).fire})
   val s1_pf_fire_vec = GatedValidRegNext(s0_pf_fire_vec)
@@ -675,8 +709,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 
   for(i <- 0 until MLP_L1_SIZE) {
     val evict = s1_l1_alloc && (s1_l1_index === i.U)
-    val issueForwardSentVec = Mux(s1_l1_sent_wen && s1_l1_sent_chosenOH(i), s1_l1_sent_candOH, 0.U)
-    val forwardSentVec = l1_array(i).sent_vec | issueForwardSentVec
+    val forwardSentVec = l1_forward_sent_vec(i)
     l1_pf_req_arb.io.in(i).valid := l1_array(i).can_send_pf(l1_valids(i), forwardSentVec) &&
       l1_array(i).sink === SINK_L1 && !evict
     l1_pf_req_arb.io.in(i).bits.req.paddr := l1_array(i).get_pf_addr(forwardSentVec)
@@ -727,19 +760,10 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
   XSPerfAccumulate("s1_pf_fire", s1_pf_fire)
 
   // l2 pf
-  val s1_l2_sent_wen = RegInit(false.B)
-  val s1_l2_sent_chosenOH = RegInit(0.U(MLP_L2L3_SIZE.W))
-  val s1_l2_sent_candOH = RegInit(0.U(BIT_VEC_WITDH.W))
-  val s1_l3_sent_wen = RegInit(false.B)
-  val s1_l3_sent_chosenOH = RegInit(0.U(MLP_L2L3_SIZE.W))
-  val s1_l3_sent_candOH = RegInit(0.U(BIT_VEC_WITDH.W))
-
   // s0: generate prefetch req paddr per entry, arb them, sent out
   for(i <- 0 until MLP_L2L3_SIZE) {
     val evict = s1_l2_alloc && (s1_l2_index === i.U)
-    val issueForwardSentVec = Mux(s1_l2_sent_wen && s1_l2_sent_chosenOH(i), s1_l2_sent_candOH, 0.U) |
-      Mux(s1_l3_sent_wen && s1_l3_sent_chosenOH(i), s1_l3_sent_candOH, 0.U)
-    val forwardSentVec = l2_array(i).sent_vec | issueForwardSentVec
+    val forwardSentVec = l2_forward_sent_vec(i)
     l2_pf_req_arb.io.in(i).valid := l2_array(i).can_send_pf(l2_valids(i), forwardSentVec) &&
       (l2_array(i).sink === SINK_L2) && !evict
     l2_pf_req_arb.io.in(i).bits.req.addr := l2_array(i).get_pf_addr(forwardSentVec)
@@ -760,8 +784,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
   l2_pf_req_arb.io.out.ready := io.l2_pf_addr.ready
   for (i <- 0 until MLP_L2L3_SIZE) {
     val evict = s1_l2_alloc && (s1_l2_index === i.U)
-    val issueForwardSentVec = Mux(s1_l2_sent_wen && s1_l2_sent_chosenOH(i), s1_l2_sent_candOH, 0.U) |
-      Mux(s1_l3_sent_wen && s1_l3_sent_chosenOH(i), s1_l3_sent_candOH, 0.U)
+    val issueForwardSentVec = l2_issue_forward_sent_vec(i)
     when(issueForwardSentVec.orR && !evict) {
       l2_array(i).sent_vec := l2_array(i).sent_vec | issueForwardSentVec
     }
@@ -796,9 +819,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 
   for(i <- 0 until MLP_L2L3_SIZE) {
     val evict = s1_l2_alloc && (s1_l2_index === i.U)
-    val issueForwardSentVec = Mux(s1_l2_sent_wen && s1_l2_sent_chosenOH(i), s1_l2_sent_candOH, 0.U) |
-      Mux(s1_l3_sent_wen && s1_l3_sent_chosenOH(i), s1_l3_sent_candOH, 0.U)
-    val forwardSentVec = l2_array(i).sent_vec | issueForwardSentVec
+    val forwardSentVec = l2_forward_sent_vec(i)
     l3_pf_req_arb.io.in(i).valid := l2_array(i).can_send_pf(l2_valids(i), forwardSentVec) &&
       (l2_array(i).sink === SINK_L3) && !evict
     l3_pf_req_arb.io.in(i).bits.addr := l2_array(i).get_pf_addr(forwardSentVec)
