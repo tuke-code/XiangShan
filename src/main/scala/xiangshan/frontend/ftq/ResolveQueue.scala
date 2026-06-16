@@ -73,9 +73,14 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
     filteredResolve.bits := backendResolve.bits
     filteredResolve
   }
+  XSPerfAccumulate("backend_direct_resolve", io.backendResolve.map(branch => branch.valid && branch.bits.attribute.isDirect).reduce(_ || _))
+  XSPerfAccumulate("backend_return_resolve", io.backendResolve.map(branch => branch.valid && branch.bits.attribute.isReturn).reduce(_ || _))
+
   private val ifuFilteredResolve = Wire(Valid(new Resolve))
   ifuFilteredResolve.valid := io.ifuResolve.valid && !backendRedirect.reduce(_ || _)
   ifuFilteredResolve.bits  := io.ifuResolve.bits
+  XSPerfAccumulate("ifu_direct_resolve", ifuFilteredResolve.valid && ifuFilteredResolve.bits.attribute.isDirect)
+  XSPerfAccumulate("ifu_return_resolve", ifuFilteredResolve.valid && ifuFilteredResolve.bits.attribute.isReturn)
 
   private val filteredResolve = backendFilteredResolve ++ Seq(ifuFilteredResolve)
 
