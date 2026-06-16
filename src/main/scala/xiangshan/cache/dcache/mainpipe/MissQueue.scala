@@ -422,8 +422,10 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     val wbq_block_miss_req = Input(Vec(reqNum, Bool()))
     // pipeline reg
     val miss_req_pipe_reg = Input(new MissReqPipeRegBundle(edge))
-    // allocate this entry for new req
-    val entry_valid = Input(Bool())
+    // allocate this entry for all req
+    // val primary_valid = Input(Bool())
+    // allocate this entry for Nth req
+    val primary_valid_vec = Vec(reqNum, Input(Bool()))
     // this entry is free and can be allocated to new reqs
     val primary_ready = Output(Bool())
     // this entry is busy, but it can merge the new req
@@ -477,7 +479,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
     val req_hasStore = Output(Bool())
 
-    val req_handled_by_this_entry = Output(Bool())
+    val req_handled_by_this_entry = Vec(reqNum, Output(Bool()))
 
     val forwardInfo = Output(new MissEntryForwardIO)
     val l2_pf_store_only = Input(Bool())
@@ -586,17 +588,18 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   val refill_start_time = Reg(UInt(64.W))
   val refill_latency = Reg(UInt(LATENCY_WIDTH.W))
 
+  assert(PopCount(Cat(io.primary_valid_vec)) <= 1.U, p"muti req alloc in oneEntry: ${io.id}")
   // allocate current miss queue entry for a miss req
-  // Use queryME instead of io.req for parallel enqueue
-  val primary_fire_vec = (0 until reqNum).map{ i =>
-    io.entry_valid && io.queryME(i).req.valid && io.primary_ready && !io.queryME(i).req.bits.cancel && !io.wbq_block_miss_req(i)
-  }
-  val primary_fire = ParallelORR(Cat(primary_fire_vec))
+  // Use primary_req instead of io.req for parallel enqueue
+  val primary_req = ParallelMux(
+    io.primary_valid_vec.zip(io.queryME.map(_.req))
+  )
+  val primary_wbq_block_miss_req = ParallelMux(
+    io.primary_valid_vec.zip(io.wbq_block_miss_req)
+  )
 
-  val primary_accept_vec = (0 until reqNum).map{ i =>
-    io.queryME(i).req.valid && io.primary_ready && !io.queryME(i).req.bits.cancel
-  }
-  val primary_accept = ParallelORR(Cat(primary_accept_vec))
+  val primary_fire = primary_req.valid && io.primary_ready && !primary_req.bits.cancel && !primary_wbq_block_miss_req
+  val primary_accept = primary_req.valid && io.primary_ready && !primary_req.bits.cancel
 
   // merge miss req to current miss queue entry
   // Check if ANY request port can merge
@@ -615,7 +618,9 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   }
   val secondary_accept = ParallelORR(Cat(secondary_accept_vec))
 
-  val req_handled_by_this_entry = primary_accept || secondary_accept
+  for(i <- 0 until reqNum) {
+    io.req_handled_by_this_entry(i) := (io.primary_valid_vec(i) && primary_accept) || secondary_accept_vec(i)
+  }
 
   for(i <- 0 until reqNum) {
     io.match_signals_vec(i).block_match := signals_vec(i).block_match && req_valid
@@ -633,7 +638,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   io.rob_head_query.resp   := io.rob_head_query.hit(req.vaddr) && req_valid
 
-  io.req_handled_by_this_entry := req_handled_by_this_entry
+  
 
   when (release_entry && req_valid) {
     req_valid := false.B
@@ -1107,7 +1112,8 @@ for(i <- 0 until reqNum) {
   XSPerfAccumulate("penalty_blocked_by_channel_A", io.mem_acquire.valid && !io.mem_acquire.ready)
   XSPerfAccumulate("penalty_waiting_for_channel_D", s_acquire && !w_grantlast && !io.mem_grant.valid)
   XSPerfAccumulate("penalty_waiting_for_channel_E", io.mem_finish.valid && !io.mem_finish.ready)
-  XSPerfAccumulate("prefetch_req_primary", Cat((0 until reqNum).map(i=> primary_fire_vec(i) && io.queryME(i).req.bits.source === DCACHE_PREFETCH_SOURCE.U)).orR)
+  // XSPerfAccumulate("prefetch_req_primary", Cat((0 until reqNum).map(i=> primary_fire_vec(i) && io.queryME(i).req.bits.source === DCACHE_PREFETCH_SOURCE.U)).orR)
+  XSPerfAccumulate("prefetch_req_primary", primary_fire && primary_req.bits.source === DCACHE_PREFETCH_SOURCE.U)
   XSPerfAccumulate("prefetch_req_merged", Cat((0 until reqNum).map(i=> secondary_fire_vec(i) && io.queryME(i).req.bits.source === DCACHE_PREFETCH_SOURCE.U)).orR)
   XSPerfAccumulate("can_not_send_acquire_because_of_merging_store", !s_acquire && io.miss_req_pipe_reg.merge && io.miss_req_pipe_reg.cancel && miss_req_pipe_reg_bits.isFromStore)
 
@@ -1115,11 +1121,8 @@ for(i <- 0 until reqNum) {
   XSPerfHistogram("miss_penalty", mshr_penalty, mshr_penalty_sample, 0, 20, 1, true, true)
   XSPerfHistogram("miss_penalty", mshr_penalty, mshr_penalty_sample, 20, 100, 10, true, false)
 
-  val load_miss_begin = ParallelMux(
-    primary_fire_vec
-     zip
-    io.queryME.map(_.req.bits.isFromLoad)
-  )
+  val load_miss_begin = primary_fire && primary_req.bits.isFromLoad
+
   val refill_finished = GatedValidRegNext(!w_grantlast && refill_done) && should_refill_data
   val (load_miss_penalty_sample, load_miss_penalty) = TransactionLatencyCounter(load_miss_begin, refill_finished) // not real refill finish time
   XSPerfHistogram("load_miss_penalty_to_use", load_miss_penalty, load_miss_penalty_sample, 0, 20, 1, true, true)
@@ -1427,6 +1430,13 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
       }
     }
 
+    // Allocate using alloc_order to account for invalid earlier requests
+    // val has_enough_free = alloc_order(i) < free_entry_count
+    // val target_mshr = free_entry_list(alloc_order(i))
+    
+    val has_enough_free = i.U < free_entry_count
+    val target_mshr = free_entry_list(i)
+
     // Determine strategy based on priority
     // strategy, bit 0: 1.U, allocate, bit 1: 2.U, merge, bit 2: 4.U, compress
     when (req_valid) {
@@ -1454,11 +1464,9 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
         }.elsewhen (can_allocate_vec(i)) {
           // compress & alloc
           analysis.strategy(i) := 4.U | 1.U
-          // Allocate using alloc_order to account for invalid earlier requests
-          val has_enough_free = alloc_order(i) < free_entry_count
 
           when (has_enough_free) {
-            analysis.target_mshr(i) := free_entry_list(alloc_order(i))
+            analysis.target_mshr(i) := target_mshr
           }.otherwise {
             // Not enough free entries, remove allocate bit
             analysis.strategy(i) := 4.U
@@ -1479,11 +1487,8 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
         analysis.strategy(i) := 1.U
         analysis.valid(i) := true.B
 
-        // Allocate using alloc_order to account for invalid earlier requests
-        val has_enough_free = alloc_order(i) < free_entry_count
-
         when (has_enough_free) {
-          analysis.target_mshr(i) := free_entry_list(alloc_order(i))
+          analysis.target_mshr(i) := target_mshr
           analysis.compress_group(i) := i.U
         }.otherwise {
           // Not enough free entries, mark as invalid
@@ -1500,6 +1505,20 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
         analysis.compress_group(i) := i.U
       }
     }
+  }
+
+  // For compressed requests, we need to return the actual MSHR that will handle them
+  // This is the target_mshr of the first request in their compression group
+  val actual_target_mshr_for_group = WireInit(VecInit(Seq.fill(reqNum)(0.U(log2Up(cfg.nMissEntries).W))))
+  for (i <- 0 until reqNum) {
+    // Find the first request in this compression group
+    val group_leader = analysis.compress_group(i)
+    // All requests in the same group share the same target MSHR
+    actual_target_mshr_for_group(i) := Mux(
+      group_leader === i.U,
+      analysis.target_mshr(i),  // I am the leader, use my own target
+      analysis.target_mshr(group_leader)  // I'm a follower, use leader's target
+    )
   }
 
   // ===== Generate ready signals (immediate response) =====
@@ -1521,8 +1540,17 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
     val alloc_ready = has_alloc && !has_compress && !has_merge && is_valid
 
-    io.queryMQ(i).ready := (compress_ready || merge_ready || alloc_ready) && 
+    io.queryMQ(i).ready := (compress_ready || merge_ready || alloc_ready) &&
       !(io.wbq_block_miss_req(i) || io.wbq_block_miss_req(analysis.compress_group(i)) || io.queryMQ(analysis.compress_group(i)).req.bits.cancel)
+
+    // merged to pipeline reg
+    io.resp(i).id := Mux(
+      can_merge_from_pipe(i),
+      can_merge_from_pipe_mshr(i),
+      actual_target_mshr_for_group(i)
+    )
+    io.resp(i).merged := (analysis.strategy(i) & 2.U) =/= 0.U
+    io.resp(i).handled :=  io.queryMQ(i).req.valid && io.queryMQ(i).ready
   }
 
   // For each queryMQ request that was granted, connect to MissEntry or PipeReg
@@ -1553,31 +1581,8 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     parallel_pipe_regs(i).cancel := io.wbq_block_miss_req(i)
   }
 
-  val req_mshr_handled_vec = entries.map(_.io.req_handled_by_this_entry)
-
-  // For compressed requests, we need to return the actual MSHR that will handle them
-  // This is the target_mshr of the first request in their compression group
-  val actual_target_mshr_for_group = WireInit(VecInit(Seq.fill(reqNum)(0.U(log2Up(cfg.nMissEntries).W))))
-  for (i <- 0 until reqNum) {
-    // Find the first request in this compression group
-    val group_leader = analysis.compress_group(i)
-    // All requests in the same group share the same target MSHR
-    actual_target_mshr_for_group(i) := Mux(
-      group_leader === i.U,
-      analysis.target_mshr(i),  // I am the leader, use my own target
-      analysis.target_mshr(group_leader)  // I'm a follower, use leader's target
-    )
-  }
-
-  for(i <- 0 until reqNum) {
-    // merged to pipeline reg
-    io.resp(i).id := Mux(
-      can_merge_from_pipe(i),
-      can_merge_from_pipe_mshr(i),
-      actual_target_mshr_for_group(i)
-    )
-    io.resp(i).handled := (Cat(req_mshr_handled_vec).orR || can_merge_from_pipe(i)) && query_fire(i)
-    io.resp(i).merged := (analysis.strategy(i) & 2.U) =/= 0.U
+  val req_mshr_handled_vec = (0 until reqNum).map{ i =>
+    Cat(entries.map(_.io.req_handled_by_this_entry(i))).orR
   }
 
   val source_except_load_cnt = RegInit(0.U(10.W))
@@ -1673,18 +1678,13 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   val nMaxPrefetchEntry = Constantin.createRecord(s"nMaxPrefetchEntry${p(XSCoreParamsKey).HartId}", initValue = cfg.nMissEntries - 2)
   entries.zipWithIndex.foreach {
     case (e, i) =>
-      val former_primary_ready = if(i == 0)
-        false.B
-      else
-        Cat((0 until i).map(j => entries(j).io.primary_ready)).orR
-
-      val former_ready_count = if(i == 0)
+      val former_primary_ready_count = if(i == 0)
         0.U
       else
         PopCount((0 until i).map(j => entries(j).io.primary_ready))
-
-      val has_n_former_ready = former_ready_count >= reqNum.U
-      e.io.entry_valid := !has_n_former_ready
+      
+      // e.io.primary_valid := has_n_primary_ready
+      e.io.primary_valid_vec := (0 until reqNum).map( j => (former_primary_ready_count === j.U) && e.io.primary_ready)
 
       e.io.hartId := io.hartId
       e.io.id := i.U
