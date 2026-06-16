@@ -20,7 +20,7 @@ import chisel3.util._
 import xiangshan.frontend.bpu.HasBpuParameters
 
 case class MainBtbParameters(
-    NumEntries: Int = 8192,
+    NumEntries: Int = 16384,
     NumWay:     Int = 8,
     // Lowest level banks used to resolve read-write conflicts and reduce SRAM power, each bank is a physical SRAM
     NumInternalBanks: Int = 4,
