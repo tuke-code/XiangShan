@@ -41,7 +41,8 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
 
   val io: ResolveQueueIO = IO(new ResolveQueueIO)
 
-  private val mem = RegInit(0.U.asTypeOf(Vec(ResolveQueueSize, Valid(new ResolveEntry))))
+  private val mem             = RegInit(0.U.asTypeOf(Vec(ResolveQueueSize, Valid(new ResolveEntry))))
+  private val ifuResolveCache = RegInit(0.U.asTypeOf(new IfuResolveCache))
 
   private val enqPtr = RegInit(ResolveQueuePtr(false.B, 0.U))
   private val deqPtr = RegInit(ResolveQueuePtr(false.B, 0.U))
@@ -66,23 +67,31 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
     "Backend resolves branches that should have been flushed\n"
   )
 
+  private def backendHitIfuCacheEntry(backendResolve: Valid[Resolve]): Bool =
+    ifuResolveCache.valid &&
+      backendResolve.valid &&
+      (backendResolve.bits.attribute.isDirect || backendResolve.bits.attribute.isReturn) &&
+      backendResolve.bits.ftqIdx === ifuResolveCache.entry.ftqIdx
+
   private val backendFilteredResolve = io.backendResolve.map { backendResolve =>
     val filteredResolve = Wire(Valid(new Resolve))
-    filteredResolve.valid := backendResolve.valid && !(backendResolve.bits.attribute.isDirect || backendResolve.bits.attribute.isReturn) &&
-      !(backendRedirect.reduce(_ || _) && backendResolve.bits.ftqIdx > backendRedirectPtr)
+    filteredResolve.valid := backendResolve.valid &&
+      !(backendRedirect.reduce(_ || _) && backendResolve.bits.ftqIdx > backendRedirectPtr) &&
+      // 过滤掉IFU已经发送给mbtb的训练数据
+      !(backendHitIfuCacheEntry(backendResolve) && ifuResolveCache.issue)
     filteredResolve.bits := backendResolve.bits
     filteredResolve
   }
-  XSPerfAccumulate("backend_direct_resolve", io.backendResolve.map(branch => branch.valid && branch.bits.attribute.isDirect && branch.bits.mispredict).reduce(_ || _))
-  XSPerfAccumulate("backend_return_resolve", io.backendResolve.map(branch => branch.valid && branch.bits.attribute.isReturn && branch.bits.mispredict).reduce(_ || _))
+  XSPerfAccumulate(
+    "backend_direct_resolve",
+    io.backendResolve.map(branch => branch.valid && branch.bits.attribute.isDirect && branch.bits.attribute.mispredict).reduce(_ || _)
+  )
+  XSPerfAccumulate(
+    "backend_return_resolve",
+    io.backendResolve.map(branch => branch.valid && branch.bits.attribute.isReturn && branch.bits.attribute.mispredict).reduce(_ || _)
+  )
 
-  private val ifuFilteredResolve = Wire(Valid(new Resolve))
-  ifuFilteredResolve.valid := io.ifuResolve.valid && !backendRedirect.reduce(_ || _)
-  ifuFilteredResolve.bits  := io.ifuResolve.bits
-  XSPerfAccumulate("ifu_direct_resolve", ifuFilteredResolve.valid && ifuFilteredResolve.bits.attribute.isDirect && ifuFilteredResolve.bits.mispredict)
-  XSPerfAccumulate("ifu_return_resolve", ifuFilteredResolve.valid && ifuFilteredResolve.bits.attribute.isReturn && ifuFilteredResolve.bits.mispredict)
-
-  private val filteredResolve = backendFilteredResolve ++ Seq(ifuFilteredResolve)
+  private val filteredResolve = backendFilteredResolve
 
   /*
    * When dropResolveCounter saturates,
@@ -136,8 +145,8 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
   }
 
   // Reslove consists of resolves fromt the backend andd the ifu.
-  private val enqIndex = WireDefault(VecInit.fill(backendParams.BrhCnt + 1)(0.U(log2Ceil(ResolveQueueSize).W)))
-  enqIndex := VecInit((0 until backendParams.BrhCnt + 1).map { i =>
+  private val enqIndex = WireDefault(VecInit.fill(backendParams.BrhCnt)(0.U(log2Ceil(ResolveQueueSize).W)))
+  enqIndex := VecInit((0 until backendParams.BrhCnt).map { i =>
     val newIndex = MuxCase(
       (enqPtr + PopCount(needNewEntry.take(i))).value,
       hitPrevious(i).zipWithIndex.map { case (hit, j) => (hit, enqIndex(j)) }
@@ -183,15 +192,42 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
     branch.valid && branch.bits.ftqIdx === mem(deqPtr.value).bits.ftqIdx
   ).reduce(_ || _)
 
-  io.bpuTrain.valid := deqValid && !mem(deqPtr.value).bits.flushed
-  io.bpuTrain.bits  := mem(deqPtr.value).bits
+  private val useBackendResolve = deqValid && !mem(deqPtr.value).bits.flushed
 
-  when(io.bpuTrain.fire || mem(deqPtr.value).valid && mem(deqPtr.value).bits.flushed) {
+  io.bpuTrain.valid := Mux(useBackendResolve, useBackendResolve, ifuResolveCache.valid && !ifuResolveCache.issue)
+  io.bpuTrain.bits  := Mux(useBackendResolve, mem(deqPtr.value).bits, ifuResolveCache.entry)
+
+  when((io.bpuTrain.fire && useBackendResolve) || mem(deqPtr.value).valid && mem(deqPtr.value).bits.flushed) {
     deqPtr := deqPtr + 1.U
 
     mem(deqPtr.value).valid        := false.B
     mem(deqPtr.value).bits.flushed := false.B
     mem(deqPtr.value).bits.branches.foreach(_.valid := false.B)
+  }
+
+  // 输入考虑redirect问题，
+  // 存储中的数据考虑redirect问题。
+  // 考虑resolve数据带来的redirect问题，以及设置Valid为false的问题，同时记得issue的设置问题。
+  // 输出后设置issue问题
+  private val ifuResolveWriteEntry = WireDefault(0.U.asTypeOf(new ResolveEntry))
+  ifuResolveWriteEntry.ftqIdx            := io.ifuResolve.bits.ftqIdx
+  ifuResolveWriteEntry.startPc           := io.ifuResolve.bits.pc
+  ifuResolveWriteEntry.branches(0).valid := true.B
+  ifuResolveWriteEntry.branches(0).bits.fromResolve(io.ifuResolve.bits)
+  private val backendHitIfuCache = io.backendResolve.map(backendHitIfuCacheEntry).reduce(_ || _)
+
+  when(backendRedirect.reduce(_ || _)) { // 遇到redirect清空数据
+    ifuResolveCache.valid := false.B
+    ifuResolveCache.issue := false.B
+  }.elsewhen(io.ifuResolve.valid && !ifuResolveCache.valid) { // 是否允许新的ifu Resolve通路进入训练
+    ifuResolveCache.valid := true.B
+    ifuResolveCache.issue := false.B
+    ifuResolveCache.entry := ifuResolveWriteEntry
+  }.elsewhen(backendHitIfuCache) { // 如果backend的对应分支来，才取消ifu训练通路中的训练。
+    ifuResolveCache.valid := false.B
+    ifuResolveCache.issue := false.B
+  }.elsewhen(io.bpuTrain.fire && !useBackendResolve) { // ifu的训练数据发送后，必须等到redirect清除或者后端的对应分支到来，才结束通道的抢占。
+    ifuResolveCache.issue := true.B
   }
 
   XSError(deqPtr > enqPtr, "Dequeue pointer exceeds enqueue pointer in Resolve Queue")
