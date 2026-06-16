@@ -477,6 +477,14 @@ class Ftq(implicit p: Parameters) extends FtqModule
     ),
     withPriority = true
   )
+  XSPerfSeqAccumulate(
+    "backend_redirect",
+    backendRedirect.valid && backendRedirect.bits.isMisPred,
+    Seq(
+      ("isReturn", redirect.bits.attribute.isReturn),
+      ("isDirect", redirect.bits.attribute.isDirect)
+    )
+  )
 
   XSPerfSeqAccumulate(
     "squash_cycles_bp_wrong_redirect_wrong_target",
