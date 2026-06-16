@@ -63,7 +63,8 @@ object LoadEntrance extends ChiselOHEnum {
 
   val unalignTail = addType(name = "unalignTail")
   val replayHiPrio = addType(name = "replayHiPrio")
-  val fastReplay = addType(name = "fastReplay")
+  val s3FastReplay = addType(name = "s3FastReplay")
+  val s2FastReplay = addType(name = "s2FastReplay")
   val replayLoPrio = addType(name = "replayLoPrio")
   val prefetchHiConf = addType(name = "prefetchHiConf")
   val vectorIssue = addType(name = "vectorIssue")
@@ -76,7 +77,7 @@ object LoadEntrance extends ChiselOHEnum {
 
   def isUnalignTail(source: UInt): Bool = IsOneOf(source, unalignTail)
   def isReplay(source: UInt): Bool = IsOneOf(source, replayHiPrio, replayLoPrio)
-  def isFastReplay(source: UInt): Bool = IsOneOf(source, fastReplay)
+  def isFastReplay(source: UInt): Bool = IsOneOf(source, s3FastReplay, s2FastReplay)
   def isHWPrefetch(source: UInt): Bool = IsOneOf(source, prefetchHiConf, prefetchLoConf)
   def isVectorIssue(source: UInt): Bool = IsOneOf(source, vectorIssue)
   def isScalarIssue(source: UInt): Bool = IsOneOf(source, scalarIssue)

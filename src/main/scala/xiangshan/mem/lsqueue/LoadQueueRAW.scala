@@ -213,7 +213,7 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
   val willRevoke = WireInit(VecInit(List.fill(LoadQueueRAWSize)(false.B)))
 
   for ((query, w) <- io.query.zipWithIndex) {
-    val revokeLastCycle = query.revokeLastCycle && lastCanAccept(w)
+    val revokeLastCycle = (query.revokeLastCycle || RegNext(query.req.bits.revoke)) && lastCanAccept(w)
     val revokeLastLastCycle = query.revokeLastLastCycle && lastLastCanAccept(w)
     val revokeLastIndex = lastAllocIndex(w)
     val revokeLastLastIndex = lastLastAllocIndex(w)

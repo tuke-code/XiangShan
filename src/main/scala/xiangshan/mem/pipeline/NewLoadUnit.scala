@@ -49,7 +49,8 @@ class LoadUnitS0(param: ExeUnitParams)(
       */
     val unalignTail = Flipped(DecoupledIO(new LoadStageIO))
     val replay = Flipped(DecoupledIO(new LoadReplayIO))
-    val fastReplay = Flipped(DecoupledIO(new FastReplayIO))
+    val s2FastReplay = Flipped(DecoupledIO(new FastReplayIO))
+    val s3FastReplay = Flipped(DecoupledIO(new FastReplayIO))
     // TODO: canAcceptHigh/LowConfPrefetch
     val prefetchReq = Flipped(DecoupledIO(new L1PrefetchReq))
     val vecldin = Flipped(DecoupledIO(new VectorLoadIn))
@@ -92,15 +93,17 @@ class LoadUnitS0(param: ExeUnitParams)(
     * 0. unalign tail inject from s1
     * 1. high-priority replay from LRQ, including NC / MMIO replay
     * 2. fast replay from s3
-    * 3. low-priority replay from LRQ
-    * 4. high-confidence prefetch
-    * 5. vector elements splited by VSplit
-    * 6. loads issued from IQ
-    * 7. low-confidence prefetch
+    * 3. fast replay from s2
+    * 4. low-priority replay from LRQ
+    * 5. high-confidence prefetch
+    * 6. vector elements splited by VSplit
+    * 7. loads issued from IQ
+    * 8. low-confidence prefetch
     */
   val unalignTail,
     replayHiPrio,
-    fastReplay,
+    s3FastReplay,
+    s2FastReplay,
     replayLoPrio,
     prefetchHiConf,
     vectorIssue,
@@ -110,7 +113,8 @@ class LoadUnitS0(param: ExeUnitParams)(
   val sources = Seq(
     unalignTail,
     replayHiPrio,
-    fastReplay,
+    s3FastReplay,
+    s2FastReplay,
     replayLoPrio,
     prefetchHiConf,
     vectorIssue,
@@ -136,14 +140,22 @@ class LoadUnitS0(param: ExeUnitParams)(
   replayHiPrio.bits.occupySource := VecInit(sources.map(_.valid)).asUInt // for perf
 
   // 2. fast replay from s3
-  fastReplay.valid := io.fastReplay.valid
-  connectSamePort(fastReplay.bits, io.fastReplay.bits)
-  fastReplay.bits.noQuery.get := true.B
-  fastReplay.bits.entrance := io.fastReplay.bits.entrance | LoadEntrance.fastReplay.U
-  fastReplay.bits.DontCareUnalign() // assign later in sink
-  fastReplay.bits.occupySource := VecInit(sources.map(_.valid)).asUInt // for perf
+  s3FastReplay.valid := io.s3FastReplay.valid
+  connectSamePort(s3FastReplay.bits, io.s3FastReplay.bits)
+  s3FastReplay.bits.noQuery.get := true.B
+  s3FastReplay.bits.entrance := io.s3FastReplay.bits.entrance | LoadEntrance.s3FastReplay.U
+  s3FastReplay.bits.DontCareUnalign() // assign later in sink
+  s3FastReplay.bits.occupySource := VecInit(sources.map(_.valid)).asUInt // for perf
 
-  // 3. low-priority replay from LRQ
+  // 3. fast replay from s2
+  s2FastReplay.valid := io.s2FastReplay.valid
+  connectSamePort(s2FastReplay.bits, io.s2FastReplay.bits)
+  s2FastReplay.bits.noQuery.get := true.B
+  s2FastReplay.bits.entrance := io.s2FastReplay.bits.entrance | LoadEntrance.s2FastReplay.U
+  s2FastReplay.bits.DontCareUnalign() // assign later in sink
+  s2FastReplay.bits.occupySource := VecInit(sources.map(_.valid)).asUInt // for perf
+
+  // 4. low-priority replay from LRQ
   val replayStall = io.ldin.valid && isAfter(io.replay.bits.uop.lqIdx, io.ldin.bits.lqIdx.get) ||
     io.vecldin.valid && isAfter(io.replay.bits.uop.lqIdx, io.vecldin.bits.uop.lqIdx)
   val replayIsLoPrio = !io.replay.bits.forwardDChannel.get && !io.replay.bits.isUncacheReplay() && !replayStall
@@ -152,7 +164,7 @@ class LoadUnitS0(param: ExeUnitParams)(
   replayLoPrio.bits.entrance := LoadEntrance.replayLoPrio.U
   replayLoPrio.bits.occupySource := VecInit(sources.map(_.valid)).asUInt // for perf
 
-  // 4. high-confidence prefetch
+  // 5. high-confidence prefetch
   val prefetch = Wire(new LoadStageIO)
   val prefetchIsHiConf = io.prefetchReq.bits.confidence > 0.U
   prefetch.entrance := 0.U // assign later
@@ -176,7 +188,7 @@ class LoadUnitS0(param: ExeUnitParams)(
   prefetchHiConf.bits := prefetch
   prefetchHiConf.bits.entrance := LoadEntrance.prefetchHiConf.U
 
-  // 5. vector elements splited by VSplit
+  // 6. vector elements splited by VSplit
   vectorIssue.valid := io.vecldin.valid
   connectSamePort(vectorIssue.bits, io.vecldin.bits)
   vectorIssue.bits.entrance := LoadEntrance.vectorIssue.U
@@ -189,7 +201,7 @@ class LoadUnitS0(param: ExeUnitParams)(
   vectorIssue.bits.DontCareReplayFromLRQFields()
   vectorIssue.bits.occupySource := VecInit(sources.map(_.valid)).asUInt // for perf
 
-  // 6. loads issued from IQ
+  // 7. loads issued from IQ
   val ldin = io.ldin.bits
   val ldinVAddr = ldin.src(0) + SignExt(ldin.imm(11, 0), VAddrBits)
   val ldinFullva = ldin.src(0) + SignExt(ldin.imm(11, 0), XLEN)
@@ -225,7 +237,7 @@ class LoadUnitS0(param: ExeUnitParams)(
   scalarIssue.bits.missDbUpdated := false.B
   scalarIssue.bits.occupySource := VecInit(sources.map(_.valid)).asUInt // for perf
 
-  // 7. low-confidence prefetch
+  // 8. low-confidence prefetch
   prefetchLoConf.valid := io.prefetchReq.valid
   prefetchLoConf.bits := prefetch
   prefetchLoConf.bits.entrance := LoadEntrance.prefetchLoConf.U
@@ -285,7 +297,7 @@ class LoadUnitS0(param: ExeUnitParams)(
     *   requiring splitting into 2 operations on DCache.
     * - **misalign** is used specifically to denote misalign exception.
     */
-  val needAlignCheckSources = Seq(replayHiPrio, fastReplay, replayLoPrio, vectorIssue, scalarIssue)
+  val needAlignCheckSources = Seq(replayHiPrio, s3FastReplay, s2FastReplay, replayLoPrio, vectorIssue, scalarIssue)
   val needAlignCheckValids = needAlignCheckSources.map(_.valid)
   val alwaysUnalignSources = Seq(unalignTail)
   val alwaysUnalign = Cat(alwaysUnalignSources.map(_.fire)).orR
@@ -386,7 +398,7 @@ class LoadUnitS0(param: ExeUnitParams)(
     */
   // Select between 2 options based on timing result:
   // Option 1
-  val needWakeupSources = Seq(unalignTail, replayHiPrio, fastReplay, replayLoPrio, scalarIssue)
+  val needWakeupSources = Seq(unalignTail, replayHiPrio, s3FastReplay, s2FastReplay, replayLoPrio, scalarIssue)
   val needWakeupValids = needWakeupSources.map(s => s.fire && s.bits.accessType.isScalar()) // exclude vector and prefetch
   // Option 2
   // val needWakeupSources = sources
@@ -413,7 +425,8 @@ class LoadUnitS0(param: ExeUnitParams)(
 
   assert(!sink.ready || unalignTail.ready, "unalignTail should always be ready")
   io.replay.ready := replayIsHiPrio && replayHiPrio.ready || replayIsLoPrio && replayLoPrio.ready
-  io.fastReplay.ready := fastReplay.ready
+  io.s2FastReplay.ready := s2FastReplay.ready
+  io.s3FastReplay.ready := s3FastReplay.ready
   io.prefetchReq.ready := Mux(prefetchIsHiConf, prefetchHiConf.ready, prefetchLoConf.ready)
   io.vecldin.ready := vectorIssue.ready
   io.ldin.ready := scalarIssue.ready
@@ -484,8 +497,14 @@ class LoadUnitS0(param: ExeUnitParams)(
   XSPerfAccumulate("first_issue", firstIssue)
   XSPerfAccumulate("replay_fire", io.replay.fire)
   XSPerfAccumulate("replay_fire_vector", io.replay.fire && io.replay.bits.accessType.isVector())
-  XSPerfAccumulate("fast_replay_fire", io.fastReplay.fire)
-  XSPerfAccumulate("fast_replay_fire_vector", io.fastReplay.fire && io.fastReplay.bits.accessType.isVector())
+  XSPerfAccumulate("fast_replay_fire", io.s2FastReplay.fire || io.s3FastReplay.fire)
+  XSPerfAccumulate(
+    "fast_replay_fire_vector",
+    io.s2FastReplay.fire && io.s2FastReplay.bits.accessType.isVector() ||
+      io.s3FastReplay.fire && io.s3FastReplay.bits.accessType.isVector()
+  )
+  XSPerfAccumulate("s2_fast_replay_fire", io.s2FastReplay.fire)
+  XSPerfAccumulate("s3_fast_replay_fire", io.s3FastReplay.fire)
   XSPerfAccumulate("stall_out", sink.valid && !sink.ready)
   XSPerfAccumulate("stall_dcache", sink.valid && !io.dcacheReq.ready)
   XSPerfAccumulate("vector_addr_vlen_align", io.vecldin.fire && io.vecldin.bits.bankOffset() === 0.U)
@@ -857,6 +876,9 @@ class LoadUnitS2(param: ExeUnitParams)(
     // TODO: this bundle is tooooooo big, define a smaller one
     val prefetchTrain = ValidIO(new TrainReqBundle)
 
+    // Fast replay
+    val fastReplay = DecoupledIO(new FastReplayIO)
+
     // CSR control signals
     val csrCtrl = Flipped(new CustomCSRCtrlIO)
 
@@ -1049,6 +1071,14 @@ class LoadUnitS2(param: ExeUnitParams)(
   val fastReplay = !LoadEntrance.isFastReplay(entrance) && // 1.3.1
     (fastReplayMSHRNack || fastReplayBankConflict || fastReplayNuke) && // 1.3.2
     !isUnalign && !tlbMiss // 1.3.3, if tlb miss, should not to fast replay
+  val shouldFastReplay = in.shouldFastReplay.get || fastReplay && !exception
+  val fastReplayReq = Wire(new FastReplayIO)
+  connectSamePort(fastReplayReq, in)
+  fastReplayReq.cause.get := 0.U.asTypeOf(fastReplayReq.cause.get)
+
+  val fastReplayValid = pipeIn.valid && shouldFastReplay
+  val allowFastReplay = io.fastReplay.ready
+  val doFastReplay = fastReplayValid && allowFastReplay
 
   /**
     * Nuke query to LQRAR / LQRAW
@@ -1069,6 +1099,7 @@ class LoadUnitS2(param: ExeUnitParams)(
   nukeQueryReq.ftqPtr := uop.ftqPtr
   nukeQueryReq.ftqOffset := uop.ftqOffset
   nukeQueryReq.pc := uop.pc
+  nukeQueryReq.revoke := fastReplayValid
   nukeQueryReq.debugInfo := uop.perfDebugInfo
 
   val rarNack = io.rarNukeQueryReq.valid && !io.rarNukeQueryReq.ready
@@ -1118,7 +1149,7 @@ class LoadUnitS2(param: ExeUnitParams)(
     */
   val pipeOutValid = RegInit(false.B)
   val pipeOutBits = Reg(new LoadStageIO) // TODO
-  when (kill || endPipe) { pipeOutValid := false.B }
+  when (kill || endPipe || doFastReplay) { pipeOutValid := false.B }
   .elsewhen (pipeIn.fire) { pipeOutValid := true.B }
   .elsewhen (pipeOut.fire) { pipeOutValid := false.B }
 
@@ -1143,7 +1174,7 @@ class LoadUnitS2(param: ExeUnitParams)(
   stageInfo.tlbFull.get := io.tlbHint.full
   // Pre-process for s3
   stageInfo.troubleMaker.get := troubleMaker
-  stageInfo.shouldFastReplay.get := in.shouldFastReplay.get || fastReplay && !exception
+  stageInfo.shouldFastReplay.get := shouldFastReplay && !doFastReplay
   stageInfo.matchInvalid.get := matchInvalid && troubleMaker
   stageInfo.shouldWakeup.get := shouldWakeup
   stageInfo.shouldWriteback.get := shouldWriteback
@@ -1182,6 +1213,9 @@ class LoadUnitS2(param: ExeUnitParams)(
   io.prefetchTrain.bits.isHwPrefetch := accessType.isHwPrefetch()
   io.prefetchTrain.bits.refillLatency := io.dcacheResp.bits.refill_latency
 
+  io.fastReplay.valid := fastReplayValid
+  io.fastReplay.bits := fastReplayReq
+
   io.debugInfo.isBankConflict := pipeIn.valid && !kill && cause(C_BC)
   io.debugInfo.isDCacheMiss := pipeIn.valid && !kill && cause(C_DM)
   io.debugInfo.isDCacheFirstMiss := pipeIn.valid && !kill && cause(C_DM) && in.isFirstIssue()
@@ -1213,6 +1247,8 @@ class LoadUnitS2(param: ExeUnitParams)(
   XSPerfAccumulate("prefetch_miss", fire && isPrefetch && io.dcacheResp.bits.miss)
   XSPerfAccumulate("prefetch_hit", fire && isPrefetch && !io.dcacheResp.bits.miss)
   XSPerfAccumulate("prefetch_accept", fire && isPrefetch && io.dcacheResp.bits.miss && !io.dcacheMSHRNack)
+  XSPerfAccumulate("s2_fast_replay_success", doFastReplay)
+  XSPerfAccumulate("s2_fast_replay_fallback", pipeIn.fire && !kill && shouldFastReplay && !doFastReplay)
   XSPerfAccumulate("forward_tld_replay", fire && in.forwardDChannel.get)
   XSPerfAccumulate("forward_tld_replay_succeed_mshr", fire && in.forwardDChannel.get && io.mshrForwardResp.valid)
   XSPerfAccumulate("forward_tld_replay_succeed_tld", fire && in.forwardDChannel.get && io.tldForwardResp.valid)
@@ -1825,7 +1861,7 @@ class LoadUnitIO(val param: ExeUnitParams)(implicit p: Parameters) extends XSBun
   val dcache = new DCacheLoadIO
   // IQ wakeup and load cancel
   val wakeup = ValidIO(new MemWakeUpBundle)
-  val cancel = Output(Bool())
+  val cancel = Output(new LoadCancelIO)
   // Exception info
   val exceptionInfo = ValidIO(new MemExceptionInfo)
   // Data forwarding and bypass
@@ -1872,7 +1908,8 @@ class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   s3 <> s2
   s4 <> s3
   s0.io.unalignTail <> s1.io.unalignTail
-  s0.io.fastReplay <> s3.io.fastReplay
+  s0.io.s2FastReplay <> s2.io.fastReplay
+  s0.io.s3FastReplay <> s3.io.fastReplay
   s3.io.unalignTailValid := s2.io.unalignTailValid
   s3.io.unalignConcat <> s4.io.unalignConcat
   s1.io.kill := false.B
@@ -1959,7 +1996,8 @@ class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   io.rawNukeQuery.revokeLastCycle := s3.io.revokeLastCycle
   io.rawNukeQuery.revokeLastLastCycle := s3.io.revokeLastLastCycle
   io.rollback := s3.io.rollback
-  io.cancel := s3.io.cancel
+  io.cancel.ld1Cancel := s2.io.fastReplay.fire
+  io.cancel.ld2Cancel := s3.io.cancel
   io.exceptionInfo := s3.io.exceptionInfo
   s3.io.csrCtrl := io.csrCtrl
 

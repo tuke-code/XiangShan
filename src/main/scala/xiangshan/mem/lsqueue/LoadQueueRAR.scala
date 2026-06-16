@@ -219,7 +219,7 @@ class LoadQueueRAR(implicit p: Parameters) extends XSModule
   val lastLastAllocIndex = lastAllocIndex.zip(lastCanAccept).map(x => RegEnable(x._1, x._2))
 
   for ((query, w) <- io.query.zipWithIndex) {
-    val revokeLastCycle = query.revokeLastCycle && lastCanAccept(w)
+    val revokeLastCycle = (query.revokeLastCycle || GatedRegNext(query.req.bits.revoke)) && lastCanAccept(w)
     val revokeLastLastCycle = query.revokeLastLastCycle && lastLastCanAccept(w)
     val revokeLastIndex = lastAllocIndex(w)
     val revokeLastLastIndex = lastLastAllocIndex(w)

@@ -270,6 +270,7 @@ object Bundles {
     val ftqPtr = new FtqPtr
     val ftqOffset = UInt(FetchBlockInstOffsetWidth.W)
     val pc = UInt(VAddrBits.W)
+    val revoke = Bool()
     val debugInfo = new PerfDebugInfo
   }
 

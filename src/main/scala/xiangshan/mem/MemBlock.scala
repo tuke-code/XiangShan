@@ -840,8 +840,8 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
 
     // get input form dispatch
     newLoadUnits(i).io.ldin <> issueLda(i)
-    io.mem_to_ooo.ldCancel(i).ld1Cancel := false.B
-    io.mem_to_ooo.ldCancel(i).ld2Cancel := newLoadUnits(i).io.cancel
+    io.mem_to_ooo.ldCancel(i).ld1Cancel := newLoadUnits(i).io.cancel.ld1Cancel
+    io.mem_to_ooo.ldCancel(i).ld2Cancel := newLoadUnits(i).io.cancel.ld2Cancel
     io.mem_to_ooo.wakeup(i) := newLoadUnits(i).io.wakeup
 
     // software prefetch to frontend (prefetch.i)
