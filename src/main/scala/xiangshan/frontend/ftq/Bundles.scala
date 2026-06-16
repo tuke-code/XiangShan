@@ -48,6 +48,12 @@ class ResolveEntry(implicit p: Parameters) extends FtqBundle {
   val branches: Vec[Valid[BranchInfo]] = Vec(ResolveEntryBranchNumber, Valid(new BranchInfo))
 }
 
+class IfuResolveCache(implicit p: Parameters) extends FtqBundle {
+  val valid: Bool         = Bool()
+  val issue: Bool         = Bool()
+  val entry: ResolveEntry = new ResolveEntry
+}
+
 class FtqRead[T <: Data](private val gen: T)(implicit p: Parameters) extends FtqBundle {
   val valid  = Output(Bool())
   val ptr    = Output(new FtqPtr)
