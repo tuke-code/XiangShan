@@ -186,6 +186,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     val bypass = Flipped(Vec(LoadPipelineWidth, new UncacheBypass))
     val replay = Vec(LoadPipelineWidth, Decoupled(new LoadReplayIO))
     val loadWakeup  = Flipped(ValidIO(new DCacheLoadWakeup()))
+    val dcacheMissQueueHasFree = Input(Bool())
     val release = Flipped(Valid(new Release))
     val nuke_rollback = Vec(StorePipelineWidth, Output(Valid(new Redirect)))
     val nack_rollback = Vec(1, Output(Valid(new Redirect))) // uncachebuffer
@@ -282,6 +283,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   loadQueueReplay.io.storeDataIn      <> io.std.storeDataIn // from store_s0
   loadQueueReplay.io.replay           <> io.replay
   loadQueueReplay.io.loadWakeup       <> io.loadWakeup
+  loadQueueReplay.io.dcacheMissQueueHasFree := io.dcacheMissQueueHasFree
   loadQueueReplay.io.stAddrReadySqPtr <> io.sq.stAddrReadySqPtr
   loadQueueReplay.io.stAddrReadyVec   <> io.sq.stAddrReadyVec
   loadQueueReplay.io.stDataReadySqPtr <> io.sq.stDataReadySqPtr

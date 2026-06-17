@@ -26,6 +26,7 @@ class FakeDCache()(implicit p: Parameters) extends XSModule with HasDCacheParame
   val io = IO(new DCacheIO)
 
   io := DontCare
+  io.missQueueHasFree := true.B
   // to LoadUnit
   for (i <- 0 until LoadPipelineWidth) {
     val ram = DifftestMem(64L * 1024 * 1024 * 1024, 8)

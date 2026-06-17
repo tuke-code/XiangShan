@@ -191,6 +191,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     val replay = Vec(LoadPipelineWidth, Decoupled(new LoadReplayIO))
 
     val loadWakeup = Flipped(ValidIO(new DCacheLoadWakeup()))
+    val dcacheMissQueueHasFree = Input(Bool())
 
     // from StoreQueue
     val stAddrReadySqPtr = Input(new SqPtr)
@@ -365,6 +366,10 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     // case C_DM
     when (cause(i)(LoadReplayCauses.C_DM)) {
       blocking(i) := Mux(io.loadWakeup.valid && io.loadWakeup.bits.mshrId === missMSHRId(i), false.B, blocking(i))
+    }
+    // case C_DR
+    when (cause(i)(LoadReplayCauses.C_DR)) {
+      blocking(i) := Mux(io.dcacheMissQueueHasFree, false.B, blocking(i))
     }
     // case C_RAR
     when (cause(i)(LoadReplayCauses.C_RAR)) {
@@ -717,11 +722,15 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
       // update blocking pointer
       when (replayInfo.cause(LoadReplayCauses.C_BC) ||
             replayInfo.cause(LoadReplayCauses.C_NK) ||
-            replayInfo.cause(LoadReplayCauses.C_DR) ||
             replayInfo.cause(LoadReplayCauses.C_WF)) {
-        // normal case: bank conflict or schedule error or dcache replay
+        // normal case: bank conflict or schedule error
         // can replay next cycle
         blocking(enqIndex) := false.B
+      }
+
+      // special case: dcache replay
+      when (replayInfo.cause(LoadReplayCauses.C_DR)) {
+        blocking(enqIndex) := !io.dcacheMissQueueHasFree
       }
 
       // special case: tlb miss

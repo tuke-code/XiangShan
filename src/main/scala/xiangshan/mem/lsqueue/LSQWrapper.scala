@@ -99,6 +99,7 @@ class LsqWrapper(implicit p: Parameters) extends XSModule
     val mdpTrain        = ValidIO(new Redirect)
     val release = Flipped(Valid(new Release))
     val loadWakeup = Flipped(ValidIO(new DCacheLoadWakeup()))
+    val dcacheMissQueueHasFree = Input(Bool())
     val uncacheOutstanding = Input(Bool())
     val uncache = new UncacheWordIO
     val mmioStout = DecoupledIO(new MemToRob(staParams.head)) // writeback uncached store
@@ -215,6 +216,7 @@ class LsqWrapper(implicit p: Parameters) extends XSModule
   loadQueue.io.nack_rollback       <> io.nack_rollback
   loadQueue.io.replay              <> io.replay
   loadQueue.io.loadWakeup          <> io.loadWakeup
+  loadQueue.io.dcacheMissQueueHasFree := io.dcacheMissQueueHasFree
   loadQueue.io.release             <> io.release
   loadQueue.io.exceptionInfo       <> io.ldExceptionInfo
   loadQueue.io.lqCancelCnt         <> io.lqCancelCnt

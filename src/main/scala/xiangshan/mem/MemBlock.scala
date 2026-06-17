@@ -1116,6 +1116,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   io.mem_to_ooo.sqDeqPtr := lsq.io.sqDeqPtr
   io.mem_to_ooo.lqDeqPtr := lsq.io.lqDeqPtr
   lsq.io.loadWakeup := dcache.io.lsu.loadWakeup
+  lsq.io.dcacheMissQueueHasFree := dcache.io.missQueueHasFree
 
   // LSQ to store buffer
   lsq.io.sbuffer        <> sbuffer.io.in

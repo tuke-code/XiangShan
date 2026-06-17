@@ -751,6 +751,7 @@ class DCacheIO(implicit p: Parameters) extends DCacheBundle {
   val lsu = new DCacheToLsuIO
   val error = ValidIO(new L1CacheErrorInfo)
   val mshrFull = Output(Bool())
+  val missQueueHasFree = Output(Bool())
   val mshr_store_empty = Output(Bool())
   val memSetPattenDetected = Output(Bool())
   val lqEmpty = Input(Bool())
@@ -1709,6 +1710,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   XSPerfAccumulate("num_loads", num_loads)
 
   io.mshrFull := missQueue.io.full
+  io.missQueueHasFree := !missQueue.io.full
   io.l1Miss := missQueue.io.l1Miss
 
   // performance counter
