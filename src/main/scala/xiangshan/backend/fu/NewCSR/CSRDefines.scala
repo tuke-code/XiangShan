@@ -188,8 +188,9 @@ object CSRDefines {
     val Smmpt43 = Value(1.U)
     val Smmpt52 = Value(2.U)
     val smmpt64 = Value(3.U)
+    val bitmapmode = Value("b1111".U)
     // XiangShan only support Sv39 & Sv48 Page
-    override def isLegal(enumeration: CSREnumType): Bool = enumeration.isOneOf(Bare, Smmpt43, Smmpt52)
+    override def isLegal(enumeration: CSREnumType): Bool = enumeration.isOneOf(Bare, Smmpt43, Smmpt52, bitmapmode)
   }
 
   object EnvCBIE extends CSREnum with WARLApply {

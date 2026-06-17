@@ -22,50 +22,53 @@ import scala.collection.immutable.SeqMap
 
 trait MachineLevel { self: NewCSR =>
   // Machine level Custom Read/Write
-  val mbmc = if (HasBitmapCheck) Some(Module(new CSRModule("Mbmc", new MbmcBundle) {
-    val mbmc_lock = reg.BME.asBool
-    if (!HasBitmapCheckDefault) {
-      reg.BME := Mux(wen && !mbmc_lock, wdata.BME, reg.BME)
-      reg.CMODE := Mux(wen, wdata.CMODE, reg.CMODE)
-      reg.BMA := Mux(wen && !mbmc_lock, wdata.BMA, reg.BMA)
-    } else {
-      reg.BME := 1.U
-      reg.CMODE := 0.U
-      reg.BMA := BMAField.TestBMA
-    }
-    reg.BCLEAR := Mux(reg.BCLEAR.asBool, 0.U, Mux(wen && wdata.BCLEAR.asBool, 1.U, 0.U))
-    reg.KEYIDEN := Mux(wen, wdata.KEYIDEN, reg.KEYIDEN)
-  })
-    .setAddr(Mbmc))  else  None
-
-  val mmpt = if (HasMptCheck) Some(Module(new CSRModule("Mmpt", new MmptBundle) {
+  val mmpt = if (HasBitmapCheck || HasMptCheck) Some(Module(new CSRModule("Mmpt", new MmptBundle) {
     val ppnMask = ZeroExt(Fill(PPNLengthMpt, 1.U(1.W)).take(PAddrBits - PageOffsetWidth), PPNLengthMpt)
-    if (!HasMptCheckDefault) {
-      when(wen) {
-        reg.SDID := wdata.SDID
-        reg.PPN := wdata.PPN & ppnMask
-        reg.optOutInNode := wdata.optOutInNode
-        when(wdata.MODE.isLegal) {
-          reg.MODE := wdata.MODE
-        }.otherwise {
-          reg.MODE := reg.MODE
-        }
-      }.otherwise {
-        reg := reg
-      }
-    } else {
+    if (HasMptCheckDefault) {
       reg.SDID := 0.U.asTypeOf(reg.SDID)
       reg.PPN := "h00000080000".U(PPNLengthMpt.W) & ppnMask //for testing, will be removed later
+      reg.KEYIDEN := 0.U.asTypeOf(reg.KEYIDEN)
+      reg.BCLEAR := 0.U.asTypeOf(reg.BCLEAR)
       if (HasMptInodeOpt) {
         reg.optOutInNode := 1.U.asTypeOf(reg.optOutInNode)
       } else {
         reg.optOutInNode := 0.U.asTypeOf(reg.optOutInNode)
       }
-      reg.MODE := 2.U.asTypeOf(reg.MODE)
+      reg.MODE := MmptMode.Smmpt52
+    } else if (HasBitmapCheckDefault) { // debug mode for bitmap
+      reg.SDID := 0.U.asTypeOf(reg.SDID)
+      reg.PPN := (BMAField.TestBMA.asUInt >> (PageOffsetWidth - 6)).asTypeOf(reg.PPN)
+      reg.KEYIDEN := 0.U.asTypeOf(reg.KEYIDEN)
+      reg.BCLEAR := 0.U.asTypeOf(reg.BCLEAR)
+      reg.optOutInNode := 0.U.asTypeOf(reg.optOutInNode)
+      reg.MODE := MmptMode.bitmapmode
+    } else { // normal mode
+      when(wen) {
+        reg.SDID := wdata.SDID
+        reg.PPN := wdata.PPN & ppnMask
+        reg.optOutInNode := wdata.optOutInNode
+        reg.KEYIDEN := wdata.KEYIDEN
+        when(wdata.MODE.isLegal) {
+          reg.MODE := wdata.MODE
+        }
+      }.otherwise {
+        reg := reg
+      }
+      reg.BCLEAR := Mux(reg.BCLEAR.asBool, 0.U, Mux(wen && wdata.BCLEAR.asBool, 1.U, 0.U))
     }
 
   })
     .setAddr(Mmpt)) else None
+
+  protected def genMbmcFromMmpt(mmpt: MmptBundle): MbmcBundle = {
+    val mbmc = Wire(new MbmcBundle)
+    mbmc.BME := (mmpt.MODE === MmptMode.bitmapmode).asUInt.asTypeOf(mbmc.BME)
+    mbmc.CMODE := (mmpt.SDID =/= 0.U.asTypeOf(mmpt.SDID)).asUInt
+    mbmc.BCLEAR := mmpt.BCLEAR
+    mbmc.KEYIDEN := mmpt.KEYIDEN
+    mbmc.BMA := (mmpt.PPN.asUInt << (PageOffsetWidth - 6)).asUInt.asTypeOf(mbmc.BMA)
+    mbmc
+  }
 
   val mstatus = Module(new MstatusModule)
     .setAddr(CSRs.mstatus)
@@ -542,7 +545,7 @@ trait MachineLevel { self: NewCSR =>
     mcyclecfg,
     minstretcfg,
     mcontext,
-  ) ++ mhpmevents ++ mhpmcounters ++ (if (HasBitmapCheck) Seq(mbmc.get) else if (HasMptCheck) Seq(mmpt.get) else Seq())
+  ) ++ mhpmevents ++ mhpmcounters ++ (if (HasBitmapCheck || HasMptCheck) Seq(mmpt.get) else Seq())
 
   val machineLevelCSRMap: SeqMap[Int, (CSRAddrWriteBundle[_], UInt)] = SeqMap.from(
     machineLevelCSRMods.map(csr => (csr.addr -> (csr.w -> csr.rdata))).iterator
@@ -567,7 +570,9 @@ class MmptBundle extends CSRBundle { //HasMptCheck
   // WARL in privileged spec.
   // RW, since we support max width of VMID
   val optOutInNode = RW(59).withReset(0.U).withDescription("Skip non-leaf node check")
+  val KEYIDEN = RW(58).withReset(0.U).withDescription("Enable key-ID checking for bitmap accesses.")
   val SDID = RW(52 - 1 + SDIDLEN, 52).withReset(0.U).withDescription("ID for security domain")
+  val BCLEAR = RW(51).withReset(0.U).withDescription("Request clearing of bitmap state.")
   val PPN = RW(PPNLengthMpt-1, 0).withReset(0.U).withDescription("Mpt level3 talble adress.")
 }
 

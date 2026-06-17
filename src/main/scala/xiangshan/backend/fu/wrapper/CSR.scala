@@ -273,7 +273,7 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   tlb.mbmc.CMODE    := csrMod.io.tlb.mbmc.CMODE.asUInt
   tlb.mbmc.BCLEAR   := csrMod.io.tlb.mbmc.BCLEAR.asUInt
   tlb.mbmc.BMA      := csrMod.io.tlb.mbmc.BMA.asUInt
-  if (HasMptCheck) {
+  if (HasBitmapCheck || HasMptCheck) {
     tlb.mmpt.mode := csrMod.io.tlb.mmpt.get.MODE.asUInt
     tlb.mmpt.sdid := csrMod.io.tlb.mmpt.get.SDID.asUInt
     tlb.mmpt.optOutInNode := csrMod.io.tlb.mmpt.get.optOutInNode.asUInt

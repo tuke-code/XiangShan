@@ -209,7 +209,7 @@ class NewCSR(implicit val p: Parameters) extends Module
       val vsatp = new SatpBundle
       val hgatp = new HgatpBundle
       val mbmc = new MbmcBundle
-      val mmpt = Option.when(HasMptCheck) (new MmptBundle)
+      val mmpt = Option.when(HasBitmapCheck || HasMptCheck) (new MmptBundle)
       val mxr = Bool()
       val sum = Bool()
       val vmxr = Bool()
@@ -868,7 +868,7 @@ class NewCSR(implicit val p: Parameters) extends Module
         in.vsatp := vsatp.regOut
         in.hgatp := hgatp.regOut
         if (HasBitmapCheck) {
-          in.mbmc := mbmc.get.regOut
+          in.mbmc := genMbmcFromMmpt(mmpt.get.regOut)
         } else {
           in.mbmc := DontCare
         }
@@ -980,12 +980,11 @@ class NewCSR(implicit val p: Parameters) extends Module
 
   val resetSatp = WireInit(false.B)
   // flush
-  if (HasBitmapCheck) {
-    resetSatp := Cat(Seq(satp, vsatp, hgatp, mbmc.get).map(_.addr.U === addr)).orR && wenLegalReg // write to satp will cause the pipeline be flushed
-  } else if (HasMptCheck) {
-     resetSatp := Cat(Seq(satp, vsatp, hgatp, mmpt.get).map(_.addr.U === addr)).orR && wenLegalReg
+  if (HasBitmapCheck || HasMptCheck) {
+    resetSatp := Cat(Seq(satp, vsatp, hgatp, mmpt.get).map(_.addr.U === addr)).orR && wenLegalReg
+    // write to address translation CSRs will cause the pipeline be flushed
   } else {
-    resetSatp := Cat(Seq(satp, vsatp, hgatp).map(_.addr.U === addr)).orR && wenLegalReg // write to satp will cause the pipeline be flushed
+    resetSatp := Cat(Seq(satp, vsatp, hgatp).map(_.addr.U === addr)).orR && wenLegalReg
   }
 
   val floatStatusOnOff = mstatus.w.wen && (
@@ -1516,12 +1515,12 @@ class NewCSR(implicit val p: Parameters) extends Module
   io.tlb.satpASIDChanged  := GatedValidRegNext(satp.w.wen  && satp .regOut.ASID =/=  satp.w.wdataFields.ASID)
   io.tlb.vsatpASIDChanged := GatedValidRegNext(vsatp.w.wen && vsatp.regOut.ASID =/= vsatp.w.wdataFields.ASID)
   io.tlb.hgatpVMIDChanged := GatedValidRegNext(hgatp.w.wen && hgatp.regOut.VMID =/= hgatp.w.wdataFields.VMID)
-  io.tlb.mmptSDIDChanged := (if (HasMptCheck) GatedValidRegNext(mmpt.get.w.wen && mmpt.get.regOut.SDID =/= mmpt.get.w.wdataFields.SDID) else DontCare)
+  io.tlb.mmptSDIDChanged := (if (HasMptCheck) GatedValidRegNext(mmpt.get.w.wen && mmpt.get.regOut.SDID =/= mmpt.get.w.wdataFields.SDID) else false.B)
   io.tlb.satp := satp.rdata
   io.tlb.vsatp := vsatp.rdata
   io.tlb.hgatp := hgatp.rdata
   if (HasBitmapCheck) {
-    io.tlb.mbmc := mbmc.get.rdata
+    io.tlb.mbmc := genMbmcFromMmpt(mmpt.get.rdataFields)
   } else {
     io.tlb.mbmc := DontCare
   }
