@@ -123,6 +123,7 @@ class PipeGroupConnect[T <: Data](n: Int, gen: => T) extends Module {
   private[this] val inValidSeq  = io.in.map(_.valid)
   private[this] val inDataSeq   = io.in.map(_.bits)
   private[this] val outReadySeq = io.out.map(_.ready)
+  private[this] val notFlushWhenFirstVec = io.notFlushWhenFirstVec
 
   // Regs
   private[this] val validVec = RegInit(VecInit.fill(n)(false.B))
@@ -133,25 +134,19 @@ class PipeGroupConnect[T <: Data](n: Int, gen: => T) extends Module {
   private[this] val inValids  = Cat(inValidSeq.reverse)
   private[this] val outReadys = Cat(outReadySeq.reverse)
 
-  val notFirstValidUopVec: Seq[Bool] = (0 until n).map(i =>
+  private[this] val notFirstValidUopVec = (0 until n).map(i =>
     if (i == 0) {
       false.B
     } else {
       validVec.slice(0, i).reduce(_ || _)
     }
   )
-  val firstUopSelVec = validVec.zip(notFirstValidUopVec).map { case (valid, notFirst) =>
-    valid && !notFirst
-  }
 
-  private val not2FlushVec = io.notFlushWhenFirstVec.zip(firstUopSelVec).map { case (notFlushWhenFirst, first) =>
-    notFlushWhenFirst && first
-  }
-  private val flushVec = not2FlushVec.map(!_ && flush)
+  private val flushVec = notFlushWhenFirstVec.zip(validVec).zip(notFirstValidUopVec).map { case ((notFlushWhenFirst, valid), notFirst) => !(notFlushWhenFirst && valid && !notFirst) && flush}
 
   // Todo: canAccVec for each elem
   // Todo: no outReadys version for better timing and lower performance
-  private[this] val canAcc = io.outAllFire && !(flush && not2FlushVec.reduce(_ || _)) || !valids.orR
+  private[this] val canAcc = io.outAllFire && !flush || !valids.orR
 
   (validVec lazyZip inValids.asBools lazyZip outReadys.asBools lazyZip flushVec).foreach { case (valid, inValid, outReady, trueFlush) =>
     valid := MuxCase(
