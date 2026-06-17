@@ -597,11 +597,11 @@ class LoadUnitS1(param: ExeUnitParams)(
   val redirectNextNext = Wire(redirect.cloneType)
   redirectNextNext.valid := GatedValidRegNext(redirectNext.valid)
   redirectNextNext.bits := RegEnable(redirectNext.bits, redirectNext.valid)
-  
+
   val isUnalignTail = LoadEntrance.isUnalignTail(entrance)
 
   val kill = !pipeIn.valid || io.kill || isSwInstrPrefetch ||
-             robIdx.needFlush(redirect) || robIdx.needFlush(redirectNext) || 
+             robIdx.needFlush(redirect) || robIdx.needFlush(redirectNext) ||
              (robIdx.needFlush(redirectNextNext) && isUnalignTail)
 
   /**
@@ -829,6 +829,10 @@ class LoadUnitS2(param: ExeUnitParams)(
     val dcacheBankConflict = Input(Bool())
     val dcacheMSHRNack = Input(Bool())
 
+    // Fast replay
+    val fastReplay = DecoupledIO(new FastReplayIO)
+    val fastReplayCancel = Output(Bool())
+
     /**
       * Data forward response
       */
@@ -901,7 +905,7 @@ class LoadUnitS2(param: ExeUnitParams)(
     *   next stage, but it may produce side effects on micro-arch
     */
   val redirect = io.redirect
-  val kill = io.kill || robIdx.needFlush(redirect)
+  val baseKill = io.kill || robIdx.needFlush(redirect)
   val endPipe = isHwPrefetch
 
   /**
@@ -1106,6 +1110,15 @@ class LoadUnitS2(param: ExeUnitParams)(
   val shouldWakeup = !shouldReplay && !isUncache && !exception && !isSwPrefetch
   val shouldWriteback = shouldWakeup || exception || matchInvalid || isSwPrefetch
 
+  val fastReplayFromPrevStage = in.shouldFastReplay.get || prevStageNuke
+  val fastReplayIO = Wire(new FastReplayIO)
+  connectSamePort(fastReplayIO, in)
+  fastReplayIO.cause.get := 0.U.asTypeOf(fastReplayIO.cause.get)
+  val fastReplayValid = pipeIn.valid && !baseKill && fastReplayFromPrevStage &&
+    !LoadEntrance.isFastReplay(entrance) && !exception
+  val fastReplayFire = fastReplayValid && io.fastReplay.ready
+  val kill = baseKill || fastReplayFire
+
   /**
     * Pipeline connect
     */
@@ -1159,6 +1172,10 @@ class LoadUnitS2(param: ExeUnitParams)(
   io.rarNukeQueryReq.bits := nukeQueryReq
   io.rawNukeQueryReq.valid := nukeQueryReqValid && pipeIn.valid
   io.rawNukeQueryReq.bits := nukeQueryReq
+
+  io.fastReplay.valid := fastReplayValid
+  io.fastReplay.bits := fastReplayIO
+  io.fastReplayCancel := fastReplayFire && accessType.isScalar()
 
   // TODO: Currently, we don't train prefetcher on vector request, because vector instruction PC is incorrect.
   // TODO: `isFirstIssue` is Fake First Issue according to prefetcher !!!
@@ -1215,6 +1232,7 @@ class LoadUnitS2(param: ExeUnitParams)(
   XSPerfAccumulate("nc_raw_nack", fire && isNCReplay && cause(C_RAW))
   XSPerfAccumulate("nc_forward_not_ready", fire && isNCReplay && (cause(C_MA) || cause(C_FF)))
   XSPerfAccumulate("nc_forward_match_invalid", fire && isNCReplay && matchInvalid)
+  XSPerfAccumulate("s2_fast_replay_fire", io.fastReplay.fire)
 
   val perfEvents = Seq(
     ("s2_in_fire", pipeIn.fire),
@@ -1617,6 +1635,7 @@ class LoadUnitS3(param: ExeUnitParams)(
   XSPerfAccumulate("nc_writeback", io.ldout.toRob.fire && (in.isNCReplay() || in.nc.get))
   XSPerfAccumulate("nc_exception", io.ldout.toRob.fire && (in.isNCReplay() || in.nc.get) && exception)
   XSPerfAccumulate("nc_rar_violation", pipeIn.valid && in.isNCReplay() && rarViolation)
+  XSPerfAccumulate("s3_fast_replay_fire", io.fastReplay.fire)
 
   // source occupy others but fail perf counter
   val executeFail = lqWriteValid && lqWriteCause.asUInt.orR || pipeIn.valid && shouldFastReplay
@@ -1847,7 +1866,9 @@ class LoadUnitIO(val param: ExeUnitParams)(implicit p: Parameters) extends XSBun
   val topDownInfo = Output(new LsTopdownInfo)
 }
 
-class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModule with HasPerfEvents {
+class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModule
+  with HasMemBlockParameters
+  with HasPerfEvents {
   val io = IO(new LoadUnitIO(param))
 
   val s0 = Module(new LoadUnitS0(param))
@@ -1864,7 +1885,14 @@ class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   s3 <> s2
   s4 <> s3
   s0.io.unalignTail <> s1.io.unalignTail
-  s0.io.fastReplay <> s3.io.fastReplay
+  val s2FastReplay = Wire(DecoupledIO(new FastReplayIO))
+  val s2FastReplayFlush = Mux(
+    s2.io.fastReplay.fire,
+    s2.io.fastReplay.bits.uop.robIdx.needFlush(io.redirect),
+    s2FastReplay.bits.uop.robIdx.needFlush(io.redirect)
+  )
+  skidBuffer(s2.io.fastReplay, s2FastReplay, s2FastReplayFlush, "s2FastReplaySkidBuffer")
+  arbiter(Seq(s3.io.fastReplay, s2FastReplay), s0.io.fastReplay, Some("fastReplay"))
   s3.io.unalignTailValid := s2.io.unalignTailValid
   s3.io.unalignConcat <> s4.io.unalignConcat
   s1.io.kill := false.B
@@ -1950,7 +1978,7 @@ class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   io.rawNukeQuery.revokeLastCycle := s3.io.revokeLastCycle
   io.rawNukeQuery.revokeLastLastCycle := s3.io.revokeLastLastCycle
   io.rollback := s3.io.rollback
-  io.cancel := s3.io.cancel
+  io.cancel := RegNext(s2.io.fastReplayCancel, false.B) || s3.io.cancel
   io.exceptionInfo := s3.io.exceptionInfo
   s3.io.csrCtrl := io.csrCtrl
 
