@@ -958,6 +958,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   io.prefetch_stat.pf_late_in_cache := pf_late_in_cache
   io.prefetch_stat.pf_late_in_cache_source := s2_hit_prefetch
   io.prefetch_stat.nack_prefetch := s2_valid && s2_can_go_to_mq && !io.miss_req.ready && s2_isPrefetch
+  io.prefetch_stat.nack_vaddr := s2_req.vaddr
   io.prefetch_stat.pf_source := s2_req.pf_source
   io.prefetch_stat.hit_pf_in_cache := DontCare
   io.prefetch_stat.hit_source := DontCare

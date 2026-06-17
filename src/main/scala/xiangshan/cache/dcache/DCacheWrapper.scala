@@ -32,7 +32,7 @@ import xiangshan.backend.rob.{RobDebugRollingIO, RobPtr}
 import xiangshan.cache.wpu._
 import xiangshan.mem.prefetch._
 import xiangshan.mem.Bundles.SbufferForwardReq
-import xiangshan.mem.{AddPipelineReg, HasL1PrefetchSourceParameter, HasMemBlockParameters, LqPtr, MemorySize}
+import xiangshan.mem.{AddPipelineReg, HasL1PrefetchSourceParameter, HasMemBlockParameters, L1PrefetchNack, LqPtr, MemorySize}
 import freechips.rocketchip.tilelink.TLMessages.GrantData
 import xiangshan.mem.L1PrefetchReq
 
@@ -766,6 +766,7 @@ class DCacheIO(implicit p: Parameters) extends DCacheBundle {
   val l1Miss = Output(Bool())
   val wfi = Flipped(new WfiReqBundle)
   val prefetch_req = Flipped(DecoupledIO(new L1PrefetchReq))
+  val prefetch_nack = ValidIO(new L1PrefetchNack())
 }
 
 private object ArbiterCtrl {
@@ -1312,6 +1313,19 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     prefetcherMonitor.io.loadinfo(w) := ldu(w).io.prefetch_stat
   }
   prefetcherMonitor.io.maininfo := mainPipe.io.prefetch_stat
+  // for loadpipe, one cycle only one prefetch request, so there uses PriorityMux
+  val loadPrefetchNackVec = VecInit(ldu.map(_.io.prefetch_stat.nack_prefetch))
+  io.prefetch_nack.valid := mainPipe.io.prefetch_stat.nack_prefetch || loadPrefetchNackVec.asUInt.orR
+  io.prefetch_nack.bits.vaddr := Mux(
+    mainPipe.io.prefetch_stat.nack_prefetch,
+    mainPipe.io.prefetch_stat.nack_vaddr,
+    PriorityMux(loadPrefetchNackVec.asUInt, ldu.map(_.io.prefetch_stat.nack_vaddr))
+  )
+  io.prefetch_nack.bits.pfsource := Mux(
+    mainPipe.io.prefetch_stat.nack_prefetch,
+    mainPipe.io.prefetch_stat.pf_source,
+    PriorityMux(loadPrefetchNackVec.asUInt, ldu.map(_.io.prefetch_stat.pf_source))
+  )
   prefetcherMonitor.io.missinfo := missQueue.io.prefetch_stat
   prefetcherMonitor.io.debugRolling := io.debugRolling
   prefetcherMonitor.io.clear_flag := clear_flag

@@ -22,6 +22,7 @@ class PipePrefetchStatBundle()(implicit p: Parameters) extends XSBundle with Has
   val pf_late_in_cache = Bool() // from loadpipe s2, pf req sent but hit
   val pf_late_in_cache_source = UInt(L1PfSourceBits.W) // from loadpipe s2, pf req sent but hit, hit's source
   val nack_prefetch = Bool() // from loadpipe s2, pf req miss but nack
+  val nack_vaddr = UInt(VAddrBits.W)
   val pf_source = UInt(L1PfSourceBits.W)
 
   val hit_pf_in_cache = Bool() // from loadpipe s3, pf block hit by demand, clear pf flag
@@ -345,4 +346,3 @@ class BertiMonitorParam extends PrefetcherMonitorParam with HasL1PrefetchSourceP
   override val name: String = "Berti"
   override def isMyType(value: UInt) = value === L1_HW_PREFETCH_BERTI
 }
-

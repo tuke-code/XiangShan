@@ -56,16 +56,22 @@ class L1PrefetchSource(implicit p: Parameters) extends XSBundle with HasL1Prefet
   val value = UInt(L1PfSourceBits.W)
 }
 
+class L1PrefetchNack(implicit p: Parameters) extends XSBundle with HasDCacheParameters with HasL1PrefetchSourceParameter {
+  val vaddr = UInt(VAddrBits.W)
+  val pfsource = UInt(L1PfSourceBits.W)
+}
+
 class L1PrefetchReq(implicit p: Parameters) extends XSBundle with HasDCacheParameters {
   val paddr = UInt(PAddrBits.W)
+  val vaddr = UInt(VAddrBits.W)
   val alias = UInt(2.W)
   val confidence = UInt(1.W)
   val is_store = Bool()
   val pf_source = new L1PrefetchSource
 
-  // only index bit is used, do not use tag
+  // now use full address
   def getVaddr(): UInt = {
-    Cat(alias, paddr(DCacheSameVPAddrLength-1, 0))
+    vaddr
   }
 
   // when l1 cache prefetch req arrives at load unit:
@@ -101,6 +107,7 @@ class L1PrefetchFuzzer(implicit p: Parameters) extends DCacheModule{
   val rand_paddr = DelayN(io.paddr, 2)
 
   io.req.bits.paddr := PmemRanges.map(_.lower).min.U + rand_offset
+  io.req.bits.vaddr := rand_vaddr
   io.req.bits.alias := io.req.bits.paddr(13,12)
   io.req.bits.confidence := LFSR64(seed=Some(789L))(4,0) === 0.U
   io.req.bits.is_store := LFSR64(seed=Some(890L))(4,0) === 0.U
