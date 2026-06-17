@@ -55,6 +55,7 @@ import xiangshan.frontend.bpu.BpuTrain
 import xiangshan.frontend.bpu.HalfAlignHelper
 import xiangshan.frontend.icache.ICacheCacheLineHelper
 import xiangshan.frontend.icache.ICacheToFtqIO
+import xiangshan.frontend.icache.PrefetchSource
 
 class Ftq(implicit p: Parameters) extends FtqModule
     with HalfAlignHelper
@@ -291,7 +292,7 @@ class Ftq(implicit p: Parameters) extends FtqModule
     req.isCrossLine      := prefetchReq(i).isCrossLine
     req.ftqIdx           := pfPtr(i)
     req.backendException := Mux(backendExceptionPtr === pfPtr(i), backendException, ExceptionType.None)
-    req.isSoftPrefetch   := false.B
+    req.source           := PrefetchSource.Fdip
   }
   io.toICache.toPrefetch.bits.twoPrefetchCase := Mux(canTwoPrefetch, twoPrefetchCase, TwoPrefetchCase.Conflict)
 
