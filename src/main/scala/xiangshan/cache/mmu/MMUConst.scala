@@ -99,27 +99,27 @@ trait MPTCacheParam extends HasTlbConst {
   val mptLevelLenUInt = 2 // level number 4 length in int
   val mptOff = 16 // mpt offset of PA
   // l3 8T
-  val l3Size  = 4
+  val l3Size  = 1
   val mptL3TagLen = 5
   val l3Associative = "fa"
   val l3Replacer = "plru"
   // l2 4G
   val mptL2TagLen = mptL3TagLen + 9
-  val l2Size = 4
+  val l2Size = 1
   val l2Associative = "fa"
   val l2Replacer = "plru"
   // l1 32M
-  val l1Size = 16
+  val l1Size = 4
   val mptL1TagLen = mptL3TagLen + 9 * 2
   val l1Associative = "fa"
   val l1Replacer = "plru"
   // l0 64k
   val l0nSets = 32 // 5bits
-  val l0nWays = 16
+  val l0nWays = 4
   val mptL0TagLen = mptL3TagLen + 9 * 3 - log2Up(l0nSets) // 32-5=27
   val l0Replacer = "setplru"
   // sp
-  val spSize = 32
+  val spSize = 8
   val mptspTagLen = mptL3TagLen + 9 * 2
   val spAssociative = "fa"
   val spReplacer = "plru"
