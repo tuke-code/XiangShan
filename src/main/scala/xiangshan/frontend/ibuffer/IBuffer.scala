@@ -26,6 +26,7 @@ import utility.UIntToMask
 import utility.XSDebug
 import utility.XSError
 import utility.XSPerfAccumulate
+import utils.DuplicateInit
 import xiangshan.CtrlFlow
 import xiangshan.StallReasonIO
 import xiangshan.TopDownCounters
@@ -102,20 +103,20 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   private val deqPtr        = deqPtrVec(0)
 
   private val enqPtrVec = RegInit(VecInit.tabulate(EnqueueWidth)(_.U.asTypeOf(new IBufPtr)))
-  private val enqPtrDup = RegInit(VecInit.fill(EnqPtrDupNum)(0.U.asTypeOf(new IBufPtr)))
-  private val enqPtr    = enqPtrDup(0)
+  // Duplicate enqPtr 3 times for pointer calculation/comparison, enqueue, bypass calculation
+  private val enqPtrDup = RegInit(DuplicateInit(Seq("ptr", "enq", "bypass"), 0.U.asTypeOf(new IBufPtr)))
   // Use the IFU-IBuffer interaction to pre-determine the queue position for each instruction output by IFU.
   private val ifuAlignedEnqPtrVec = RegInit(VecInit.tabulate(EnqueueWidth)(_.U.asTypeOf(new IBufPtr)))
 
   // No bubble for ibuffer.out, so head.valid is enough
-  io.empty := enqPtr === deqPtr && !io.out.head.valid
+  io.empty := enqPtrDup("ptr") === deqPtr && !io.out.head.valid
   XSError(
     !io.out.head.valid && io.out.tail.map(_.valid).reduce(_ || _),
     "Bubble in ibuffer.out"
   )
 
   XSError(
-    io.in.valid && io.in.bits.prevIBufEnqPtr =/= enqPtr,
+    io.in.valid && io.in.bits.prevIBufEnqPtr =/= enqPtrDup("ptr"),
     "The enqueueing behavior of the IBuffer does not match expectations."
   )
 
@@ -123,7 +124,7 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   private val numEnq    = Mux(io.in.fire, numTryEnq, 0.U)
 
   // empty and decode can accept insts
-  private val useBypass = enqPtr === deqPtr && decodeCanAccept
+  private val useBypass = enqPtrDup("ptr") === deqPtr && decodeCanAccept
 
   // The number of decode accepted insts.
   // Since decode promises accepting insts in order, use priority encoder to simplify the accumulation.
@@ -131,7 +132,7 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   private val numDeq = numOut
 
   // counter current number of valid
-  private val numValid = distanceBetween(enqPtr, deqPtr)
+  private val numValid = distanceBetween(enqPtrDup("ptr"), deqPtr)
   // counter next number of valid
   private val nextNumValid = numValid + numEnq - numDeq
   private val numFromFetch = Mux(io.in.valid, PopCount(io.in.bits.enqEnable), 0.U)
@@ -214,7 +215,7 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   // enqOffset with a prefix PopCount on the bypass path.
   private val bypassExceptionMask = Wire(Vec(DecodeWidth, Bool()))
   bypassEntries.zipWithIndex.foreach { case (entry, idx) =>
-    val bankOffset = enqPtrDup(2).value(log2Ceil(NumWriteBank) - 1, 0)
+    val bankOffset = enqPtrDup("bypass").value(log2Ceil(NumWriteBank) - 1, 0)
     val bankOH     = UIntToOH(bankOffset, NumWriteBank)
 
     val selectedValid = Mux1H(
@@ -315,11 +316,11 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
   // low-bit bank cycle is preserved across wrap-around.
   private val baseAlignedPtr = Wire(new IBufPtr)
   private val alignedMask    = (~(NumWriteBank - 1).U(log2Ceil(Size).W)).asUInt
-  baseAlignedPtr       := (enqPtrDup(1) + numTryEnq)
-  baseAlignedPtr.value := (enqPtrDup(1) + numTryEnq).value & alignedMask
+  baseAlignedPtr       := (enqPtrDup("enq") + numTryEnq)
+  baseAlignedPtr.value := (enqPtrDup("enq") + numTryEnq).value & alignedMask
   when(io.in.fire && !io.flush) {
-    enqPtrVec := VecInit(enqPtrVec.map(_ + numTryEnq))
-    enqPtrDup.map(_ := enqPtrDup(1) + numTryEnq)
+    enqPtrVec           := VecInit(enqPtrVec.map(_ + numTryEnq))
+    enqPtrDup           := enqPtrDup("enq") + numTryEnq // NOTE this ":=" is overloaded
     ifuAlignedEnqPtrVec := VecInit((0 until EnqueueWidth).map(i => baseAlignedPtr + i.U))
   }
 
@@ -406,9 +407,9 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
 
   // Flush
   when(io.flush) {
-    allowEnq  := true.B
-    enqPtrVec := enqPtrVec.indices.map(_.U.asTypeOf(new IBufPtr))
-    enqPtrDup.map(_ := 0.U.asTypeOf(new IBufPtr))
+    allowEnq            := true.B
+    enqPtrVec           := enqPtrVec.indices.map(_.U.asTypeOf(new IBufPtr))
+    enqPtrDup           := 0.U.asTypeOf(new IBufPtr) // NOTE this ":=" is overloaded
     ifuAlignedEnqPtrVec := ifuAlignedEnqPtrVec.indices.map(_.U.asTypeOf(new IBufPtr))
     deqBankPtrVec       := deqBankPtrVec.indices.map(_.U.asTypeOf(new IBufBankPtr))
     deqInBankPtr        := VecInit.fill(NumReadBank)(0.U.asTypeOf(new IBufInBankPtr))
@@ -463,7 +464,7 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
     deqPtr.value =/= deqBankPtr.value + deqInBankPtr(deqBankPtr.value).value * NumReadBank.asUInt,
     "Dequeue PTR mismatch"
   )
-  XSError(isBefore(enqPtr, deqPtr) && !isFull(enqPtr, deqPtr), "\ndeqPtr is older than enqPtr!\n")
+  XSError(isBefore(enqPtrDup("ptr"), deqPtr) && !isFull(enqPtrDup("ptr"), deqPtr), "\ndeqPtr is older than enqPtr!\n")
 
   XSDebug(io.flush, "IBuffer Flushed\n")
 
