@@ -209,7 +209,7 @@ class NewCSR(implicit val p: Parameters) extends Module
       val vsatp = new SatpBundle
       val hgatp = new HgatpBundle
       val mbmc = new MbmcBundle
-      val mmpt = Option.when(HasBitmapCheck || HasMptCheck) (new MmptBundle)
+      val mmpt = Option.when(HasMptCheck) (new MmptBundle)
       val mxr = Bool()
       val sum = Bool()
       val vmxr = Bool()
@@ -1515,7 +1515,7 @@ class NewCSR(implicit val p: Parameters) extends Module
   io.tlb.satpASIDChanged  := GatedValidRegNext(satp.w.wen  && satp .regOut.ASID =/=  satp.w.wdataFields.ASID)
   io.tlb.vsatpASIDChanged := GatedValidRegNext(vsatp.w.wen && vsatp.regOut.ASID =/= vsatp.w.wdataFields.ASID)
   io.tlb.hgatpVMIDChanged := GatedValidRegNext(hgatp.w.wen && hgatp.regOut.VMID =/= hgatp.w.wdataFields.VMID)
-  io.tlb.mmptSDIDChanged := (if (HasMptCheck) GatedValidRegNext(mmpt.get.w.wen && mmpt.get.regOut.SDID =/= mmpt.get.w.wdataFields.SDID) else false.B)
+  io.tlb.mmptSDIDChanged := (if (HasMptCheck) GatedValidRegNext(mmpt.get.w.wen && mmpt.get.regOut.SDID =/= mmpt.get.w.wdataFields.SDID) else DontCare)
   io.tlb.satp := satp.rdata
   io.tlb.vsatp := vsatp.rdata
   io.tlb.hgatp := hgatp.rdata

@@ -268,12 +268,16 @@ class CSR(cfg: FuConfig)(implicit p: Parameters) extends FuncUnit(cfg)
   tlb.hgatp.mode    := csrMod.io.tlb.hgatp.MODE.asUInt
   tlb.hgatp.vmid    := csrMod.io.tlb.hgatp.VMID.asUInt
   tlb.hgatp.ppn     := csrMod.io.tlb.hgatp.PPN.asUInt
-  tlb.mbmc.KEYIDEN  := csrMod.io.tlb.mbmc.KEYIDEN.asUInt
-  tlb.mbmc.BME      := csrMod.io.tlb.mbmc.BME.asUInt
-  tlb.mbmc.CMODE    := csrMod.io.tlb.mbmc.CMODE.asUInt
-  tlb.mbmc.BCLEAR   := csrMod.io.tlb.mbmc.BCLEAR.asUInt
-  tlb.mbmc.BMA      := csrMod.io.tlb.mbmc.BMA.asUInt
-  if (HasBitmapCheck || HasMptCheck) {
+  if (HasBitmapCheck) {
+    tlb.mbmc.KEYIDEN  := csrMod.io.tlb.mbmc.KEYIDEN.asUInt
+    tlb.mbmc.BME      := csrMod.io.tlb.mbmc.BME.asUInt
+    tlb.mbmc.CMODE    := csrMod.io.tlb.mbmc.CMODE.asUInt
+    tlb.mbmc.BCLEAR   := csrMod.io.tlb.mbmc.BCLEAR.asUInt
+    tlb.mbmc.BMA      := csrMod.io.tlb.mbmc.BMA.asUInt
+  } else {
+    tlb.mbmc := DontCare
+  }
+  if (HasMptCheck) {
     tlb.mmpt.mode := csrMod.io.tlb.mmpt.get.MODE.asUInt
     tlb.mmpt.sdid := csrMod.io.tlb.mmpt.get.SDID.asUInt
     tlb.mmpt.optOutInNode := csrMod.io.tlb.mmpt.get.optOutInNode.asUInt
@@ -428,7 +432,7 @@ class CSRInput(implicit p: Parameters) extends XSBundle with HasSoCParameter {
 
 class CSRToDecode(implicit p: Parameters) extends XSBundle {
   val illegalInst = new Bundle {
-    
+
     val mfence = Option.when(HasMptCheck) (Bool())
     /**
      * illegal sfence.vma, sinval.vma
