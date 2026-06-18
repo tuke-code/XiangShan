@@ -84,11 +84,11 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
   }
   XSPerfAccumulate(
     "backend_direct_resolve",
-    io.backendResolve.map(branch => branch.valid && branch.bits.attribute.isDirect && branch.bits.attribute.mispredict).reduce(_ || _)
+    io.backendResolve.map(branch => branch.valid && branch.bits.attribute.isDirect && branch.bits.mispredict).reduce(_ || _)
   )
   XSPerfAccumulate(
     "backend_return_resolve",
-    io.backendResolve.map(branch => branch.valid && branch.bits.attribute.isReturn && branch.bits.attribute.mispredict).reduce(_ || _)
+    io.backendResolve.map(branch => branch.valid && branch.bits.attribute.isReturn && branch.bits.mispredict).reduce(_ || _)
   )
 
   private val filteredResolve = backendFilteredResolve
