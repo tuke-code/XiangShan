@@ -16,6 +16,7 @@ Audited files:
 - `src/main/scala/xiangshan/backend/rob/Rab.scala`
 - `src/main/scala/xiangshan/Bundle.scala`
 - `src/main/scala/xiangshan/backend/Bundles.scala`
+- `src/main/scala/xiangshan/backend/CtrlBlock.scala`
 - `src/main/scala/xiangshan/backend/decode/DecodeStage.scala`
 - `src/main/scala/xiangshan/backend/IntEarlyReleaseBundles.scala`
 - `src/main/scala/xiangshan/backend/IntSparseUCA.scala`
@@ -37,16 +38,18 @@ simplified RAT mirror.
 
 The implementation strategy for task8 is:
 
-1. Add an ER-only old-destination read port vector to the integer
-   `RenameTableWrapper` path.
-2. Drive each lane with the same held rename input that the current source RAT
-   reads use:
-   - `addr := io.in(i).bits.ldest(log2Ceil(IntLogicRegs) - 1, 0)`
-   - `hold := !io.in(i).ready`
+1. Add an ER-only old-destination read port vector that follows the existing
+   decode-to-rename RAT read path:
+   `DecodeStageIO` -> `CtrlBlock` -> `Rename` IO -> `RenameTableWrapper`.
+2. Drive each lane in `DecodeStage`, not inside `Rename`, with the same output
+   uop and hold boundary that current integer source RAT reads use:
+   - `addr := io.out(i).bits.ldest(log2Ceil(IntLogicRegs) - 1, 0)`
+   - `hold := !io.out(i).ready`
 3. Connect those ports as the third integer RAT read port per rename lane when
    `EnableIntEarlyRegRelease` is true. Existing `intReadPorts` remain the two
    source ports.
-4. Use the read data only as the base mapping before same-rename-group writes.
+4. Consume the returned data in `Rename` as the base mapping for the aligned
+   `Rename.io.in` uop before same-rename-group writes.
 5. Apply a same-group bypass over all older lanes that really write the integer
    RAT in the current rename group. The bypass data is the older lane's final
    post-bypass `pdest`.
@@ -79,11 +82,19 @@ Current integer source reads are driven through `DecodeStage`/`Rename` with:
 - `addr := io.out(i).bits.lsrc(0/1)`
 - `hold := !io.out(i).ready`
 
-At the `Rename` boundary this hold condition is equivalent to
-`!io.in(i).ready`, because `DecodeStage.io.out` feeds `Rename.io.in`. The ER
-old-dest port must use the same stall boundary. Do not use only
-`!io.out(i).ready` inside `Rename`, because that misses free-list and walk stalls
-that are included in `io.in(i).ready`.
+`CtrlBlock` wires `decode.io.intRat <> rename.io.intReadPorts`, and separately
+pipelines `decode.io.out` into `rename.io.in` through `PipelineConnect`. The RAT
+address is therefore presented while the uop is at `DecodeStage.io.out`, then
+the registered RAT data is consumed when the same uop reaches `Rename.io.in`.
+Current fusion replacement is applied after the decode-to-rename pipe and can
+change selected control/source fields, but it does not replace ordinary integer
+`ldest`; if a later fusion change can rewrite `ldest`, the old-dest read
+placement must be revisited.
+
+The ER old-dest read must mirror that path. Driving the old-dest address first
+from `Rename.io.in(i).bits.ldest` would register the address in the rename cycle
+and return the mapping in the following cycle, one cycle after the renamed uop
+needs it.
 
 The current commit old-dest path is not a rename-time source:
 
@@ -96,9 +107,22 @@ The current commit old-dest path is not a rename-time source:
 
 ## Exact Old-Dest Dataflow
 
-Task8 should add a wrapper-level old-dest port, for example:
+Task8 should add a decode-timed old-dest port chain:
 
 ```scala
+// DecodeStageIO
+val intOldDestRat =
+  Option.when(EnableIntEarlyRegRelease)(
+    Vec(RenameWidth, Flipped(new RatReadPort(log2Ceil(IntLogicRegs))))
+  )
+
+// Rename IO
+val intOldDestReadPorts =
+  Option.when(EnableIntEarlyRegRelease)(
+    Vec(RenameWidth, new RatReadPort(log2Ceil(IntLogicRegs)))
+  )
+
+// RenameTableWrapper IO
 val intOldDestReadPorts =
   Option.when(EnableIntEarlyRegRelease)(
     Vec(RenameWidth, new RatReadPort(log2Ceil(IntLogicRegs)))
@@ -114,22 +138,40 @@ intRat.io.readPorts :=
   io.intReadPorts.flatten ++ io.intOldDestReadPorts.get
 ```
 
-The old-dest ports are driven in `Rename.scala`:
+The top-level path must be wired in `CtrlBlock` next to the existing source RAT
+ports:
 
 ```scala
-for (i <- 0 until RenameWidth) {
-  rat.io.intOldDestReadPorts.get(i).addr :=
-    io.in(i).bits.ldest(log2Ceil(IntLogicRegs) - 1, 0)
-  rat.io.intOldDestReadPorts.get(i).hold := !io.in(i).ready
+decode.io.intOldDestRat.get <> rename.io.intOldDestReadPorts.get
+```
+
+`Rename.scala` then passes its top-level port through to the wrapper, matching
+the existing source RAT pattern:
+
+```scala
+val intOldDestReadPorts = rat.io.intOldDestReadPorts.get
+io.intOldDestReadPorts.get <> intOldDestReadPorts
+```
+
+The old-dest ports are driven in `DecodeStage`:
+
+```scala
+for (i <- 0 until DecodeWidth) {
+  io.intOldDestRat.get(i).addr :=
+    io.out(i).bits.ldest(log2Ceil(IntLogicRegs) - 1, 0)
+  io.intOldDestRat.get(i).hold := !io.out(i).ready
 }
 ```
 
-The base value is:
+`Rename` consumes the returned base value from its wrapper-connected port:
 
 ```scala
 val intOldDestBase =
   VecInit(rat.io.intOldDestReadPorts.get.map(_.data))
 ```
+
+This data is aligned with `Rename.io.in`, just like `intReadPortsData` for
+`src0/src1`. Do not drive the old-dest read address from `Rename.io.in`.
 
 The same-group bypass must use the same mapping order as integer RAT writes:
 
@@ -230,8 +272,9 @@ The old-dest read must not create a new recovery model:
   follows the same snapshot and redirect repair as current integer source reads.
 - `RenameTable` clears the registered write bypass on redirect. Do not add a
   second old-dest table that has to be repaired separately.
-- During a rename stall, `hold := !io.in(i).ready` keeps the old-dest address
-  stable exactly like the existing source RAT read ports.
+- During decode-to-rename backpressure, `hold := !io.out(i).ready` in
+  `DecodeStage` keeps the old-dest address stable exactly like the existing
+  source RAT read ports.
 - During RAB walk, `Rename.io.out.valid` is false and `intSpecWen` is false.
   UCA source, alloc, and redef events must be gated by `io.out(i).fire`, so a
   walk cannot consume stale old-dest data.
@@ -239,10 +282,10 @@ The old-dest read must not create a new recovery model:
   bypass. UCA rename events must additionally be gated by the same redirect kill
   policy used by `IntSparseUCA.redirectKill`.
 
-If a later timing experiment moves the old-dest address back into `DecodeStage`
-for physical timing, the architectural contract is unchanged: the port address is
-`ldest`, the hold condition is the decode-to-rename ready, and the data must be
-consumed only in the aligned rename cycle.
+If a later timing experiment changes where the old-dest port is physically
+declared, the architectural contract is unchanged: the address is issued from
+the decode output side, the hold condition is the decode-to-rename ready, and
+the data is consumed only in the aligned rename cycle.
 
 ## Commit Suppress Alignment For Task10
 
@@ -291,9 +334,15 @@ early-freed physical register is reallocated before the old redefiner commits.
 
 Task8 hooks:
 
-- Add optional `intOldDestReadPorts` to `RenameTableWrapper`.
+- Add optional ER old-dest RAT read ports to `DecodeStageIO`, `Rename` IO, and
+  `RenameTableWrapper`.
+- Wire `decode.io.intOldDestRat.get <> rename.io.intOldDestReadPorts.get` in
+  `CtrlBlock`.
 - Increase the enabled integer RAT read-port count by one per rename lane.
-- Drive the port from `Rename.io.in(i).bits.ldest` with `hold := !io.in(i).ready`.
+- Drive the port in `DecodeStage` from `io.out(i).bits.ldest` with
+  `hold := !io.out(i).ready`.
+- Consume the returned base old-dest data in `Rename`, aligned with
+  `Rename.io.in`.
 - Build `intOldDestForER` with same-group older-lane bypass from final
   `intRenamePorts(j).data`.
 - Instantiate/connect `IntSparseUCA` in `Rename.scala`.
@@ -333,6 +382,9 @@ Task11 directed tests:
   produce ER dest/redef metadata.
 - Hold/stall: stall rename for at least one cycle and verify the held old-dest
   address/data pair is used only for the held uop.
+- Cycle alignment: hold a decoded uop before rename, then change a following
+  lane or next-cycle `ldest`; the consumed old-dest mapping must belong to the
+  held `DecodeStage.io.out` uop, not to a later `Rename.io.in` address.
 - Redirect/walk: assert no UCA source, alloc, or redef fires during redirect or
   RAB walk even if old-dest read data changes.
 - Move fallback: a move source matching a tracked entry marks that entry
@@ -350,6 +402,8 @@ Task11 directed tests:
 - Adding one integer RAT read port per rename lane increases integer RAT read
   fanout and bypass muxing. The first functional mode must stay observe-only or
   disabled if timing/alignment cannot be proven.
+- The old-dest port must be addressed at `DecodeStage.io.out`, not
+  `Rename.io.in`; otherwise the synchronous RAT read returns one cycle late.
 - Same-group old-dest bypass depends on final `intRenamePorts(j).data`, which for
   moves depends on final source bypass. This is already the rename critical path.
 - ER source matching also depends on final post-bypass `psrc`, so task8 must place
