@@ -90,6 +90,11 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
     for (i <- dut.io.commitNeedFree.indices) {
       dut.io.commitNeedFree(i).poke(false.B)
       dut.io.commitOldPdest(i).poke(0.U)
+      dut.io.commitRedef(i).valid.poke(false.B)
+      dut.io.commitRedef(i).bits.oldPdest.poke(0.U)
+      dut.io.commitRedef(i).bits.trackId.poke(0.U)
+      dut.io.commitRedef(i).bits.trackGen.poke(0.U)
+      setRobPtr(dut.io.commitRedef(i).bits.redefinerRobIdx, 0)
     }
   }
 
@@ -136,6 +141,31 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
     dut.io.readDone(0).bits.src(srcSlot).srcIdx.poke(srcSlot.U)
   }
 
+  private def squash(dut: IntSparseUCA, trackId: Int = 0, gen: Int = 1, srcSlot: Int = 0): Unit = {
+    dut.io.squash(0).valid.poke(true.B)
+    dut.io.squash(0).bits.src(srcSlot).valid.poke(true.B)
+    dut.io.squash(0).bits.src(srcSlot).trackId.poke(trackId.U)
+    dut.io.squash(0).bits.src(srcSlot).trackGen.poke(gen.U)
+    dut.io.squash(0).bits.src(srcSlot).srcIdx.poke(srcSlot.U)
+  }
+
+  private def commitRedef(
+    dut: IntSparseUCA,
+    lane: Int,
+    oldPdest: Int,
+    trackId: Int,
+    gen: Int,
+    redefinerRobIdx: Int
+  ): Unit = {
+    dut.io.commitNeedFree(lane).poke(true.B)
+    dut.io.commitOldPdest(lane).poke(oldPdest.U)
+    dut.io.commitRedef(lane).valid.poke(true.B)
+    dut.io.commitRedef(lane).bits.oldPdest.poke(oldPdest.U)
+    dut.io.commitRedef(lane).bits.trackId.poke(trackId.U)
+    dut.io.commitRedef(lane).bits.trackGen.poke(gen.U)
+    setRobPtr(dut.io.commitRedef(lane).bits.redefinerRobIdx, redefinerRobIdx)
+  }
+
   it should "track L entries and leave extra producers untracked" in {
     val config = configWith(IntEarlyReleaseParams(trackEntries = 1))
     simulate(new IntSparseUCA()(config)) { dut =>
@@ -156,6 +186,26 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       clearInputs(dut)
       dut.io.debug.activeCount.expect(1.U)
       dut.io.debug.fullUntrackedCount.expect(1.U)
+    }
+  }
+
+  it should "allocate a free entry for a valid nonzero rename lane" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 1))
+    simulate(new IntSparseUCA()(config)) { dut =>
+      resetDut(dut)
+
+      allocate(dut, pdest = 9, robIdx = 3, lane = 1)
+      dut.io.rename.destTrack(0).valid.expect(false.B)
+      dut.io.rename.destTrack(1).valid.expect(true.B)
+      dut.io.rename.destTrack(1).trackId.expect(0.U)
+      dut.io.rename.destTrack(1).trackGen.expect(1.U)
+      dut.clock.step()
+      clearInputs(dut)
+
+      dut.io.debug.activeCount.expect(1.U)
+      dut.io.debug.entries(0).pdest.expect(9.U)
+      dut.io.debug.entries(0).userCounter.expect(1.U)
+      dut.io.debug.fullUntrackedCount.expect(0.U)
     }
   }
 
@@ -182,6 +232,133 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.debug.entries(0).userCounter.expect(2.U)
       dut.io.debug.sourceMatchCount.expect(1.U)
       dut.io.debug.sourceDuplicateCount.expect(1.U)
+    }
+  }
+
+  it should "count same-cycle older allocation sources and suppress same-uop duplicates" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 2))
+    simulate(new IntSparseUCA()(config)) { dut =>
+      resetDut(dut)
+
+      allocate(dut, pdest = 5, robIdx = 1, lane = 0)
+      dut.io.rename.source(1)(0).valid.poke(true.B)
+      dut.io.rename.source(1)(0).psrc.poke(5.U)
+      dut.io.rename.source(1)(0).srcIdx.poke(0.U)
+      dut.io.rename.source(1)(1).valid.poke(true.B)
+      dut.io.rename.source(1)(1).psrc.poke(5.U)
+      dut.io.rename.source(1)(1).srcIdx.poke(1.U)
+      dut.io.rename.destTrack(0).valid.expect(true.B)
+      dut.io.rename.srcMatch(1)(0).valid.expect(true.B)
+      dut.io.rename.srcMatch(1)(0).trackId.expect(0.U)
+      dut.io.rename.srcMatch(1)(0).trackGen.expect(1.U)
+      dut.io.rename.srcMatch(1)(1).valid.expect(false.B)
+      dut.clock.step()
+      clearInputs(dut)
+
+      dut.io.debug.entries(0).userCounter.expect(2.U)
+      dut.io.debug.sourceMatchCount.expect(1.U)
+      dut.io.debug.sourceDuplicateCount.expect(1.U)
+    }
+  }
+
+  it should "fallback a same-cycle allocation when bypass matching is disabled" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 2, allowSameCycleRenameBypassMatch = false))
+    simulate(new IntSparseUCA()(config)) { dut =>
+      resetDut(dut)
+
+      allocate(dut, pdest = 5, robIdx = 1, lane = 0)
+      dut.io.rename.source(1)(0).valid.poke(true.B)
+      dut.io.rename.source(1)(0).psrc.poke(5.U)
+      dut.io.rename.source(1)(0).srcIdx.poke(0.U)
+      dut.io.rename.srcMatch(1)(0).valid.expect(false.B)
+      dut.clock.step()
+      clearInputs(dut)
+
+      dut.io.debug.entries(0).state.expect(IntEREntryState.fallbackWaitCommit)
+      dut.io.debug.entries(0).fallback.expect(true.B)
+      dut.io.debug.entries(0).userCounter.expect(1.U)
+      dut.io.debug.fallbackCount.expect(1.U)
+    }
+  }
+
+  it should "decrement counted users on readDone and squash events" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 2))
+    simulate(new IntSparseUCA()(config)) { dut =>
+      resetDut(dut)
+
+      allocate(dut, pdest = 5, robIdx = 1)
+      dut.clock.step()
+      clearInputs(dut)
+
+      dut.io.rename.source(0)(0).valid.poke(true.B)
+      dut.io.rename.source(0)(0).psrc.poke(5.U)
+      dut.io.rename.source(0)(0).srcIdx.poke(0.U)
+      dut.clock.step()
+      clearInputs(dut)
+      dut.io.debug.entries(0).userCounter.expect(2.U)
+
+      readDone(dut, trackId = 0, gen = 1, srcSlot = 0)
+      dut.clock.step()
+      clearInputs(dut)
+      dut.io.debug.entries(0).userCounter.expect(1.U)
+      dut.io.debug.readDoneDecCount.expect(1.U)
+
+      dut.io.rename.source(0)(1).valid.poke(true.B)
+      dut.io.rename.source(0)(1).psrc.poke(5.U)
+      dut.io.rename.source(0)(1).srcIdx.poke(1.U)
+      dut.clock.step()
+      clearInputs(dut)
+      dut.io.debug.entries(0).userCounter.expect(2.U)
+
+      squash(dut, trackId = 0, gen = 1, srcSlot = 1)
+      dut.clock.step()
+      clearInputs(dut)
+      dut.io.debug.entries(0).userCounter.expect(1.U)
+      dut.io.debug.squashDecCount.expect(1.U)
+    }
+  }
+
+  it should "aggregate same-cycle source increments and validated decrements" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 2))
+    simulate(new IntSparseUCA()(config)) { dut =>
+      resetDut(dut)
+
+      allocate(dut, pdest = 5, robIdx = 1)
+      dut.clock.step()
+      clearInputs(dut)
+
+      dut.io.rename.source(0)(0).valid.poke(true.B)
+      dut.io.rename.source(0)(0).psrc.poke(5.U)
+      dut.io.rename.source(0)(0).srcIdx.poke(0.U)
+      readDone(dut, trackId = 0, gen = 1, srcSlot = 1)
+      dut.clock.step()
+      clearInputs(dut)
+
+      dut.io.debug.entries(0).userCounter.expect(1.U)
+      dut.io.debug.sourceMatchCount.expect(1.U)
+      dut.io.debug.readDoneDecCount.expect(1.U)
+    }
+  }
+
+  it should "elaborate and report debug state for sixteen tracked entries" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 16))
+    simulate(new IntSparseUCA()(config)) { dut =>
+      resetDut(dut)
+
+      for (i <- dut.io.rename.alloc.indices) {
+        allocate(dut, pdest = 8 + i, robIdx = 10 + i, lane = i)
+        dut.io.rename.destTrack(i).valid.expect(true.B)
+        dut.io.rename.destTrack(i).trackId.expect(i.U)
+      }
+      dut.clock.step()
+      clearInputs(dut)
+
+      dut.io.debug.entries.length shouldBe 16
+      dut.io.debug.activeCount.expect(dut.io.rename.alloc.length.U)
+      for (i <- dut.io.rename.alloc.indices) {
+        dut.io.debug.entries(i).pdest.expect((8 + i).U)
+        dut.io.debug.entries(i).userCounter.expect(1.U)
+      }
     }
   }
 
@@ -234,8 +411,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.rename.srcMatch(0)(0).valid.expect(false.B)
       clearInputs(dut)
 
-      dut.io.commitNeedFree(0).poke(true.B)
-      dut.io.commitOldPdest(0).poke(5.U)
+      commitRedef(dut, lane = 0, oldPdest = 5, trackId = 0, gen = 1, redefinerRobIdx = 7)
       dut.io.commitSuppress(0).suppress.expect(true.B)
       dut.io.commitSuppress(0).trackId.expect(0.U)
       dut.io.commitSuppress(0).trackGen.expect(1.U)
@@ -243,6 +419,116 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       clearInputs(dut)
       dut.io.debug.activeCount.expect(0.U)
       dut.io.debug.commitSuppressCount.expect(1.U)
+    }
+  }
+
+  it should "suppress only the commit lane with exact released allocation identity" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 2, observeOnly = false))
+    simulate(new IntSparseUCA()(config)) { dut =>
+      resetDut(dut)
+
+      allocate(dut, pdest = 5, robIdx = 1)
+      dut.clock.step()
+      clearInputs(dut)
+      redef(dut, oldPdest = 5, robIdx = 7)
+      producerReady(dut, pdest = 5, robIdx = 1)
+      guardDec(dut)
+      dut.clock.step()
+      clearInputs(dut)
+      dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
+
+      allocate(dut, pdest = 5, robIdx = 2)
+      dut.clock.step()
+      clearInputs(dut)
+      dut.io.debug.entries(1).state.expect(IntEREntryState.counting)
+      redef(dut, oldPdest = 5, robIdx = 11)
+      dut.io.rename.redefTrack(0).valid.expect(true.B)
+      dut.io.rename.redefTrack(0).trackId.expect(1.U)
+      dut.clock.step()
+      clearInputs(dut)
+
+      commitRedef(dut, lane = 0, oldPdest = 5, trackId = 1, gen = 1, redefinerRobIdx = 11)
+      commitRedef(dut, lane = 1, oldPdest = 5, trackId = 0, gen = 1, redefinerRobIdx = 7)
+      dut.io.commitSuppress(0).suppress.expect(false.B)
+      dut.io.commitSuppress(1).suppress.expect(true.B)
+      dut.io.commitSuppress(1).trackId.expect(0.U)
+      dut.io.commitSuppress(1).trackGen.expect(1.U)
+      dut.clock.step()
+      clearInputs(dut)
+
+      dut.io.debug.activeCount.expect(0.U)
+      dut.io.debug.commitSuppressCount.expect(1.U)
+    }
+  }
+
+  it should "allow redef tracking for a reused pdest with an active newer owner" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 2, observeOnly = false))
+    noException should be thrownBy {
+      simulate(new IntSparseUCA()(config)) { dut =>
+        resetDut(dut)
+
+        allocate(dut, pdest = 5, robIdx = 1)
+        dut.clock.step()
+        clearInputs(dut)
+        redef(dut, oldPdest = 5, robIdx = 7)
+        producerReady(dut, pdest = 5, robIdx = 1)
+        guardDec(dut)
+        dut.clock.step()
+        clearInputs(dut)
+        dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
+
+        allocate(dut, pdest = 5, robIdx = 2)
+        dut.clock.step()
+        clearInputs(dut)
+
+        redef(dut, oldPdest = 5, robIdx = 11)
+        dut.io.rename.redefTrack(0).valid.expect(true.B)
+        dut.io.rename.redefTrack(0).trackId.expect(1.U)
+        dut.io.rename.redefTrack(0).trackGen.expect(1.U)
+        dut.clock.step()
+      }
+    }
+  }
+
+  it should "ignore pdest-only commit free and fail fast on wrong released identity" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 2, observeOnly = false))
+    simulate(new IntSparseUCA()(config)) { dut =>
+      resetDut(dut)
+
+      allocate(dut, pdest = 5, robIdx = 1)
+      dut.clock.step()
+      clearInputs(dut)
+      redef(dut, oldPdest = 5, robIdx = 7)
+      producerReady(dut, pdest = 5, robIdx = 1)
+      guardDec(dut)
+      dut.clock.step()
+      clearInputs(dut)
+      dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
+
+      dut.io.commitNeedFree(0).poke(true.B)
+      dut.io.commitOldPdest(0).poke(5.U)
+      dut.io.commitSuppress(0).suppress.expect(false.B)
+      dut.clock.step()
+      clearInputs(dut)
+      dut.io.debug.activeCount.expect(1.U)
+    }
+
+    assertThrows[Exception] {
+      simulate(new IntSparseUCA()(config)) { dut =>
+        resetDut(dut)
+
+        allocate(dut, pdest = 5, robIdx = 1)
+        dut.clock.step()
+        clearInputs(dut)
+        redef(dut, oldPdest = 5, robIdx = 7)
+        producerReady(dut, pdest = 5, robIdx = 1)
+        guardDec(dut)
+        dut.clock.step()
+        clearInputs(dut)
+
+        commitRedef(dut, lane = 0, oldPdest = 5, trackId = 0, gen = 1, redefinerRobIdx = 8)
+        dut.clock.step()
+      }
     }
   }
 

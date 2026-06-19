@@ -93,6 +93,13 @@ class IntERRedefTrack(implicit p: Parameters) extends XSBundle {
   val oldPdest = UInt(PhyRegIdxWidth.W)
 }
 
+class IntERCommitRedef(implicit p: Parameters) extends XSBundle {
+  val trackId = UInt(IntERTrackIdWidth.W)
+  val trackGen = UInt(IntERTrackGenBits.W)
+  val oldPdest = UInt(PhyRegIdxWidth.W)
+  val redefinerRobIdx = new RobPtr
+}
+
 class IntERUopMeta(implicit p: Parameters) extends XSBundle {
   val src = IntERBundleHelper.logicalSrcVec
   val dest = new IntERDestTrack
