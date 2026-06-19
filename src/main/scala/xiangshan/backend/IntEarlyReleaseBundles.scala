@@ -36,6 +36,15 @@ object IntERFallbackReason {
   def invalidPdest = 7.U(width.W)
 }
 
+object IntEREntryState {
+  val width = 2
+
+  def invalid = 0.U(width.W)
+  def counting = 1.U(width.W)
+  def fallbackWaitCommit = 2.U(width.W)
+  def releasedWaitCommit = 3.U(width.W)
+}
+
 object IntERBundleHelper {
   def sourceIndexWidth(numSrc: Int): Int = log2Ceil(numSrc max 2)
 
@@ -140,4 +149,53 @@ class IntERCommitSuppress(implicit p: Parameters) extends XSBundle {
   val oldPdest = UInt(PhyRegIdxWidth.W)
   val trackId = UInt(IntERTrackIdWidth.W)
   val trackGen = UInt(IntERTrackGenBits.W)
+}
+
+class IntERRenameSourceProbe(implicit p: Parameters) extends XSBundle {
+  val valid = Bool()
+  val psrc = UInt(PhyRegIdxWidth.W)
+  val srcIdx = UInt(IntERSrcIdxWidth.W)
+}
+
+class IntERProducerAlloc(implicit p: Parameters) extends XSBundle {
+  val pdest = UInt(PhyRegIdxWidth.W)
+  val robIdx = new RobPtr
+}
+
+class IntERRedefProbe(implicit p: Parameters) extends XSBundle {
+  val oldPdest = UInt(PhyRegIdxWidth.W)
+  val robIdx = new RobPtr
+}
+
+class IntEREntryDebug(implicit p: Parameters) extends XSBundle {
+  val state = UInt(IntEREntryState.width.W)
+  val pdest = UInt(PhyRegIdxWidth.W)
+  val producerRobIdx = new RobPtr
+  val redefinerRobIdx = new RobPtr
+  val userCounter = UInt(IntERCounterWidth.W)
+  val gen = UInt(IntERTrackGenBits.W)
+  val fallback = Bool()
+  val redefinerSeen = Bool()
+  val redefinerNS = Bool()
+  val producedReady = Bool()
+  val earlyFreeIssued = Bool()
+}
+
+class IntERDebugBundle(implicit p: Parameters) extends XSBundle {
+  val entries = Vec(IntERTrackEntries, new IntEREntryDebug)
+  val activeCount = UInt(log2Ceil(IntERTrackEntries + 1).W)
+  val allocCount = UInt(32.W)
+  val fullUntrackedCount = UInt(32.W)
+  val sourceMatchCount = UInt(32.W)
+  val sourceDuplicateCount = UInt(32.W)
+  val readDoneDecCount = UInt(32.W)
+  val squashDecCount = UInt(32.W)
+  val guardDecCount = UInt(32.W)
+  val fallbackCount = UInt(32.W)
+  val producerReadyCount = UInt(32.W)
+  val earlyFreeOpportunityCount = UInt(32.W)
+  val earlyFreeCount = UInt(32.W)
+  val commitSuppressCount = UInt(32.W)
+  val genMismatchCount = UInt(32.W)
+  val redirectKillCount = UInt(32.W)
 }

@@ -63,7 +63,7 @@ case class IntEarlyReleaseParams(
   private def isPowerOf2(x: Int): Boolean = x > 0 && ((x & (x - 1)) == 0)
 
   require(trackEntries > 0, "IntEarlyReleaseParams.trackEntries must be positive")
-  require(isPowerOf2(trackEntries), "IntEarlyReleaseParams.trackEntries must be a power of 2 in phase 1")
+  require(isPowerOf2(trackEntries), "IntEarlyReleaseParams.trackEntries must be a power of 2")
   require(counterBits >= 3, "IntEarlyReleaseParams.counterBits must be at least 3")
   require(genBits >= 3, "IntEarlyReleaseParams.genBits must be at least 3")
   require(earlyFreeWidth >= 1, "IntEarlyReleaseParams.earlyFreeWidth must be positive")
@@ -700,8 +700,8 @@ trait HasXSParameter {
   def IntERSrcIdxWidth = log2Ceil(IntERLogicalSrcWidth max 2)
   def IntERRenameSrcWidth = RenameWidth * backendParams.numIntRegSrc
   def IntERReadDoneWidth = backendParams.allIssueParams.map(_.numDeq).sum
-  def IntERPhase1TopologyOk = backendParams.numIntRegSrc == 2
-  require(!EnableIntEarlyRegRelease || IntERPhase1TopologyOk, "phase-1 int ER assumes exactly src0/src1 are integer RAT sources")
+  def IntERIntSourceTopologyOk = backendParams.numIntRegSrc == 2
+  require(!EnableIntEarlyRegRelease || IntERIntSourceTopologyOk, "int ER assumes exactly src0/src1 are integer RAT sources")
   def DecodeWidth = coreParams.DecodeWidth
   def RenameWidth = coreParams.RenameWidth
   def CommitWidth = coreParams.CommitWidth
