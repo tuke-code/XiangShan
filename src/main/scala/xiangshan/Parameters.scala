@@ -45,6 +45,37 @@ case object XSTileKey extends Field[Seq[XSCoreParameters]]
 
 case object XSCoreParamsKey extends Field[XSCoreParameters]
 
+case class IntEarlyReleaseParams(
+  enable: Boolean = false,
+  observeOnly: Boolean = true,
+  trackEntries: Int = 16,
+  counterBits: Int = 4,
+  genBits: Int = 4,
+  earlyFreeWidth: Int = 1,
+  stWalkWidth: Int = 2,
+  readDoneQueueDepth: Int = 16,
+  eventQueueDepth: Int = 16,
+  allowSameCycleRenameBypassMatch: Boolean = true,
+  allowNonIntSchedulerConsumers: Boolean = true,
+  conservativeRedirectKill: Boolean = false,
+  enableDiffShadowXRF: Boolean = true
+) {
+  private def isPowerOf2(x: Int): Boolean = x > 0 && ((x & (x - 1)) == 0)
+
+  require(trackEntries > 0, "IntEarlyReleaseParams.trackEntries must be positive")
+  require(isPowerOf2(trackEntries), "IntEarlyReleaseParams.trackEntries must be a power of 2 in phase 1")
+  require(counterBits >= 3, "IntEarlyReleaseParams.counterBits must be at least 3")
+  require(genBits >= 3, "IntEarlyReleaseParams.genBits must be at least 3")
+  require(earlyFreeWidth >= 1, "IntEarlyReleaseParams.earlyFreeWidth must be positive")
+  require(stWalkWidth >= 1, "IntEarlyReleaseParams.stWalkWidth must be positive")
+  require(readDoneQueueDepth >= 1, "IntEarlyReleaseParams.readDoneQueueDepth must be positive")
+  require(eventQueueDepth >= 1, "IntEarlyReleaseParams.eventQueueDepth must be positive")
+
+  def trackIdWidth: Int = log2Ceil(trackEntries max 2)
+  def counterWidth: Int = counterBits
+  def trackGenBits: Int = genBits
+}
+
 case class XSCoreParameters
 (
   HasPrefetch: Boolean = false,
@@ -93,6 +124,7 @@ case class XSCoreParameters
   // TODO: New frontend parameters system below. Replace the old parameters above during development.
   frontendParameters: FrontendParameters = FrontendParameters(),
   EnableLoadFastWakeUp: Boolean = true, // NOTE: not supported now, make it false
+  intEarlyRelease: IntEarlyReleaseParams = IntEarlyReleaseParams(),
   IntLogicRegs: Int = 32,
   FpLogicRegs: Int = 32 + 1 + 1, // 1: I2F, 1: stride
   VecLogicRegs: Int = 32 + 15, // 15: tmp
@@ -648,6 +680,28 @@ trait HasXSParameter {
   def FtqSize = coreParams.frontendParameters.ftqParameters.FtqSize
   def FetchBlockInstOffsetWidth: Int = log2Ceil(coreParams.frontendParameters.FetchBlockSize / instBytes)
   def backendParams: BackendParams = coreParams.backendParams
+  def intEarlyRelease = coreParams.intEarlyRelease
+  def EnableIntEarlyRegRelease = intEarlyRelease.enable
+  def IntERObserveOnly = intEarlyRelease.observeOnly
+  def IntERTrackEntries = intEarlyRelease.trackEntries
+  def IntERTrackIdWidth = intEarlyRelease.trackIdWidth
+  def IntERCounterWidth = intEarlyRelease.counterWidth
+  def IntERTrackGenBits = intEarlyRelease.trackGenBits
+  def IntEREarlyFreeWidth = intEarlyRelease.earlyFreeWidth
+  def IntERSTWalkWidth = intEarlyRelease.stWalkWidth
+  def IntERReadDoneQueueDepth = intEarlyRelease.readDoneQueueDepth
+  def IntEREventQueueDepth = intEarlyRelease.eventQueueDepth
+  def IntERAllowSameCycleRenameBypassMatch = intEarlyRelease.allowSameCycleRenameBypassMatch
+  def IntERAllowNonIntSchedulerConsumers = intEarlyRelease.allowNonIntSchedulerConsumers
+  def IntERConservativeRedirectKill = intEarlyRelease.conservativeRedirectKill
+  def IntEREnableDiffShadowXRF = intEarlyRelease.enableDiffShadowXRF
+  def IntERMaxIntSrc = backendParams.numIntRegSrc
+  def IntERLogicalSrcWidth = backendParams.numSrc
+  def IntERSrcIdxWidth = log2Ceil(IntERLogicalSrcWidth max 2)
+  def IntERRenameSrcWidth = RenameWidth * backendParams.numIntRegSrc
+  def IntERReadDoneWidth = backendParams.allIssueParams.map(_.numDeq).sum
+  def IntERPhase1TopologyOk = backendParams.numIntRegSrc == 2
+  require(!EnableIntEarlyRegRelease || IntERPhase1TopologyOk, "phase-1 int ER assumes exactly src0/src1 are integer RAT sources")
   def DecodeWidth = coreParams.DecodeWidth
   def RenameWidth = coreParams.RenameWidth
   def CommitWidth = coreParams.CommitWidth
