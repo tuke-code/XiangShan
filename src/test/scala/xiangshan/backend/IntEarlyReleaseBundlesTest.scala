@@ -6,7 +6,10 @@ import org.chipsalliance.cde.config.Parameters
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import top.DefaultConfig
+import utility.{LogUtilsOptions, LogUtilsOptionsKey}
 import xiangshan._
+import xiangshan.backend.decode.DecodeStageIO
+import xiangshan.backend.rename.{RatReadPort, Reg_I, RenameTable, RenameTableWrapper}
 
 class IntEarlyReleaseBundleProbe(
   localSrc: Int,
@@ -52,6 +55,46 @@ class IntEarlyReleaseBundleProbe(
   require(RobSize == expectedRobSize, "IntER trackEntries must not change ROB size")
 }
 
+class DecodeOldDestRatPortShapeProbe(
+  expectedOldDestPort: Boolean
+)(implicit p: Parameters) extends XSModule {
+  val decode = IO(new DecodeStageIO)
+
+  require(decode.intRat.length == RenameWidth, "decode int RAT lane count must follow RenameWidth")
+  require(decode.intRat.head.length == backendParams.numIntRegSrc, "decode int RAT source ports must follow backend topology")
+
+  val oldDestPort = decode.elements.get("intOldDestRat")
+  require(oldDestPort.isDefined == expectedOldDestPort, "decode old-dest RAT port presence must follow Int ER enable")
+  oldDestPort.foreach { port =>
+    require(port.asInstanceOf[Vec[RatReadPort]].length == RenameWidth, "decode old-dest RAT port must have one entry per rename lane")
+  }
+}
+
+class IntRatReadPortCountProbe(
+  expectedPortsPerLane: Int
+)(implicit p: Parameters) extends RenameTable(
+  Reg_I,
+  p(XSCoreParamsKey).RabCommitWidth * p(XSCoreParamsKey).MaxUopSize
+) {
+  require(
+    io.readPorts.length == RenameWidth * expectedPortsPerLane,
+    "integer RAT read-port count must follow source plus old-dest topology"
+  )
+}
+
+class RenameTableWrapperOldDestPortShapeProbe(
+  expectedOldDestPort: Boolean
+)(implicit p: Parameters) extends RenameTableWrapper {
+  require(io.intReadPorts.length == RenameWidth, "wrapper int RAT lane count must follow RenameWidth")
+  require(io.intReadPorts.head.length == backendParams.numIntRegSrc, "wrapper int RAT source ports must follow backend topology")
+
+  val oldDestPort = io.elements.get("intOldDestReadPorts")
+  require(oldDestPort.isDefined == expectedOldDestPort, "wrapper old-dest RAT port presence must follow Int ER enable")
+  oldDestPort.foreach { port =>
+    require(port.asInstanceOf[Vec[RatReadPort]].length == RenameWidth, "wrapper old-dest RAT port must have one entry per rename lane")
+  }
+}
+
 class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers {
   behavior of "IntEarlyReleaseParams and IntEarlyReleaseBundles"
 
@@ -60,6 +103,13 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers {
     defaultConfig.alterPartial({
       case XSCoreParamsKey => defaultConfig(XSTileKey).head.copy(
         intEarlyRelease = params
+      )
+    }).alter((site, here, up) => {
+      case LogUtilsOptionsKey => LogUtilsOptions(
+        here(DebugOptionsKey).EnableDebug,
+        here(DebugOptionsKey).EnablePerfDebug,
+        here(DebugOptionsKey).FPGAPlatform,
+        here(DebugOptionsKey).EnableXMR
       )
     })
   }
@@ -78,6 +128,17 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers {
         expectedRobSize = coreParams.RobSize
       )(config)
     )
+  }
+
+  private def elaborateOldDestRatProbe(
+    params: IntEarlyReleaseParams,
+    expectedOldDestPort: Boolean,
+    expectedPortsPerLane: Int
+  ): Unit = {
+    val config = configWith(params)
+    ChiselStage.elaborate(new DecodeOldDestRatPortShapeProbe(expectedOldDestPort)(config))
+    ChiselStage.elaborate(new IntRatReadPortCountProbe(expectedPortsPerLane)(config))
+    ChiselStage.elaborate(new RenameTableWrapperOldDestPortShapeProbe(expectedOldDestPort)(config))
   }
 
   it should "reject illegal trackEntries values" in {
@@ -109,5 +170,18 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers {
 
   it should "keep default feature config disabled" in {
     elaborateProbe(IntEarlyReleaseParams(), localSrc = 1, expectedTrackIdWidth = 4)
+  }
+
+  it should "gate old-destination integer RAT read ports with feature enable" in {
+    elaborateOldDestRatProbe(
+      IntEarlyReleaseParams(),
+      expectedOldDestPort = false,
+      expectedPortsPerLane = 2
+    )
+    elaborateOldDestRatProbe(
+      IntEarlyReleaseParams(enable = true, trackEntries = 2),
+      expectedOldDestPort = true,
+      expectedPortsPerLane = 3
+    )
   }
 }

@@ -49,6 +49,9 @@ class DecodeStageIO(implicit p: Parameters) extends XSBundle {
   val out = Vec(DecodeWidth, DecoupledIO(new DecodeOutUop))
   // RAT read
   val intRat = Vec(RenameWidth, Vec(numIntRatPorts, Flipped(new RatReadPort(log2Ceil(IntLogicRegs)))))
+  val intOldDestRat = Option.when(EnableIntEarlyRegRelease)(
+    Vec(RenameWidth, Flipped(new RatReadPort(log2Ceil(IntLogicRegs))))
+  )
   val fpRat = Vec(RenameWidth, Vec(numFpRatPorts, Flipped(new RatReadPort(log2Ceil(FpLogicRegs)))))
   val vecRat = Vec(RenameWidth, Vec(numVecRatPorts, Flipped(new RatReadPort(log2Ceil(VecLogicRegs)))))
   // no v0Rat and vlRat Bundle because they are only one logic register
@@ -273,6 +276,10 @@ class DecodeStage(implicit p: Parameters) extends XSModule
     io.intRat(i)(0).addr := io.out(i).bits.lsrc(0)
     io.intRat(i)(1).addr := io.out(i).bits.lsrc(1)
     io.intRat(i).foreach(_.hold := !io.out(i).ready)
+    io.intOldDestRat.foreach { ports =>
+      ports(i).addr := io.out(i).bits.ldest(log2Ceil(IntLogicRegs) - 1, 0)
+      ports(i).hold := !io.out(i).ready
+    }
 
     // Floating-point instructions can not be fused now.
     io.fpRat(i)(0).addr := io.out(i).bits.lsrc(0)

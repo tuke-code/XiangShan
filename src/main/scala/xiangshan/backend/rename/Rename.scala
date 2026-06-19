@@ -74,6 +74,9 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     // waittable read result
     val waittable = Flipped(Vec(RenameWidth, Output(Bool())))
     val intReadPorts = Vec(RenameWidth, Vec(numIntRatPorts, new RatReadPort(log2Ceil(IntLogicRegs))))
+    val intOldDestReadPorts = Option.when(EnableIntEarlyRegRelease)(
+      Vec(RenameWidth, new RatReadPort(log2Ceil(IntLogicRegs)))
+    )
     val fpReadPorts  = Vec(RenameWidth, Vec(numFpRatPorts,  new RatReadPort(log2Ceil(FpLogicRegs))))
     val vecReadPorts = Vec(RenameWidth, Vec(numVecRatPorts, new RatReadPort(log2Ceil(VecLogicRegs))))
     val v0ReadPorts  = Vec(RenameWidth, new RatReadPort(log2Ceil(V0LogicRegs)))
@@ -189,18 +192,24 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   vlFreeList.io.debug_rat.foreach(_ := debug_vl_rat.get)
 
   val intReadPorts = rat.io.intReadPorts
+  val intOldDestReadPorts = rat.io.intOldDestReadPorts
   val fpReadPorts  = rat.io.fpReadPorts
   val vecReadPorts = rat.io.vecReadPorts
   val v0ReadPorts  = rat.io.v0ReadPorts
   val vlReadPorts  = rat.io.vlReadPorts
 
   val intReadPortsData = VecInit(intReadPorts.map(x => VecInit(x.map(_.data))))
+  val intOldDestReadPortsData = intOldDestReadPorts.map(ports => VecInit(ports.map(_.data)))
   val fpReadPortsData  = VecInit(fpReadPorts.map(x => VecInit(x.map(_.data))))
   val vecReadPortsData = VecInit(vecReadPorts.map(x => VecInit(x.map(_.data))))
   val v0ReadPortsData  = VecInit(v0ReadPorts.map(x => VecInit(x.data)))
   val vlReadPortsData  = VecInit(vlReadPorts.map(x => VecInit(x.data)))
 
   io.intReadPorts <> intReadPorts
+  if (EnableIntEarlyRegRelease) {
+    io.intOldDestReadPorts.get <> intOldDestReadPorts.get
+    dontTouch(intOldDestReadPortsData.get)
+  }
   io.fpReadPorts  <> fpReadPorts
   io.vecReadPorts <> vecReadPorts
   io.v0ReadPorts  <> v0ReadPorts

@@ -530,6 +530,9 @@ class CtrlBlockImp(
   io.frontend.canAccept := !decodeBufValid(0) || !decodeFromFrontend(0).valid
   decode.io.csrCtrl := RegNext(io.csrCtrl)
   decode.io.intRat <> rename.io.intReadPorts
+  if (EnableIntEarlyRegRelease) {
+    decode.io.intOldDestRat.get <> rename.io.intOldDestReadPorts.get
+  }
   decode.io.fpRat  <> rename.io.fpReadPorts
   decode.io.vecRat <> rename.io.vecReadPorts
   decode.io.v0Rat  <> rename.io.v0ReadPorts

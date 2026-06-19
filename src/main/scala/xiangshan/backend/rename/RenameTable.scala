@@ -48,11 +48,13 @@ class RatWritePort(ratAddrWidth: Int)(implicit p: Parameters) extends XSBundle {
 class RenameTable(reg_t: RegType, numDiffWritePorts: Int)(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelper {
 
   // params alias
+  private val numIntRegSrc = backendParams.numIntRegSrc
+  private val numIntRatPorts = numIntRegSrc + (if (EnableIntEarlyRegRelease) 1 else 0)
   private val numVecRegSrc = backendParams.numVecRegSrc
   private val numVecRatPorts = numVecRegSrc
 
   val readPortsNum = reg_t match {
-    case Reg_I => 2
+    case Reg_I => numIntRatPorts
     case Reg_F => 3
     case Reg_V => 3
     case Reg_V0 => 1
@@ -211,6 +213,8 @@ class RenameTable(reg_t: RegType, numDiffWritePorts: Int)(implicit p: Parameters
 class RenameTableWrapper(implicit p: Parameters) extends XSModule {
 
   // params alias
+  private val numIntRegSrc = backendParams.numIntRegSrc
+  private val numIntRatPorts = numIntRegSrc
   private val numVecRegSrc = backendParams.numVecRegSrc
   private val numVecRatPorts = numVecRegSrc
 
@@ -221,7 +225,10 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
     val vlCommits = Input(new VlCommitBundle(RabCommitWidth))
     val diffCommits = if (backendParams.basicDebugEn) Some(Input(new DiffCommitIO)) else None
     val diffVlCommits = Option.when(backendParams.basicDebugEn)(Input(new DiffVlCommitBundle(CommitWidth)))
-    val intReadPorts = Vec(RenameWidth, Vec(2, new RatReadPort(log2Ceil(IntLogicRegs))))
+    val intReadPorts = Vec(RenameWidth, Vec(numIntRatPorts, new RatReadPort(log2Ceil(IntLogicRegs))))
+    val intOldDestReadPorts = Option.when(EnableIntEarlyRegRelease)(
+      Vec(RenameWidth, new RatReadPort(log2Ceil(IntLogicRegs)))
+    )
     val intRenamePorts = Vec(RenameWidth, Input(new RatWritePort(log2Ceil(IntLogicRegs))))
     val fpReadPorts = Vec(RenameWidth, Vec(3, new RatReadPort(log2Ceil(FpLogicRegs))))
     val fpRenamePorts = Vec(RenameWidth, Input(new RatWritePort(log2Ceil(FpLogicRegs))))
@@ -264,7 +271,15 @@ class RenameTableWrapper(implicit p: Parameters) extends XSModule {
     difftest.coreid := io.hartId
     difftest.value := intRat.io.diff_rdata.get
   }
-  intRat.io.readPorts <> io.intReadPorts.flatten
+  val intRatReadPorts = if (EnableIntEarlyRegRelease) {
+    io.intReadPorts.flatten ++ io.intOldDestReadPorts.get
+  } else {
+    io.intReadPorts.flatten
+  }
+  require(intRat.io.readPorts.length == intRatReadPorts.length, "integer RAT read-port plumbing must be complete")
+  for ((ratPort, readPort) <- intRat.io.readPorts.zip(intRatReadPorts)) {
+    ratPort <> readPort
+  }
   intRat.io.redirect := io.redirect
   intRat.io.snpt := io.snpt
   io.int_old_pdest := intRat.io.old_pdest
