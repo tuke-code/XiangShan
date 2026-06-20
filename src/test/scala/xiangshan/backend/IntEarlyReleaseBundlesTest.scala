@@ -122,6 +122,7 @@ class IntERDownstreamPayloadShapeProbe(
   issueParams.flatMap(_.exuBlockParams).foreach(_.bindBackendParam(backendParams))
   issueParams.foreach { issue =>
     issue.bindBackendParam(backendParams)
+    issue.allExuParams.foreach(_.bindBackendParam(backendParams))
     issue.exuBlockParams.foreach(_.bindIssueBlockParam(issue))
   }
   private val issueParam = issueParams.find { issue =>
@@ -173,6 +174,132 @@ class IntERDownstreamPayloadShapeProbe(
       srcLength(regionER.get) < dynER.get.asInstanceOf[IntERUopMeta].src.length,
       "shape probe must distinguish local issue source width from full logical source width"
     )
+  }
+}
+
+class IntERAllLocalPayloadShapeProbe(
+  expectedERMeta: Boolean
+)(implicit p: Parameters) extends XSModule {
+  private val issueParams = backendParams.allIssueParams
+  issueParams.flatMap(_.exuBlockParams).foreach(_.bindBackendParam(backendParams))
+  issueParams.foreach { issue =>
+    issue.bindBackendParam(backendParams)
+    issue.allExuParams.foreach(_.bindBackendParam(backendParams))
+    issue.exuBlockParams.foreach(_.bindIssueBlockParam(issue))
+  }
+
+  require(issueParams.exists(_.inIntSchd), "shape probe must cover integer scheduler payloads")
+  require(issueParams.exists(_.inFpSchd), "shape probe must cover floating-point scheduler payloads")
+  require(issueParams.exists(_.inVfSchd), "shape probe must cover vector scheduler payloads")
+  require(
+    issueParams.flatMap(_.exuBlockParams).exists(exu => exu.numRegSrc > 0 && exu.numRegSrc < backendParams.numSrc),
+    "shape probe must include execute payloads narrower than full logical source width"
+  )
+  private val realDeqParams = issueParams.flatMap(issue => issue.exuBlockParams.filterNot(_.fakeUnit).map(issue -> _))
+  require(realDeqParams.exists(_._1.inIntSchd), "shape probe must cover integer deq payloads")
+  require(realDeqParams.exists(_._1.inFpSchd), "shape probe must cover floating-point deq payloads")
+  require(realDeqParams.exists(_._1.inVfSchd), "shape probe must cover vector deq payloads")
+
+  issueParams.foreach { issue =>
+    implicit val implicitIssueParam: IssueBlockParams = issue
+    val regionUop = Wire(new RegionInUop(issue))
+    val issuePayload = Wire(new IssueQueuePayload(issue))
+    val entry = Wire(new EntryBundles.EntryBundle)
+
+    regionUop := 0.U.asTypeOf(regionUop)
+    issuePayload := 0.U.asTypeOf(issuePayload)
+    entry := 0.U.asTypeOf(entry)
+
+    val regionER = regionUop.elements.get("intER")
+    val payloadER = issuePayload.elements.get("intER")
+    require(regionER.isDefined == expectedERMeta, s"RegionInUop ER metadata presence mismatch for ${issue.getIQName}")
+    require(payloadER.isDefined == expectedERMeta, s"IssueQueuePayload ER metadata presence mismatch for ${issue.getIQName}")
+    require(entry.status.srcStatus.length == issue.numRegSrc, s"SrcStatus width mismatch for ${issue.getIQName}")
+
+    if (expectedERMeta) {
+      require(regionER.get.asInstanceOf[IntERLocalUopMeta].src.length == issue.numSrc, s"RegionInUop ER source width mismatch for ${issue.getIQName}")
+      require(payloadER.get.asInstanceOf[IntERLocalUopMeta].src.length == issue.numSrc, s"IssueQueuePayload ER source width mismatch for ${issue.getIQName}")
+      entry.status.srcStatus.foreach { status =>
+        require(status.elements.get("intER").isDefined, s"SrcStatus ER metadata missing for ${issue.getIQName}")
+      }
+    }
+
+    issue.exuBlockParams.filterNot(_.fakeUnit).foreach { exu =>
+      val deqPayload = Wire(new IssueQueueDeqOg1Payload(exu))
+      deqPayload := 0.U.asTypeOf(deqPayload)
+      val deqER = deqPayload.elements.get("intER")
+      require(deqER.isDefined == expectedERMeta, s"IssueQueueDeqOg1Payload ER metadata presence mismatch for ${exu.name}")
+      if (expectedERMeta) {
+        require(deqER.get.asInstanceOf[Vec[IntERSrcTrack]].length == exu.numRegSrc, s"deq ER source width mismatch for ${exu.name}")
+      }
+    }
+  }
+}
+
+class IntERIssueQueueOwnershipProbe(
+  expectedERMeta: Boolean
+)(implicit p: Parameters) extends XSModule {
+  private val issueParams = backendParams.allIssueParams
+  backendParams.allExuParams.zipWithIndex.foreach { case (exu, idx) =>
+    exu.bindBackendParam(backendParams)
+    exu.updateIQWakeUpConfigs(backendParams.iqWakeUpParams)
+    exu.updateExuIdx(idx)
+  }
+  issueParams.foreach { issue =>
+    issue.bindBackendParam(backendParams)
+    issue.allExuParams.foreach(_.bindBackendParam(backendParams))
+    issue.exuBlockParams.foreach(_.bindIssueBlockParam(issue))
+  }
+
+  private def hasForbiddenERName(name: String, insideER: Boolean): Boolean = {
+    val lower = name.toLowerCase
+    val erContext = insideER || lower.contains("inter")
+    erContext && (lower.contains("readdone") || lower.contains("uca") || lower.contains("decrement"))
+  }
+
+  private def hasForbiddenERPort(name: String, data: Data, insideER: Boolean = false): Boolean = {
+    val lower = name.toLowerCase
+    val erContext = insideER || lower.contains("inter")
+    hasForbiddenERName(name, insideER) || (data match {
+      case record: Record => record.elements.exists { case (fieldName, fieldData) =>
+        hasForbiddenERPort(fieldName, fieldData, erContext)
+      }
+      case vec: Vec[_] => vec.getElements.zipWithIndex.exists { case (fieldData, fieldIdx) =>
+        hasForbiddenERPort(fieldIdx.toString, fieldData, erContext)
+      }
+      case _ => false
+    })
+  }
+
+  issueParams.foreach { issue =>
+    implicit val implicitIssueParam: IssueBlockParams = issue
+    val regionUop = new RegionInUop(issue)
+    val issuePayload = new IssueQueuePayload(issue)
+    val entry = new EntryBundles.EntryBundle
+    val deqEntry = new EntryBundles.EntryBundle(isDeq = true)
+    val commonIn = new EntryBundles.CommonInBundle
+    val commonOut = new EntryBundles.CommonOutBundle
+    val commonWire = new EntryBundles.CommonWireBundle
+    val srcStatus = new EntryBundles.SrcStatus
+
+    require(!regionUop.elements.exists { case (name, data) => hasForbiddenERPort(name, data) }, s"RegionInUop owns ER side-effect port for ${issue.getIQName}")
+    require(!issuePayload.elements.exists { case (name, data) => hasForbiddenERPort(name, data) }, s"IssueQueuePayload owns ER side-effect port for ${issue.getIQName}")
+    require(!entry.elements.exists { case (name, data) => hasForbiddenERPort(name, data) }, s"EntryBundle owns ER side-effect port for ${issue.getIQName}")
+    require(!deqEntry.elements.exists { case (name, data) => hasForbiddenERPort(name, data) }, s"deq EntryBundle owns ER side-effect port for ${issue.getIQName}")
+    require(!commonIn.elements.exists { case (name, data) => hasForbiddenERPort(name, data) }, s"IssueQueue common input owns ER side-effect port for ${issue.getIQName}")
+    require(!commonOut.elements.exists { case (name, data) => hasForbiddenERPort(name, data) }, s"IssueQueue common output owns ER side-effect port for ${issue.getIQName}")
+    require(!commonWire.elements.exists { case (name, data) => hasForbiddenERPort(name, data) }, s"IssueQueue common wire owns ER side-effect port for ${issue.getIQName}")
+    issue.exuBlockParams.filterNot(_.fakeUnit).foreach { exu =>
+      val deqPayload = new IssueQueueDeqOg1Payload(exu)
+      require(!deqPayload.elements.exists { case (name, data) => hasForbiddenERPort(name, data) }, s"IssueQueue deq payload owns ER side-effect port for ${exu.name}")
+    }
+
+    val srcER = srcStatus.elements.get("intER")
+    require(srcER.isDefined == expectedERMeta, s"SrcStatus ER metadata presence mismatch for ${issue.getIQName}")
+    srcER.foreach { meta =>
+      val fields = meta.asInstanceOf[IntERSrcTrack].elements.keySet
+      require(fields == Set("valid", "trackId", "trackGen", "srcIdx", "psrc"), s"SrcStatus ER metadata carries side-effect state for ${issue.getIQName}")
+    }
   }
 }
 
@@ -273,15 +400,25 @@ class IntERStaToStdCopyProbe(implicit p: Parameters) extends XSModule {
     val outTrackGen = Output(UInt(IntERTrackGenBits.W))
     val outSrcIdx = Output(UInt(IntERSrcIdxWidth.W))
     val outPsrc = Output(UInt(PhyRegIdxWidth.W))
+    val deqValid = Output(Bool())
+    val deqTrackId = Output(UInt(IntERTrackIdWidth.W))
+    val deqTrackGen = Output(UInt(IntERTrackGenBits.W))
+    val deqSrcIdx = Output(UInt(IntERSrcIdxWidth.W))
+    val deqPsrc = Output(UInt(PhyRegIdxWidth.W))
   })
 
+  private val stdDeqIdx = stdParam.exuBlockParams.indexWhere(_.numRegSrc > 0)
+  require(stdDeqIdx >= 0, "STD payload must have a deq source vector")
+  private implicit val implicitStdParam: IssueBlockParams = stdParam
   val staUop = Wire(new RegionInUop(staParam))
   val stdUop = Wire(new RegionInUop(stdParam))
+  val stdEntry = Wire(new EntryBundles.EntryBundle)
   val staER = staUop.intER.get
   val stdER = stdUop.intER.get
 
   staUop := 0.U.asTypeOf(staUop)
   stdUop := 0.U.asTypeOf(stdUop)
+  stdEntry := 0.U.asTypeOf(stdEntry)
 
   staUop.psrc(0) := 31.U
   staUop.psrc(1) := io.inPsrc
@@ -297,12 +434,21 @@ class IntERStaToStdCopyProbe(implicit p: Parameters) extends XSModule {
   staER.src(1).psrc := io.inPsrc
 
   Region.connectStaToStdUop(stdUop, staUop)
+  for (src <- 0 until stdParam.numRegSrc) {
+    stdEntry.status.srcStatus(src).intER.get := stdER.src(src)
+  }
+  val deqER = stdEntry.toDeqOg1Payload(stdDeqIdx).intER.get
 
   io.outValid := stdER.src(0).valid
   io.outTrackId := stdER.src(0).trackId
   io.outTrackGen := stdER.src(0).trackGen
   io.outSrcIdx := stdER.src(0).srcIdx
   io.outPsrc := stdER.src(0).psrc
+  io.deqValid := deqER(0).valid
+  io.deqTrackId := deqER(0).trackId
+  io.deqTrackGen := deqER(0).trackGen
+  io.deqSrcIdx := deqER(0).srcIdx
+  io.deqPsrc := deqER(0).psrc
 }
 
 class RenameOldDestBypassProbe(implicit p: Parameters) extends XSModule {
@@ -722,6 +868,14 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     ChiselStage.elaborate(new IntERDownstreamPayloadShapeProbe(expectedERMeta)(configWith(params)))
   }
 
+  private def elaborateAllLocalPayloadShapeProbe(params: IntEarlyReleaseParams, expectedERMeta: Boolean): Unit = {
+    ChiselStage.elaborate(new IntERAllLocalPayloadShapeProbe(expectedERMeta)(configWith(params)))
+  }
+
+  private def elaborateIssueQueueOwnershipProbe(params: IntEarlyReleaseParams, expectedERMeta: Boolean): Unit = {
+    ChiselStage.elaborate(new IntERIssueQueueOwnershipProbe(expectedERMeta)(configWith(params)))
+  }
+
   private def elaborateRenameERDebugProbe(params: IntEarlyReleaseParams, expectedDebug: Boolean): Unit = {
     ChiselStage.elaborate(new RenameERDebugShapeProbe(expectedDebug)(smallRenameConfigWith(params)))
   }
@@ -1018,6 +1172,16 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     elaborateDownstreamPayloadShapeProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedERMeta = true)
   }
 
+  it should "check all scheduler local ER metadata payload widths" in {
+    elaborateAllLocalPayloadShapeProbe(IntEarlyReleaseParams(), expectedERMeta = false)
+    elaborateAllLocalPayloadShapeProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedERMeta = true)
+  }
+
+  it should "keep IssueQueue ER ownership to metadata carriers" in {
+    elaborateIssueQueueOwnershipProbe(IntEarlyReleaseParams(), expectedERMeta = false)
+    elaborateIssueQueueOwnershipProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedERMeta = true)
+  }
+
   it should "propagate local ER source metadata through dispatch and issue payload carriers" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
 
@@ -1054,6 +1218,11 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       dut.io.outTrackGen.expect(1.U)
       dut.io.outSrcIdx.expect(1.U)
       dut.io.outPsrc.expect(23.U)
+      dut.io.deqValid.expect(true.B)
+      dut.io.deqTrackId.expect(1.U)
+      dut.io.deqTrackGen.expect(1.U)
+      dut.io.deqSrcIdx.expect(1.U)
+      dut.io.deqPsrc.expect(23.U)
     }
   }
 
@@ -1118,6 +1287,47 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
 
       dut.io.debugActiveCount.expect(1.U)
       dut.io.debugFallbackCount.expect(1.U)
+    }
+  }
+
+  it should "ignore non-register and zero integer sources before ER source matching" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new RenameERPolicyProbe()(config)) { dut =>
+      resetPolicyProbe(dut)
+
+      allocatePolicyProbe(dut, pdest = 7)
+      dut.clock.step()
+      clearPolicyProbe(dut)
+      dut.io.debugActiveCount.expect(1.U)
+
+      dut.io.renameFire.poke(true.B)
+      dut.io.sourceValid.poke(false.B)
+      dut.io.sourcePsrc.poke(7.U)
+      setRobPtr(dut.io.robIdx, 2)
+      dut.io.sourceProbeValid.expect(false.B)
+      dut.io.sourceFallback.expect(false.B)
+      dut.io.srcValid.expect(false.B)
+      dut.io.fallbackMark.expect(false.B)
+      dut.clock.step()
+      clearPolicyProbe(dut)
+
+      dut.io.debugActiveCount.expect(1.U)
+      dut.io.debugFallbackCount.expect(0.U)
+
+      dut.io.renameFire.poke(true.B)
+      dut.io.sourceValid.poke(true.B)
+      dut.io.sourcePsrc.poke(0.U)
+      setRobPtr(dut.io.robIdx, 3)
+      dut.io.sourceProbeValid.expect(false.B)
+      dut.io.sourceFallback.expect(false.B)
+      dut.io.srcValid.expect(false.B)
+      dut.io.fallbackMark.expect(false.B)
+      dut.clock.step()
+      clearPolicyProbe(dut)
+
+      dut.io.debugActiveCount.expect(1.U)
+      dut.io.debugFallbackCount.expect(0.U)
     }
   }
 
