@@ -9,7 +9,15 @@ import utility._
 import utils.SeqUtils._
 import utils._
 import xiangshan._
-import xiangshan.backend.{BackendParams, ExcpModToVprf, PcToDataPathIO, VprfToExcpMod}
+import xiangshan.backend.{
+  BackendParams,
+  ExcpModToVprf,
+  IntERFallbackReason,
+  IntERSrcTrack,
+  IntERSrcValueReadDone,
+  PcToDataPathIO,
+  VprfToExcpMod
+}
 import xiangshan.backend.Bundles._
 import xiangshan.backend.decode.ImmUnion
 import xiangshan.backend.datapath.DataConfig._
@@ -21,12 +29,63 @@ import xiangshan.backend.regcache._
 import xiangshan.backend.fu.FuConfig
 import xiangshan.backend.fu.FuType.is0latency
 import xiangshan.backend.fu.FuType.isUncertain
+import xiangshan.backend.rob.RobPtr
 import xiangshan.mem.{LqPtr, SqPtr}
+
+object DataPathIntEROps {
+  def isSupportedValueRead(source: DataSource): Bool = {
+    source.readRegOH || source.readRegCache
+  }
+
+  def emitReadDoneObservation(
+    out: ValidIO[IntERSrcValueReadDone],
+    robIdx: RobPtr,
+    srcShadow: Vec[IntERSrcTrack],
+    dataSources: Vec[DataSource],
+    s1Valid: Bool,
+    og1Failed: Bool,
+    replayPronePath: Bool
+  ): Unit = {
+    require(srcShadow.length == dataSources.length, "read observation source vectors must have matching widths")
+
+    out := 0.U.asTypeOf(out)
+    out.bits.robIdx := robIdx
+
+    val completed = s1Valid && !og1Failed
+    val trackedSources = srcShadow.map(_.valid)
+    val supportedSources = dataSources.map(isSupportedValueRead)
+    val anyTracked = VecInit(trackedSources).asUInt.orR
+    val anyUnsupported = VecInit(srcShadow.zip(supportedSources).map { case (src, supported) =>
+      src.valid && !supported
+    }).asUInt.orR
+    val fallback = completed && anyTracked && (replayPronePath || anyUnsupported)
+    val readDone = completed && anyTracked && !fallback
+
+    out.valid := fallback || readDone
+    out.bits.fallback := fallback
+    out.bits.reason := Mux(fallback, IntERFallbackReason.unsupportedReadPath, IntERFallbackReason.none)
+
+    for (logicalSrc <- out.bits.src.indices) {
+      val sourceHits = srcShadow.zip(supportedSources).map { case (src, supported) =>
+        src.valid && src.srcIdx === logicalSrc.U && Mux(fallback, true.B, supported)
+      }
+      val hit = VecInit(sourceHits).asUInt.orR
+      val selected = Mux1H(sourceHits, srcShadow)
+
+      out.bits.src(logicalSrc).valid := hit
+      out.bits.src(logicalSrc).trackId := selected.trackId
+      out.bits.src(logicalSrc).trackGen := selected.trackGen
+      out.bits.src(logicalSrc).srcIdx := selected.srcIdx
+      out.bits.src(logicalSrc).psrc := selected.psrc
+    }
+  }
+}
 
 class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockParams)
   extends XSModule with HasXSParameter {
 
   val io = IO(new DataPathIO())
+  io.intERReadDone.foreach(_ := 0.U.asTypeOf(io.intERReadDone.get))
 
   private val (fromIntIQ, toIntIQ, toIntExu) = (io.fromIntIQ, io.toIntIQ, io.toIntExu)
   private val (fromFpIQ,  toFpIQ,  toFpExu)  = (io.fromFpIQ,  io.toFpIQ,  io.toFpExu)
@@ -491,6 +550,13 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
   val s1_toExuData: MixedVec[MixedVec[Og1InUop]] = Reg(MixedVec(toExu.map(x => MixedVec(x.map(_.bits.cloneType).toSeq)).toSeq))
   val s1_toExuDataWire: MixedVec[MixedVec[Og1InUop]] = Wire(MixedVec(toExu.map(x => MixedVec(x.map(_.bits.cloneType).toSeq)).toSeq))
   s1_toExuData := s1_toExuDataWire
+  private val s1_intERReadDoneShadow = Option.when(EnableIntEarlyRegRelease)(
+    RegInit(0.U.asTypeOf(MixedVec(
+      toExu.map(iq => MixedVec(
+        iq.map(exu => Vec(exu.bits.exuParams.numRegSrc, new IntERSrcTrack)).toSeq
+      )).toSeq
+    )))
+  )
   val s1_toExuReady = Wire(MixedVec(toExu.map(x => MixedVec(x.map(_.ready.cloneType).toSeq))))
   val s1_intRfBankRaddr: MixedVec[MixedVec[Vec[UInt]]] = MixedVecInit(fromIntIQ.map(x => MixedVecInit(x.map(xx => VecInit(xx.bits.rfBankRen.get.map(xxx =>
       RegNext(xxx.asUInt)))))))
@@ -600,6 +666,14 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
       s1_data.loadDependency.foreach(_ := s0.bits.loadDependency.get.map(_ << 1))
       // timing Optimize, clock gate can use RegNext(s0.valid)
       connectSamePort(s1_data, fromIQDeqOg1Payload(i)(j))
+      s1_intERReadDoneShadow.foreach { shadow =>
+        val nextShadow = Wire(chiselTypeOf(shadow(i)(j)))
+        nextShadow := 0.U.asTypeOf(nextShadow)
+        fromIQDeqOg1Payload(i)(j).intER.foreach(nextShadow := _)
+        when (s0.fire && !s1_flush && !s0_ldCancel) {
+          shadow(i)(j) := nextShadow
+        }
+      }
       s0.ready := notBlock && !s0_cancel
       // IQ(s0) --[Ctrl]--> s1Reg ---------- end
     }
@@ -621,6 +695,9 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
           og0resp.fuType              := fromIQ(iqIdx)(iuIdx).bits.fuType
 
           val og1resp = toIU.og1resp
+          val replayPronePath = toIU.issueQueueParams match {
+            case x => x.isLdAddrIQ || x.isStAddrIQ || x.isStdIQ || x.isHyAddrIQ || x.inVfSchd
+          }
           val hasUncertain = s1_toExuData(iqIdx)(iuIdx).exuParams.needUncertainWakeup
           val lastUncertainFire = RegNext(toExu(iqIdx)(iuIdx).valid && isUncertain(s1_toExuData(iqIdx)(iuIdx).fuType) && s1_toExuReady(iqIdx)(iuIdx))
           if (hasUncertain){
@@ -633,12 +710,24 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
           og1resp.sqIdx.foreach(_ :=  0.U.asTypeOf(new SqPtr))
           og1resp.lqIdx.foreach(_ :=  0.U.asTypeOf(new LqPtr))
           og1resp.finalSuccess    := (
-            if (toIU.issueQueueParams match { case x => x.isLdAddrIQ || x.isStAddrIQ || x.isStdIQ || x.isHyAddrIQ || x.inVfSchd})
+            if (replayPronePath)
               false.B
             else
               s1_toExuValid(iqIdx)(iuIdx) && !og1FailedVec2(iqIdx)(iuIdx)
             )
           og1resp.fuType           := s1_toExuData(iqIdx)(iuIdx).fuType
+          io.intERReadDone.foreach { readDone =>
+            val readDoneIdx = fromIQ.take(iqIdx).map(_.size).sum + iuIdx
+            DataPathIntEROps.emitReadDoneObservation(
+              out = readDone(readDoneIdx),
+              robIdx = s1_toExuData(iqIdx)(iuIdx).robIdx,
+              srcShadow = s1_intERReadDoneShadow.get(iqIdx)(iuIdx),
+              dataSources = s1_toExuData(iqIdx)(iuIdx).dataSources,
+              s1Valid = s1_toExuValid(iqIdx)(iuIdx),
+              og1Failed = og1FailedVec2(iqIdx)(iuIdx),
+              replayPronePath = replayPronePath.B
+            )
+          }
       }
   }
 
@@ -869,4 +958,6 @@ class DataPathIO()(implicit p: Parameters, params: BackendParams, param: SchdBlo
   val diffRcIdx = Option.when(params.basicDebugEn && param.needWriteRegCache)(Input(Vec(params.getExuRCWriteSize, new DiffRCIdx)))
 
   val uopTopDown = new UopTopDown
+
+  val intERReadDone = Option.when(EnableIntEarlyRegRelease)(Output(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone))))
 }
