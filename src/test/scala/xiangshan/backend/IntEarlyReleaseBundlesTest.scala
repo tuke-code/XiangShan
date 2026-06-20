@@ -883,6 +883,39 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     }
   }
 
+  it should "fallback move consumers that read a tracked integer source" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new RenameERPolicyProbe()(config)) { dut =>
+      resetPolicyProbe(dut)
+
+      allocatePolicyProbe(dut, pdest = 7)
+      dut.clock.step()
+      clearPolicyProbe(dut)
+      dut.io.debugActiveCount.expect(1.U)
+
+      dut.io.renameFire.poke(true.B)
+      dut.io.singleUop.poke(true.B)
+      dut.io.isMove.poke(true.B)
+      dut.io.needIntDest.poke(true.B)
+      dut.io.ldest.poke(5.U)
+      dut.io.sourceValid.poke(true.B)
+      dut.io.sourcePsrc.poke(7.U)
+      dut.io.pdest.poke(7.U)
+      setRobPtr(dut.io.robIdx, 2)
+      dut.io.sourceProbeValid.expect(true.B)
+      dut.io.sourceFallback.expect(true.B)
+      dut.io.producerEligible.expect(false.B)
+      dut.io.srcValid.expect(false.B)
+      dut.io.fallbackMark.expect(true.B)
+      dut.clock.step()
+      clearPolicyProbe(dut)
+
+      dut.io.debugActiveCount.expect(1.U)
+      dut.io.debugFallbackCount.expect(1.U)
+    }
+  }
+
   it should "block redirect and walk from rename-side ER source events" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
 

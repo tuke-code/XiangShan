@@ -108,6 +108,121 @@ class IntERRabCommitProbe(implicit p: Parameters) extends XSModule {
   io.commitRedefRobIdxValue := rab.io.commits.info(0).intERCommitRedef.get.bits.redefinerRobIdx.value
 }
 
+class IntERUCAFreeListProbe(size: Int)(implicit p: Parameters) extends XSModule {
+  val io = IO(new Bundle {
+    val redirect = Input(Bool())
+    val walk = Input(Bool())
+    val doAllocate = Input(Bool())
+    val allocateReq = Input(Vec(RenameWidth, Bool()))
+
+    val allocValid = Input(Bool())
+    val allocPdest = Input(UInt(PhyRegIdxWidth.W))
+    val allocRobIdxValue = Input(UInt(log2Ceil(RobSize).W))
+
+    val redefValid = Input(Bool())
+    val redefOldPdest = Input(UInt(PhyRegIdxWidth.W))
+    val redefRobIdxValue = Input(UInt(log2Ceil(RobSize).W))
+
+    val producerReadyValid = Input(Bool())
+    val producerReadyPdest = Input(UInt(PhyRegIdxWidth.W))
+    val producerReadyRobIdxValue = Input(UInt(log2Ceil(RobSize).W))
+
+    val guardDecValid = Input(Bool())
+    val guardDecTrackId = Input(UInt(IntERTrackIdWidth.W))
+    val guardDecTrackGen = Input(UInt(IntERTrackGenBits.W))
+
+    val commitNeedFree = Input(Bool())
+    val commitOldPdest = Input(UInt(PhyRegIdxWidth.W))
+    val commitRedefValid = Input(Bool())
+    val commitRedefTrackId = Input(UInt(IntERTrackIdWidth.W))
+    val commitRedefTrackGen = Input(UInt(IntERTrackGenBits.W))
+    val commitRedefOldPdest = Input(UInt(PhyRegIdxWidth.W))
+    val commitRedefRobIdxValue = Input(UInt(log2Ceil(RobSize).W))
+
+    val canAllocate = Output(Bool())
+    val allocatePhyReg = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
+    val earlyFreeValid = Output(Bool())
+    val earlyFreePdest = Output(UInt(PhyRegIdxWidth.W))
+    val suppress = Output(Bool())
+    val gatedFreeReq = Output(Bool())
+    val activeCount = Output(UInt(log2Ceil(IntERTrackEntries + 1).W))
+    val entryState = Output(Vec(IntERTrackEntries, UInt(IntEREntryState.width.W)))
+  })
+
+  private def setRobPtr(ptr: xiangshan.backend.rob.RobPtr, value: UInt): Unit = {
+    ptr.flag := false.B
+    ptr.value := value
+  }
+
+  val uca = Module(new IntSparseUCA)
+  val freeList = Module(new MEFreeList(size, RabCommitWidth))
+
+  uca.io.redirectKill := false.B
+  uca.io.rename.source := 0.U.asTypeOf(uca.io.rename.source)
+  uca.io.rename.sourceFallback := 0.U.asTypeOf(uca.io.rename.sourceFallback)
+  uca.io.rename.alloc := 0.U.asTypeOf(uca.io.rename.alloc)
+  uca.io.rename.redef := 0.U.asTypeOf(uca.io.rename.redef)
+  uca.io.producerReady := 0.U.asTypeOf(uca.io.producerReady)
+  uca.io.readDone := 0.U.asTypeOf(uca.io.readDone)
+  uca.io.squash := 0.U.asTypeOf(uca.io.squash)
+  uca.io.stGuardDec := 0.U.asTypeOf(uca.io.stGuardDec)
+  uca.io.commitOldPdest := 0.U.asTypeOf(uca.io.commitOldPdest)
+  uca.io.commitNeedFree := 0.U.asTypeOf(uca.io.commitNeedFree)
+  uca.io.commitRedef := 0.U.asTypeOf(uca.io.commitRedef)
+
+  uca.io.rename.alloc(0).valid := io.allocValid
+  uca.io.rename.alloc(0).bits.pdest := io.allocPdest
+  setRobPtr(uca.io.rename.alloc(0).bits.robIdx, io.allocRobIdxValue)
+  uca.io.rename.redef(0).valid := io.redefValid
+  uca.io.rename.redef(0).bits.oldPdest := io.redefOldPdest
+  setRobPtr(uca.io.rename.redef(0).bits.robIdx, io.redefRobIdxValue)
+
+  uca.io.producerReady(0).valid := io.producerReadyValid
+  uca.io.producerReady(0).bits.valid := io.producerReadyValid
+  uca.io.producerReady(0).bits.pdest := io.producerReadyPdest
+  setRobPtr(uca.io.producerReady(0).bits.robIdx, io.producerReadyRobIdxValue)
+
+  uca.io.stGuardDec(0).valid := io.guardDecValid
+  uca.io.stGuardDec(0).bits.valid := io.guardDecValid
+  uca.io.stGuardDec(0).bits.trackId := io.guardDecTrackId
+  uca.io.stGuardDec(0).bits.trackGen := io.guardDecTrackGen
+
+  uca.io.commitNeedFree(0) := io.commitNeedFree
+  uca.io.commitOldPdest(0) := io.commitOldPdest
+  uca.io.commitRedef(0).valid := io.commitRedefValid
+  uca.io.commitRedef(0).bits.trackId := io.commitRedefTrackId
+  uca.io.commitRedef(0).bits.trackGen := io.commitRedefTrackGen
+  uca.io.commitRedef(0).bits.oldPdest := io.commitRedefOldPdest
+  setRobPtr(uca.io.commitRedef(0).bits.redefinerRobIdx, io.commitRedefRobIdxValue)
+
+  freeList.io.redirect := io.redirect
+  freeList.io.walk := io.walk
+  freeList.io.doAllocate := io.doAllocate
+  freeList.io.allocateReq := io.allocateReq
+  freeList.io.walkReq := 0.U.asTypeOf(freeList.io.walkReq)
+  freeList.io.freeReq := 0.U.asTypeOf(freeList.io.freeReq)
+  freeList.io.freePhyReg := 0.U.asTypeOf(freeList.io.freePhyReg)
+  freeList.io.commit.doCommit := false.B
+  freeList.io.commit.archAlloc := 0.U.asTypeOf(freeList.io.commit.archAlloc)
+  freeList.io.snpt := 0.U.asTypeOf(freeList.io.snpt)
+  freeList.io.debug_rat.foreach(_ := 0.U.asTypeOf(freeList.io.debug_rat.get))
+
+  val conventionalFree = io.commitNeedFree && !uca.io.commitSuppress(0).suppress
+  freeList.io.freeReq(0) := conventionalFree
+  freeList.io.freePhyReg(0) := io.commitOldPdest
+  freeList.io.earlyFreeReq.get := VecInit(uca.io.earlyFree.map(_.valid))
+  freeList.io.earlyFreePhyReg.get := VecInit(uca.io.earlyFree.map(_.bits.pdest))
+
+  io.canAllocate := freeList.io.canAllocate
+  io.allocatePhyReg := freeList.io.allocatePhyReg
+  io.earlyFreeValid := uca.io.earlyFree(0).valid
+  io.earlyFreePdest := uca.io.earlyFree(0).bits.pdest
+  io.suppress := uca.io.commitSuppress(0).suppress
+  io.gatedFreeReq := conventionalFree
+  io.activeCount := uca.io.debug.activeCount
+  io.entryState := VecInit(uca.io.debug.entries.map(_.state))
+}
+
 class IntEarlyReleaseFreeListTest extends AnyFlatSpec with Matchers with ChiselSim {
   behavior of "Int ER integer free list integration"
 
@@ -166,6 +281,43 @@ class IntEarlyReleaseFreeListTest extends AnyFlatSpec with Matchers with ChiselS
     }
   }
 
+  private def clearCombinedInputs(dut: IntERUCAFreeListProbe): Unit = {
+    dut.io.redirect.poke(false.B)
+    dut.io.walk.poke(false.B)
+    dut.io.doAllocate.poke(false.B)
+    for (i <- dut.io.allocateReq.indices) {
+      dut.io.allocateReq(i).poke(false.B)
+    }
+    dut.io.allocValid.poke(false.B)
+    dut.io.allocPdest.poke(0.U)
+    dut.io.allocRobIdxValue.poke(0.U)
+    dut.io.redefValid.poke(false.B)
+    dut.io.redefOldPdest.poke(0.U)
+    dut.io.redefRobIdxValue.poke(0.U)
+    dut.io.producerReadyValid.poke(false.B)
+    dut.io.producerReadyPdest.poke(0.U)
+    dut.io.producerReadyRobIdxValue.poke(0.U)
+    dut.io.guardDecValid.poke(false.B)
+    dut.io.guardDecTrackId.poke(0.U)
+    dut.io.guardDecTrackGen.poke(0.U)
+    dut.io.commitNeedFree.poke(false.B)
+    dut.io.commitOldPdest.poke(0.U)
+    dut.io.commitRedefValid.poke(false.B)
+    dut.io.commitRedefTrackId.poke(0.U)
+    dut.io.commitRedefTrackGen.poke(0.U)
+    dut.io.commitRedefOldPdest.poke(0.U)
+    dut.io.commitRedefRobIdxValue.poke(0.U)
+  }
+
+  private def resetCombinedDut(dut: IntERUCAFreeListProbe): Unit = {
+    clearCombinedInputs(dut)
+    dut.reset.poke(true.B)
+    dut.clock.step(2)
+    dut.reset.poke(false.B)
+    dut.clock.step(2)
+    clearCombinedInputs(dut)
+  }
+
   private def resetDut(dut: IntERMEFreeListProbe): Unit = {
     clearInputs(dut)
     dut.reset.poke(true.B)
@@ -173,6 +325,19 @@ class IntEarlyReleaseFreeListTest extends AnyFlatSpec with Matchers with ChiselS
     dut.reset.poke(false.B)
     dut.clock.step(2)
     clearInputs(dut)
+  }
+
+  private def allocateUntil(dut: IntERUCAFreeListProbe, preg: Int, maxCycles: Int): Boolean = {
+    var sawPreg = false
+    for (_ <- 0 until maxCycles) {
+      dut.io.allocateReq(0).poke(true.B)
+      dut.io.doAllocate.poke(true.B)
+      val allocated = dut.io.allocatePhyReg(0).peek().litValue
+      sawPreg ||= dut.io.canAllocate.peek().litToBoolean && allocated == BigInt(preg)
+      dut.clock.step()
+      clearCombinedInputs(dut)
+    }
+    sawPreg
   }
 
   it should "merge early-free lanes into later integer allocations" in {
@@ -213,6 +378,95 @@ class IntEarlyReleaseFreeListTest extends AnyFlatSpec with Matchers with ChiselS
         dut.io.earlyFreePhyReg(0).poke(7.U)
         dut.clock.step()
       }
+    }
+  }
+
+  it should "fail fast on duplicate early release lanes" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, observeOnly = false, trackEntries = 2, earlyFreeWidth = 2))
+
+    assertThrows[Exception] {
+      simulate(new IntERMEFreeListProbe(size = 8)(config)) { dut =>
+        resetDut(dut)
+
+        dut.io.earlyFreeReq(0).poke(true.B)
+        dut.io.earlyFreePhyReg(0).poke(33.U)
+        dut.io.earlyFreeReq(1).poke(true.B)
+        dut.io.earlyFreePhyReg(1).poke(33.U)
+        dut.clock.step()
+      }
+    }
+  }
+
+  it should "keep conventional free after ABA reuse while suppressing the original redefiner" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, observeOnly = false, trackEntries = 2))
+
+    simulate(new IntERUCAFreeListProbe(size = 8)(config)) { dut =>
+      resetCombinedDut(dut)
+
+      dut.io.allocValid.poke(true.B)
+      dut.io.allocPdest.poke(55.U)
+      dut.io.allocRobIdxValue.poke(1.U)
+      dut.clock.step()
+      clearCombinedInputs(dut)
+      dut.io.activeCount.expect(1.U)
+
+      dut.io.redefValid.poke(true.B)
+      dut.io.redefOldPdest.poke(55.U)
+      dut.io.redefRobIdxValue.poke(7.U)
+      dut.io.producerReadyValid.poke(true.B)
+      dut.io.producerReadyPdest.poke(55.U)
+      dut.io.producerReadyRobIdxValue.poke(1.U)
+      dut.io.guardDecValid.poke(true.B)
+      dut.io.guardDecTrackId.poke(0.U)
+      dut.io.guardDecTrackGen.poke(1.U)
+      dut.io.earlyFreeValid.expect(true.B)
+      dut.io.earlyFreePdest.expect(55.U)
+      dut.clock.step()
+      clearCombinedInputs(dut)
+      dut.io.entryState(0).expect(IntEREntryState.releasedWaitCommit)
+
+      allocateUntil(dut, preg = 55, maxCycles = 12) shouldBe true
+
+      dut.io.allocValid.poke(true.B)
+      dut.io.allocPdest.poke(55.U)
+      dut.io.allocRobIdxValue.poke(2.U)
+      dut.clock.step()
+      clearCombinedInputs(dut)
+      dut.io.entryState(1).expect(IntEREntryState.counting)
+
+      dut.io.redefValid.poke(true.B)
+      dut.io.redefOldPdest.poke(55.U)
+      dut.io.redefRobIdxValue.poke(11.U)
+      dut.clock.step()
+      clearCombinedInputs(dut)
+
+      dut.io.commitNeedFree.poke(true.B)
+      dut.io.commitOldPdest.poke(55.U)
+      dut.io.commitRedefValid.poke(true.B)
+      dut.io.commitRedefTrackId.poke(1.U)
+      dut.io.commitRedefTrackGen.poke(1.U)
+      dut.io.commitRedefOldPdest.poke(55.U)
+      dut.io.commitRedefRobIdxValue.poke(11.U)
+      dut.io.suppress.expect(false.B)
+      dut.io.gatedFreeReq.expect(true.B)
+      dut.clock.step()
+      clearCombinedInputs(dut)
+      dut.io.activeCount.expect(1.U)
+
+      allocateUntil(dut, preg = 55, maxCycles = 12) shouldBe true
+
+      dut.io.commitNeedFree.poke(true.B)
+      dut.io.commitOldPdest.poke(55.U)
+      dut.io.commitRedefValid.poke(true.B)
+      dut.io.commitRedefTrackId.poke(0.U)
+      dut.io.commitRedefTrackGen.poke(1.U)
+      dut.io.commitRedefOldPdest.poke(55.U)
+      dut.io.commitRedefRobIdxValue.poke(7.U)
+      dut.io.suppress.expect(true.B)
+      dut.io.gatedFreeReq.expect(false.B)
+      dut.clock.step()
+      clearCombinedInputs(dut)
+      dut.io.activeCount.expect(0.U)
     }
   }
 
