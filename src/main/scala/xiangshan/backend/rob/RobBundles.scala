@@ -25,7 +25,7 @@ import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
 import utility._
 import utils._
 import xiangshan._
-import xiangshan.backend.{BackendParams, IntERRobUopMeta}
+import xiangshan.backend.{BackendParams, IntERRobUopMeta, IntERSrcValueReadDone}
 import xiangshan.backend.Bundles.{DynInst, ExceptionInfo, ExuOutput, UopIdx, EnqRobUop}
 import xiangshan.backend.fu.{FuConfig, FuType}
 import xiangshan.frontend.ftq.FtqPtr
@@ -217,6 +217,77 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robCommitEntry.debug_pdest.foreach(_ := robEntry.debug_pdest.get)
     robCommitEntry.debug_fuType.foreach(_ := robEntry.debug_fuType.get)
     robCommitEntry.debug_fusionNum.foreach(_ := robEntry.debug_fusionNum.get)
+  }
+}
+
+object RobIntEROps {
+  def validateReadDoneEvents(
+    out: Vec[ValidIO[IntERSrcValueReadDone]],
+    markReadDone: Vec[Vec[Bool]],
+    raw: Vec[ValidIO[IntERSrcValueReadDone]],
+    entries: Vec[RobBundles.RobEntryBundle]
+  )(implicit p: Parameters): Unit = {
+    val logicalSrcWidth = p(XSCoreParamsKey).backendParams.numSrc
+    require(out.length == raw.length, "ROB ER readDone output width must match raw input width")
+    require(markReadDone.length == entries.length, "ROB ER readDone mark width must match entry count")
+    require(markReadDone.forall(_.length == logicalSrcWidth), "ROB ER readDone marks must use full logical source width")
+
+    out := 0.U.asTypeOf(out)
+    markReadDone := 0.U.asTypeOf(markReadDone)
+
+    var earlierAccepted = Seq.empty[(Int, Int, Bool)]
+    val accepted = Seq.tabulate(raw.length) { lane =>
+      Seq.tabulate(logicalSrcWidth) { slot =>
+        val srcEvent = raw(lane).bits.src(slot)
+        val entryIdxWidth = log2Ceil(entries.length max 2)
+        val entryIdx = raw(lane).bits.robIdx.value(entryIdxWidth - 1, 0)
+        val robEntry = entries(entryIdx)
+        val entryIdxInRange = raw(lane).bits.robIdx.value < entries.length.U
+        val srcIdxInRange = srcEvent.srcIdx < logicalSrcWidth.U
+        val stored = robEntry.intER.get.src(srcEvent.srcIdx)
+        val duplicate = if (earlierAccepted.isEmpty) {
+          false.B
+        } else {
+          VecInit(earlierAccepted.map { case (prevLane, prevSlot, prevAccepted) =>
+            prevAccepted &&
+              raw(prevLane).bits.robIdx.value === raw(lane).bits.robIdx.value &&
+              raw(prevLane).bits.src(prevSlot).srcIdx === srcEvent.srcIdx
+          }).asUInt.orR
+        }
+        val storedMatches =
+          entryIdxInRange &&
+            robEntry.valid &&
+            srcIdxInRange &&
+            stored.valid &&
+            stored.trackId === srcEvent.trackId &&
+            stored.trackGen === srcEvent.trackGen &&
+            !stored.readDone
+        val acceptedSource = raw(lane).valid && srcEvent.valid && storedMatches && !duplicate
+        earlierAccepted = earlierAccepted :+ (lane, slot, acceptedSource)
+        acceptedSource
+      }
+    }
+
+    for (lane <- raw.indices) {
+      out(lane).bits := raw(lane).bits
+      for (slot <- 0 until logicalSrcWidth) {
+        out(lane).bits.src(slot).valid := accepted(lane)(slot)
+      }
+      out(lane).valid := VecInit(accepted(lane)).asUInt.orR
+    }
+
+    for (entryIdx <- entries.indices) {
+      for (slot <- 0 until logicalSrcWidth) {
+        val hits = accepted.zipWithIndex.flatMap { case (acceptedLane, lane) =>
+          acceptedLane.zipWithIndex.map { case (acceptedSource, sourceSlot) =>
+            acceptedSource &&
+              raw(lane).bits.robIdx.value === entryIdx.U &&
+              raw(lane).bits.src(sourceSlot).srcIdx === slot.U
+          }
+        }
+        markReadDone(entryIdx)(slot) := VecInit(hits).asUInt.orR
+      }
+    }
   }
 }
 

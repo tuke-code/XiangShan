@@ -62,6 +62,58 @@ class BackendImp(wrapper: Backend)(implicit p: Parameters) extends LazyModuleImp
   }
 }
 
+object BackendIntEROps {
+  def mergeReadDoneRegions(
+    out: Vec[ValidIO[IntERSrcValueReadDone]],
+    regionReadDone: Seq[Vec[ValidIO[IntERSrcValueReadDone]]]
+  )(implicit p: Parameters): Unit = {
+    require(regionReadDone.nonEmpty, "Backend ER readDone merge needs at least one region input")
+    require(regionReadDone.forall(_.length == out.length), "Backend ER readDone merge lane widths must match")
+
+    val logicalSrcWidth = p(XSCoreParamsKey).backendParams.numSrc
+    out := 0.U.asTypeOf(out)
+    for (lane <- out.indices) {
+      val validSeq = regionReadDone.map(_(lane).valid)
+      val valids = VecInit(validSeq)
+      val selected = PriorityMux(validSeq.zip(regionReadDone.map(_(lane).bits)))
+      val fallbackSeq = regionReadDone.map(port => port(lane).valid && port(lane).bits.fallback)
+      val fallback = VecInit(fallbackSeq).asUInt.orR
+
+      out(lane).valid := valids.asUInt.orR
+      out(lane).bits := selected
+      out(lane).bits.fallback := fallback
+      out(lane).bits.reason := PriorityMux(
+        fallbackSeq.zip(regionReadDone.map(_(lane).bits.reason)) :+ (true.B -> IntERFallbackReason.none)
+      )
+
+      when(PopCount(valids) > 1.U) {
+        assert(
+          VecInit(regionReadDone.map(port => !port(lane).valid || port(lane).bits.robIdx.asUInt === selected.robIdx.asUInt)).asUInt.andR,
+          "Int ER same-lane readDone merge observed mismatched ROB indices"
+        )
+      }
+
+      for (src <- 0 until logicalSrcWidth) {
+        val srcValidSeq = regionReadDone.map(port => port(lane).valid && port(lane).bits.src(src).valid)
+        val selectedSrc = PriorityMux(
+          srcValidSeq.zip(regionReadDone.map(_(lane).bits.src(src))) :+
+            (true.B -> 0.U.asTypeOf(out(lane).bits.src(src)))
+        )
+        when(PopCount(VecInit(srcValidSeq)) > 1.U) {
+          assert(
+            VecInit(regionReadDone.map(port =>
+              !port(lane).valid || !port(lane).bits.src(src).valid || port(lane).bits.src(src).asUInt === selectedSrc.asUInt
+            )).asUInt.andR,
+            "Int ER same-lane readDone merge observed mismatched source identity"
+          )
+        }
+        out(lane).bits.src(src) := selectedSrc
+        out(lane).bits.src(src).valid := VecInit(srcValidSeq).asUInt.orR
+      }
+    }
+  }
+}
+
 class BackendInlined(val params: BackendParams)(implicit p: Parameters) extends LazyModule
   with HasXSParameter {
 
@@ -214,6 +266,16 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   assert(ctrlBlock.io.fromWB.wbData.size == wbDataPathToCtrlBlock.size, "ctrlBlock.io.fromWB.wbData.size == wbDataPathToCtrlBlock.size")
   ctrlBlock.io.fromWB.wbData.zip(wbDataPathToCtrlBlock).map(x => x._1 := x._2)
   ctrlBlock.io.fromWB.delayedOldestExuRedirect := intRegion.io.wbDataPathToCtrlBlock.delayedOldestExuRedirect.get
+  if (EnableIntEarlyRegRelease) {
+    BackendIntEROps.mergeReadDoneRegions(
+      ctrlBlock.io.fromRegionIntERReadDone.get,
+      Seq(
+        intRegion.io.intERReadDone.get,
+        fpRegion.io.intERReadDone.get,
+        vecRegion.io.intERReadDone.get
+      )
+    )
+  }
   ctrlBlock.io.fromMem.stIn <> io.mem.stIn
   ctrlBlock.io.fromMem.violation <> io.mem.memoryViolation
   ctrlBlock.io.fromMem.mdpTrain <> io.mem.mdpTrain

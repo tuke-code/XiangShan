@@ -779,6 +779,7 @@ class CtrlBlockImp(
   rob.io.exuWriteback := delayedWriteBack
   rob.io.writebackNums := VecInit(delayedNotFlushedWriteBackNums)
   rob.io.writebackNeedFlush := delayedNotFlushedWriteBackNeedFlush
+  rob.io.intERReadDone.foreach(_ := io.fromRegionIntERReadDone.get)
   rob.io.readGPAMemData := gpaMem.io.exceptionReadData
   rob.io.fromVecExcpMod.busy := io.fromVecExcpMod.busy
 
@@ -950,6 +951,7 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
     val wbData = Flipped(MixedVec(params.genWrite2RobBundles))
     val delayedOldestExuRedirect = Flipped(ValidIO(new Redirect))
   }
+  val fromRegionIntERReadDone = Option.when(EnableIntEarlyRegRelease)(Input(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone))))
   val redirect = ValidIO(new Redirect)
   val fromMem = new Bundle {
     val stIn = Vec(params.StaExuCnt, Flipped(ValidIO(new StoreUnitToLFST))) // use storeSetHit, ssid, robIdx

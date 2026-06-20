@@ -723,6 +723,7 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     }
   }
   io.wbDataPathToCtrlBlock.writeback := wbDataPath.io.toCtrlBlock.writeback
+  io.intERReadDone.foreach(_ := dataPath.io.intERReadDone.get)
   // oldestRedirect
   if (params.isIntSchd) {
     val exuRedirects: Seq[ValidIO[Redirect]] = wbDataPath.io.toCtrlBlock.writeback.filter(_.bits.redirect.nonEmpty).map(x => {
@@ -882,6 +883,7 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
     val writeback: MixedVec[ValidIO[WriteBackRobBundle]] = MixedVec(params.genWriteBackRobValidBundle.flatten)
     val delayedOldestExuRedirect = Option.when(params.isIntSchd)(ValidIO(new Redirect))
   }
+  val intERReadDone = Option.when(EnableIntEarlyRegRelease)(Output(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone))))
   val memWriteback: MixedVec[MixedVec[DecoupledIO[NewExuOutput]]] = Flipped(params.genNewExuOutputDecoupledBundleMemBlock)
   val lduWriteback: Option[MixedVec[MixedVec[DecoupledIO[NewExuOutput]]]] = Option.when(params.isFpSchd)(
     Flipped(MixedVec(intSchdParam.issueBlockParams.filter(_.isLdAddrIQ).map(_.genNewExuOutputDecoupledBundle)))
@@ -954,4 +956,3 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val debugIQEnqHasIssuedVec = Option.when(backendParams.debugEn)(Vec(IQNum, Output(Bool())))
   val debugIQDeqRobIdxVec = Option.when(backendParams.debugEn)(Vec(iqDeqSum, ValidIO(new RobPtr())))
 }
-

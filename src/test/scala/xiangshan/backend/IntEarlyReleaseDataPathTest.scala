@@ -54,6 +54,7 @@ class IntERDataPathReadDoneProbe(localSrc: Int, replayProne: Boolean)(implicit p
     val srcIdx = Input(Vec(localSrc, UInt(IntERSrcIdxWidth.W)))
     val psrc = Input(Vec(localSrc, UInt(PhyRegIdxWidth.W)))
     val dataSources = Input(Vec(localSrc, DataSource()))
+    val intReadSrc = Input(Vec(localSrc, Bool()))
     val out = Output(Valid(new IntERSrcValueReadDone))
   })
 
@@ -71,11 +72,21 @@ class IntERDataPathReadDoneProbe(localSrc: Int, replayProne: Boolean)(implicit p
     robIdx = io.robIdx,
     srcShadow = shadow,
     dataSources = io.dataSources,
+    intReadSources = io.intReadSrc,
     s1Valid = io.s1Valid,
     og1Failed = io.og1Failed,
     replayPronePath = replayProne.B,
     uncertainReadPath = io.uncertainReadPath
   )
+}
+
+class IntERBackendReadDoneMergeProbe(regionCount: Int, laneCount: Int)(implicit p: Parameters) extends XSModule {
+  val io = IO(new Bundle {
+    val region = Input(Vec(regionCount, Vec(laneCount, Valid(new IntERSrcValueReadDone))))
+    val out = Output(Vec(laneCount, Valid(new IntERSrcValueReadDone)))
+  })
+
+  BackendIntEROps.mergeReadDoneRegions(io.out, io.region)
 }
 
 class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselSim {
@@ -107,6 +118,7 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
       dut.io.srcIdx(src).poke(src.U)
       dut.io.psrc(src).poke(0.U)
       dut.io.dataSources(src).value.poke(DataSource.zero)
+      dut.io.intReadSrc(src).poke(false.B)
     }
   }
 
@@ -117,7 +129,8 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
     trackId: Int,
     trackGen: Int,
     psrc: Int,
-    dataSource: UInt
+    dataSource: UInt,
+    intReadSrc: Boolean = true
   ): Unit = {
     dut.io.srcValid(localSrc).poke(true.B)
     dut.io.srcTrackId(localSrc).poke(trackId.U)
@@ -125,11 +138,62 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
     dut.io.srcIdx(localSrc).poke(logicalSrc.U)
     dut.io.psrc(localSrc).poke(psrc.U)
     dut.io.dataSources(localSrc).value.poke(dataSource)
+    dut.io.intReadSrc(localSrc).poke(intReadSrc.B)
   }
 
   it should "gate DataPath read observation IO with Int ER enable" in {
     ChiselStage.elaborate(new IntERDataPathIOShapeProbe(expectedER = false)(configWith(IntEarlyReleaseParams())))
     ChiselStage.elaborate(new IntERDataPathIOShapeProbe(expectedER = true)(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))))
+  }
+
+  it should "map readDone lanes by global issue-queue order" in {
+    val params = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))(XSCoreParamsKey).backendParams
+    val intFirst = 0
+    val fpFirst = params.allIssueParams.indexWhere(issue => params.fpSchdParams.get.issueBlockParams.exists(_ eq issue))
+    val vecFirst = params.allIssueParams.indexWhere(issue => params.vecSchdParams.get.issueBlockParams.exists(_ eq issue))
+    fpFirst should be > intFirst
+    vecFirst should be > fpFirst
+
+    val firstFpLane = params.allIssueParams.take(fpFirst).map(_.numDeq).sum
+    val firstVecLane = params.allIssueParams.take(vecFirst).map(_.numDeq).sum
+    DataPathIntEROps.readDoneLaneIndex(params.allIssueParams, fpFirst, 0) shouldBe firstFpLane
+    DataPathIntEROps.readDoneLaneIndex(params.allIssueParams, vecFirst, 0) shouldBe firstVecLane
+    val multiDeqIssue = params.allIssueParams.zipWithIndex.collectFirst { case (issue, idx) if issue.numDeq > 1 => idx }.get
+    val multiDeqFirstLane = params.allIssueParams.take(multiDeqIssue).map(_.numDeq).sum
+    DataPathIntEROps.readDoneLaneIndex(params.allIssueParams, multiDeqIssue, 1) shouldBe multiDeqFirstLane + 1
+  }
+
+  it should "merge cross-region readDone observations for the same global lane" in {
+    simulate(new IntERBackendReadDoneMergeProbe(regionCount = 3, laneCount = 2)(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2)))) { dut =>
+      dut.io.region.poke(0.U.asTypeOf(dut.io.region))
+      setRobPtr(dut.io.region(0)(0).bits.robIdx, 12)
+      dut.io.region(0)(0).valid.poke(true.B)
+      dut.io.region(0)(0).bits.src(0).valid.poke(true.B)
+      dut.io.region(0)(0).bits.src(0).trackId.poke(1.U)
+      dut.io.region(0)(0).bits.src(0).trackGen.poke(2.U)
+      dut.io.region(0)(0).bits.src(0).srcIdx.poke(0.U)
+      dut.io.region(0)(0).bits.src(0).psrc.poke(21.U)
+
+      setRobPtr(dut.io.region(1)(0).bits.robIdx, 12)
+      dut.io.region(1)(0).valid.poke(true.B)
+      dut.io.region(1)(0).bits.fallback.poke(true.B)
+      dut.io.region(1)(0).bits.reason.poke(IntERFallbackReason.unsupportedReadPath)
+      dut.io.region(1)(0).bits.src(1).valid.poke(true.B)
+      dut.io.region(1)(0).bits.src(1).trackId.poke(0.U)
+      dut.io.region(1)(0).bits.src(1).trackGen.poke(3.U)
+      dut.io.region(1)(0).bits.src(1).srcIdx.poke(1.U)
+      dut.io.region(1)(0).bits.src(1).psrc.poke(22.U)
+
+      dut.io.out(0).valid.expect(true.B)
+      dut.io.out(0).bits.robIdx.value.expect(12.U)
+      dut.io.out(0).bits.fallback.expect(true.B)
+      dut.io.out(0).bits.reason.expect(IntERFallbackReason.unsupportedReadPath)
+      dut.io.out(0).bits.src(0).valid.expect(true.B)
+      dut.io.out(0).bits.src(0).trackId.expect(1.U)
+      dut.io.out(0).bits.src(1).valid.expect(true.B)
+      dut.io.out(0).bits.src(1).trackGen.expect(3.U)
+      dut.io.out(1).valid.expect(false.B)
+    }
   }
 
   it should "emit readDone for supported register and regcache reads after final success" in {
@@ -174,6 +238,46 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
       dut.io.s1Valid.poke(true.B)
       dut.io.og1Failed.poke(true.B)
       dut.io.out.valid.expect(false.B)
+    }
+  }
+
+  it should "suppress tracked sources that this DataPath did not read as integer values" in {
+    simulate(new IntERDataPathReadDoneProbe(localSrc = 1, replayProne = false)(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2)))) { dut =>
+      clearProbe(dut)
+      dut.io.s1Valid.poke(true.B)
+      setRobPtr(dut.io.robIdx, 12)
+      setTrackedSource(
+        dut,
+        localSrc = 0,
+        logicalSrc = 0,
+        trackId = 1,
+        trackGen = 3,
+        psrc = 21,
+        dataSource = DataSource.reg,
+        intReadSrc = false
+      )
+      dut.io.out.valid.expect(false.B)
+    }
+
+    simulate(new IntERDataPathReadDoneProbe(localSrc = 2, replayProne = false)(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2)))) { dut =>
+      clearProbe(dut)
+      dut.io.s1Valid.poke(true.B)
+      setRobPtr(dut.io.robIdx, 13)
+      setTrackedSource(dut, localSrc = 0, logicalSrc = 0, trackId = 1, trackGen = 3, psrc = 21, dataSource = DataSource.forward)
+      setTrackedSource(
+        dut,
+        localSrc = 1,
+        logicalSrc = 1,
+        trackId = 0,
+        trackGen = 4,
+        psrc = 22,
+        dataSource = DataSource.reg,
+        intReadSrc = false
+      )
+      dut.io.out.valid.expect(true.B)
+      dut.io.out.bits.fallback.expect(true.B)
+      dut.io.out.bits.src(0).valid.expect(true.B)
+      dut.io.out.bits.src(1).valid.expect(false.B)
     }
   }
 

@@ -35,7 +35,7 @@ import utils._
 import xiangshan._
 import xiangshan.PerfDebugInfo
 import xiangshan.backend.GPAMemEntry
-import xiangshan.backend.{BackendParams, RatToVecExcpMod, RegWriteFromRab, VecExcpInfo}
+import xiangshan.backend.{BackendParams, IntERSrcValueReadDone, RatToVecExcpMod, RegWriteFromRab, VecExcpInfo}
 import xiangshan.backend.Bundles._
 import xiangshan.backend.decode.isa.bitfield.XSInstBitFields
 import xiangshan.backend.fu.{FuConfig, FuType}
@@ -74,6 +74,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val exuWriteback: MixedVec[ValidIO[WriteBackRobBundle]] = Flipped(params.genWrite2RobBundles)
     val writebackNums = Flipped(Vec(writeback.size, ValidIO(UInt(writeback.size.U.getWidth.W))))
     val writebackNeedFlush = Input(Vec(params.allExuParams.filter(_.needExceptionGen).length, Bool()))
+    val intERReadDone = Option.when(EnableIntEarlyRegRelease)(Flipped(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone))))
+    val intERReadDoneDec = Option.when(EnableIntEarlyRegRelease)(Output(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone))))
     val commits = Output(new RobCommitIO)
     val trace = new Bundle {
       val blockCommit = Input(Bool())
@@ -171,6 +173,24 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val bankNum = 8
   assert(RobSize % bankNum == 0, "RobSize % bankNum must be 0")
   val robEntries = RegInit(VecInit.fill(RobSize)((new RobEntryBundle).Lit(_.valid -> false.B)))
+  val intERReadDoneMarks = Option.when(EnableIntEarlyRegRelease)(
+    Wire(Vec(RobSize, Vec(IntERLogicalSrcWidth, Bool())))
+  )
+  if (EnableIntEarlyRegRelease) {
+    RobIntEROps.validateReadDoneEvents(
+      out = io.intERReadDoneDec.get,
+      markReadDone = intERReadDoneMarks.get,
+      raw = io.intERReadDone.get,
+      entries = robEntries
+    )
+    for (entry <- 0 until RobSize) {
+      for (src <- 0 until IntERLogicalSrcWidth) {
+        when(intERReadDoneMarks.get(entry)(src)) {
+          robEntries(entry).intER.get.src(src).readDone := true.B
+        }
+      }
+    }
+  }
   // pointers
   // For enqueue ptr, we don't duplicate it since only enqueue needs it.
   val enqPtrVec = Wire(Vec(RenameWidth, new RobPtr))

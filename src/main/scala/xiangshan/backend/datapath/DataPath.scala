@@ -22,7 +22,7 @@ import xiangshan.backend.Bundles._
 import xiangshan.backend.decode.ImmUnion
 import xiangshan.backend.datapath.DataConfig._
 import xiangshan.backend.datapath.RdConfig._
-import xiangshan.backend.issue.{FpScheduler, ImmExtractor, IntScheduler, SchdBlockParams, VecScheduler}
+import xiangshan.backend.issue.{FpScheduler, ImmExtractor, IntScheduler, IssueBlockParams, SchdBlockParams, VecScheduler}
 import xiangshan.backend.issue.EntryBundles._
 import xiangshan.backend.regfile._
 import xiangshan.backend.regcache._
@@ -33,6 +33,12 @@ import xiangshan.backend.rob.RobPtr
 import xiangshan.mem.{LqPtr, SqPtr}
 
 object DataPathIntEROps {
+  def readDoneLaneIndex(issueParams: Seq[IssueBlockParams], iqIdx: Int, deqIdx: Int): Int = {
+    require(iqIdx >= 0 && iqIdx < issueParams.length, "readDone IQ index must be in global issue topology")
+    require(deqIdx >= 0 && deqIdx < issueParams(iqIdx).numDeq, "readDone dequeue index must be in issue-queue width")
+    issueParams.take(iqIdx).map(_.numDeq).sum + deqIdx
+  }
+
   def isSupportedValueRead(source: DataSource): Bool = {
     source.readRegOH || source.readRegCache
   }
@@ -42,22 +48,26 @@ object DataPathIntEROps {
     robIdx: RobPtr,
     srcShadow: Vec[IntERSrcTrack],
     dataSources: Vec[DataSource],
+    intReadSources: Vec[Bool],
     s1Valid: Bool,
     og1Failed: Bool,
     replayPronePath: Bool,
     uncertainReadPath: Bool
   ): Unit = {
     require(srcShadow.length == dataSources.length, "read observation source vectors must have matching widths")
+    require(srcShadow.length == intReadSources.length, "read observation integer-read mask must match source width")
 
     out := 0.U.asTypeOf(out)
     out.bits.robIdx := robIdx
 
     val completed = s1Valid && !og1Failed
-    val trackedSources = srcShadow.map(_.valid)
-    val supportedSources = dataSources.map(isSupportedValueRead)
+    val trackedSources = srcShadow.zip(intReadSources).map { case (src, intRead) => src.valid && intRead }
+    val supportedSources = dataSources.zip(intReadSources).map { case (source, intRead) =>
+      intRead && isSupportedValueRead(source)
+    }
     val anyTracked = VecInit(trackedSources).asUInt.orR
-    val anyUnsupported = VecInit(srcShadow.zip(supportedSources).map { case (src, supported) =>
-      src.valid && !supported
+    val anyUnsupported = VecInit(srcShadow.zip(intReadSources).zip(supportedSources).map { case ((src, intRead), supported) =>
+      src.valid && intRead && !supported
     }).asUInt.orR
     val fallback = completed && anyTracked && (replayPronePath || uncertainReadPath || anyUnsupported)
     val readDone = completed && anyTracked && !fallback
@@ -67,8 +77,8 @@ object DataPathIntEROps {
     out.bits.reason := Mux(fallback, IntERFallbackReason.unsupportedReadPath, IntERFallbackReason.none)
 
     for (logicalSrc <- out.bits.src.indices) {
-      val sourceHits = srcShadow.zip(supportedSources).map { case (src, supported) =>
-        src.valid && src.srcIdx === logicalSrc.U && Mux(fallback, true.B, supported)
+      val sourceHits = srcShadow.zip(intReadSources).zip(supportedSources).map { case ((src, intRead), supported) =>
+        src.valid && intRead && src.srcIdx === logicalSrc.U && Mux(fallback, true.B, supported)
       }
       val hit = VecInit(sourceHits).asUInt.orR
       val selected = Mux1H(sourceHits, srcShadow)
@@ -97,6 +107,12 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
 
   // just refences for convience
   private val fromIQ: Seq[MixedVec[DecoupledIO[Og0InUop]]] = (fromIntIQ ++ fromFpIQ ++ fromVfIQ).toSeq
+  if (EnableIntEarlyRegRelease) {
+    require(fromIQ.length == backendParams.allIssueParams.length, "DataPath ER readDone IQ topology must use global issue order")
+    fromIQ.zip(backendParams.allIssueParams).foreach { case (local, global) =>
+      require(local.size == global.numDeq, "DataPath ER readDone issue width must match global issue topology")
+    }
+  }
 
   private val fromIQDeqOg1Payload: Seq[MixedVec[IssueQueueDeqOg1Payload]] = (io.fromIntIQDeqOg1Payload ++ io.fromFpIQDeqOg1Payload ++ io.fromVecIQDeqOg1Payload).toSeq
 
@@ -718,13 +734,17 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
             )
           og1resp.fuType           := s1_toExuData(iqIdx)(iuIdx).fuType
           io.intERReadDone.foreach { readDone =>
-            val readDoneIdx = fromIQ.take(iqIdx).map(_.size).sum + iuIdx
+            val readDoneIdx = DataPathIntEROps.readDoneLaneIndex(backendParams.allIssueParams, iqIdx, iuIdx)
             val uncertainReadPath = hasUncertain.B && isUncertain(s1_toExuData(iqIdx)(iuIdx).fuType)
+            val intReadSources = VecInit((0 until s1_toExuData(iqIdx)(iuIdx).exuParams.numRegSrc).map { src =>
+              (param.isIntSchd && s1_toExuData(iqIdx)(iuIdx).exuParams.getRfReadSrcIdx(IntData()).contains(src)).B
+            })
             DataPathIntEROps.emitReadDoneObservation(
               out = readDone(readDoneIdx),
               robIdx = s1_toExuData(iqIdx)(iuIdx).robIdx,
               srcShadow = s1_intERReadDoneShadow.get(iqIdx)(iuIdx),
               dataSources = s1_toExuData(iqIdx)(iuIdx).dataSources,
+              intReadSources = intReadSources,
               s1Valid = s1_toExuValid(iqIdx)(iuIdx),
               og1Failed = og1FailedVec2(iqIdx)(iuIdx),
               replayPronePath = replayPronePath.B,
