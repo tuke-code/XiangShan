@@ -11,9 +11,9 @@ import top.DefaultConfig
 import utility.{LogUtilsOptions, LogUtilsOptionsKey, PerfCounterOptions, PerfCounterOptionsKey, XSPerfLevel}
 import xiangshan._
 import xiangshan.TopDownCounters._
-import xiangshan.backend.Bundles.RenameOutUop
-import xiangshan.backend.Bundles.DecodeOutUop
+import xiangshan.backend.Bundles.{DecodeOutUop, DispatchOutUop, DynInst, IssueQueueDeqOg1Payload, IssueQueuePayload, RegionInUop, RenameOutUop, connectSamePort}
 import xiangshan.backend.decode.{DecodeStage, DecodeStageIO, FusionDecodeInfo}
+import xiangshan.backend.issue.{EntryBundles, IssueBlockParams}
 import xiangshan.backend.rename.{RatReadPort, Reg_I, Rename, RenameIntEROps, RenameTable, RenameTableWrapper}
 import xiangshan.backend.regfile.{FpPregParams, IntPregParams, V0PregParams, VfPregParams, VlPregParams}
 
@@ -113,6 +113,141 @@ class RenameOutUopERMetaShapeProbe(
     val typed = meta.asInstanceOf[IntERUopMeta]
     require(typed.src.length == backendParams.numSrc, "rename output ER metadata must use full logical source width")
   }
+}
+
+class IntERDownstreamPayloadShapeProbe(
+  expectedERMeta: Boolean
+)(implicit p: Parameters) extends XSModule {
+  private val issueParams = backendParams.allIssueParams
+  issueParams.flatMap(_.exuBlockParams).foreach(_.bindBackendParam(backendParams))
+  issueParams.foreach { issue =>
+    issue.bindBackendParam(backendParams)
+    issue.exuBlockParams.foreach(_.bindIssueBlockParam(issue))
+  }
+  private val issueParam = issueParams.find { issue =>
+    issue.numSrc > 0 && issue.numRegSrc > 0 && issue.numSrc < backendParams.numSrc
+  }.getOrElse(issueParams.find(issue => issue.numSrc > 0 && issue.numRegSrc > 0).get)
+  private val exuParam = issueParam.exuBlockParams.find(_.numRegSrc > 0).get
+  private implicit val implicitIssueParam: IssueBlockParams = issueParam
+
+  val dynInst = Wire(new DynInst)
+  val dispatchUop = Wire(new DispatchOutUop)
+  val regionUop = Wire(new RegionInUop(issueParam))
+  val issuePayload = Wire(new IssueQueuePayload(issueParam))
+  val srcStatus = Wire(new EntryBundles.SrcStatus)
+  val deqPayload = Wire(new IssueQueueDeqOg1Payload(exuParam))
+
+  dynInst := 0.U.asTypeOf(dynInst)
+  dispatchUop := 0.U.asTypeOf(dispatchUop)
+  regionUop := 0.U.asTypeOf(regionUop)
+  issuePayload := 0.U.asTypeOf(issuePayload)
+  srcStatus := 0.U.asTypeOf(srcStatus)
+  deqPayload := 0.U.asTypeOf(deqPayload)
+
+  val dynER = dynInst.elements.get("intER")
+  val dispatchER = dispatchUop.elements.get("intER")
+  val regionER = regionUop.elements.get("intER")
+  val payloadER = issuePayload.elements.get("intER")
+  val statusER = srcStatus.elements.get("intER")
+  val deqER = deqPayload.elements.get("intER")
+
+  require(dynER.isDefined == expectedERMeta, "DynInst ER metadata presence must follow feature enable")
+  require(dispatchER.isDefined == expectedERMeta, "DispatchOutUop ER metadata presence must follow feature enable")
+  require(regionER.isDefined == expectedERMeta, "RegionInUop ER metadata presence must follow feature enable")
+  require(payloadER.isDefined == expectedERMeta, "IssueQueuePayload ER metadata presence must follow feature enable")
+  require(statusER.isDefined == expectedERMeta, "SrcStatus ER metadata presence must follow feature enable")
+  require(deqER.isDefined == expectedERMeta, "IssueQueueDeqOg1Payload ER metadata presence must follow feature enable")
+
+  if (expectedERMeta) {
+    def srcLength(meta: Data): Int = {
+      meta.asInstanceOf[Bundle].elements("src").asInstanceOf[Vec[IntERSrcTrack]].length
+    }
+
+    require(dynER.get.asInstanceOf[IntERUopMeta].src.length == backendParams.numSrc, "DynInst must use full logical ER source width")
+    require(dispatchER.get.asInstanceOf[IntERUopMeta].src.length == backendParams.numSrc, "DispatchOutUop must use full logical ER source width")
+    require(srcLength(regionER.get) == issueParam.numSrc, "RegionInUop must use issue-local ER source width")
+    require(srcLength(payloadER.get) == issueParam.numSrc, "IssueQueuePayload must use issue-local ER source width")
+    require(statusER.get.asInstanceOf[IntERSrcTrack].srcIdx.getWidth == IntERSrcIdxWidth, "SrcStatus must preserve full logical source index width")
+    require(deqER.get.asInstanceOf[Vec[IntERSrcTrack]].length == exuParam.numRegSrc, "IssueQueueDeqOg1Payload must use execute-local register source width")
+    require(
+      srcLength(regionER.get) < dynER.get.asInstanceOf[IntERUopMeta].src.length,
+      "shape probe must distinguish local issue source width from full logical source width"
+    )
+  }
+}
+
+class IntERDownstreamPropagationProbe(implicit p: Parameters) extends XSModule {
+  private val issueParams = backendParams.allIssueParams
+  issueParams.flatMap(_.exuBlockParams).foreach(_.bindBackendParam(backendParams))
+  issueParams.foreach { issue =>
+    issue.bindBackendParam(backendParams)
+    issue.exuBlockParams.foreach(_.bindIssueBlockParam(issue))
+  }
+  private val issueParam = issueParams.find { issue =>
+    issue.numSrc > 0 && issue.numRegSrc > 0 && issue.numSrc < backendParams.numSrc
+  }.getOrElse(issueParams.find(issue => issue.numSrc > 0 && issue.numRegSrc > 0).get)
+  private val deqIdx = issueParam.exuBlockParams.indexWhere(_.numRegSrc > 0)
+  require(deqIdx >= 0, "propagation probe requires an execute unit with register sources")
+  private implicit val implicitIssueParam: IssueBlockParams = issueParam
+
+  val io = IO(new Bundle {
+    val inValid = Input(Bool())
+    val inTrackId = Input(UInt(IntERTrackIdWidth.W))
+    val inTrackGen = Input(UInt(IntERTrackGenBits.W))
+    val inSrcIdx = Input(UInt(IntERSrcIdxWidth.W))
+    val inPsrc = Input(UInt(PhyRegIdxWidth.W))
+
+    val dispatchValid = Output(Bool())
+    val regionValid = Output(Bool())
+    val payloadValid = Output(Bool())
+    val statusValid = Output(Bool())
+    val deqValid = Output(Bool())
+    val deqTrackId = Output(UInt(IntERTrackIdWidth.W))
+    val deqTrackGen = Output(UInt(IntERTrackGenBits.W))
+    val deqSrcIdx = Output(UInt(IntERSrcIdxWidth.W))
+    val deqPsrc = Output(UInt(PhyRegIdxWidth.W))
+  })
+
+  val renameUop = Wire(new RenameOutUop)
+  val dispatchUop = Wire(new DispatchOutUop)
+  val regionUop = Wire(new RegionInUop(issueParam))
+  val entry = Wire(new EntryBundles.EntryBundle)
+  val renameMeta = renameUop.elements("intER").asInstanceOf[IntERUopMeta]
+  val dispatchMeta = dispatchUop.elements("intER").asInstanceOf[IntERUopMeta]
+  val regionMeta = regionUop.elements("intER").asInstanceOf[Bundle]
+  val regionSrc = regionMeta.elements("src").asInstanceOf[Vec[IntERSrcTrack]]
+  val payloadMeta = entry.payload.elements("intER").asInstanceOf[Bundle]
+  val payloadSrc = payloadMeta.elements("src").asInstanceOf[Vec[IntERSrcTrack]]
+
+  renameUop := 0.U.asTypeOf(renameUop)
+  dispatchUop := 0.U.asTypeOf(dispatchUop)
+  regionUop := 0.U.asTypeOf(regionUop)
+  entry := 0.U.asTypeOf(entry)
+
+  renameMeta.src(0).valid := io.inValid
+  renameMeta.src(0).trackId := io.inTrackId
+  renameMeta.src(0).trackGen := io.inTrackGen
+  renameMeta.src(0).srcIdx := io.inSrcIdx
+  renameMeta.src(0).psrc := io.inPsrc
+
+  connectSamePort(dispatchUop, renameUop)
+  IntERBundleHelper.connectLocalUopMeta(regionMeta.asInstanceOf[IntERLocalUopMeta], dispatchMeta)
+  connectSamePort(entry.payload, regionUop)
+  for (src <- 0 until issueParam.numRegSrc) {
+    entry.status.srcStatus(src).elements("intER").asInstanceOf[IntERSrcTrack] := regionSrc(src)
+  }
+
+  val deqPayload = entry.toDeqOg1Payload(deqIdx)
+  val deqSrc = deqPayload.elements("intER").asInstanceOf[Vec[IntERSrcTrack]]
+  io.dispatchValid := dispatchMeta.src(0).valid
+  io.regionValid := regionSrc(0).valid
+  io.payloadValid := payloadSrc(0).valid
+  io.statusValid := entry.status.srcStatus(0).elements("intER").asInstanceOf[IntERSrcTrack].valid
+  io.deqValid := deqSrc(0).valid
+  io.deqTrackId := deqSrc(0).trackId
+  io.deqTrackGen := deqSrc(0).trackGen
+  io.deqSrcIdx := deqSrc(0).srcIdx
+  io.deqPsrc := deqSrc(0).psrc
 }
 
 class RenameOldDestBypassProbe(implicit p: Parameters) extends XSModule {
@@ -528,6 +663,10 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     ChiselStage.elaborate(new RenameOutUopERMetaShapeProbe(expectedERMeta)(configWith(params)))
   }
 
+  private def elaborateDownstreamPayloadShapeProbe(params: IntEarlyReleaseParams, expectedERMeta: Boolean): Unit = {
+    ChiselStage.elaborate(new IntERDownstreamPayloadShapeProbe(expectedERMeta)(configWith(params)))
+  }
+
   private def elaborateRenameERDebugProbe(params: IntEarlyReleaseParams, expectedDebug: Boolean): Unit = {
     ChiselStage.elaborate(new RenameERDebugShapeProbe(expectedDebug)(smallRenameConfigWith(params)))
   }
@@ -817,6 +956,33 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
   it should "gate rename output ER metadata with feature enable" in {
     elaborateRenameOutUopERMetaProbe(IntEarlyReleaseParams(), expectedERMeta = false)
     elaborateRenameOutUopERMetaProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedERMeta = true)
+  }
+
+  it should "gate downstream ER metadata carriers with feature enable and local widths" in {
+    elaborateDownstreamPayloadShapeProbe(IntEarlyReleaseParams(), expectedERMeta = false)
+    elaborateDownstreamPayloadShapeProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedERMeta = true)
+  }
+
+  it should "propagate local ER source metadata through dispatch and issue payload carriers" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new IntERDownstreamPropagationProbe()(config)) { dut =>
+      dut.io.inValid.poke(true.B)
+      dut.io.inTrackId.poke(1.U)
+      dut.io.inTrackGen.poke(1.U)
+      dut.io.inSrcIdx.poke(2.U)
+      dut.io.inPsrc.poke(19.U)
+
+      dut.io.dispatchValid.expect(true.B)
+      dut.io.regionValid.expect(true.B)
+      dut.io.payloadValid.expect(true.B)
+      dut.io.statusValid.expect(true.B)
+      dut.io.deqValid.expect(true.B)
+      dut.io.deqTrackId.expect(1.U)
+      dut.io.deqTrackGen.expect(1.U)
+      dut.io.deqSrcIdx.expect(2.U)
+      dut.io.deqPsrc.expect(19.U)
+    }
   }
 
   it should "gate rename ER debug output with feature enable" in {

@@ -289,6 +289,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
     sink.bits.srcType.zip(source.bits.srcType).map(x => x._1 := x._2)
     sink.bits.psrc.zip(source.bits.psrc).map(x => x._1 := x._2)
     sink.bits.srcState.zip(source.bits.srcState).map(x => x._1 := x._2)
+    sink.bits.intER.foreach(meta => IntERBundleHelper.connectLocalUopMeta(meta, source.bits.intER.get))
     // only the IQ contains VSET uop will use psrcVl and srcStateVl
     sink.bits.psrcVl.foreach(_ := source.bits.psrcVl)
     sink.bits.srcStateVl.foreach(_ := source.bits.srcStateVl)
@@ -342,6 +343,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
     sink.bits.srcType.zip(source.bits.srcType).map(x => x._1 := x._2)
     sink.bits.psrc.zip(source.bits.psrc).map(x => x._1 := x._2)
     sink.bits.srcState.zip(source.bits.srcState).map(x => x._1 := x._2)
+    sink.bits.intER.foreach(meta => IntERBundleHelper.connectLocalUopMeta(meta, source.bits.intER.get))
     sink.bits.srcLoadDependency.zip(source.bits.srcLoadDependency).map(x => x._1 := x._2)
   }
   fpRegion.io.ldCancel := io.mem.ldCancel
@@ -353,6 +355,7 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
     sink.valid := source.valid
     connectSamePort(sink.bits, source.bits)
     source.ready := sink.ready
+    sink.bits.intER.foreach(meta => IntERBundleHelper.connectLocalUopMeta(meta, source.bits.intER.get))
     sink.bits.srcStateVl.get := source.bits.srcStateVl
     sink.bits.psrcVl.get := source.bits.psrcVl
     sink.bits.pdestVl.foreach(_ := source.bits.pdestVl)

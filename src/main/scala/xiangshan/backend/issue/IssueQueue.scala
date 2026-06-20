@@ -313,6 +313,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
         enq.bits.status.srcStatus(j).exuSources.foreach(_       := 0.U.asTypeOf(ExuSource()))
         enq.bits.status.srcStatus(j).useRegCache.foreach(_      := s0_enqBits(enqIdx).useRegCache(j))
         enq.bits.status.srcStatus(j).regCacheIdx.foreach(_      := s0_enqBits(enqIdx).regCacheIdx(j))
+        enq.bits.status.srcStatus(j).intER.foreach(_            := s0_enqBits(enqIdx).intER.get.src(j))
       }
       enq.bits.status.srcStatusVl.foreach {
         vlSrcStatus =>

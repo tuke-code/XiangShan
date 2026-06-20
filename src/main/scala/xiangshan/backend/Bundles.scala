@@ -374,6 +374,7 @@ object Bundles {
     val srcLoadDependency = Vec(numSrc, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
     val useRegCache = Vec(backendParams.numIntRegSrc, Bool())
     val regCacheIdx = Vec(backendParams.numIntRegSrc, UInt(RegCacheIdxWidth.W))
+    val intER = Option.when(EnableIntEarlyRegRelease)(new IntERUopMeta)
     val lqIdx = new LqPtr
     val sqIdx = new SqPtr
     val debug = OptionWrapper(backendParams.debugEn, new IssueQueueInDebug)
@@ -434,6 +435,7 @@ object Bundles {
     val srcLoadDependency = Vec(numSrc, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
     val useRegCache       = Vec(backendParams.numIntRegSrc, Bool())
     val regCacheIdx       = Vec(backendParams.numIntRegSrc, UInt(RegCacheIdxWidth.W))
+    val intER             = Option.when(EnableIntEarlyRegRelease)(new IntERLocalUopMeta(numSrc))
     val srcStateVl        = Option.when(params.readVlRf)(SrcState())
     val lqIdx             = Option.when(params.needLqIdx)(new LqPtr)
     val sqIdx             = Option.when(params.needSqIdx)(new SqPtr) // load unit need sqIdx
@@ -493,6 +495,7 @@ object Bundles {
     // psrc are used in datapath to generate regfile's bank Ren
     val psrc      = Vec(params.numRegSrc, UInt(params.rdPregIdxWidth.W))
     val psrcVl    = Option.when(params.readVlRf)(UInt(VlPhyRegIdxWidth.W))
+    val intER     = Option.when(EnableIntEarlyRegRelease)(IntERBundleHelper.localSrcVec(params.numRegSrc))
     // for mdp
     val storeSetHit    = Option.when(params.issueBlockParam.isLdAddrIQ || params.issueBlockParam.isStAddrIQ)(Bool())
     val waitForRobIdx  = Option.when(params.issueBlockParam.isLdAddrIQ)(new RobPtr)
@@ -521,6 +524,7 @@ object Bundles {
     // from rename
     val pdest     = UInt(PhyRegIdxWidth.W)
     val pdestVl   = Option.when(params.writeVlRf)(UInt(VlPhyRegIdxWidth.W))
+    val intER     = Option.when(EnableIntEarlyRegRelease)(new IntERLocalUopMeta(numSrc))
     // from dispatch
     val srcLoadDependency = Vec(numSrc, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
     val debug             = OptionWrapper(backendParams.debugEn, new IssueQueueInDebug)
@@ -603,6 +607,7 @@ object Bundles {
     val dirtyFs         = Bool()
     val dirtyVs         = Bool()
     val traceBlockInPipe = new TracePipe(IretireWidthEncoded)
+    val intER = Option.when(EnableIntEarlyRegRelease)(new IntERUopMeta)
 
     // Take snapshot at this CFI inst
     val snapshot        = Bool()

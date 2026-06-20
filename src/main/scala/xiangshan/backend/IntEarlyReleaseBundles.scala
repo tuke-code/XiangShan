@@ -65,6 +65,15 @@ object IntERBundleHelper {
 
   def localReadDoneSrcVec(n: Int)(implicit p: Parameters): Vec[IntERSrcReadDone] =
     Vec(n, new IntERSrcReadDone)
+
+  def connectLocalSrcFromFull(dst: Vec[IntERSrcTrack], src: Vec[IntERSrcTrack]): Unit = {
+    require(dst.length <= src.length, "local ER source metadata cannot be wider than full metadata")
+    dst.zipWithIndex.foreach { case (d, i) => d := src(i) }
+  }
+
+  def connectLocalUopMeta(dst: IntERLocalUopMeta, src: IntERUopMeta): Unit = {
+    connectLocalSrcFromFull(dst.src, src.src)
+  }
 }
 
 class IntERSrcTrack(implicit p: Parameters) extends XSBundle {
@@ -105,6 +114,10 @@ class IntERUopMeta(implicit p: Parameters) extends XSBundle {
   val dest = new IntERDestTrack
   val redef = new IntERRedefTrack
   val eligible = Bool()
+}
+
+class IntERLocalUopMeta(val numSrc: Int)(implicit p: Parameters) extends XSBundle {
+  val src = IntERBundleHelper.localSrcVec(numSrc)
 }
 
 class IntERSrcReadDone(implicit p: Parameters) extends XSBundle {

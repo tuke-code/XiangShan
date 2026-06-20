@@ -6,6 +6,7 @@ import chisel3.util._
 import utils.MathUtils
 import utility.HasCircularQueuePtrHelper
 import xiangshan._
+import xiangshan.backend.IntERSrcTrack
 import xiangshan.backend.Bundles._
 import xiangshan.backend.datapath.DataConfig.VlData
 import xiangshan.backend.datapath.DataSource
@@ -56,6 +57,7 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     //reg cache
     val useRegCache           = Option.when(params.needReadRegCache)(Bool())
     val regCacheIdx           = Option.when(params.needReadRegCache)(UInt(RegCacheIdxWidth.W))
+    val intER                 = Option.when(EnableIntEarlyRegRelease)(new IntERSrcTrack)
   }
 
   class VlSrcStatus(implicit p: Parameters, params: IssueBlockParams) extends XSBundle {
@@ -110,6 +112,9 @@ object EntryBundles extends HasCircularQueuePtrHelper {
       deqOg1Payload.imm.foreach(_ := payload.og1Payload.imm.get)
       deqOg1Payload.psrc.zipWithIndex.foreach{case(pl, idx) => pl := status.srcStatus(idx).psrc}
       deqOg1Payload.psrcVl.foreach{_ := status.srcStatusVl.get.psrc}
+      deqOg1Payload.intER.foreach { meta =>
+        meta.zipWithIndex.foreach { case (dst, idx) => dst := status.srcStatus(idx).intER.get }
+      }
       deqOg1Payload
     }
     def genXrfRen(entry: EntryBundle): Unit = {
