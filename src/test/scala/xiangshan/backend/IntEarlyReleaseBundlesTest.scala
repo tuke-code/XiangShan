@@ -250,6 +250,61 @@ class IntERDownstreamPropagationProbe(implicit p: Parameters) extends XSModule {
   io.deqPsrc := deqSrc(0).psrc
 }
 
+class IntERStaToStdCopyProbe(implicit p: Parameters) extends XSModule {
+  private val issueParams = backendParams.allIssueParams
+  issueParams.flatMap(_.exuBlockParams).foreach(_.bindBackendParam(backendParams))
+  issueParams.foreach { issue =>
+    issue.bindBackendParam(backendParams)
+    issue.exuBlockParams.foreach(_.bindIssueBlockParam(issue))
+  }
+  private val staParam = issueParams.find(_.isStAddrIQ).get
+  private val stdParam = issueParams.find(_.isStdIQ).get
+  require(staParam.numSrc > 1, "STA source vector must include the store-data source")
+  require(stdParam.numSrc > 0, "STD source vector must include the store-data source")
+
+  val io = IO(new Bundle {
+    val inValid = Input(Bool())
+    val inTrackId = Input(UInt(IntERTrackIdWidth.W))
+    val inTrackGen = Input(UInt(IntERTrackGenBits.W))
+    val inPsrc = Input(UInt(PhyRegIdxWidth.W))
+
+    val outValid = Output(Bool())
+    val outTrackId = Output(UInt(IntERTrackIdWidth.W))
+    val outTrackGen = Output(UInt(IntERTrackGenBits.W))
+    val outSrcIdx = Output(UInt(IntERSrcIdxWidth.W))
+    val outPsrc = Output(UInt(PhyRegIdxWidth.W))
+  })
+
+  val staUop = Wire(new RegionInUop(staParam))
+  val stdUop = Wire(new RegionInUop(stdParam))
+  val staER = staUop.intER.get
+  val stdER = stdUop.intER.get
+
+  staUop := 0.U.asTypeOf(staUop)
+  stdUop := 0.U.asTypeOf(stdUop)
+
+  staUop.psrc(0) := 31.U
+  staUop.psrc(1) := io.inPsrc
+  staER.src(0).valid := true.B
+  staER.src(0).trackId := 0.U
+  staER.src(0).trackGen := 0.U
+  staER.src(0).srcIdx := 0.U
+  staER.src(0).psrc := 31.U
+  staER.src(1).valid := io.inValid
+  staER.src(1).trackId := io.inTrackId
+  staER.src(1).trackGen := io.inTrackGen
+  staER.src(1).srcIdx := 1.U
+  staER.src(1).psrc := io.inPsrc
+
+  Region.connectStaToStdUop(stdUop, staUop)
+
+  io.outValid := stdER.src(0).valid
+  io.outTrackId := stdER.src(0).trackId
+  io.outTrackGen := stdER.src(0).trackGen
+  io.outSrcIdx := stdER.src(0).srcIdx
+  io.outPsrc := stdER.src(0).psrc
+}
+
 class RenameOldDestBypassProbe(implicit p: Parameters) extends XSModule {
   val io = IO(new Bundle {
     val base = Input(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
@@ -982,6 +1037,23 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       dut.io.deqTrackGen.expect(1.U)
       dut.io.deqSrcIdx.expect(2.U)
       dut.io.deqPsrc.expect(19.U)
+    }
+  }
+
+  it should "copy STA source one ER metadata to STD source zero preserving original source index" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new IntERStaToStdCopyProbe()(config)) { dut =>
+      dut.io.inValid.poke(true.B)
+      dut.io.inTrackId.poke(1.U)
+      dut.io.inTrackGen.poke(1.U)
+      dut.io.inPsrc.poke(23.U)
+
+      dut.io.outValid.expect(true.B)
+      dut.io.outTrackId.expect(1.U)
+      dut.io.outTrackGen.expect(1.U)
+      dut.io.outSrcIdx.expect(1.U)
+      dut.io.outPsrc.expect(23.U)
     }
   }
 

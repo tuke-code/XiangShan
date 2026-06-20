@@ -34,6 +34,22 @@ import xiangshan.backend.rob.RobPtr
 import xiangshan.backend.issue.EntryBundles.RespType
 import xiangshan.backend.issue._
 
+object Region {
+  def connectStaToStdUop(stdUop: RegionInUop, staUop: RegionInUop): Unit = {
+    val stdIdx = 1
+    require(staUop.numSrc > stdIdx, "STA uop must carry store-data source metadata")
+    require(stdUop.numSrc > 0, "STD uop must carry store-data source metadata")
+
+    stdUop.srcState(0) := staUop.srcState(stdIdx)
+    stdUop.srcLoadDependency(0) := staUop.srcLoadDependency(stdIdx)
+    stdUop.srcType(0) := staUop.srcType(stdIdx)
+    stdUop.psrc(0) := staUop.psrc(stdIdx)
+    stdUop.sqIdx.get := staUop.sqIdx.get
+    stdUop.useRegCache(0) := staUop.useRegCache(stdIdx)
+    stdUop.regCacheIdx(0) := staUop.regCacheIdx(stdIdx)
+    stdUop.intER.foreach(_.src(0) := staUop.intER.get.src(stdIdx))
+  }
+}
 
 class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModule with HasCriticalErrors {
   val io = IO(new RegionIO(params))
@@ -282,14 +298,7 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     //                        ---src*(1)--> [stdIQ]
     // Since the src(1) of sta is easier to get, stdIQEnq.bits.src*(0) is assigned to staIQEnq.bits.src*(1)
     // instead of dispatch2Iq.io.out(x).bits.src*(1)
-    val stdIdx = 1
-    stdIQEnq.bits.srcState(0) := staIQEnq.bits.srcState(stdIdx)
-    stdIQEnq.bits.srcLoadDependency(0) := staIQEnq.bits.srcLoadDependency(stdIdx)
-    stdIQEnq.bits.srcType(0) := staIQEnq.bits.srcType(stdIdx)
-    stdIQEnq.bits.psrc(0) := staIQEnq.bits.psrc(stdIdx)
-    stdIQEnq.bits.sqIdx.get := staIQEnq.bits.sqIdx.get
-    stdIQEnq.bits.useRegCache(0) := staIQEnq.bits.useRegCache(stdIdx)
-    stdIQEnq.bits.regCacheIdx(0) := staIQEnq.bits.regCacheIdx(stdIdx)
+    Region.connectStaToStdUop(stdIQEnq.bits, staIQEnq.bits)
   }
   // Connect each replace RCIdx to IQ
   if (params.needWriteRegCache) {
