@@ -24,7 +24,15 @@ import utils._
 import utility._
 
 
-class MEFreeList(size: Int, commitWidth: Int)(implicit p: Parameters) extends BaseFreeList(size, commitWidth) with HasPerfEvents {
+class MEFreeList(size: Int, commitWidth: Int)(implicit p: Parameters) extends BaseFreeList(
+  size,
+  commitWidth,
+  earlyFreeWidth = if (p(XSCoreParamsKey).intEarlyRelease.enable) {
+    p(XSCoreParamsKey).intEarlyRelease.earlyFreeWidth
+  } else {
+    0
+  }
+) with HasPerfEvents {
   val freeList = RegInit(VecInit(
     // originally {1, 2, ..., size - 1} are free. Register 0-31 are mapped to x0.
     Seq.tabulate(size - 1)(i => (i + 1).U(PhyRegIdxWidth.W)) :+ 0.U(PhyRegIdxWidth.W)))
@@ -75,19 +83,37 @@ class MEFreeList(size: Int, commitWidth: Int)(implicit p: Parameters) extends Ba
   /**
     * Deallocation: when refCounter becomes zero, the register can be released to freelist
     */
-  val freePtr = VecInit(Seq.tabulate(commitWidth)(i => tailPtr + PopCount(io.freeReq.take(i))))
+  val earlyFreeReq = io.earlyFreeReq.map(_.toSeq).getOrElse(Seq.empty)
+  val earlyFreePhyReg = io.earlyFreePhyReg.map(_.toSeq).getOrElse(Seq.empty)
+  val allFreeReq = VecInit(io.freeReq.toSeq ++ earlyFreeReq)
+  val allFreePhyReg = VecInit(io.freePhyReg.toSeq ++ earlyFreePhyReg)
+  val totalFreeWidth = commitWidth + earlyFreeReq.length
+
+  io.earlyFreeReq.foreach(_.zip(io.earlyFreePhyReg.get).foreach {
+    case (req, preg) => assert(!req || preg =/= 0.U, "MEFreeList early-free physical register must be nonzero")
+  })
+  for (i <- 0 until totalFreeWidth) {
+    for (j <- 0 until i) {
+      assert(
+        !(allFreeReq(i) && allFreeReq(j) && allFreePhyReg(i) === allFreePhyReg(j)),
+        "MEFreeList received duplicate free requests for one physical register"
+      )
+    }
+  }
+
+  val freePtr = VecInit(Seq.tabulate(totalFreeWidth)(i => tailPtr + PopCount(allFreeReq.take(i))))
   for (i <- 0 until size) {
-    val freeReqOH = VecInit(io.freeReq.zipWithIndex.map { case (w, idx) =>
+    val freeReqOH = VecInit(allFreeReq.zipWithIndex.map { case (w, idx) =>
       w && freePtr(idx).value === i.U
     })
-    val freePhyReg = Mux1H(freeReqOH, io.freePhyReg)
+    val freePhyReg = Mux1H(freeReqOH, allFreePhyReg)
     when(freeReqOH.asUInt.orR) {
       freeList(i) := freePhyReg
     }
   }
 
   // update tail pointer
-  val tailPtrNext = tailPtr + PopCount(io.freeReq)
+  val tailPtrNext = tailPtr + PopCount(allFreeReq)
   tailPtr := tailPtrNext
 
   val freeRegCnt = Mux(doWalkRename && !lastCycleRedirect, distanceBetween(tailPtrNext, headPtr) - PopCount(io.walkReq),
@@ -96,7 +122,7 @@ class MEFreeList(size: Int, commitWidth: Int)(implicit p: Parameters) extends Ba
   val freeRegCntReg = RegNext(freeRegCnt)
   io.canAllocate := freeRegCntReg >= RenameWidth.U
 
-  if(backendParams.debugEn){
+  if(backendParams.debugEn && !EnableIntEarlyRegRelease){
     val debugArchHeadPtr = RegNext(RegNext(archHeadPtr, FreeListPtr(false, 0)), FreeListPtr(false, 0)) // two-cycle delay from refCounter
     val debugArchRAT = RegNext(RegNext(io.debug_rat.get, VecInit(Seq.fill(32)(0.U(PhyRegIdxWidth.W)))), VecInit(Seq.fill(32)(0.U(PhyRegIdxWidth.W))))
     val debugUniqPR = Seq.tabulate(32)(i => i match {

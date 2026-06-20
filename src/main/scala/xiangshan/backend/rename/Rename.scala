@@ -27,7 +27,15 @@ import xiangshan.TopDownCounters._
 import xiangshan.backend.Bundles.{DecodeOutUop, RenameOutUop, connectSamePort}
 import xiangshan.backend.decode.{FusionDecodeInfo, ImmUnion, Imm_Z, XSDebugDecode}
 import xiangshan.backend.fu.FuType
-import xiangshan.backend.{IntERDebugBundle, IntERUopMeta, IntSparseUCA, StoreBubbleReason, PipelineStallReason}
+import xiangshan.backend.{
+  IntERCommitRedef,
+  IntERCommitSuppress,
+  IntERDebugBundle,
+  IntERUopMeta,
+  IntSparseUCA,
+  StoreBubbleReason,
+  PipelineStallReason
+}
 import xiangshan.backend.rename.freelist._
 import xiangshan.backend.rob.{RobEnqIO, RobPtr}
 import xiangshan.mem.mdp._
@@ -303,6 +311,14 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   debug_vl_rat.foreach (_ := rat.io.debug_vl_rat.get)
 
   io.diff_vl_rat.foreach(_ := rat.io.diff_vl_rat.get)
+
+  val intOldPdestForFree = RegNext(int_old_pdest)
+  val intEREarlyFreeReq = Option.when(EnableIntEarlyRegRelease)(Wire(Vec(IntEREarlyFreeWidth, Bool())))
+  val intEREarlyFreePhyReg = Option.when(EnableIntEarlyRegRelease)(Wire(Vec(IntEREarlyFreeWidth, UInt(PhyRegIdxWidth.W))))
+  val intERCommitSuppress = Option.when(EnableIntEarlyRegRelease)(Wire(Vec(RabCommitWidth, new IntERCommitSuppress)))
+  intEREarlyFreeReq.foreach(req => req := 0.U.asTypeOf(req))
+  intEREarlyFreePhyReg.foreach(preg => preg := 0.U.asTypeOf(preg))
+  intERCommitSuppress.foreach(suppress => suppress := 0.U.asTypeOf(suppress))
 
   // T  : rat receive rabCommit
   // T+1: rat return oldPdest
@@ -839,9 +855,18 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     intUCA.io.readDone := 0.U.asTypeOf(intUCA.io.readDone)
     intUCA.io.squash := 0.U.asTypeOf(intUCA.io.squash)
     intUCA.io.stGuardDec := 0.U.asTypeOf(intUCA.io.stGuardDec)
-    intUCA.io.commitOldPdest := RegNext(int_old_pdest)
+    intUCA.io.commitOldPdest := intOldPdestForFree
     intUCA.io.commitNeedFree := int_need_free
-    intUCA.io.commitRedef := 0.U.asTypeOf(intUCA.io.commitRedef)
+
+    val commitRedefFromRab = Wire(Vec(RabCommitWidth, Valid(new IntERCommitRedef)))
+    for (i <- 0 until RabCommitWidth) {
+      commitRedefFromRab(i) := io.rabCommits.info(i).intERCommitRedef.get
+    }
+    val commitRedefForSuppress = RegNext(
+      RegNext(commitRedefFromRab, 0.U.asTypeOf(commitRedefFromRab)),
+      0.U.asTypeOf(commitRedefFromRab)
+    )
+    intUCA.io.commitRedef := commitRedefForSuppress
 
     for (i <- 0 until RenameWidth) {
       val out = io.out(i).bits
@@ -894,6 +919,9 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       out.intER.get.eligible := intEREligible && !intUCA.io.rename.fallbackMark(i)
     }
     io.intERDebug.get := intUCA.io.debug
+    intEREarlyFreeReq.get := VecInit(intUCA.io.earlyFree.map(_.valid))
+    intEREarlyFreePhyReg.get := VecInit(intUCA.io.earlyFree.map(_.bits.pdest))
+    intERCommitSuppress.get := intUCA.io.commitSuppress
 
     XSPerfAccumulate("int_er_rename_alloc", PopCount(intUCA.io.rename.alloc.map(_.valid)))
     XSPerfAccumulate("int_er_rename_dest_track", PopCount(intUCA.io.rename.destTrack.map(_.valid)))
@@ -932,6 +960,10 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   vecFreeList.io.snpt.snptEnq := genSnapshot
   v0FreeList.io.snpt.snptEnq := genSnapshot
   vlFreeList.io.snpt.snptEnq := genSnapshot
+  if (EnableIntEarlyRegRelease) {
+    intFreeList.io.earlyFreeReq.get := intEREarlyFreeReq.get
+    intFreeList.io.earlyFreePhyReg.get := intEREarlyFreePhyReg.get
+  }
 
   /**
     * Instructions commit: update freelist and rename table
@@ -963,8 +995,19 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     vlRenamePorts(i).data := vlFreeList.io.allocatePhyReg(i)
 
     // II. Free List Update
-    intFreeList.io.freeReq(i) := int_need_free(i)
-    intFreeList.io.freePhyReg(i) := RegNext(int_old_pdest(i))
+    val erSuppress = if (EnableIntEarlyRegRelease) {
+      intERCommitSuppress.get(i).suppress
+    } else {
+      false.B
+    }
+    intFreeList.io.freeReq(i) := int_need_free(i) && !erSuppress
+    intFreeList.io.freePhyReg(i) := intOldPdestForFree(i)
+    if (EnableIntEarlyRegRelease) {
+      assert(
+        !erSuppress || intERCommitSuppress.get(i).oldPdest === intOldPdestForFree(i),
+        "Rename Int ER suppress old physical destination must align with conventional free lane"
+      )
+    }
     fpFreeList.io.freeReq(i)  := GatedValidRegNext(commitValid && needDestRegCommit(Reg_F, io.rabCommits.info(i)))
     fpFreeList.io.freePhyReg(i) := fp_old_pdest(i)
     vecFreeList.io.freeReq(i)  := GatedValidRegNext(commitValid && needDestRegCommit(Reg_V, io.rabCommits.info(i)))

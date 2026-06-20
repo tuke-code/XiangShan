@@ -207,7 +207,22 @@ class RenameBuffer(size: Int)(implicit p: Parameters) extends XSModule with HasC
   val allocatePtrVec = VecInit((0 until RenameWidth).map(i => enqPtrVec(PopCount(realNeedAlloc.take(i))).value))
   allocatePtrVec.zip(io.req).zip(realNeedAlloc).map{ case((allocatePtr, req), realNeedAlloc) =>
     when(realNeedAlloc){
-      renameBuffer(allocatePtr).info := req.bits
+      val info = renameBuffer(allocatePtr).info
+      info.ldest := req.bits.ldest
+      info.pdest := req.bits.pdest
+      info.rfWen := req.bits.rfWen
+      info.fpWen := req.bits.fpWen
+      info.vecWen := req.bits.vecWen
+      info.v0Wen := req.bits.v0Wen
+      info.vlWen := req.bits.vlWen
+      info.isMove := req.bits.isMove
+      info.intERCommitRedef.foreach { redef =>
+        redef.valid := req.bits.intER.get.redef.valid
+        redef.bits.trackId := req.bits.intER.get.redef.trackId
+        redef.bits.trackGen := req.bits.intER.get.redef.trackGen
+        redef.bits.oldPdest := req.bits.intER.get.redef.oldPdest
+        redef.bits.redefinerRobIdx := req.bits.robIdx
+      }
       renameBuffer(allocatePtr).robIdx.foreach(_ := req.bits.robIdx)
     }
   }

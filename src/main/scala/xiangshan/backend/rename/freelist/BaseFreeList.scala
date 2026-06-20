@@ -29,6 +29,7 @@ abstract class BaseFreeList(
   size: Int,
   commitWidth: Int,
   numLogicRegs:Int = 32,
+  earlyFreeWidth: Int = 0,
 )(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelper {
   val io = IO(new Bundle {
     val redirect = Input(Bool())
@@ -42,6 +43,8 @@ abstract class BaseFreeList(
 
     val freeReq = Input(Vec(commitWidth, Bool()))
     val freePhyReg = Input(Vec(commitWidth, UInt(PhyRegIdxWidth.W)))
+    val earlyFreeReq = Option.when(earlyFreeWidth > 0)(Input(Vec(earlyFreeWidth, Bool())))
+    val earlyFreePhyReg = Option.when(earlyFreeWidth > 0)(Input(Vec(earlyFreeWidth, UInt(PhyRegIdxWidth.W))))
 
     val commit = Input(new FreeListCommitBundle(commitWidth))
 
