@@ -46,6 +46,7 @@ class IntERDataPathReadDoneProbe(localSrc: Int, replayProne: Boolean)(implicit p
   val io = IO(new Bundle {
     val s1Valid = Input(Bool())
     val og1Failed = Input(Bool())
+    val uncertainReadPath = Input(Bool())
     val robIdx = Input(new rob.RobPtr)
     val srcValid = Input(Vec(localSrc, Bool()))
     val srcTrackId = Input(Vec(localSrc, UInt(IntERTrackIdWidth.W)))
@@ -72,7 +73,8 @@ class IntERDataPathReadDoneProbe(localSrc: Int, replayProne: Boolean)(implicit p
     dataSources = io.dataSources,
     s1Valid = io.s1Valid,
     og1Failed = io.og1Failed,
-    replayPronePath = replayProne.B
+    replayPronePath = replayProne.B,
+    uncertainReadPath = io.uncertainReadPath
   )
 }
 
@@ -96,6 +98,7 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
   private def clearProbe(dut: IntERDataPathReadDoneProbe): Unit = {
     dut.io.s1Valid.poke(false.B)
     dut.io.og1Failed.poke(false.B)
+    dut.io.uncertainReadPath.poke(false.B)
     setRobPtr(dut.io.robIdx, 0)
     for (src <- dut.io.srcValid.indices) {
       dut.io.srcValid(src).poke(false.B)
@@ -201,6 +204,31 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
       dut.io.out.bits.reason.expect(IntERFallbackReason.unsupportedReadPath)
       dut.io.out.bits.src(0).valid.expect(true.B)
       dut.io.out.bits.src(0).trackGen.expect(5.U)
+    }
+  }
+
+  it should "emit keyed fallback for uncertain-latency supported read paths" in {
+    simulate(new IntERDataPathReadDoneProbe(localSrc = 2, replayProne = false)(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2)))) { dut =>
+      clearProbe(dut)
+      dut.io.s1Valid.poke(true.B)
+      dut.io.uncertainReadPath.poke(true.B)
+      setRobPtr(dut.io.robIdx, 11)
+      setTrackedSource(dut, localSrc = 0, logicalSrc = 0, trackId = 1, trackGen = 5, psrc = 24, dataSource = DataSource.reg)
+      setTrackedSource(dut, localSrc = 1, logicalSrc = 1, trackId = 0, trackGen = 6, psrc = 25, dataSource = DataSource.regcache)
+      dut.io.out.valid.expect(true.B)
+      dut.io.out.bits.fallback.expect(true.B)
+      dut.io.out.bits.reason.expect(IntERFallbackReason.unsupportedReadPath)
+      dut.io.out.bits.robIdx.value.expect(11.U)
+      dut.io.out.bits.src(0).valid.expect(true.B)
+      dut.io.out.bits.src(0).trackId.expect(1.U)
+      dut.io.out.bits.src(0).trackGen.expect(5.U)
+      dut.io.out.bits.src(0).srcIdx.expect(0.U)
+      dut.io.out.bits.src(0).psrc.expect(24.U)
+      dut.io.out.bits.src(1).valid.expect(true.B)
+      dut.io.out.bits.src(1).trackId.expect(0.U)
+      dut.io.out.bits.src(1).trackGen.expect(6.U)
+      dut.io.out.bits.src(1).srcIdx.expect(1.U)
+      dut.io.out.bits.src(1).psrc.expect(25.U)
     }
   }
 }

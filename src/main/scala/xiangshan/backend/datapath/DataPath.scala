@@ -44,7 +44,8 @@ object DataPathIntEROps {
     dataSources: Vec[DataSource],
     s1Valid: Bool,
     og1Failed: Bool,
-    replayPronePath: Bool
+    replayPronePath: Bool,
+    uncertainReadPath: Bool
   ): Unit = {
     require(srcShadow.length == dataSources.length, "read observation source vectors must have matching widths")
 
@@ -58,7 +59,7 @@ object DataPathIntEROps {
     val anyUnsupported = VecInit(srcShadow.zip(supportedSources).map { case (src, supported) =>
       src.valid && !supported
     }).asUInt.orR
-    val fallback = completed && anyTracked && (replayPronePath || anyUnsupported)
+    val fallback = completed && anyTracked && (replayPronePath || uncertainReadPath || anyUnsupported)
     val readDone = completed && anyTracked && !fallback
 
     out.valid := fallback || readDone
@@ -718,6 +719,7 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
           og1resp.fuType           := s1_toExuData(iqIdx)(iuIdx).fuType
           io.intERReadDone.foreach { readDone =>
             val readDoneIdx = fromIQ.take(iqIdx).map(_.size).sum + iuIdx
+            val uncertainReadPath = hasUncertain.B && isUncertain(s1_toExuData(iqIdx)(iuIdx).fuType)
             DataPathIntEROps.emitReadDoneObservation(
               out = readDone(readDoneIdx),
               robIdx = s1_toExuData(iqIdx)(iuIdx).robIdx,
@@ -725,7 +727,8 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
               dataSources = s1_toExuData(iqIdx)(iuIdx).dataSources,
               s1Valid = s1_toExuValid(iqIdx)(iuIdx),
               og1Failed = og1FailedVec2(iqIdx)(iuIdx),
-              replayPronePath = replayPronePath.B
+              replayPronePath = replayPronePath.B,
+              uncertainReadPath = uncertainReadPath
             )
           }
       }
