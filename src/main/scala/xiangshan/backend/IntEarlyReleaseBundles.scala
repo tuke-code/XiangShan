@@ -116,6 +116,13 @@ class IntERUopMeta(implicit p: Parameters) extends XSBundle {
   val eligible = Bool()
 }
 
+class IntERRobUopMeta(implicit p: Parameters) extends XSBundle {
+  val src = IntERBundleHelper.logicalRobSrcVec
+  val dest = new IntERDestTrack
+  val redef = new IntERRedefTrack
+  val resolved = Bool()
+}
+
 class IntERLocalUopMeta(val numSrc: Int)(implicit p: Parameters) extends XSBundle {
   val src = IntERBundleHelper.localSrcVec(numSrc)
 }

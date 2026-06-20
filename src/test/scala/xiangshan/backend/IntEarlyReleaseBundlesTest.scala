@@ -11,11 +11,12 @@ import top.DefaultConfig
 import utility.{LogUtilsOptions, LogUtilsOptionsKey, PerfCounterOptions, PerfCounterOptionsKey, XSPerfLevel}
 import xiangshan._
 import xiangshan.TopDownCounters._
-import xiangshan.backend.Bundles.{DecodeOutUop, DispatchOutUop, DynInst, IssueQueueDeqOg1Payload, IssueQueuePayload, RegionInUop, RenameOutUop, connectSamePort}
+import xiangshan.backend.Bundles.{DecodeOutUop, DispatchOutUop, DynInst, EnqRobUop, IssueQueueDeqOg1Payload, IssueQueuePayload, RegionInUop, RenameOutUop, connectSamePort}
 import xiangshan.backend.decode.{DecodeStage, DecodeStageIO, FusionDecodeInfo}
 import xiangshan.backend.issue.{EntryBundles, IssueBlockParams}
 import xiangshan.backend.rename.{RatReadPort, Reg_I, Rename, RenameIntEROps, RenameTable, RenameTableWrapper}
 import xiangshan.backend.regfile.{FpPregParams, IntPregParams, V0PregParams, VfPregParams, VlPregParams}
+import xiangshan.backend.rob.RobBundles.{RobCommitEntryBundle, RobEntryBundle, connectCommitEntry, connectEnq}
 
 class IntEarlyReleaseBundleProbe(
   localSrc: Int,
@@ -175,6 +176,114 @@ class IntERDownstreamPayloadShapeProbe(
       "shape probe must distinguish local issue source width from full logical source width"
     )
   }
+}
+
+class IntERRobMetadataShapeProbe(
+  expectedERMeta: Boolean
+)(implicit p: Parameters) extends XSModule {
+  val robEntry = Wire(new RobEntryBundle)
+  val commitEntry = Wire(new RobCommitEntryBundle)
+  val rabInfo = Wire(new RabCommitInfo)
+
+  robEntry := 0.U.asTypeOf(robEntry)
+  commitEntry := 0.U.asTypeOf(commitEntry)
+  rabInfo := 0.U.asTypeOf(rabInfo)
+
+  val robEntryER = robEntry.elements.get("intER")
+  val commitEntryER = commitEntry.elements.get("intER")
+  val rabRedef = rabInfo.elements.get("intERCommitRedef")
+
+  require(robEntryER.isDefined == expectedERMeta, "RobEntryBundle ER metadata presence must follow feature enable")
+  require(commitEntryER.isDefined == expectedERMeta, "RobCommitEntryBundle ER metadata presence must follow feature enable")
+  require(rabRedef.isDefined == expectedERMeta, "RabCommitInfo ER redef metadata presence must follow feature enable")
+
+  if (expectedERMeta) {
+    val robEntrySrc = robEntryER.get.asInstanceOf[Bundle].elements("src").asInstanceOf[Vec[IntERSrcRobState]]
+    val commitEntrySrc = commitEntryER.get.asInstanceOf[Bundle].elements("src").asInstanceOf[Vec[IntERSrcRobState]]
+    require(robEntrySrc.length == backendParams.numSrc, "ROB entry ER metadata must use full logical source width")
+    require(commitEntrySrc.length == backendParams.numSrc, "ROB commit entry ER metadata must use full logical source width")
+  }
+}
+
+class IntERRobMetadataPropagationProbe(implicit p: Parameters) extends XSModule {
+  val io = IO(new Bundle {
+    val inSrcValid = Input(Bool())
+    val inTrackId = Input(UInt(IntERTrackIdWidth.W))
+    val inTrackGen = Input(UInt(IntERTrackGenBits.W))
+    val inSrcIdx = Input(UInt(IntERSrcIdxWidth.W))
+    val inPsrc = Input(UInt(PhyRegIdxWidth.W))
+    val inDestValid = Input(Bool())
+    val inPdest = Input(UInt(PhyRegIdxWidth.W))
+    val inRedefValid = Input(Bool())
+    val inOldPdest = Input(UInt(PhyRegIdxWidth.W))
+    val entrySrcValid = Output(Bool())
+    val entrySrcReadDone = Output(Bool())
+    val entryTrackId = Output(UInt(IntERTrackIdWidth.W))
+    val entryTrackGen = Output(UInt(IntERTrackGenBits.W))
+    val entrySrcIdx = Output(UInt(IntERSrcIdxWidth.W))
+    val entryPsrc = Output(UInt(PhyRegIdxWidth.W))
+    val entryDestValid = Output(Bool())
+    val entryPdest = Output(UInt(PhyRegIdxWidth.W))
+    val entryRedefValid = Output(Bool())
+    val entryOldPdest = Output(UInt(PhyRegIdxWidth.W))
+    val commitSrcValid = Output(Bool())
+    val commitSrcReadDone = Output(Bool())
+    val commitTrackId = Output(UInt(IntERTrackIdWidth.W))
+    val commitTrackGen = Output(UInt(IntERTrackGenBits.W))
+    val commitSrcIdx = Output(UInt(IntERSrcIdxWidth.W))
+    val commitPsrc = Output(UInt(PhyRegIdxWidth.W))
+    val commitDestValid = Output(Bool())
+    val commitPdest = Output(UInt(PhyRegIdxWidth.W))
+    val commitRedefValid = Output(Bool())
+    val commitOldPdest = Output(UInt(PhyRegIdxWidth.W))
+  })
+
+  val enq = Wire(new EnqRobUop)
+  val robEntry = Wire(new RobEntryBundle)
+  val commitEntry = Wire(new RobCommitEntryBundle)
+
+  enq := 0.U.asTypeOf(enq)
+  robEntry := 0.U.asTypeOf(robEntry)
+  commitEntry := 0.U.asTypeOf(commitEntry)
+
+  enq.intER.get.src(1).valid := io.inSrcValid
+  enq.intER.get.src(1).trackId := io.inTrackId
+  enq.intER.get.src(1).trackGen := io.inTrackGen
+  enq.intER.get.src(1).srcIdx := io.inSrcIdx
+  enq.intER.get.src(1).psrc := io.inPsrc
+  enq.intER.get.dest.valid := io.inDestValid
+  enq.intER.get.dest.trackId := io.inTrackId
+  enq.intER.get.dest.trackGen := io.inTrackGen
+  enq.intER.get.dest.pdest := io.inPdest
+  enq.intER.get.redef.valid := io.inRedefValid
+  enq.intER.get.redef.trackId := io.inTrackId
+  enq.intER.get.redef.trackGen := io.inTrackGen
+  enq.intER.get.redef.oldPdest := io.inOldPdest
+
+  connectEnq(robEntry, enq)
+  connectCommitEntry(commitEntry, robEntry)
+
+  io.entrySrcValid := robEntry.intER.get.src(1).valid
+  io.entrySrcReadDone := robEntry.intER.get.src(1).readDone
+  io.entryTrackId := robEntry.intER.get.src(1).trackId
+  io.entryTrackGen := robEntry.intER.get.src(1).trackGen
+  io.entrySrcIdx := robEntry.intER.get.src(1).srcIdx
+  io.entryPsrc := robEntry.intER.get.src(1).psrc
+  io.entryDestValid := robEntry.intER.get.dest.valid
+  io.entryPdest := robEntry.intER.get.dest.pdest
+  io.entryRedefValid := robEntry.intER.get.redef.valid
+  io.entryOldPdest := robEntry.intER.get.redef.oldPdest
+
+  io.commitSrcValid := commitEntry.intER.get.src(1).valid
+  io.commitSrcReadDone := commitEntry.intER.get.src(1).readDone
+  io.commitTrackId := commitEntry.intER.get.src(1).trackId
+  io.commitTrackGen := commitEntry.intER.get.src(1).trackGen
+  io.commitSrcIdx := commitEntry.intER.get.src(1).srcIdx
+  io.commitPsrc := commitEntry.intER.get.src(1).psrc
+  io.commitDestValid := commitEntry.intER.get.dest.valid
+  io.commitPdest := commitEntry.intER.get.dest.pdest
+  io.commitRedefValid := commitEntry.intER.get.redef.valid
+  io.commitOldPdest := commitEntry.intER.get.redef.oldPdest
 }
 
 class IntERAllLocalPayloadShapeProbe(
@@ -868,6 +977,10 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     ChiselStage.elaborate(new IntERDownstreamPayloadShapeProbe(expectedERMeta)(configWith(params)))
   }
 
+  private def elaborateRobMetadataShapeProbe(params: IntEarlyReleaseParams, expectedERMeta: Boolean): Unit = {
+    ChiselStage.elaborate(new IntERRobMetadataShapeProbe(expectedERMeta)(configWith(params)))
+  }
+
   private def elaborateAllLocalPayloadShapeProbe(params: IntEarlyReleaseParams, expectedERMeta: Boolean): Unit = {
     ChiselStage.elaborate(new IntERAllLocalPayloadShapeProbe(expectedERMeta)(configWith(params)))
   }
@@ -1172,6 +1285,11 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     elaborateDownstreamPayloadShapeProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedERMeta = true)
   }
 
+  it should "gate ROB and RAB ER metadata storage with feature enable" in {
+    elaborateRobMetadataShapeProbe(IntEarlyReleaseParams(), expectedERMeta = false)
+    elaborateRobMetadataShapeProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedERMeta = true)
+  }
+
   it should "check all scheduler local ER metadata payload widths" in {
     elaborateAllLocalPayloadShapeProbe(IntEarlyReleaseParams(), expectedERMeta = false)
     elaborateAllLocalPayloadShapeProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedERMeta = true)
@@ -1223,6 +1341,44 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       dut.io.deqTrackGen.expect(1.U)
       dut.io.deqSrcIdx.expect(1.U)
       dut.io.deqPsrc.expect(23.U)
+    }
+  }
+
+  it should "store ROB ER metadata from enqueue through commit entry conversion" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new IntERRobMetadataPropagationProbe()(config)) { dut =>
+      dut.io.inSrcValid.poke(true.B)
+      dut.io.inTrackId.poke(1.U)
+      dut.io.inTrackGen.poke(3.U)
+      dut.io.inSrcIdx.poke(1.U)
+      dut.io.inPsrc.poke(21.U)
+      dut.io.inDestValid.poke(true.B)
+      dut.io.inPdest.poke(25.U)
+      dut.io.inRedefValid.poke(true.B)
+      dut.io.inOldPdest.poke(17.U)
+
+      dut.io.entrySrcValid.expect(true.B)
+      dut.io.entrySrcReadDone.expect(false.B)
+      dut.io.entryTrackId.expect(1.U)
+      dut.io.entryTrackGen.expect(3.U)
+      dut.io.entrySrcIdx.expect(1.U)
+      dut.io.entryPsrc.expect(21.U)
+      dut.io.entryDestValid.expect(true.B)
+      dut.io.entryPdest.expect(25.U)
+      dut.io.entryRedefValid.expect(true.B)
+      dut.io.entryOldPdest.expect(17.U)
+
+      dut.io.commitSrcValid.expect(true.B)
+      dut.io.commitSrcReadDone.expect(false.B)
+      dut.io.commitTrackId.expect(1.U)
+      dut.io.commitTrackGen.expect(3.U)
+      dut.io.commitSrcIdx.expect(1.U)
+      dut.io.commitPsrc.expect(21.U)
+      dut.io.commitDestValid.expect(true.B)
+      dut.io.commitPdest.expect(25.U)
+      dut.io.commitRedefValid.expect(true.B)
+      dut.io.commitOldPdest.expect(17.U)
     }
   }
 

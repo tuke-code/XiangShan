@@ -25,7 +25,7 @@ import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
 import utility._
 import utils._
 import xiangshan._
-import xiangshan.backend.BackendParams
+import xiangshan.backend.{BackendParams, IntERRobUopMeta}
 import xiangshan.backend.Bundles.{DynInst, ExceptionInfo, ExuOutput, UopIdx, EnqRobUop}
 import xiangshan.backend.fu.{FuConfig, FuType}
 import xiangshan.frontend.ftq.FtqPtr
@@ -70,6 +70,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val realDestSize = UInt(log2Up(MaxUopSize + 1).W)
     val uopNum = UInt(log2Up(MaxUopSize + 1).W)
     val needFlush = Bool()
+    val intER = Option.when(EnableIntEarlyRegRelease)(new IntERRobUopMeta)
     // status end
 
     // debug_begin
@@ -120,6 +121,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val fpWen = Bool()
     val rfWen = Bool()
     val needFlush = Bool()
+    val intER = Option.when(EnableIntEarlyRegRelease)(new IntERRobUopMeta)
     // trace
     val traceBlockInPipe = new TracePipe(IretireWidthEncoded)
     // debug_begin
@@ -167,6 +169,19 @@ object RobBundles extends HasCircularQueuePtrHelper {
       robEntry.perfDebugInfo.foreach(_ := debug.perfDebugInfo)
       robEntry.debug_sim_trig.foreach(_ := debug.debug_sim_trig)
     }
+    robEntry.intER.foreach { meta =>
+      for (src <- meta.src.indices) {
+        meta.src(src).valid := robEnq.intER.get.src(src).valid
+        meta.src(src).trackId := robEnq.intER.get.src(src).trackId
+        meta.src(src).trackGen := robEnq.intER.get.src(src).trackGen
+        meta.src(src).srcIdx := robEnq.intER.get.src(src).srcIdx
+        meta.src(src).psrc := robEnq.intER.get.src(src).psrc
+        meta.src(src).readDone := false.B
+      }
+      meta.dest := robEnq.intER.get.dest
+      meta.redef := robEnq.intER.get.redef
+      meta.resolved := false.B
+    }
     robEntry.topdownIssued.foreach(_ := false.B)
     robEntry.topdownIssueTime.foreach(_ := 0.U)
   }
@@ -194,6 +209,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robCommitEntry.dirtyFs := robEntry.fpWen || robEntry.wflags
     robCommitEntry.dirtyVs := robEntry.dirtyVs
     robCommitEntry.needFlush := robEntry.needFlush
+    robCommitEntry.intER.foreach(_ := robEntry.intER.get)
     robCommitEntry.traceBlockInPipe := robEntry.traceBlockInPipe
     robCommitEntry.debug_pc.foreach(_ := robEntry.debug_pc.get)
     robCommitEntry.debug_instr.foreach(_ := robEntry.debug_instr.get)
