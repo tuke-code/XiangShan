@@ -27,7 +27,7 @@ import xiangshan.TopDownCounters._
 import xiangshan.backend.Bundles.{DecodeOutUop, RenameOutUop, connectSamePort}
 import xiangshan.backend.decode.{FusionDecodeInfo, ImmUnion, Imm_Z, XSDebugDecode}
 import xiangshan.backend.fu.FuType
-import xiangshan.backend.{IntERUopMeta, IntSparseUCA, StoreBubbleReason, PipelineStallReason}
+import xiangshan.backend.{IntERDebugBundle, IntERUopMeta, IntSparseUCA, StoreBubbleReason, PipelineStallReason}
 import xiangshan.backend.rename.freelist._
 import xiangshan.backend.rob.{RobEnqIO, RobPtr}
 import xiangshan.mem.mdp._
@@ -41,6 +41,48 @@ import yunsuan.{VfaluType, VipuType, VmoveType}
 import xiangshan.backend.RatToVecExcpMod
 
 object RenameIntEROps {
+  def redirectBlocked(redirectValid: Bool, rabWalk: Bool): Bool =
+    redirectValid || rabWalk
+
+  def sourceProbeAllowed(renameFire: Bool, blocked: Bool): Bool =
+    renameFire && !blocked
+
+  def supportedConsumer(
+    renameFire: Bool,
+    singleUop: Bool,
+    hasException: Bool,
+    flushPipe: Bool,
+    singleStep: Bool,
+    blocked: Bool
+  ): Bool =
+    sourceProbeAllowed(renameFire, blocked) && singleUop && !hasException && !flushPipe && !singleStep
+
+  def sourceFallback(
+    renameFire: Bool,
+    isMove: Bool,
+    singleUop: Bool,
+    hasException: Bool,
+    flushPipe: Bool,
+    singleStep: Bool,
+    blocked: Bool
+  ): Bool =
+    sourceProbeAllowed(renameFire, blocked) &&
+      (isMove || !supportedConsumer(renameFire, singleUop, hasException, flushPipe, singleStep, blocked))
+
+  def producerEligible(
+    renameFire: Bool,
+    needIntDest: Bool,
+    isMove: Bool,
+    logicLdest: UInt,
+    singleUop: Bool,
+    hasException: Bool,
+    flushPipe: Bool,
+    singleStep: Bool,
+    blocked: Bool
+  ): Bool =
+    supportedConsumer(renameFire, singleUop, hasException, flushPipe, singleStep, blocked) &&
+      needIntDest && !isMove && logicLdest =/= 0.U
+
   def sameGroupOldDest(
     base: Vec[UInt],
     ldest: Vec[UInt],
@@ -117,6 +159,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     val debugRobHeadFuType = Option.when(backendParams.debugEn)(Input(FuType()))
     val debugRobHeadStall = Option.when(backendParams.debugEn)(Input(Bool()))
     val debugLoadReason = Option.when(backendParams.debugEn)(Input(UInt(log2Ceil(TopDownCounters.NumStallReasons.id).W)))
+    val intERDebug = Option.when(EnableIntEarlyRegRelease)(Output(new IntERDebugBundle))
     val stallReason = new Bundle {
       val in = Flipped(new StallReasonIO(RenameWidth))
       val out = new StallReasonIO(RenameWidth)
@@ -782,6 +825,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   if (EnableIntEarlyRegRelease) {
     val intUCA = Module(new IntSparseUCA)
     val intLogicLdest = VecInit(inVec.map(_.ldest(log2Ceil(IntLogicRegs) - 1, 0)))
+    val intERRenameBlocked = RenameIntEROps.redirectBlocked(io.redirect.valid, io.rabCommits.isWalk)
     val intOldDestBase = intOldDestReadPortsData.get
     val intOldDestForER = RenameIntEROps.sameGroupOldDest(
       intOldDestBase,
@@ -790,7 +834,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       VecInit(intRenamePorts.map(_.data))
     )
 
-    intUCA.io.redirectKill := io.redirect.valid || io.rabCommits.isWalk
+    intUCA.io.redirectKill := intERRenameBlocked
     intUCA.io.producerReady := 0.U.asTypeOf(intUCA.io.producerReady)
     intUCA.io.readDone := 0.U.asTypeOf(intUCA.io.readDone)
     intUCA.io.squash := 0.U.asTypeOf(intUCA.io.squash)
@@ -804,11 +848,28 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       val renameFire = io.out(i).fire
       val hasException = out.exceptionVec.orR || TriggerAction.isDmode(out.trigger)
       val singleUop = out.firstUop && out.lastUop
-      val intEREligible = renameFire && needIntDest(i) && !isMove(i) &&
-        intLogicLdest(i) =/= 0.U && singleUop && !hasException &&
-        !out.flushPipe && !io.singleStep && !io.redirect.valid && !io.rabCommits.isWalk
+      val sourceProbeAllowed = RenameIntEROps.sourceProbeAllowed(renameFire, intERRenameBlocked)
+      val intEREligible = RenameIntEROps.producerEligible(
+        renameFire = renameFire,
+        needIntDest = needIntDest(i),
+        isMove = isMove(i),
+        logicLdest = intLogicLdest(i),
+        singleUop = singleUop,
+        hasException = hasException,
+        flushPipe = out.flushPipe,
+        singleStep = io.singleStep,
+        blocked = intERRenameBlocked
+      )
 
-      intUCA.io.rename.sourceFallback(i) := renameFire && isMove(i)
+      intUCA.io.rename.sourceFallback(i) := RenameIntEROps.sourceFallback(
+        renameFire = renameFire,
+        isMove = isMove(i),
+        singleUop = singleUop,
+        hasException = hasException,
+        flushPipe = out.flushPipe,
+        singleStep = io.singleStep,
+        blocked = intERRenameBlocked
+      )
       intUCA.io.rename.alloc(i).valid := intEREligible
       intUCA.io.rename.alloc(i).bits.pdest := out.pdest
       intUCA.io.rename.alloc(i).bits.robIdx := out.robIdx
@@ -821,7 +882,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
         source := 0.U.asTypeOf(source)
         source.srcIdx := s.U
         if (s < numRegSrc) {
-          source.valid := renameFire && SrcType.isXp(out.srcType(s)) && out.psrc(s) =/= 0.U
+          source.valid := sourceProbeAllowed && SrcType.isXp(out.srcType(s)) && out.psrc(s) =/= 0.U
           source.psrc := out.psrc(s)
         }
       }
@@ -832,6 +893,14 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       out.intER.get.redef := intUCA.io.rename.redefTrack(i)
       out.intER.get.eligible := intEREligible && !intUCA.io.rename.fallbackMark(i)
     }
+    io.intERDebug.get := intUCA.io.debug
+
+    XSPerfAccumulate("int_er_rename_alloc", PopCount(intUCA.io.rename.alloc.map(_.valid)))
+    XSPerfAccumulate("int_er_rename_dest_track", PopCount(intUCA.io.rename.destTrack.map(_.valid)))
+    XSPerfAccumulate("int_er_rename_src_track", PopCount(intUCA.io.rename.srcMatch.flatten.map(_.valid)))
+    XSPerfAccumulate("int_er_rename_redef_track", PopCount(intUCA.io.rename.redefTrack.map(_.valid)))
+    XSPerfAccumulate("int_er_rename_fallback", PopCount(intUCA.io.rename.fallbackMark))
+    XSPerfAccumulate("int_er_rename_redirect_kill", intUCA.io.redirectKill)
   }
 
   val genSnapshot = Cat(io.out.map(out => out.fire && out.bits.snapshot)).orR
