@@ -10,9 +10,12 @@ import org.scalatest.matchers.should.Matchers
 import top.DefaultConfig
 import utility.{LogUtilsOptions, LogUtilsOptionsKey, PerfCounterOptions, PerfCounterOptionsKey, XSPerfLevel}
 import xiangshan._
+import xiangshan.TopDownCounters._
 import xiangshan.backend.Bundles.RenameOutUop
-import xiangshan.backend.decode.DecodeStageIO
+import xiangshan.backend.Bundles.DecodeOutUop
+import xiangshan.backend.decode.{DecodeStage, DecodeStageIO, FusionDecodeInfo}
 import xiangshan.backend.rename.{RatReadPort, Reg_I, Rename, RenameIntEROps, RenameTable, RenameTableWrapper}
+import xiangshan.backend.regfile.{FpPregParams, IntPregParams, V0PregParams, VfPregParams, VlPregParams}
 
 class IntEarlyReleaseBundleProbe(
   localSrc: Int,
@@ -222,16 +225,217 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
   io.debugRedirectKillCount := uca.io.debug.redirectKillCount
 }
 
+class RenameERFullPathProbe(implicit p: Parameters) extends XSModule {
+  private val intLogicWidth = log2Ceil(IntLogicRegs)
+
+  val io = IO(new Bundle {
+    val valid = Input(Vec(RenameWidth, Bool()))
+    val outReady = Input(Bool())
+    val readHold = Input(Vec(RenameWidth, Bool()))
+    val redirect = Input(Bool())
+    val rabWalk = Input(Bool())
+    val ldest = Input(Vec(RenameWidth, UInt(intLogicWidth.W)))
+    val lsrc0 = Input(Vec(RenameWidth, UInt(intLogicWidth.W)))
+    val lsrc1 = Input(Vec(RenameWidth, UInt(intLogicWidth.W)))
+    val oldDestAddr = Input(Vec(RenameWidth, UInt(intLogicWidth.W)))
+    val src0Xp = Input(Vec(RenameWidth, Bool()))
+    val src1Xp = Input(Vec(RenameWidth, Bool()))
+    val rfWen = Input(Vec(RenameWidth, Bool()))
+    val isMove = Input(Vec(RenameWidth, Bool()))
+
+    val inReady = Output(Vec(RenameWidth, Bool()))
+    val outValid = Output(Vec(RenameWidth, Bool()))
+    val outFire = Output(Vec(RenameWidth, Bool()))
+    val outPdest = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
+    val outPsrc0 = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
+    val erDestValid = Output(Vec(RenameWidth, Bool()))
+    val erDestPdest = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
+    val erRedefValid = Output(Vec(RenameWidth, Bool()))
+    val erRedefOldPdest = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
+    val erSrc0Valid = Output(Vec(RenameWidth, Bool()))
+    val erSrc0Psrc = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
+    val debugActiveCount = Output(UInt(log2Ceil(IntERTrackEntries + 1).W))
+  })
+
+  val rename = Module(new Rename)
+
+  rename.io.redirect.valid := io.redirect
+  rename.io.redirect.bits := 0.U.asTypeOf(new Redirect)
+  rename.io.rabCommits := 0.U.asTypeOf(new RabCommitIO)
+  rename.io.rabCommits.isWalk := io.rabWalk
+  rename.io.vlCommits := 0.U.asTypeOf(new VlCommitBundle(RabCommitWidth))
+  rename.io.singleStep := false.B
+  rename.io.validVec := io.valid
+  rename.io.isFusionVec := 0.U.asTypeOf(rename.io.isFusionVec)
+  rename.io.fusionCross2FtqVec := 0.U.asTypeOf(rename.io.fusionCross2FtqVec)
+  rename.io.fusionInfo.foreach(_ := 0.U.asTypeOf(new FusionDecodeInfo))
+  rename.io.ssit := 0.U.asTypeOf(rename.io.ssit)
+  rename.io.waittable := 0.U.asTypeOf(rename.io.waittable)
+  rename.io.snpt := 0.U.asTypeOf(rename.io.snpt)
+  rename.io.snptLastEnq.valid := false.B
+  rename.io.snptLastEnq.bits := 0.U.asTypeOf(rename.io.snptLastEnq.bits)
+  rename.io.snptIsFull := false.B
+  rename.io.hartId := 0.U
+  rename.io.ratSnpt := 0.U.asTypeOf(rename.io.ratSnpt)
+  rename.io.ratDiffCommits.foreach(_ := 0.U.asTypeOf(new DiffCommitIO))
+  rename.io.ratDiffVlCommits.foreach(_ := 0.U.asTypeOf(new DiffVlCommitBundle(CommitWidth)))
+  rename.io.debugDispatchAllFire.foreach(_ := false.B)
+  rename.io.debugOutValidVec.foreach(_ := 0.U.asTypeOf(rename.io.debugOutValidVec.get))
+  rename.io.debugRobHeadFuType.foreach(_ := 0.U)
+  rename.io.debugRobHeadStall.foreach(_ := false.B)
+  rename.io.debugLoadReason.foreach(_ := 0.U)
+  rename.io.stallReason.in.reason.foreach(_ := NoStall.id.U)
+
+  for (i <- 0 until RenameWidth) {
+    rename.io.in(i).valid := io.valid(i)
+    rename.io.in(i).bits := 0.U.asTypeOf(new DecodeOutUop)
+    rename.io.in(i).bits.srcType.foreach(_ := SrcType.no)
+    rename.io.in(i).bits.srcType(0) := Mux(io.src0Xp(i), SrcType.xp, SrcType.no)
+    rename.io.in(i).bits.srcType(1) := Mux(io.src1Xp(i), SrcType.xp, SrcType.no)
+    rename.io.in(i).bits.lsrc.foreach(_ := 0.U)
+    rename.io.in(i).bits.lsrc(0) := io.lsrc0(i)
+    rename.io.in(i).bits.lsrc(1) := io.lsrc1(i)
+    rename.io.in(i).bits.ldest := io.ldest(i)
+    rename.io.in(i).bits.fuType := xiangshan.backend.fu.FuType.alu.U
+    rename.io.in(i).bits.fuOpType := ALUOpType.add
+    rename.io.in(i).bits.rfWen := io.rfWen(i)
+    rename.io.in(i).bits.fpWen := false.B
+    rename.io.in(i).bits.vecWen := false.B
+    rename.io.in(i).bits.v0Wen := false.B
+    rename.io.in(i).bits.vlWen := false.B
+    rename.io.in(i).bits.canRobCompress := false.B
+    rename.io.in(i).bits.selImm := SelImm.IMM_X
+    rename.io.in(i).bits.isMove := io.isMove(i)
+    rename.io.in(i).bits.firstUop := true.B
+    rename.io.in(i).bits.lastUop := true.B
+    rename.io.in(i).bits.numWB := 1.U
+    rename.io.in(i).bits.isLastInFtqEntry := true.B
+
+    for (s <- 0 until backendParams.numIntRegSrc) {
+      rename.io.intReadPorts(i)(s).addr := (if (s == 0) io.lsrc0(i) else io.lsrc1(i))
+      rename.io.intReadPorts(i)(s).hold := io.readHold(i)
+    }
+    rename.io.intOldDestReadPorts.get(i).addr := io.oldDestAddr(i)
+    rename.io.intOldDestReadPorts.get(i).hold := io.readHold(i)
+
+    for (s <- 0 until backendParams.numFpRegSrc) {
+      rename.io.fpReadPorts(i)(s).addr := 0.U
+      rename.io.fpReadPorts(i)(s).hold := io.readHold(i)
+    }
+    for (s <- 0 until backendParams.numVecRegSrc) {
+      rename.io.vecReadPorts(i)(s).addr := 0.U
+      rename.io.vecReadPorts(i)(s).hold := io.readHold(i)
+    }
+    rename.io.v0ReadPorts(i).addr := 0.U
+    rename.io.v0ReadPorts(i).hold := io.readHold(i)
+    rename.io.vlReadPorts(i).addr := 0.U
+    rename.io.vlReadPorts(i).hold := io.readHold(i)
+
+    rename.io.out(i).ready := io.outReady
+    io.inReady(i) := rename.io.in(i).ready
+    io.outValid(i) := rename.io.out(i).valid
+    io.outFire(i) := rename.io.out(i).fire
+    io.outPdest(i) := rename.io.out(i).bits.pdest
+    io.outPsrc0(i) := rename.io.out(i).bits.psrc(0)
+    io.erDestValid(i) := rename.io.out(i).bits.intER.get.dest.valid
+    io.erDestPdest(i) := rename.io.out(i).bits.intER.get.dest.pdest
+    io.erRedefValid(i) := rename.io.out(i).bits.intER.get.redef.valid
+    io.erRedefOldPdest(i) := rename.io.out(i).bits.intER.get.redef.oldPdest
+    io.erSrc0Valid(i) := rename.io.out(i).bits.intER.get.src(0).valid
+    io.erSrc0Psrc(i) := rename.io.out(i).bits.intER.get.src(0).psrc
+  }
+
+  io.debugActiveCount := rename.io.intERDebug.get.activeCount
+}
+
+class DecodeOldDestHoldProbe(implicit p: Parameters) extends XSModule {
+  private val intLogicWidth = log2Ceil(IntLogicRegs)
+
+  val io = IO(new Bundle {
+    val inValid = Input(Bool())
+    val outReady = Input(Bool())
+    val instr = Input(UInt(32.W))
+    val writeValid = Input(Bool())
+    val writeAddr = Input(UInt(intLogicWidth.W))
+    val writeData = Input(UInt(PhyRegIdxWidth.W))
+    val oldDestAddr = Output(UInt(intLogicWidth.W))
+    val oldDestHold = Output(Bool())
+    val oldDestData = Output(UInt(PhyRegIdxWidth.W))
+    val outValid = Output(Bool())
+    val outLdest = Output(UInt(LogicRegsWidth.W))
+    val inReady = Output(Bool())
+  })
+
+  val decode = Module(new DecodeStage)
+  val intRat = Module(new RenameTable(Reg_I, 0))
+
+  decode.io.redirect.valid := false.B
+  decode.io.redirect.bits := 0.U.asTypeOf(new Redirect)
+  decode.io.csrCtrl := 0.U.asTypeOf(decode.io.csrCtrl)
+  decode.io.fromCSR := 0.U.asTypeOf(decode.io.fromCSR)
+  decode.io.fusion := 0.U.asTypeOf(decode.io.fusion)
+  decode.io.fromRob := 0.U.asTypeOf(decode.io.fromRob)
+  decode.io.vsetvlVType := 0.U.asTypeOf(decode.io.vsetvlVType)
+  decode.io.vstart := 0.U.asTypeOf(decode.io.vstart)
+  decode.io.stallReason.in.reason.foreach(_ := NoStall.id.U)
+  decode.io.debugOutValid.foreach(_ := 0.U.asTypeOf(decode.io.debugOutValid.get))
+
+  for (i <- 0 until DecodeWidth) {
+    decode.io.in(i).valid := io.inValid && i.U === 0.U
+    decode.io.in(i).bits := 0.U.asTypeOf(decode.io.in(i).bits)
+    decode.io.in(i).bits.instr := io.instr
+    decode.io.in(i).bits.isLastInFtqEntry := true.B
+    decode.io.out(i).ready := io.outReady
+
+    decode.io.fpRat(i).foreach(_.data := 0.U)
+    decode.io.vecRat(i).foreach(_.data := 0.U)
+    decode.io.v0Rat(i).data := 0.U
+    decode.io.vlRat(i).data := 0.U
+  }
+
+  intRat.io.redirect := false.B
+  intRat.io.snpt := 0.U.asTypeOf(intRat.io.snpt)
+  intRat.io.specWritePorts.foreach(_ := 0.U.asTypeOf(intRat.io.specWritePorts.head))
+  intRat.io.archWritePorts.foreach(_ := 0.U.asTypeOf(intRat.io.archWritePorts.head))
+  intRat.io.specWritePorts(0).wen := io.writeValid
+  intRat.io.specWritePorts(0).addr := io.writeAddr
+  intRat.io.specWritePorts(0).data := io.writeData
+  intRat.io.diffWritePorts.foreach(_ := 0.U.asTypeOf(intRat.io.diffWritePorts.get))
+
+  val readPorts = decode.io.intRat.flatten ++ decode.io.intOldDestRat.get
+  require(readPorts.length == intRat.io.readPorts.length, "decode old-dest hold probe must cover all integer RAT reads")
+  for ((decodePort, ratPort) <- readPorts.zip(intRat.io.readPorts)) {
+    decodePort <> ratPort
+  }
+
+  io.oldDestAddr := decode.io.intOldDestRat.get(0).addr
+  io.oldDestHold := decode.io.intOldDestRat.get(0).hold
+  io.oldDestData := decode.io.intOldDestRat.get(0).data
+  io.outValid := decode.io.out(0).valid
+  io.outLdest := decode.io.out(0).bits.ldest
+  io.inReady := decode.io.in(0).ready
+}
+
 class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSim {
   behavior of "IntEarlyReleaseParams and IntEarlyReleaseBundles"
 
   private def configWith(params: IntEarlyReleaseParams): Parameters = {
+    configWith(params, fastSim = false)
+  }
+
+  private def configWith(params: IntEarlyReleaseParams, fastSim: Boolean): Parameters = {
     val defaultConfig = new DefaultConfig
     defaultConfig.alterPartial({
       case XSCoreParamsKey => defaultConfig(XSTileKey).head.copy(
         intEarlyRelease = params
       )
     }).alter((site, here, up) => {
+      case DebugOptionsKey if fastSim => up(DebugOptionsKey).copy(
+        AlwaysBasicDiff = false,
+        EnableDifftest = false,
+        EnablePerfDebug = false,
+        EnableDebug = false
+      )
       case LogUtilsOptionsKey => LogUtilsOptions(
         here(DebugOptionsKey).EnableDebug,
         here(DebugOptionsKey).EnablePerfDebug,
@@ -241,6 +445,52 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       case PerfCounterOptionsKey => PerfCounterOptions(
         enablePerfPrint = here(DebugOptionsKey).EnablePerfDebug && !here(DebugOptionsKey).FPGAPlatform,
         enablePerfDB = here(DebugOptionsKey).EnableRollingDB && !here(DebugOptionsKey).FPGAPlatform,
+        perfLevel = XSPerfLevel.withName(here(DebugOptionsKey).PerfLevel),
+        perfDBHartID = 0
+      )
+    })
+  }
+
+  private def fastSimConfigWith(params: IntEarlyReleaseParams): Parameters = {
+    configWith(params, fastSim = true)
+  }
+
+  private def smallRenameConfigWith(params: IntEarlyReleaseParams): Parameters = {
+    val defaultConfig = new DefaultConfig
+    defaultConfig.alterPartial({
+      case XSCoreParamsKey => defaultConfig(XSTileKey).head.copy(
+        DecodeWidth = 2,
+        RenameWidth = 2,
+        CommitWidth = 2,
+        RobCommitWidth = 2,
+        RabCommitWidth = 2,
+        RobSize = 32,
+        RabSize = 32,
+        RenameSnapshotNum = 2,
+        VTypeBufferSize = 8,
+        intPreg = IntPregParams(numEntries = 64, numBank = 1, numRead = None, numWrite = None),
+        fpPreg = FpPregParams(numEntries = 64, numBank = 1, numRead = None, numWrite = None),
+        vfPreg = VfPregParams(numEntries = 64, numBank = 1, numRead = None, numWrite = None),
+        v0Preg = V0PregParams(numEntries = 8, numBank = 1, numRead = None, numWrite = None),
+        vlPreg = VlPregParams(numEntries = 8, numBank = 1, numRead = None, numWrite = None),
+        intEarlyRelease = params
+      )
+    }).alter((site, here, up) => {
+      case DebugOptionsKey => up(DebugOptionsKey).copy(
+        AlwaysBasicDiff = false,
+        EnableDifftest = false,
+        EnablePerfDebug = false,
+        EnableDebug = false
+      )
+      case LogUtilsOptionsKey => LogUtilsOptions(
+        here(DebugOptionsKey).EnableDebug,
+        here(DebugOptionsKey).EnablePerfDebug,
+        here(DebugOptionsKey).FPGAPlatform,
+        here(DebugOptionsKey).EnableXMR
+      )
+      case PerfCounterOptionsKey => PerfCounterOptions(
+        enablePerfPrint = false,
+        enablePerfDB = false,
         perfLevel = XSPerfLevel.withName(here(DebugOptionsKey).PerfLevel),
         perfDBHartID = 0
       )
@@ -268,7 +518,7 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     expectedOldDestPort: Boolean,
     expectedPortsPerLane: Int
   ): Unit = {
-    val config = configWith(params)
+    val config = smallRenameConfigWith(params)
     ChiselStage.elaborate(new DecodeOldDestRatPortShapeProbe(expectedOldDestPort)(config))
     ChiselStage.elaborate(new IntRatReadPortCountProbe(expectedPortsPerLane)(config))
     ChiselStage.elaborate(new RenameTableWrapperOldDestPortShapeProbe(expectedOldDestPort)(config))
@@ -279,7 +529,7 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
   }
 
   private def elaborateRenameERDebugProbe(params: IntEarlyReleaseParams, expectedDebug: Boolean): Unit = {
-    ChiselStage.elaborate(new RenameERDebugShapeProbe(expectedDebug)(configWith(params)))
+    ChiselStage.elaborate(new RenameERDebugShapeProbe(expectedDebug)(smallRenameConfigWith(params)))
   }
 
   private def setRobPtr(ptr: xiangshan.backend.rob.RobPtr, value: Int): Unit = {
@@ -322,6 +572,202 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     dut.io.pdest.poke(pdest.U)
     dut.io.oldPdest.poke(2.U)
     setRobPtr(dut.io.robIdx, 1)
+  }
+
+  private def addi(rd: Int, rs1: Int, imm: Int = 0): BigInt = {
+    val imm12 = imm & 0xfff
+    BigInt((imm12 << 20) | (rs1 << 15) | (0 << 12) | (rd << 7) | 0x13)
+  }
+
+  private def clearRenameProbe(dut: RenameERFullPathProbe): Unit = {
+    dut.io.outReady.poke(true.B)
+    dut.io.redirect.poke(false.B)
+    dut.io.rabWalk.poke(false.B)
+    for (i <- 0 until dut.io.valid.length) {
+      dut.io.valid(i).poke(false.B)
+      dut.io.readHold(i).poke(false.B)
+      dut.io.ldest(i).poke(0.U)
+      dut.io.lsrc0(i).poke(0.U)
+      dut.io.lsrc1(i).poke(0.U)
+      dut.io.oldDestAddr(i).poke(0.U)
+      dut.io.src0Xp(i).poke(false.B)
+      dut.io.src1Xp(i).poke(false.B)
+      dut.io.rfWen(i).poke(false.B)
+      dut.io.isMove(i).poke(false.B)
+    }
+  }
+
+  private def resetRenameProbe(dut: RenameERFullPathProbe): Unit = {
+    clearRenameProbe(dut)
+    dut.reset.poke(true.B)
+    dut.clock.step(2)
+    dut.reset.poke(false.B)
+    dut.clock.step(3)
+    clearRenameProbe(dut)
+  }
+
+  private def primeRenameRead(
+    dut: RenameERFullPathProbe,
+    lane: Int,
+    ldest: Int,
+    lsrc0: Int = 0,
+    lsrc1: Int = 0
+  ): Unit = {
+    primeRenameReads(dut, Seq((lane, ldest, lsrc0, lsrc1)))
+  }
+
+  private def primeRenameReads(
+    dut: RenameERFullPathProbe,
+    lanes: Seq[(Int, Int, Int, Int)]
+  ): Unit = {
+    clearRenameProbe(dut)
+    lanes.foreach { case (lane, ldest, lsrc0, lsrc1) =>
+      dut.io.ldest(lane).poke(ldest.U)
+      dut.io.lsrc0(lane).poke(lsrc0.U)
+      dut.io.lsrc1(lane).poke(lsrc1.U)
+      dut.io.oldDestAddr(lane).poke(ldest.U)
+    }
+    dut.clock.step()
+  }
+
+  private def driveRenameLane(
+    dut: RenameERFullPathProbe,
+    lane: Int,
+    ldest: Int,
+    lsrc0: Int = 0,
+    lsrc1: Int = 0,
+    src0Xp: Boolean = false,
+    src1Xp: Boolean = false,
+    rfWen: Boolean = true,
+    isMove: Boolean = false
+  ): Unit = {
+    dut.io.valid(lane).poke(true.B)
+    dut.io.ldest(lane).poke(ldest.U)
+    dut.io.lsrc0(lane).poke(lsrc0.U)
+    dut.io.lsrc1(lane).poke(lsrc1.U)
+    dut.io.oldDestAddr(lane).poke(ldest.U)
+    dut.io.src0Xp(lane).poke(src0Xp.B)
+    dut.io.src1Xp(lane).poke(src1Xp.B)
+    dut.io.rfWen(lane).poke(rfWen.B)
+    dut.io.isMove(lane).poke(isMove.B)
+  }
+
+  private def fireSingleRenameLane(
+    dut: RenameERFullPathProbe,
+    lane: Int,
+    ldest: Int,
+    lsrc0: Int = 0,
+    lsrc1: Int = 0,
+    src0Xp: Boolean = false,
+    src1Xp: Boolean = false,
+    rfWen: Boolean = true,
+    isMove: Boolean = false
+  ): BigInt = {
+    driveRenameLane(dut, lane, ldest, lsrc0, lsrc1, src0Xp, src1Xp, rfWen, isMove)
+    dut.io.outValid(lane).expect(true.B)
+    dut.io.outFire(lane).expect(true.B)
+    val pdest = dut.io.outPdest(lane).peek().litValue
+    dut.clock.step()
+    clearRenameProbe(dut)
+    pdest
+  }
+
+  private def writeDecodeRatMapping(dut: DecodeOldDestHoldProbe, ldest: Int, pdest: Int): Unit = {
+    dut.io.inValid.poke(false.B)
+    dut.io.outReady.poke(true.B)
+    dut.io.instr.poke(addi(0, 0).U)
+    dut.io.writeValid.poke(true.B)
+    dut.io.writeAddr.poke(ldest.U)
+    dut.io.writeData.poke(pdest.U)
+    dut.clock.step()
+    dut.io.writeValid.poke(false.B)
+    dut.clock.step()
+  }
+
+  private def checkFullRenameOldDestIdentity(dut: RenameERFullPathProbe): Unit = {
+    resetRenameProbe(dut)
+
+    primeRenameRead(dut, lane = 0, ldest = 6)
+    val sourcePdest = fireSingleRenameLane(dut, lane = 0, ldest = 6)
+    sourcePdest should not be BigInt(0)
+
+    primeRenameRead(dut, lane = 0, ldest = 5)
+    val oldDestPdest = fireSingleRenameLane(dut, lane = 0, ldest = 5)
+    oldDestPdest should not be BigInt(0)
+    oldDestPdest should not be sourcePdest
+
+    primeRenameRead(dut, lane = 0, ldest = 5, lsrc0 = 6)
+    driveRenameLane(dut, lane = 0, ldest = 5, lsrc0 = 6, src0Xp = true)
+
+    dut.io.outPsrc0(0).expect(sourcePdest.U)
+    dut.io.erRedefValid(0).expect(true.B)
+    dut.io.erRedefOldPdest(0).expect(oldDestPdest.U)
+    dut.io.erRedefOldPdest(0).peek().litValue should not be dut.io.outPsrc0(0).peek().litValue
+  }
+
+  private def checkFullRenameSameGroupRedef(dut: RenameERFullPathProbe): Unit = {
+    resetRenameProbe(dut)
+
+    primeRenameReads(dut, Seq((0, 7, 0, 0), (1, 7, 0, 0)))
+    driveRenameLane(dut, lane = 0, ldest = 7)
+    driveRenameLane(dut, lane = 1, ldest = 7)
+
+    val olderPdest = dut.io.outPdest(0).peek().litValue
+    val youngerPdest = dut.io.outPdest(1).peek().litValue
+    olderPdest should not be BigInt(0)
+    youngerPdest should not be BigInt(0)
+    youngerPdest should not be olderPdest
+
+    dut.io.erDestValid(0).expect(true.B)
+    dut.io.erRedefValid(0).expect(false.B)
+    dut.io.erDestValid(1).expect(true.B)
+    dut.io.erRedefValid(1).expect(true.B)
+    dut.io.erRedefOldPdest(1).expect(olderPdest.U)
+  }
+
+  private def checkFullRenameMoveThenRedef(dut: RenameERFullPathProbe): Unit = {
+    resetRenameProbe(dut)
+
+    primeRenameRead(dut, lane = 0, ldest = 8)
+    val moveSourcePdest = fireSingleRenameLane(dut, lane = 0, ldest = 8)
+    moveSourcePdest should not be BigInt(0)
+
+    primeRenameReads(dut, Seq((0, 9, 8, 0), (1, 9, 0, 0)))
+    driveRenameLane(dut, lane = 0, ldest = 9, lsrc0 = 8, src0Xp = true, isMove = true)
+    driveRenameLane(dut, lane = 1, ldest = 9)
+
+    dut.io.outPsrc0(0).expect(moveSourcePdest.U)
+    dut.io.outPdest(0).expect(moveSourcePdest.U)
+    dut.io.erDestValid(0).expect(false.B)
+    dut.io.erRedefValid(0).expect(false.B)
+    dut.io.erRedefValid(1).expect(true.B)
+    dut.io.erRedefOldPdest(1).expect(moveSourcePdest.U)
+  }
+
+  private def checkFullRenameHeldOldDestRead(dut: RenameERFullPathProbe): Unit = {
+    resetRenameProbe(dut)
+
+    primeRenameRead(dut, lane = 0, ldest = 5)
+    val heldOldDestPdest = fireSingleRenameLane(dut, lane = 0, ldest = 5)
+    heldOldDestPdest should not be BigInt(0)
+
+    primeRenameRead(dut, lane = 0, ldest = 9)
+    val laterOldDestPdest = fireSingleRenameLane(dut, lane = 0, ldest = 9)
+    laterOldDestPdest should not be BigInt(0)
+    laterOldDestPdest should not be heldOldDestPdest
+
+    clearRenameProbe(dut)
+    dut.io.ldest(0).poke(5.U)
+    dut.io.oldDestAddr(0).poke(5.U)
+    dut.clock.step()
+
+    dut.io.readHold(0).poke(true.B)
+    dut.io.oldDestAddr(0).poke(9.U)
+    driveRenameLane(dut, lane = 0, ldest = 5)
+
+    dut.io.erRedefValid(0).expect(true.B)
+    dut.io.erRedefOldPdest(0).expect(heldOldDestPdest.U)
+    dut.io.erRedefOldPdest(0).peek().litValue should not be laterOldDestPdest
   }
 
   it should "reject illegal trackEntries values" in {
@@ -465,6 +911,48 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
         dut.io.debugActiveCount.expect(0.U)
         dut.io.debugRedirectKillCount.expect(1.U)
       }
+    }
+  }
+
+  it should "track full Rename old-destination and same-group ordering" in {
+    val config = smallRenameConfigWith(IntEarlyReleaseParams(enable = true, trackEntries = 4))
+
+    simulate(new RenameERFullPathProbe()(config)) { dut =>
+      checkFullRenameOldDestIdentity(dut)
+      checkFullRenameSameGroupRedef(dut)
+      checkFullRenameMoveThenRedef(dut)
+      checkFullRenameHeldOldDestRead(dut)
+    }
+  }
+
+  it should "hold decode-timed old-destination RAT data under decode backpressure" in {
+    val config = fastSimConfigWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new DecodeOldDestHoldProbe()(config)) { dut =>
+      dut.io.inValid.poke(false.B)
+      dut.io.outReady.poke(true.B)
+      dut.io.instr.poke(addi(0, 0).U)
+      dut.io.writeValid.poke(false.B)
+      dut.io.writeAddr.poke(0.U)
+      dut.io.writeData.poke(0.U)
+      dut.reset.poke(true.B)
+      dut.clock.step(2)
+      dut.reset.poke(false.B)
+
+      writeDecodeRatMapping(dut, ldest = 5, pdest = 17)
+      writeDecodeRatMapping(dut, ldest = 9, pdest = 29)
+
+      dut.io.inValid.poke(true.B)
+      dut.io.outReady.poke(true.B)
+      dut.io.instr.poke(addi(rd = 5, rs1 = 1).U)
+      dut.io.oldDestAddr.expect(5.U)
+      dut.io.oldDestHold.expect(false.B)
+      dut.clock.step()
+
+      dut.io.outReady.poke(false.B)
+      dut.io.instr.poke(addi(rd = 9, rs1 = 2).U)
+      dut.io.oldDestHold.expect(true.B)
+      dut.io.oldDestData.expect(17.U)
     }
   }
 }
