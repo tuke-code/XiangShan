@@ -27,7 +27,7 @@ import xiangshan.TopDownCounters._
 import xiangshan.backend.Bundles.{DecodeOutUop, RenameOutUop, connectSamePort}
 import xiangshan.backend.decode.{FusionDecodeInfo, ImmUnion, Imm_Z, XSDebugDecode}
 import xiangshan.backend.fu.FuType
-import xiangshan.backend.{StoreBubbleReason, PipelineStallReason}
+import xiangshan.backend.{IntERUopMeta, IntSparseUCA, StoreBubbleReason, PipelineStallReason}
 import xiangshan.backend.rename.freelist._
 import xiangshan.backend.rob.{RobEnqIO, RobPtr}
 import xiangshan.mem.mdp._
@@ -39,6 +39,23 @@ import xiangshan.backend.decode.isa.bitfield.{OPCODE5Bit, XSInstBitFields}
 import xiangshan.backend.fu.NewCSR.CSROoORead
 import yunsuan.{VfaluType, VipuType, VmoveType}
 import xiangshan.backend.RatToVecExcpMod
+
+object RenameIntEROps {
+  def sameGroupOldDest(
+    base: Vec[UInt],
+    ldest: Vec[UInt],
+    wen: Vec[Bool],
+    data: Vec[UInt]
+  ): Vec[UInt] = {
+    val out = Wire(chiselTypeOf(base))
+    for (i <- 0 until base.length) {
+      out(i) := (0 until i).foldLeft(base(i)) { case (oldDest, older) =>
+        Mux(wen(older) && ldest(older) === ldest(i), data(older), oldDest)
+      }
+    }
+    out
+  }
+}
 
 class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelper with HasPerfEvents {
 
@@ -208,7 +225,6 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   io.intReadPorts <> intReadPorts
   if (EnableIntEarlyRegRelease) {
     io.intOldDestReadPorts.get <> intOldDestReadPorts.get
-    dontTouch(intOldDestReadPortsData.get)
   }
   io.fpReadPorts  <> fpReadPorts
   io.vecReadPorts <> vecReadPorts
@@ -438,6 +454,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   // uop calculation
   for (i <- 0 until RenameWidth) {
     (uops(i): Data).waiveAll :<= (io.in(i).bits: Data).waiveAll
+    uops(i).intER.foreach(_ := 0.U.asTypeOf(new IntERUopMeta))
 
     // update cf according to ssit result
     uops(i).storeSetHit := io.ssit(i).valid
@@ -759,6 +776,61 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       require(io.out(i).bits.imm.getWidth >= lui_imm.getWidth + ld_imm.getWidth)
       io.out(i).bits.srcType(0) := SrcType.imm
       io.out(i).bits.imm := Cat(lui_imm, ld_imm)
+    }
+  }
+
+  if (EnableIntEarlyRegRelease) {
+    val intUCA = Module(new IntSparseUCA)
+    val intLogicLdest = VecInit(inVec.map(_.ldest(log2Ceil(IntLogicRegs) - 1, 0)))
+    val intOldDestBase = intOldDestReadPortsData.get
+    val intOldDestForER = RenameIntEROps.sameGroupOldDest(
+      intOldDestBase,
+      intLogicLdest,
+      VecInit(intRenamePorts.map(_.wen)),
+      VecInit(intRenamePorts.map(_.data))
+    )
+
+    intUCA.io.redirectKill := io.redirect.valid || io.rabCommits.isWalk
+    intUCA.io.producerReady := 0.U.asTypeOf(intUCA.io.producerReady)
+    intUCA.io.readDone := 0.U.asTypeOf(intUCA.io.readDone)
+    intUCA.io.squash := 0.U.asTypeOf(intUCA.io.squash)
+    intUCA.io.stGuardDec := 0.U.asTypeOf(intUCA.io.stGuardDec)
+    intUCA.io.commitOldPdest := RegNext(int_old_pdest)
+    intUCA.io.commitNeedFree := int_need_free
+    intUCA.io.commitRedef := 0.U.asTypeOf(intUCA.io.commitRedef)
+
+    for (i <- 0 until RenameWidth) {
+      val out = io.out(i).bits
+      val renameFire = io.out(i).fire
+      val hasException = out.exceptionVec.orR || TriggerAction.isDmode(out.trigger)
+      val singleUop = out.firstUop && out.lastUop
+      val intEREligible = renameFire && needIntDest(i) && !isMove(i) &&
+        intLogicLdest(i) =/= 0.U && singleUop && !hasException &&
+        !out.flushPipe && !io.singleStep && !io.redirect.valid && !io.rabCommits.isWalk
+
+      intUCA.io.rename.sourceFallback(i) := renameFire && isMove(i)
+      intUCA.io.rename.alloc(i).valid := intEREligible
+      intUCA.io.rename.alloc(i).bits.pdest := out.pdest
+      intUCA.io.rename.alloc(i).bits.robIdx := out.robIdx
+      intUCA.io.rename.redef(i).valid := intEREligible
+      intUCA.io.rename.redef(i).bits.oldPdest := intOldDestForER(i)
+      intUCA.io.rename.redef(i).bits.robIdx := out.robIdx
+
+      for (s <- 0 until IntERLogicalSrcWidth) {
+        val source = intUCA.io.rename.source(i)(s)
+        source := 0.U.asTypeOf(source)
+        source.srcIdx := s.U
+        if (s < numRegSrc) {
+          source.valid := renameFire && SrcType.isXp(out.srcType(s)) && out.psrc(s) =/= 0.U
+          source.psrc := out.psrc(s)
+        }
+      }
+
+      out.intER.get := 0.U.asTypeOf(new IntERUopMeta)
+      out.intER.get.src := intUCA.io.rename.srcMatch(i)
+      out.intER.get.dest := intUCA.io.rename.destTrack(i)
+      out.intER.get.redef := intUCA.io.rename.redefTrack(i)
+      out.intER.get.eligible := intEREligible && !intUCA.io.rename.fallbackMark(i)
     }
   }
 

@@ -294,6 +294,7 @@ object Bundles {
     val ftqLastOffset = UInt(FetchBlockInstOffsetWidth.W) // store ftqoffset before change in rename
     val lastIsRVC = Bool() // store isrvc before change in rename
     val debug = OptionWrapper(backendParams.debugEn, new RenameOutUopDebug())
+    val intER = Option.when(EnableIntEarlyRegRelease)(new IntERUopMeta)
     val crossFtqCommit = UInt(2.W) // use to caculate the ftq idx of ftqentry when commit
     val crossFtq = Bool() // use to caculate the ftq idx of brh instructions when pass to exu
     def isLUI: Bool = this.fuType === FuType.alu.U && (this.selImm === SelImm.IMM_U || this.selImm === SelImm.IMM_LUI32)

@@ -1,6 +1,8 @@
 package xiangshan.backend
 
 import chisel3._
+import chisel3.simulator.scalatest.ChiselSim
+import chisel3.util.log2Ceil
 import circt.stage.ChiselStage
 import org.chipsalliance.cde.config.Parameters
 import org.scalatest.flatspec.AnyFlatSpec
@@ -8,8 +10,9 @@ import org.scalatest.matchers.should.Matchers
 import top.DefaultConfig
 import utility.{LogUtilsOptions, LogUtilsOptionsKey}
 import xiangshan._
+import xiangshan.backend.Bundles.RenameOutUop
 import xiangshan.backend.decode.DecodeStageIO
-import xiangshan.backend.rename.{RatReadPort, Reg_I, RenameTable, RenameTableWrapper}
+import xiangshan.backend.rename.{RatReadPort, Reg_I, RenameIntEROps, RenameTable, RenameTableWrapper}
 
 class IntEarlyReleaseBundleProbe(
   localSrc: Int,
@@ -95,7 +98,33 @@ class RenameTableWrapperOldDestPortShapeProbe(
   }
 }
 
-class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers {
+class RenameOutUopERMetaShapeProbe(
+  expectedERMeta: Boolean
+)(implicit p: Parameters) extends XSModule {
+  val uop = Wire(new RenameOutUop)
+  uop := 0.U.asTypeOf(uop)
+
+  val erMeta = uop.elements.get("intER")
+  require(erMeta.isDefined == expectedERMeta, "rename output ER metadata presence must follow Int ER enable")
+  erMeta.foreach { meta =>
+    val typed = meta.asInstanceOf[IntERUopMeta]
+    require(typed.src.length == backendParams.numSrc, "rename output ER metadata must use full logical source width")
+  }
+}
+
+class RenameOldDestBypassProbe(implicit p: Parameters) extends XSModule {
+  val io = IO(new Bundle {
+    val base = Input(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
+    val ldest = Input(Vec(RenameWidth, UInt(log2Ceil(IntLogicRegs).W)))
+    val wen = Input(Vec(RenameWidth, Bool()))
+    val data = Input(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
+    val out = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
+  })
+
+  io.out := RenameIntEROps.sameGroupOldDest(io.base, io.ldest, io.wen, io.data)
+}
+
+class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSim {
   behavior of "IntEarlyReleaseParams and IntEarlyReleaseBundles"
 
   private def configWith(params: IntEarlyReleaseParams): Parameters = {
@@ -141,6 +170,10 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers {
     ChiselStage.elaborate(new RenameTableWrapperOldDestPortShapeProbe(expectedOldDestPort)(config))
   }
 
+  private def elaborateRenameOutUopERMetaProbe(params: IntEarlyReleaseParams, expectedERMeta: Boolean): Unit = {
+    ChiselStage.elaborate(new RenameOutUopERMetaShapeProbe(expectedERMeta)(configWith(params)))
+  }
+
   it should "reject illegal trackEntries values" in {
     assertThrows[IllegalArgumentException] {
       IntEarlyReleaseParams(trackEntries = 0)
@@ -183,5 +216,39 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers {
       expectedOldDestPort = true,
       expectedPortsPerLane = 3
     )
+  }
+
+  it should "gate rename output ER metadata with feature enable" in {
+    elaborateRenameOutUopERMetaProbe(IntEarlyReleaseParams(), expectedERMeta = false)
+    elaborateRenameOutUopERMetaProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedERMeta = true)
+  }
+
+  it should "select same-group old destination from older final integer RAT writes" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new RenameOldDestBypassProbe()(config)) { dut =>
+      for (i <- 0 until dut.io.base.length) {
+        dut.io.base(i).poke((10 + i).U)
+        dut.io.ldest(i).poke((i + 1).U)
+        dut.io.wen(i).poke(false.B)
+        dut.io.data(i).poke((40 + i).U)
+      }
+
+      dut.io.ldest(0).poke(5.U)
+      dut.io.wen(0).poke(true.B)
+      dut.io.data(0).poke(21.U)
+      dut.io.ldest(1).poke(6.U)
+      dut.io.wen(1).poke(true.B)
+      dut.io.data(1).poke(31.U)
+      dut.io.ldest(2).poke(5.U)
+      dut.io.wen(2).poke(true.B)
+      dut.io.data(2).poke(41.U)
+      dut.io.ldest(3).poke(5.U)
+
+      dut.io.out(0).expect(10.U)
+      dut.io.out(1).expect(11.U)
+      dut.io.out(2).expect(21.U)
+      dut.io.out(3).expect(41.U)
+    }
   }
 }
