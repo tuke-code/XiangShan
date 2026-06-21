@@ -6,6 +6,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parent
 DOC = ROOT / "assertion-perf-inventory.md"
+SPEC = ROOT.parent / "spec" / "int-er-sparse-uca-spec.md"
 
 REQUIRED_HEADINGS = [
     "# Int ER Task24 Assertion And Perf Inventory",
@@ -44,6 +45,14 @@ REQUIRED_STATUS = [
     "open",
 ]
 
+UNSUPPORTED_SCOPE_MARKERS = [
+    "producer-not-ready is not a first-version fallback event",
+    "int_er_fallback_producer_not_ready is deliberately unsupported",
+    "ST does not combinationally query UCA produced-ready state",
+    "pending interrupt/trap/flush is handled as an ST stop/no-guardDec condition",
+    "int_er_fallback_pending_interrupt is deliberately unsupported",
+]
+
 
 def fail(message: str) -> int:
     print(message, file=sys.stderr)
@@ -53,9 +62,13 @@ def fail(message: str) -> int:
 def main() -> int:
     if not DOC.exists():
         return fail(f"missing inventory document: {DOC}")
+    if not SPEC.exists():
+        return fail(f"missing sparse UCA spec document: {SPEC}")
 
     text = DOC.read_text(encoding="utf-8")
+    spec_text = SPEC.read_text(encoding="utf-8")
     lower = text.lower()
+    combined = f"{text}\n{spec_text}"
 
     for heading in REQUIRED_HEADINGS:
         if heading not in text:
@@ -75,6 +88,32 @@ def main() -> int:
 
     if "task24 remains active" not in lower:
         return fail("inventory must state whether task24 remains active")
+
+    for marker in UNSUPPORTED_SCOPE_MARKERS:
+        if marker not in combined:
+            return fail(f"missing unsupported fallback scope marker: {marker}")
+
+    fallback_rows = [
+        line for line in text.splitlines()
+        if line.startswith("| fallback reasons |")
+    ]
+    if len(fallback_rows) != 1:
+        return fail("inventory must contain exactly one fallback reasons row")
+    fallback_row = fallback_rows[0]
+    if "| covered |" not in fallback_row:
+        return fail("fallback reasons row must be fully covered")
+    if "open perf" in fallback_row.lower():
+        return fail("fallback reasons row must not list an open perf gap")
+
+    remaining_section = text.split("## Remaining Task24 Work", 1)[-1]
+    stale_remaining = [
+        "producer-not-ready",
+        "pending-interrupt",
+        "stable fallback reason names",
+    ]
+    for stale_text in stale_remaining:
+        if stale_text in remaining_section:
+            return fail(f"remaining task24 work still carries resolved fallback scope: {stale_text}")
 
     return 0
 
