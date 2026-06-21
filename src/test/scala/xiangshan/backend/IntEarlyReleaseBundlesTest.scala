@@ -1504,6 +1504,13 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     renameSource should include("intUCA.io.debug.saturatedFallbackCount")
   }
 
+  it should "expose Rename fallback reason perf counters with stable names" in {
+    val renameSource = sourceText("src/main/scala/xiangshan/backend/rename/Rename.scala")
+
+    renameSource should include("XSPerfAccumulate(\"int_er_rename_fallback_move\"")
+    renameSource should include("XSPerfAccumulate(\"int_er_rename_fallback_unsupported_consumer\"")
+  }
+
   it should "select same-group old destination from older final integer RAT writes" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
 

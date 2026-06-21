@@ -873,12 +873,22 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     )
     intUCA.io.commitRedef := commitRedefForSuppress
 
+    val renameFallbackMove = Wire(Vec(RenameWidth, Bool()))
+    val renameFallbackUnsupportedConsumer = Wire(Vec(RenameWidth, Bool()))
     for (i <- 0 until RenameWidth) {
       val out = io.out(i).bits
       val renameFire = io.out(i).fire
       val hasException = out.exceptionVec.orR || TriggerAction.isDmode(out.trigger)
       val singleUop = out.firstUop && out.lastUop
       val sourceProbeAllowed = RenameIntEROps.sourceProbeAllowed(renameFire, intERRenameBlocked)
+      val supportedConsumer = RenameIntEROps.supportedConsumer(
+        renameFire = renameFire,
+        singleUop = singleUop,
+        hasException = hasException,
+        flushPipe = out.flushPipe,
+        singleStep = io.singleStep,
+        blocked = intERRenameBlocked
+      )
       val intEREligible = RenameIntEROps.producerEligible(
         renameFire = renameFire,
         needIntDest = needIntDest(i),
@@ -900,6 +910,8 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
         singleStep = io.singleStep,
         blocked = intERRenameBlocked
       )
+      renameFallbackMove(i) := sourceProbeAllowed && isMove(i)
+      renameFallbackUnsupportedConsumer(i) := sourceProbeAllowed && !isMove(i) && !supportedConsumer
       intUCA.io.rename.alloc(i).valid := intEREligible
       intUCA.io.rename.alloc(i).bits.pdest := out.pdest
       intUCA.io.rename.alloc(i).bits.robIdx := out.robIdx
@@ -936,6 +948,12 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     XSPerfAccumulate("int_er_rename_src_track", PopCount(intUCA.io.rename.srcMatch.flatten.map(_.valid)))
     XSPerfAccumulate("int_er_rename_redef_track", PopCount(intUCA.io.rename.redefTrack.map(_.valid)))
     XSPerfAccumulate("int_er_rename_fallback", PopCount(intUCA.io.rename.fallbackMark))
+    XSPerfAccumulate("int_er_rename_fallback_move", PopCount(renameFallbackMove.zip(intUCA.io.rename.fallbackMark).map {
+      case (reason, marked) => reason && marked
+    }))
+    XSPerfAccumulate("int_er_rename_fallback_unsupported_consumer", PopCount(renameFallbackUnsupportedConsumer.zip(intUCA.io.rename.fallbackMark).map {
+      case (reason, marked) => reason && marked
+    }))
     XSPerfAccumulate("int_er_rename_redirect_kill", intUCA.io.redirectKill)
     XSPerfAccumulate("int_er_uc_saturated_fallback", saturatedFallbackDelta)
   }
