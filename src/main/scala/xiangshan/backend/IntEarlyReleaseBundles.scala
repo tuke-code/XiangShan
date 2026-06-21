@@ -122,6 +122,7 @@ class IntERRobUopMeta(implicit p: Parameters) extends XSBundle {
   val dest = new IntERDestTrack
   val redef = new IntERRedefTrack
   val resolved = Bool()
+  val guardEmitted = Bool()
 }
 
 class IntERLocalUopMeta(val numSrc: Int)(implicit p: Parameters) extends XSBundle {

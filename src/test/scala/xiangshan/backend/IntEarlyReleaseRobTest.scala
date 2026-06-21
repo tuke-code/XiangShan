@@ -78,32 +78,38 @@ class IntERRobSTGuardProbe(implicit p: Parameters) extends XSModule {
     val loadNeedFlush = Input(Bool())
     val loadRedefValid = Input(Bool())
     val loadResolved = Input(Bool())
+    val loadGuardEmitted = Input(Bool())
     val loadTrackId = Input(UInt(IntERTrackIdWidth.W))
     val loadTrackGen = Input(UInt(IntERTrackGenBits.W))
     val loadOldPdest = Input(UInt(PhyRegIdxWidth.W))
     val stop = Input(Bool())
     val cursorValue = Input(UInt(log2Ceil(RobSize).W))
     val guard = Output(Vec(IntERSTWalkWidth, Valid(new IntERSTGuardDec)))
-    val markResolved = Output(Vec(entryCount, Bool()))
+    val markGuardEmitted = Output(Vec(entryCount, Bool()))
     val advance = Output(UInt(log2Ceil(IntERSTWalkWidth + 1).W))
   })
 
   private val entries = RegInit(VecInit.fill(entryCount)(0.U.asTypeOf(new RobEntryBundle)))
+  private val safeToCross = Wire(Vec(entryCount, Bool()))
+  for (entry <- 0 until entryCount) {
+    safeToCross(entry) := entries(entry).intER.get.resolved
+  }
   private val cursor = Wire(new RobPtr)
   cursor.flag := false.B
   cursor.value := io.cursorValue
 
   io.advance := RobIntEROps.emitSTGuardDec(
     out = io.guard,
-    markResolved = io.markResolved,
+    markGuardEmitted = io.markGuardEmitted,
     cursor = cursor,
     stop = io.stop || io.load,
-    entries = entries
+    entries = entries,
+    safeToCross = safeToCross
   )
 
   for (entry <- 0 until entryCount) {
-    when(io.markResolved(entry)) {
-      entries(entry).intER.get.resolved := true.B
+    when(io.markGuardEmitted(entry)) {
+      entries(entry).intER.get.guardEmitted := true.B
     }
   }
 
@@ -118,6 +124,7 @@ class IntERRobSTGuardProbe(implicit p: Parameters) extends XSModule {
       entries(entry).intER.get.redef.trackGen := io.loadTrackGen
       entries(entry).intER.get.redef.oldPdest := io.loadOldPdest
       entries(entry).intER.get.resolved := io.loadResolved
+      entries(entry).intER.get.guardEmitted := io.loadGuardEmitted
     }
   }
 }
@@ -191,6 +198,7 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     dut.io.loadNeedFlush.poke(false.B)
     dut.io.loadRedefValid.poke(false.B)
     dut.io.loadResolved.poke(false.B)
+    dut.io.loadGuardEmitted.poke(false.B)
     dut.io.loadTrackId.poke(0.U)
     dut.io.loadTrackGen.poke(0.U)
     dut.io.loadOldPdest.poke(0.U)
@@ -206,6 +214,7 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     needFlush: Boolean = false,
     redefValid: Boolean = true,
     resolved: Boolean = false,
+    guardEmitted: Boolean = false,
     trackId: Int = 1,
     trackGen: Int = 3,
     oldPdest: Int = 21
@@ -218,6 +227,7 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     dut.io.loadNeedFlush.poke(needFlush.B)
     dut.io.loadRedefValid.poke(redefValid.B)
     dut.io.loadResolved.poke(resolved.B)
+    dut.io.loadGuardEmitted.poke(guardEmitted.B)
     dut.io.loadTrackId.poke(trackId.U)
     dut.io.loadTrackGen.poke(trackGen.U)
     dut.io.loadOldPdest.poke(oldPdest.U)
@@ -410,7 +420,7 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.clock.step()
       dut.reset.poke(false.B)
 
-      loadSTEntry(dut, idx = 0, trackId = 1, trackGen = 3, oldPdest = 21)
+      loadSTEntry(dut, idx = 0, resolved = true, trackId = 1, trackGen = 3, oldPdest = 21)
       loadSTEntry(dut, idx = 1, writebacked = false, trackId = 0, trackGen = 1, oldPdest = 31)
 
       dut.io.cursorValue.poke(0.U)
@@ -420,8 +430,8 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.guard(0).bits.trackGen.expect(3.U)
       dut.io.guard(0).bits.oldPdest.expect(21.U)
       dut.io.guard(1).valid.expect(false.B)
-      dut.io.markResolved(0).expect(true.B)
-      dut.io.markResolved(1).expect(false.B)
+      dut.io.markGuardEmitted(0).expect(true.B)
+      dut.io.markGuardEmitted(1).expect(false.B)
       dut.io.advance.expect(1.U)
       dut.clock.step()
 
@@ -440,7 +450,7 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.clock.step()
       dut.reset.poke(false.B)
 
-      loadSTEntry(dut, idx = 0, writebacked = false, trackId = 1, trackGen = 3, oldPdest = 21)
+      loadSTEntry(dut, idx = 0, writebacked = true, resolved = false, trackId = 1, trackGen = 3, oldPdest = 21)
       loadSTEntry(dut, idx = 1, trackId = 0, trackGen = 1, oldPdest = 31)
 
       dut.io.cursorValue.poke(0.U)
@@ -448,7 +458,20 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.guard(1).valid.expect(false.B)
       dut.io.advance.expect(0.U)
 
-      loadSTEntry(dut, idx = 0, writebacked = true, trackId = 1, trackGen = 3, oldPdest = 21)
+      loadSTEntry(dut, idx = 0, resolved = true, trackId = 1, trackGen = 3, oldPdest = 21)
+      dut.io.cursorValue.poke(0.U)
+      dut.io.guard(0).valid.expect(true.B)
+      dut.io.guard(0).bits.trackId.expect(1.U)
+      dut.io.guard(0).bits.trackGen.expect(3.U)
+      dut.io.guard(0).bits.oldPdest.expect(21.U)
+      dut.io.guard(1).valid.expect(false.B)
+      dut.io.advance.expect(1.U)
+      dut.clock.step()
+      clearSTGuard(dut)
+      dut.io.cursorValue.poke(0.U)
+      dut.io.guard(0).valid.expect(false.B)
+
+      loadSTEntry(dut, idx = 0, resolved = true, trackId = 1, trackGen = 3, oldPdest = 21)
       dut.io.cursorValue.poke(0.U)
       dut.io.stop.poke(true.B)
       dut.io.guard(0).valid.expect(false.B)

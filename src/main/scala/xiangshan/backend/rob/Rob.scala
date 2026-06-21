@@ -179,7 +179,13 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val intERReadDoneMarks = Option.when(EnableIntEarlyRegRelease)(
     Wire(Vec(RobSize, Vec(IntERLogicalSrcWidth, Bool())))
   )
-  val intERSTGuardMarks = Option.when(EnableIntEarlyRegRelease)(
+  val intERSTGuardEmittedMarks = Option.when(EnableIntEarlyRegRelease)(
+    Wire(Vec(RobSize, Bool()))
+  )
+  val intERSafeToCross = Option.when(EnableIntEarlyRegRelease)(
+    Wire(Vec(RobSize, Bool()))
+  )
+  val intERCommitSafeNow = Option.when(EnableIntEarlyRegRelease)(
     Wire(Vec(RobSize, Bool()))
   )
   val intERSpecCursor = Option.when(EnableIntEarlyRegRelease)(RegInit(0.U.asTypeOf(new RobPtr)))
@@ -200,7 +206,9 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     }
     io.intERSTGuardDec.get := 0.U.asTypeOf(io.intERSTGuardDec.get)
     io.intERSquash.get := 0.U.asTypeOf(io.intERSquash.get)
-    intERSTGuardMarks.get := 0.U.asTypeOf(intERSTGuardMarks.get)
+    intERSTGuardEmittedMarks.get := 0.U.asTypeOf(intERSTGuardEmittedMarks.get)
+    intERSafeToCross.get := 0.U.asTypeOf(intERSafeToCross.get)
+    intERCommitSafeNow.get := 0.U.asTypeOf(intERCommitSafeNow.get)
   }
   // pointers
   // For enqueue ptr, we don't duplicate it since only enqueue needs it.
@@ -832,15 +840,23 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     (deqNeedFlush && !deqHasFlushed) || deqFlushBlock || criticalErrorState || traceBlock
 
   if (EnableIntEarlyRegRelease) {
+    for (entry <- 0 until RobSize) {
+      intERCommitSafeNow.get(entry) := io.commits.isCommit &&
+        VecInit(io.commits.commitValid.zip(deqPtrVec.map(_.value === entry.U)).map {
+          case (valid, hit) => valid && hit
+        }).asUInt.orR
+      intERSafeToCross.get(entry) := robEntries(entry).intER.get.resolved || intERCommitSafeNow.get(entry)
+    }
     val stStop = blockCommit || state =/= s_idle || io.flushOut.valid ||
       intrBitSetReg || deqHasException || deqHasFlushPipe || deqHasReplayInst
     val stCursor = Mux(deqPtr > intERSpecCursor.get, deqPtr, intERSpecCursor.get)
     val stAdvance = RobIntEROps.emitSTGuardDec(
       out = io.intERSTGuardDec.get,
-      markResolved = intERSTGuardMarks.get,
+      markGuardEmitted = intERSTGuardEmittedMarks.get,
       cursor = stCursor,
       stop = stStop,
-      entries = robEntries
+      entries = robEntries,
+      safeToCross = intERSafeToCross.get
     )
 
     when(io.redirect.valid || io.flushOut.valid || state === s_walk) {
@@ -849,8 +865,14 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       intERSpecCursor.get := stCursor + stAdvance
     }
     for (entry <- 0 until RobSize) {
-      when(intERSTGuardMarks.get(entry)) {
+      val enqHit = VecInit(canEnqueue.zip(allocatePtrVec.map(_.value === entry.U)).map {
+        case (valid, hit) => valid && hit
+      }).asUInt.orR
+      when(intERCommitSafeNow.get(entry) && !enqHit) {
         robEntries(entry).intER.get.resolved := true.B
+      }
+      when(intERSTGuardEmittedMarks.get(entry) && !enqHit) {
+        robEntries(entry).intER.get.guardEmitted := true.B
       }
     }
   }

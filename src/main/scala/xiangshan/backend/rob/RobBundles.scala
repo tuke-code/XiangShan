@@ -181,6 +181,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
       meta.dest := robEnq.intER.get.dest
       meta.redef := robEnq.intER.get.redef
       meta.resolved := false.B
+      meta.guardEmitted := false.B
     }
     robEntry.topdownIssued.foreach(_ := false.B)
     robEntry.topdownIssueTime.foreach(_ := 0.U)
@@ -223,16 +224,18 @@ object RobBundles extends HasCircularQueuePtrHelper {
 object RobIntEROps {
   def emitSTGuardDec(
     out: Vec[ValidIO[IntERSTGuardDec]],
-    markResolved: Vec[Bool],
+    markGuardEmitted: Vec[Bool],
     cursor: RobPtr,
     stop: Bool,
-    entries: Vec[RobBundles.RobEntryBundle]
+    entries: Vec[RobBundles.RobEntryBundle],
+    safeToCross: Vec[Bool]
   )(implicit p: Parameters): UInt = {
     require(out.length >= 1, "ROB ER speculation tracker must have at least one output lane")
-    require(markResolved.length == entries.length, "ROB ER resolved mark width must match entry count")
+    require(markGuardEmitted.length == entries.length, "ROB ER guard-emitted mark width must match entry count")
+    require(safeToCross.length == entries.length, "ROB ER safe-to-cross width must match entry count")
 
     out := 0.U.asTypeOf(out)
-    markResolved := 0.U.asTypeOf(markResolved)
+    markGuardEmitted := 0.U.asTypeOf(markGuardEmitted)
 
     val entryIdxWidth = log2Ceil(entries.length max 2)
     val laneCanCross = Wire(Vec(out.length, Bool()))
@@ -246,8 +249,8 @@ object RobIntEROps {
       } else {
         !stop && laneCanCross.take(lane).foldLeft(true.B)(_ && _)
       }
-      val canCross = olderClear && inRange && entry.valid && entry.isWritebacked && !entry.needFlush
-      val emit = canCross && entry.intER.get.redef.valid && !entry.intER.get.resolved
+      val canCross = olderClear && inRange && entry.valid && safeToCross(idx) && !entry.needFlush
+      val emit = canCross && entry.intER.get.redef.valid && !entry.intER.get.guardEmitted
 
       laneCanCross(lane) := canCross
       out(lane).valid := emit
@@ -265,7 +268,7 @@ object RobIntEROps {
         val ptr = cursor + lane.U
         out(lane).valid && ptr.value === entryIdx.U
       }
-      markResolved(entryIdx) := VecInit(hits).asUInt.orR
+      markGuardEmitted(entryIdx) := VecInit(hits).asUInt.orR
     }
 
     PopCount(laneCanCross)
