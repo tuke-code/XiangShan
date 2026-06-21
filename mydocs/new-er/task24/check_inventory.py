@@ -12,6 +12,7 @@ REQUIRED_HEADINGS = [
     "# Int ER Task24 Assertion And Perf Inventory",
     "## Coverage Matrix",
     "## Remaining Task24 Work",
+    "## Focused Suite Sweep Evidence",
     "## Closure Gate",
 ]
 
@@ -51,6 +52,20 @@ UNSUPPORTED_SCOPE_MARKERS = [
     "ST does not combinationally query UCA produced-ready state",
     "pending interrupt/trap/flush is handled as an ST stop/no-guardDec condition",
     "int_er_fallback_pending_interrupt is deliberately unsupported",
+]
+
+FOCUSED_SWEEP_MARKERS = [
+    "Round 39 focused sweep",
+    "IntSparseUCATest",
+    "IntEarlyReleaseBundlesTest",
+    "IntEarlyReleaseFreeListTest",
+    "IntEarlyReleaseDataPathTest",
+    "IntEarlyReleaseRobTest",
+    "PreprocessTest",
+    "xiangshan.test.compile",
+    "difftest.test.compile not required",
+    "70 tests run, 70 succeeded",
+    "5 tests run, 5 succeeded",
 ]
 
 
@@ -114,6 +129,14 @@ def main() -> int:
     for stale_text in stale_remaining:
         if stale_text in remaining_section:
             return fail(f"remaining task24 work still carries resolved fallback scope: {stale_text}")
+
+    for marker in FOCUSED_SWEEP_MARKERS:
+        if marker not in text:
+            return fail(f"missing focused sweep evidence marker: {marker}")
+
+    completed_sweep_phrase = "focused suite sweep" + " before task26"
+    if completed_sweep_phrase in remaining_section:
+        return fail("remaining task24 work still lists the completed focused sweep")
 
     return 0
 

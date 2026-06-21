@@ -2,7 +2,7 @@
 
 This inventory maps the current integer early-release assertion, debug, perf, and directed-test coverage to the risk list from the sparse UCA spec and the implementation plan. It is intentionally conservative: a risk can be functionally covered while still carrying an open perf or fail-fast coverage gap.
 
-Current result: task24 remains active. The implementation has strong local correctness coverage across UCA, Rename, MEFreeList, ROB/ST, DataPath, and Difftest, and the UCA event debug counters needed for system debug are now exposed through stable Rename-owned `XSPerfAccumulate` names. The remaining open work is the focused module suite sweep before task26.
+Current result: task24 remains active pending review closure. The implementation has strong local correctness coverage across UCA, Rename, MEFreeList, ROB/ST, DataPath, and Difftest, and the UCA event debug counters needed for system debug are now exposed through stable Rename-owned `XSPerfAccumulate` names. The Round 39 focused sweep completed the remaining task24 verification gate before task26.
 
 ## Coverage Matrix
 
@@ -35,12 +35,24 @@ Current result: task24 remains active. The implementation has strong local corre
 
 ## Remaining Task24 Work
 
-The following item is open before task24 can be closed:
+No implementation or focused-sweep item remains open before task24 review closure.
 
-1. Rerun the focused module suites for UCA, Rename bundle policy, MEFreeList, DataPath, ROB/ST, and Difftest preprocess before moving to task26.
+The next step is review reconciliation: if the Round 39 evidence is accepted, move task24 to completed and then begin task26 full affected submodule regression.
+
+## Focused Suite Sweep Evidence
+
+Round 39 focused sweep:
+
+| Check | Command | Result |
+|-------|---------|--------|
+| UCA, Rename bundle policy, MEFreeList, DataPath, and ROB/ST focused suites | `CCACHE_DIR=/tmp/ccache-codex-review env -u LD_PRELOAD JAVA_TOOL_OPTIONS=-Djdk.net.hosts.file=/tmp/codex-hosts mill -i xiangshan.test.testOnly xiangshan.backend.IntSparseUCATest xiangshan.backend.IntEarlyReleaseBundlesTest xiangshan.backend.IntEarlyReleaseFreeListTest xiangshan.backend.IntEarlyReleaseDataPathTest xiangshan.backend.IntEarlyReleaseRobTest` | passed: 5 suites completed, 70 tests run, 70 succeeded, 0 failed |
+| Difftest preprocess focused suite | `CCACHE_DIR=/tmp/ccache-codex-review env -u LD_PRELOAD JAVA_TOOL_OPTIONS=-Djdk.net.hosts.file=/tmp/codex-hosts mill -i difftest.test.testOnly difftest.PreprocessTest` | passed: 1 suite completed, 5 tests run, 5 succeeded, 0 failed |
+| XiangShan test compile | `CCACHE_DIR=/tmp/ccache-codex-review env -u LD_PRELOAD JAVA_TOOL_OPTIONS=-Djdk.net.hosts.file=/tmp/codex-hosts mill -i xiangshan.test.compile` | passed |
+| Inventory/spec checker | `env -u LD_PRELOAD python3 mydocs/new-er/task24/check_inventory.py` | passed after this evidence section was added |
+| Difftest test compile | `difftest.test.compile` | difftest.test.compile not required in Round 39 because no Difftest-facing source or assumption changed; `PreprocessTest` was rerun as the focused Difftest gate |
 
 ## Closure Gate
 
 This inventory checker is a structure guard only. It proves that the inventory mentions every required module and risk, but it does not close task24 by itself.
 
-task24 remains active until the focused suite sweep above passes. Only after that should the loop proceed to task26 full affected submodule regression.
+task24 remains active until the Round 39 focused sweep evidence is reviewed and accepted. Only after that should the loop proceed to task26 full affected submodule regression.
