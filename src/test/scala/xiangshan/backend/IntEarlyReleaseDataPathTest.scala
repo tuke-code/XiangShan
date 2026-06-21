@@ -356,6 +356,14 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
       dut.io.status.fallback.expect(false.B)
       dut.io.status.suppressed.expect(true.B)
 
+      dut.io.s1Valid.poke(false.B)
+      dut.io.og1Failed.poke(false.B)
+      dut.io.status.tracked.expect(false.B)
+      dut.io.status.accepted.expect(false.B)
+      dut.io.status.fallback.expect(false.B)
+      dut.io.status.suppressed.expect(false.B)
+
+      dut.io.s1Valid.poke(true.B)
       dut.io.og1Failed.poke(false.B)
       dut.io.dataSources(0).value.poke(DataSource.forward)
       dut.io.status.tracked.expect(true.B)

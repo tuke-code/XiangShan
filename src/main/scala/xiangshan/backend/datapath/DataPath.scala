@@ -71,15 +71,16 @@ object DataPathIntEROps {
     val anyUnsupported = VecInit(srcShadow.zip(intReadSources).zip(supportedSources).map { case ((src, intRead), supported) =>
       src.valid && intRead && !supported
     }).asUInt.orR
+    val activeTracked = s1Valid && anyTracked
     val fallback = completed && anyTracked && (replayPronePath || uncertainReadPath || anyUnsupported)
     val readDone = completed && anyTracked && !fallback
-    val suppressed = anyTracked && !(fallback || readDone)
+    val suppressed = activeTracked && !(fallback || readDone)
 
     out.valid := fallback || readDone
     out.bits.fallback := fallback
     out.bits.reason := Mux(fallback, IntERFallbackReason.unsupportedReadPath, IntERFallbackReason.none)
     status.foreach { s =>
-      s.tracked := anyTracked
+      s.tracked := activeTracked
       s.accepted := readDone
       s.fallback := fallback
       s.suppressed := suppressed
