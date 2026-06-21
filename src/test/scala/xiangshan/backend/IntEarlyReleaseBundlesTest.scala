@@ -246,6 +246,10 @@ class IntERRobMetadataPropagationProbe(implicit p: Parameters) extends XSModule 
   robEntry := 0.U.asTypeOf(robEntry)
   commitEntry := 0.U.asTypeOf(commitEntry)
 
+  enq.firstUop := true.B
+  enq.lastUop := true.B
+  enq.numUops := 1.U
+  enq.numWB := 1.U
   enq.intER.get.src(1).valid := io.inSrcValid
   enq.intER.get.src(1).trackId := io.inTrackId
   enq.intER.get.src(1).trackGen := io.inTrackGen
@@ -706,6 +710,9 @@ class RenameERFullPathProbe(implicit p: Parameters) extends XSModule {
     val inReady = Output(Vec(RenameWidth, Bool()))
     val outValid = Output(Vec(RenameWidth, Bool()))
     val outFire = Output(Vec(RenameWidth, Bool()))
+    val outFirstUop = Output(Vec(RenameWidth, Bool()))
+    val outLastUop = Output(Vec(RenameWidth, Bool()))
+    val outNumUops = Output(Vec(RenameWidth, UInt(log2Ceil(MaxUopSize).W)))
     val outPdest = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
     val outPsrc0 = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
     val erDestValid = Output(Vec(RenameWidth, Bool()))
@@ -827,6 +834,9 @@ class RenameERFullPathProbe(implicit p: Parameters) extends XSModule {
     io.inReady(i) := rename.io.in(i).ready
     io.outValid(i) := rename.io.out(i).valid
     io.outFire(i) := rename.io.out(i).fire
+    io.outFirstUop(i) := rename.io.out(i).bits.firstUop
+    io.outLastUop(i) := rename.io.out(i).bits.lastUop
+    io.outNumUops(i) := rename.io.out(i).bits.numUops
     io.outPdest(i) := rename.io.out(i).bits.pdest
     io.outPsrc0(i) := rename.io.out(i).bits.psrc(0)
     io.erDestValid(i) := rename.io.out(i).bits.intER.get.dest.valid
@@ -1194,6 +1204,9 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     driveRenameLane(dut, lane, ldest, lsrc0, lsrc1, src0Xp, src1Xp, rfWen, isMove)
     dut.io.outValid(lane).expect(true.B)
     dut.io.outFire(lane).expect(true.B)
+    dut.io.outFirstUop(lane).expect(true.B)
+    dut.io.outLastUop(lane).expect(true.B)
+    dut.io.outNumUops(lane).expect(1.U)
     val pdest = dut.io.outPdest(lane).peek().litValue
     dut.clock.step()
     clearRenameProbe(dut)
@@ -1446,6 +1459,7 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       dut.io.commitPdest.expect(25.U)
       dut.io.commitRedefValid.expect(true.B)
       dut.io.commitOldPdest.expect(17.U)
+      dut.clock.step()
     }
   }
 

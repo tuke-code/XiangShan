@@ -134,7 +134,9 @@ class IntERRobMultiUopRejectProbe(implicit p: Parameters) extends XSModule {
   require(EnableIntEarlyRegRelease, "probe requires Int ER metadata")
 
   val io = IO(new Bundle {
-    val singleUop = Input(Bool())
+    val firstUop = Input(Bool())
+    val lastUop = Input(Bool())
+    val numUops = Input(UInt(log2Ceil(MaxUopSize).W))
     val srcValid = Input(Bool())
     val destValid = Input(Bool())
     val redefValid = Input(Bool())
@@ -147,9 +149,9 @@ class IntERRobMultiUopRejectProbe(implicit p: Parameters) extends XSModule {
   enq := 0.U.asTypeOf(enq)
   entry := 0.U.asTypeOf(entry)
 
-  enq.firstUop := true.B
-  enq.lastUop := io.singleUop
-  enq.numUops := Mux(io.singleUop, 1.U, 2.U)
+  enq.firstUop := io.firstUop
+  enq.lastUop := io.lastUop
+  enq.numUops := io.numUops
   enq.numWB := enq.numUops
   enq.intER.get.src(0).valid := io.srcValid
   enq.intER.get.src(0).trackId := 1.U
@@ -523,37 +525,64 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
   it should "reject tracked ER metadata on multi-uop ROB entries" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
 
-    def expectReject(srcValid: Boolean, destValid: Boolean, redefValid: Boolean): Unit = {
+    def driveEntry(
+      dut: IntERRobMultiUopRejectProbe,
+      firstUop: Boolean,
+      lastUop: Boolean,
+      numUops: Int,
+      srcValid: Boolean,
+      destValid: Boolean,
+      redefValid: Boolean
+    ): Unit = {
+      dut.io.firstUop.poke(firstUop.B)
+      dut.io.lastUop.poke(lastUop.B)
+      dut.io.numUops.poke(numUops.U)
+      dut.io.srcValid.poke(srcValid.B)
+      dut.io.destValid.poke(destValid.B)
+      dut.io.redefValid.poke(redefValid.B)
+    }
+
+    def expectReject(
+      firstUop: Boolean,
+      lastUop: Boolean,
+      numUops: Int,
+      srcValid: Boolean,
+      destValid: Boolean,
+      redefValid: Boolean
+    ): Unit = {
       assertThrows[Exception] {
         simulate(new IntERRobMultiUopRejectProbe()(config)) { dut =>
-          dut.io.singleUop.poke(false.B)
-          dut.io.srcValid.poke(srcValid.B)
-          dut.io.destValid.poke(destValid.B)
-          dut.io.redefValid.poke(redefValid.B)
+          driveEntry(dut, firstUop, lastUop, numUops, srcValid, destValid, redefValid)
           dut.clock.step()
         }
       }
     }
 
-    def expectPass(singleUop: Boolean, srcValid: Boolean, destValid: Boolean, redefValid: Boolean): Unit = {
+    def expectPass(
+      firstUop: Boolean,
+      lastUop: Boolean,
+      numUops: Int,
+      srcValid: Boolean,
+      destValid: Boolean,
+      redefValid: Boolean
+    ): Unit = {
       noException should be thrownBy {
         simulate(new IntERRobMultiUopRejectProbe()(config)) { dut =>
-          dut.io.singleUop.poke(singleUop.B)
-          dut.io.srcValid.poke(srcValid.B)
-          dut.io.destValid.poke(destValid.B)
-          dut.io.redefValid.poke(redefValid.B)
+          driveEntry(dut, firstUop, lastUop, numUops, srcValid, destValid, redefValid)
           dut.clock.step()
           dut.io.entrySrcValid.expect(srcValid.B)
         }
       }
     }
 
-    expectReject(srcValid = true, destValid = false, redefValid = false)
-    expectReject(srcValid = false, destValid = true, redefValid = false)
-    expectReject(srcValid = false, destValid = false, redefValid = true)
-    expectReject(srcValid = true, destValid = true, redefValid = true)
+    expectReject(firstUop = true, lastUop = false, numUops = 2, srcValid = true, destValid = false, redefValid = false)
+    expectReject(firstUop = true, lastUop = false, numUops = 2, srcValid = false, destValid = true, redefValid = false)
+    expectReject(firstUop = true, lastUop = false, numUops = 2, srcValid = false, destValid = false, redefValid = true)
+    expectReject(firstUop = true, lastUop = false, numUops = 2, srcValid = true, destValid = true, redefValid = true)
+    expectReject(firstUop = false, lastUop = true, numUops = 2, srcValid = true, destValid = true, redefValid = true)
+    expectReject(firstUop = true, lastUop = true, numUops = 2, srcValid = true, destValid = true, redefValid = true)
 
-    expectPass(singleUop = false, srcValid = false, destValid = false, redefValid = false)
-    expectPass(singleUop = true, srcValid = true, destValid = true, redefValid = true)
+    expectPass(firstUop = true, lastUop = false, numUops = 2, srcValid = false, destValid = false, redefValid = false)
+    expectPass(firstUop = true, lastUop = true, numUops = 1, srcValid = true, destValid = true, redefValid = true)
   }
 }
