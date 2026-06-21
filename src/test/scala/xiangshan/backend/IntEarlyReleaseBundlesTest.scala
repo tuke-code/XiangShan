@@ -216,6 +216,7 @@ class IntERRobMetadataPropagationProbe(implicit p: Parameters) extends XSModule 
     val inPdest = Input(UInt(PhyRegIdxWidth.W))
     val inRedefValid = Input(Bool())
     val inOldPdest = Input(UInt(PhyRegIdxWidth.W))
+    val inMoveSrcLReg = Input(UInt(LogicRegsWidth.W))
     val entrySrcValid = Output(Bool())
     val entrySrcReadDone = Output(Bool())
     val entryTrackId = Output(UInt(IntERTrackIdWidth.W))
@@ -226,6 +227,7 @@ class IntERRobMetadataPropagationProbe(implicit p: Parameters) extends XSModule 
     val entryPdest = Output(UInt(PhyRegIdxWidth.W))
     val entryRedefValid = Output(Bool())
     val entryOldPdest = Output(UInt(PhyRegIdxWidth.W))
+    val entryMoveSrcLReg = Output(UInt(LogicRegsWidth.W))
     val commitSrcValid = Output(Bool())
     val commitSrcReadDone = Output(Bool())
     val commitTrackId = Output(UInt(IntERTrackIdWidth.W))
@@ -236,6 +238,7 @@ class IntERRobMetadataPropagationProbe(implicit p: Parameters) extends XSModule 
     val commitPdest = Output(UInt(PhyRegIdxWidth.W))
     val commitRedefValid = Output(Bool())
     val commitOldPdest = Output(UInt(PhyRegIdxWidth.W))
+    val commitMoveSrcLReg = Output(UInt(LogicRegsWidth.W))
   })
 
   val enq = Wire(new EnqRobUop)
@@ -250,6 +253,7 @@ class IntERRobMetadataPropagationProbe(implicit p: Parameters) extends XSModule 
   enq.lastUop := true.B
   enq.numUops := 1.U
   enq.numWB := 1.U
+  enq.moveSrcLReg := io.inMoveSrcLReg
   enq.intER.get.src(1).valid := io.inSrcValid
   enq.intER.get.src(1).trackId := io.inTrackId
   enq.intER.get.src(1).trackGen := io.inTrackGen
@@ -277,6 +281,7 @@ class IntERRobMetadataPropagationProbe(implicit p: Parameters) extends XSModule 
   io.entryPdest := robEntry.intER.get.dest.pdest
   io.entryRedefValid := robEntry.intER.get.redef.valid
   io.entryOldPdest := robEntry.intER.get.redef.oldPdest
+  io.entryMoveSrcLReg := robEntry.debug_move_src.get
 
   io.commitSrcValid := commitEntry.intER.get.src(1).valid
   io.commitSrcReadDone := commitEntry.intER.get.src(1).readDone
@@ -288,6 +293,7 @@ class IntERRobMetadataPropagationProbe(implicit p: Parameters) extends XSModule 
   io.commitPdest := commitEntry.intER.get.dest.pdest
   io.commitRedefValid := commitEntry.intER.get.redef.valid
   io.commitOldPdest := commitEntry.intER.get.redef.oldPdest
+  io.commitMoveSrcLReg := commitEntry.debug_move_src.get
 }
 
 class IntERAllLocalPayloadShapeProbe(
@@ -1437,6 +1443,7 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       dut.io.inPdest.poke(25.U)
       dut.io.inRedefValid.poke(true.B)
       dut.io.inOldPdest.poke(17.U)
+      dut.io.inMoveSrcLReg.poke(6.U)
 
       dut.io.entrySrcValid.expect(true.B)
       dut.io.entrySrcReadDone.expect(false.B)
@@ -1448,6 +1455,7 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       dut.io.entryPdest.expect(25.U)
       dut.io.entryRedefValid.expect(true.B)
       dut.io.entryOldPdest.expect(17.U)
+      dut.io.entryMoveSrcLReg.expect(6.U)
 
       dut.io.commitSrcValid.expect(true.B)
       dut.io.commitSrcReadDone.expect(false.B)
@@ -1459,6 +1467,7 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       dut.io.commitPdest.expect(25.U)
       dut.io.commitRedefValid.expect(true.B)
       dut.io.commitOldPdest.expect(17.U)
+      dut.io.commitMoveSrcLReg.expect(6.U)
       dut.clock.step()
     }
   }

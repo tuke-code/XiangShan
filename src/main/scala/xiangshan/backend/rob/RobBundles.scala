@@ -77,6 +77,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val debug_pc         = OptionWrapper(backendParams.debugEn, UInt(VAddrBits.W))
     val debug_instr      = OptionWrapper(backendParams.debugEn, UInt(32.W))
     val debug_ldest      = OptionWrapper(backendParams.basicDebugEn, UInt(LogicRegsWidth.W))
+    val debug_move_src   = OptionWrapper(backendParams.basicDebugEn, UInt(LogicRegsWidth.W))
     val debug_pdest      = OptionWrapper(backendParams.basicDebugEn, UInt(PhyRegIdxWidth.W))
     val debug_fuType     = OptionWrapper(backendParams.debugEn, FuType())
     val debug_fusionNum  = OptionWrapper(backendParams.debugEn, UInt(2.W))
@@ -128,6 +129,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     val debug_pc = OptionWrapper(backendParams.debugEn, UInt(VAddrBits.W))
     val debug_instr = OptionWrapper(backendParams.debugEn, UInt(32.W))
     val debug_ldest = OptionWrapper(backendParams.basicDebugEn, UInt(LogicRegsWidth.W))
+    val debug_move_src = OptionWrapper(backendParams.basicDebugEn, UInt(LogicRegsWidth.W))
     val debug_pdest = OptionWrapper(backendParams.basicDebugEn, UInt(PhyRegIdxWidth.W))
     val debug_otherPdest = OptionWrapper(backendParams.basicDebugEn, Vec(7, UInt(PhyRegIdxWidth.W)))
     val debug_fuType = OptionWrapper(backendParams.debugEn, FuType())
@@ -154,6 +156,7 @@ object RobBundles extends HasCircularQueuePtrHelper {
     // trace
     robEntry.traceBlockInPipe := robEnq.traceBlockInPipe
     robEntry.debug_ldest.foreach(_ := robEnq.ldest)
+    robEntry.debug_move_src.foreach(_ := robEnq.moveSrcLReg)
     robEntry.debug_pdest.foreach(_ := robEnq.pdest)
     robEntry.debug_fuType.foreach(_ := robEnq.fuType)
     robEntry.debug_fuOpType.foreach(_ := robEnq.fuOpType)
@@ -223,9 +226,54 @@ object RobBundles extends HasCircularQueuePtrHelper {
     robCommitEntry.debug_pc.foreach(_ := robEntry.debug_pc.get)
     robCommitEntry.debug_instr.foreach(_ := robEntry.debug_instr.get)
     robCommitEntry.debug_ldest.foreach(_ := robEntry.debug_ldest.get)
+    robCommitEntry.debug_move_src.foreach(_ := robEntry.debug_move_src.get)
     robCommitEntry.debug_pdest.foreach(_ := robEntry.debug_pdest.get)
     robCommitEntry.debug_fuType.foreach(_ := robEntry.debug_fuType.get)
     robCommitEntry.debug_fusionNum.foreach(_ := robEntry.debug_fusionNum.get)
+  }
+}
+
+object RobIntDiffOps {
+  def updateShadow(
+    current: Vec[UInt],
+    next: Vec[UInt],
+    commitData: Vec[UInt],
+    valid: Seq[Bool],
+    rfWen: Seq[Bool],
+    isMove: Seq[Bool],
+    ldest: Seq[UInt],
+    moveSrc: Seq[UInt],
+    writeData: Seq[UInt]
+  ): Unit = {
+    val numRegs = current.length
+    require(numRegs == 32, "ROB direct integer diff shadow must model 32 architectural registers")
+    require(next.length == numRegs, "ROB direct integer diff next shadow width must match current shadow")
+    require(valid.length == rfWen.length, "ROB direct integer diff valid/rfWen lane counts must match")
+    require(valid.length == isMove.length, "ROB direct integer diff valid/isMove lane counts must match")
+    require(valid.length == ldest.length, "ROB direct integer diff valid/ldest lane counts must match")
+    require(valid.length == moveSrc.length, "ROB direct integer diff valid/moveSrc lane counts must match")
+    require(valid.length == writeData.length, "ROB direct integer diff valid/writeData lane counts must match")
+    require(commitData.length == valid.length, "ROB direct integer diff commit data lane count must match")
+
+    val staged = Wire(Vec(valid.length + 1, Vec(numRegs, UInt(current.head.getWidth.W))))
+    staged(0) := current
+
+    for (lane <- valid.indices) {
+      val srcIdx = moveSrc(lane)(log2Ceil(numRegs) - 1, 0)
+      val dstIdx = ldest(lane)(log2Ceil(numRegs) - 1, 0)
+      val laneData = Mux(isMove(lane), staged(lane)(srcIdx), writeData(lane))
+      val write = valid(lane) && rfWen(lane) && dstIdx =/= 0.U
+
+      commitData(lane) := laneData
+      staged(lane + 1) := staged(lane)
+      when(write) {
+        staged(lane + 1)(dstIdx) := laneData
+      }
+      staged(lane + 1)(0) := 0.U
+    }
+
+    next := staged.last
+    next(0) := 0.U
   }
 }
 

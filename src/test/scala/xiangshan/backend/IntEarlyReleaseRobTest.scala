@@ -11,7 +11,7 @@ import utility.{LogUtilsOptions, LogUtilsOptionsKey, PerfCounterOptions, PerfCou
 import xiangshan._
 import xiangshan.backend.Bundles.EnqRobUop
 import xiangshan.backend.rob.RobBundles.RobEntryBundle
-import xiangshan.backend.rob.{RobBundles, RobIntEROps, RobPtr}
+import xiangshan.backend.rob.{RobBundles, RobIntDiffOps, RobIntEROps, RobPtr}
 
 class IntERRobReadDoneValidationProbe(implicit p: Parameters) extends XSModule {
   private val entryCount = 4
@@ -169,6 +169,47 @@ class IntERRobMultiUopRejectProbe(implicit p: Parameters) extends XSModule {
 
   RobBundles.connectEnq(entry, enq)
   io.entrySrcValid := entry.intER.get.src(0).valid
+}
+
+class IntERRobDirectDiffShadowProbe(implicit p: Parameters) extends XSModule {
+  private val lanes = 3
+
+  val io = IO(new Bundle {
+    val load = Input(Bool())
+    val loadAddr = Input(UInt(log2Ceil(IntLogicRegs).W))
+    val loadData = Input(UInt(XLEN.W))
+    val valid = Input(Vec(lanes, Bool()))
+    val rfWen = Input(Vec(lanes, Bool()))
+    val isMove = Input(Vec(lanes, Bool()))
+    val ldest = Input(Vec(lanes, UInt(LogicRegsWidth.W)))
+    val moveSrc = Input(Vec(lanes, UInt(LogicRegsWidth.W)))
+    val writeData = Input(Vec(lanes, UInt(XLEN.W)))
+    val shadow = Output(Vec(IntLogicRegs, UInt(XLEN.W)))
+    val commitData = Output(Vec(lanes, UInt(XLEN.W)))
+  })
+
+  private val shadow = RegInit(VecInit.fill(IntLogicRegs)(0.U(XLEN.W)))
+  val currentShadow = Wire(Vec(IntLogicRegs, UInt(XLEN.W)))
+  currentShadow := shadow
+  when(io.load) {
+    currentShadow(io.loadAddr) := io.loadData
+  }
+
+  val nextShadow = Wire(Vec(IntLogicRegs, UInt(XLEN.W)))
+  RobIntDiffOps.updateShadow(
+    current = currentShadow,
+    next = nextShadow,
+    commitData = io.commitData,
+    valid = io.valid,
+    rfWen = io.rfWen,
+    isMove = io.isMove,
+    ldest = io.ldest,
+    moveSrc = io.moveSrc,
+    writeData = io.writeData
+  )
+
+  shadow := nextShadow
+  io.shadow := shadow
 }
 
 class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
@@ -584,5 +625,80 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
 
     expectPass(firstUop = true, lastUop = false, numUops = 2, srcValid = false, destValid = false, redefValid = false)
     expectPass(firstUop = true, lastUop = true, numUops = 1, srcValid = true, destValid = true, redefValid = true)
+  }
+
+  it should "update direct integer diff shadow in commit-lane order with move source value and x0 zeroed" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new IntERRobDirectDiffShadowProbe()(config)) { dut =>
+      dut.reset.poke(true.B)
+      dut.clock.step()
+      dut.reset.poke(false.B)
+
+      def clear(): Unit = {
+        dut.io.load.poke(false.B)
+        dut.io.loadAddr.poke(0.U)
+        dut.io.loadData.poke(0.U)
+        for (lane <- 0 until dut.io.valid.length) {
+          dut.io.valid(lane).poke(false.B)
+          dut.io.rfWen(lane).poke(false.B)
+          dut.io.isMove(lane).poke(false.B)
+          dut.io.ldest(lane).poke(0.U)
+          dut.io.moveSrc(lane).poke(0.U)
+          dut.io.writeData(lane).poke(0.U)
+        }
+      }
+
+      def loadReg(addr: Int, data: BigInt): Unit = {
+        clear()
+        dut.io.load.poke(true.B)
+        dut.io.loadAddr.poke(addr.U)
+        dut.io.loadData.poke(data.U)
+        dut.clock.step()
+      }
+
+      clear()
+      loadReg(1, BigInt("1111", 16))
+      loadReg(2, BigInt("2222", 16))
+      loadReg(3, BigInt("3333", 16))
+      loadReg(5, BigInt("5555", 16))
+      clear()
+
+      dut.io.valid(0).poke(true.B)
+      dut.io.rfWen(0).poke(true.B)
+      dut.io.ldest(0).poke(2.U)
+      dut.io.writeData(0).poke(BigInt("aaaa", 16).U)
+
+      dut.io.valid(1).poke(true.B)
+      dut.io.rfWen(1).poke(true.B)
+      dut.io.isMove(1).poke(true.B)
+      dut.io.ldest(1).poke(4.U)
+      dut.io.moveSrc(1).poke(2.U)
+      dut.io.writeData(1).poke(BigInt("dead", 16).U)
+
+      dut.io.valid(2).poke(true.B)
+      dut.io.rfWen(2).poke(true.B)
+      dut.io.ldest(2).poke(2.U)
+      dut.io.writeData(2).poke(BigInt("bbbb", 16).U)
+
+      dut.io.commitData(0).expect(BigInt("aaaa", 16).U)
+      dut.io.commitData(1).expect(BigInt("aaaa", 16).U)
+      dut.io.commitData(2).expect(BigInt("bbbb", 16).U)
+      dut.clock.step()
+
+      clear()
+      dut.io.shadow(0).expect(0.U)
+      dut.io.shadow(2).expect(BigInt("bbbb", 16).U)
+      dut.io.shadow(4).expect(BigInt("aaaa", 16).U)
+
+      dut.io.valid(0).poke(true.B)
+      dut.io.rfWen(0).poke(true.B)
+      dut.io.ldest(0).poke(0.U)
+      dut.io.writeData(0).poke(BigInt("ffff", 16).U)
+      dut.clock.step()
+
+      clear()
+      dut.io.shadow(0).expect(0.U)
+    }
   }
 }

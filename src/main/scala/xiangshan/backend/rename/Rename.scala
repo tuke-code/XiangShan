@@ -620,6 +620,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     uops(i).psrc(3) := v0ReadPortsData(i)(0)
     uops(i).psrcVl := vlReadPortsData(i).head
     uops(i).psrcIntForMove := intReadPortsData(i).head
+    uops(i).moveSrcLReg := io.in(i).bits.lsrc(0)
 
     // int psrc2 should be bypassed from next instruction if it is fused
     if (i < RenameWidth - 1) {

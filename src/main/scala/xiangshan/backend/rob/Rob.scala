@@ -1653,12 +1653,14 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   if (env.EnableDifftest || env.AlwaysBasicDiff) {
     // These are the structures used by difftest only and should be optimized after synthesis.
     val dt_eliminatedMove = Mem(RobSize, Bool())
+    val dt_moveSrcLReg = Mem(RobSize, UInt(LogicRegsWidth.W))
     val dt_isRVC = Mem(RobSize, Bool())
     val dt_pcTransType = Option.when(env.EnableDifftest)(Mem(RobSize, new AddrTransType))
     val dt_exuDebug = Reg(Vec(RobSize, new DebugBundle))
     for (i <- 0 until RenameWidth) {
       when(canEnqueue(i)) {
         dt_eliminatedMove(allocatePtrVec(i).value) := io.enq.req(i).bits.isMove
+        dt_moveSrcLReg(allocatePtrVec(i).value) := io.enq.req(i).bits.moveSrcLReg
         dt_isRVC(allocatePtrVec(i).value) := io.enq.req(i).bits.isRVC
         dt_pcTransType.foreach(_(allocatePtrVec(i).value) := io.debugInstrAddrTransType)
       }
@@ -1669,6 +1671,43 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         dt_exuDebug(wbIdx) := wb.bits.debug
       }
     }
+    val dtArchIntShadow = RegInit(VecInit.fill(IntLogicRegs)(0.U(XLEN.W)))
+    val dtArchIntShadowNext = Wire(Vec(IntLogicRegs, UInt(XLEN.W)))
+    val dtCommitIntData = Wire(Vec(CommitWidth, UInt(XLEN.W)))
+    val dtCommitValid = Wire(Vec(CommitWidth, Bool()))
+    val dtCommitRfWen = Wire(Vec(CommitWidth, Bool()))
+    val dtCommitIsMove = Wire(Vec(CommitWidth, Bool()))
+    val dtCommitLdest = Wire(Vec(CommitWidth, UInt(LogicRegsWidth.W)))
+    val dtCommitMoveSrc = Wire(Vec(CommitWidth, UInt(LogicRegsWidth.W)))
+    val dtCommitWdata = Wire(Vec(CommitWidth, UInt(XLEN.W)))
+
+    for (i <- 0 until CommitWidth) {
+      val ptr = deqPtrVec(i).value
+      dtCommitValid(i) := io.commits.commitValid(i) && io.commits.isCommit
+      dtCommitRfWen(i) := io.commits.info(i).rfWen
+      dtCommitIsMove(i) := dt_eliminatedMove(ptr)
+      dtCommitLdest(i) := io.commits.info(i).debug_ldest.get
+      dtCommitMoveSrc(i) := dt_moveSrcLReg(ptr)
+      dtCommitWdata(i) := debug_exuData(ptr)
+    }
+
+    RobIntDiffOps.updateShadow(
+      current = dtArchIntShadow,
+      next = dtArchIntShadowNext,
+      commitData = dtCommitIntData,
+      valid = dtCommitValid,
+      rfWen = dtCommitRfWen,
+      isMove = dtCommitIsMove,
+      ldest = dtCommitLdest,
+      moveSrc = dtCommitMoveSrc,
+      writeData = dtCommitWdata
+    )
+    dtArchIntShadow := dtArchIntShadowNext
+
+    val directXrf = DifftestModule(new DiffArchIntRegState, delay = 3)
+    directXrf.coreid := io.hartId
+    directXrf.value := dtArchIntShadowNext
+
     // Always instantiate basic difftest modules.
     for (i <- 0 until CommitWidth) {
       val uop = commitDebugUop(i)
@@ -1683,6 +1722,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
 
       val diffMaxPhyRegs = Seq(MaxPhyRegs, 2 * (V0PhyRegs + VfPhyRegs)).max // For width of wpdest and otherwpdest
       val difftest = DifftestModule(new DiffInstrCommit(diffMaxPhyRegs), delay = 3, dontCare = true)
+      val diffCommitData = DifftestModule(new DiffCommitData, delay = 3, dontCare = true)
       val dt_skip = Mux(eliminatedMove, false.B, exuOut.isSkipDiff)
       difftest.coreid := io.hartId
       difftest.index := i.U
@@ -1707,6 +1747,10 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         Seq(splitDest, splitDest + 1.U)
       }
       difftest.nFused := instrSize - 1.U
+      diffCommitData.coreid := io.hartId
+      diffCommitData.index := i.U
+      diffCommitData.valid := io.commits.commitValid(i) && io.commits.isCommit && commitInfo.rfWen && commitInfo.debug_ldest.get =/= 0.U
+      diffCommitData.data := dtCommitIntData(i)
       when(difftest.valid) {
         assert(instrSize >= 1.U)
       }
