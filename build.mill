@@ -101,6 +101,8 @@ object openNCB extends ChiselModule {
 
 object difftest extends ChiselModule {
   object test extends SbtTests with TestModule.ScalaTest {
+    def ivyDeps: T[Agg[Dep]] = super.ivyDeps() ++ Agg(ivy"org.scalatest::scalatest:3.2.19")
+
     override def sources: T[Seq[PathRef]] = Task.Sources {
       super.sources() ++ Seq(PathRef(this.millSourcePath / "src" / "generator" / "chisel"))
     }
