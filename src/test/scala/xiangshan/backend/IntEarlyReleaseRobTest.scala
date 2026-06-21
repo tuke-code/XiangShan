@@ -185,11 +185,13 @@ class IntERRobDirectDiffShadowProbe(implicit p: Parameters) extends XSModule {
     val ldest = Input(Vec(lanes, UInt(LogicRegsWidth.W)))
     val moveSrc = Input(Vec(lanes, UInt(LogicRegsWidth.W)))
     val writeData = Input(Vec(lanes, UInt(XLEN.W)))
+    val instrSkip = Output(Vec(lanes, Bool()))
     val shadow = Output(Vec(IntLogicRegs, UInt(XLEN.W)))
     val commitData = Output(Vec(lanes, UInt(XLEN.W)))
   })
 
   private val shadow = RegInit(VecInit.fill(IntLogicRegs)(0.U(XLEN.W)))
+  io.instrSkip := io.skip
   val currentShadow = Wire(Vec(IntLogicRegs, UInt(XLEN.W)))
   currentShadow := shadow
   when(io.load) {
@@ -733,6 +735,7 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.rfWen(0).poke(true.B)
       dut.io.ldest(0).poke(7.U)
       dut.io.writeData(0).poke(BigInt("7777", 16).U)
+      dut.io.instrSkip(0).expect(true.B)
       dut.io.commitData(0).expect(BigInt("7777", 16).U)
       dut.clock.step()
 
