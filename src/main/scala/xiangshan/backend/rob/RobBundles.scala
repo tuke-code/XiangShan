@@ -225,6 +225,7 @@ object RobIntEROps {
     out: Vec[ValidIO[IntERSrcValueReadDone]],
     markReadDone: Vec[Vec[Bool]],
     raw: Vec[ValidIO[IntERSrcValueReadDone]],
+    redirect: Valid[Redirect],
     entries: Vec[RobBundles.RobEntryBundle]
   )(implicit p: Parameters): Unit = {
     val logicalSrcWidth = p(XSCoreParamsKey).backendParams.numSrc
@@ -243,6 +244,7 @@ object RobIntEROps {
         val entryIdx = raw(lane).bits.robIdx.value(entryIdxWidth - 1, 0)
         val robEntry = entries(entryIdx)
         val entryIdxInRange = raw(lane).bits.robIdx.value < entries.length.U
+        val killedByRedirect = raw(lane).bits.robIdx.needFlush(redirect)
         val srcIdxInRange = srcEvent.srcIdx < logicalSrcWidth.U
         val stored = robEntry.intER.get.src(srcEvent.srcIdx)
         val duplicate = if (earlierAccepted.isEmpty) {
@@ -256,6 +258,7 @@ object RobIntEROps {
         }
         val storedMatches =
           entryIdxInRange &&
+            !killedByRedirect &&
             robEntry.valid &&
             srcIdxInRange &&
             stored.valid &&

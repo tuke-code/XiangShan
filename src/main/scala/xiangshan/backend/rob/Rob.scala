@@ -181,6 +181,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       out = io.intERReadDoneDec.get,
       markReadDone = intERReadDoneMarks.get,
       raw = io.intERReadDone.get,
+      redirect = io.redirect,
       entries = robEntries
     )
     for (entry <- 0 until RobSize) {

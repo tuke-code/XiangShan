@@ -27,6 +27,7 @@ class IntERRobReadDoneValidationProbe(implicit p: Parameters) extends XSModule {
     val loadTrackId = Input(UInt(IntERTrackIdWidth.W))
     val loadTrackGen = Input(UInt(IntERTrackGenBits.W))
     val loadPsrc = Input(UInt(PhyRegIdxWidth.W))
+    val redirect = Input(Valid(new Redirect))
     val raw = Input(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone)))
     val dec = Output(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone)))
     val selectedReadDone = Output(Bool())
@@ -39,6 +40,7 @@ class IntERRobReadDoneValidationProbe(implicit p: Parameters) extends XSModule {
     out = io.dec,
     markReadDone = marks,
     raw = io.raw,
+    redirect = io.redirect,
     entries = entries
   )
 
@@ -121,6 +123,8 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     dut.io.loadTrackId.poke(0.U)
     dut.io.loadTrackGen.poke(0.U)
     dut.io.loadPsrc.poke(0.U)
+    dut.io.redirect.valid.poke(false.B)
+    dut.io.redirect.bits.poke(0.U.asTypeOf(dut.io.redirect.bits))
   }
 
   private def loadTrackedSource(
@@ -164,6 +168,17 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     dut.io.raw(lane).bits.src(srcSlot).trackGen.poke(trackGen.U)
     dut.io.raw(lane).bits.src(srcSlot).srcIdx.poke(srcSlot.U)
     dut.io.raw(lane).bits.src(srcSlot).psrc.poke(psrc.U)
+  }
+
+  private def driveRedirect(
+    dut: IntERRobReadDoneValidationProbe,
+    robIdx: Int,
+    flushSelf: Boolean
+  ): Unit = {
+    dut.io.redirect.valid.poke(true.B)
+    dut.io.redirect.bits.poke(0.U.asTypeOf(dut.io.redirect.bits))
+    setRobPtr(dut.io.redirect.bits.robIdx, robIdx)
+    dut.io.redirect.bits.level.poke(flushSelf.B)
   }
 
   it should "emit one validated decrement and suppress later duplicates" in {
@@ -243,6 +258,48 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
 
       clearRaw(dut)
       dut.io.selectedReadDone.expect(true.B)
+    }
+  }
+
+  it should "filter raw readDone killed by a redirect to an older entry" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new IntERRobReadDoneValidationProbe()(config)) { dut =>
+      clearRaw(dut)
+      dut.reset.poke(true.B)
+      dut.clock.step()
+      dut.reset.poke(false.B)
+
+      loadTrackedSource(dut)
+      driveReadDone(dut, lane = 0, robIdx = 1)
+      driveRedirect(dut, robIdx = 0, flushSelf = false)
+
+      dut.io.dec(0).valid.expect(false.B)
+      dut.clock.step()
+
+      clearRaw(dut)
+      dut.io.selectedReadDone.expect(false.B)
+    }
+  }
+
+  it should "filter raw readDone on the redirecting entry when redirect flushes itself" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new IntERRobReadDoneValidationProbe()(config)) { dut =>
+      clearRaw(dut)
+      dut.reset.poke(true.B)
+      dut.clock.step()
+      dut.reset.poke(false.B)
+
+      loadTrackedSource(dut)
+      driveReadDone(dut, lane = 0, robIdx = 1)
+      driveRedirect(dut, robIdx = 1, flushSelf = true)
+
+      dut.io.dec(0).valid.expect(false.B)
+      dut.clock.step()
+
+      clearRaw(dut)
+      dut.io.selectedReadDone.expect(false.B)
     }
   }
 }
