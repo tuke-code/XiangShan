@@ -927,6 +927,9 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     intEREarlyFreeReq.get := VecInit(intUCA.io.earlyFree.map(_.valid))
     intEREarlyFreePhyReg.get := VecInit(intUCA.io.earlyFree.map(_.bits.pdest))
     intERCommitSuppress.get := intUCA.io.commitSuppress
+    val saturatedFallbackCount = intUCA.io.debug.saturatedFallbackCount
+    val saturatedFallbackCountPrev = RegNext(saturatedFallbackCount, 0.U)
+    val saturatedFallbackDelta = saturatedFallbackCount - saturatedFallbackCountPrev
 
     XSPerfAccumulate("int_er_rename_alloc", PopCount(intUCA.io.rename.alloc.map(_.valid)))
     XSPerfAccumulate("int_er_rename_dest_track", PopCount(intUCA.io.rename.destTrack.map(_.valid)))
@@ -934,6 +937,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     XSPerfAccumulate("int_er_rename_redef_track", PopCount(intUCA.io.rename.redefTrack.map(_.valid)))
     XSPerfAccumulate("int_er_rename_fallback", PopCount(intUCA.io.rename.fallbackMark))
     XSPerfAccumulate("int_er_rename_redirect_kill", intUCA.io.redirectKill)
+    XSPerfAccumulate("int_er_uc_saturated_fallback", saturatedFallbackDelta)
   }
 
   val genSnapshot = Cat(io.out.map(out => out.fire && out.bits.snapshot)).orR

@@ -7,6 +7,8 @@ import circt.stage.ChiselStage
 import org.chipsalliance.cde.config.Parameters
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import java.nio.file.{Files, Path, Paths}
+import scala.io.Source
 import top.DefaultConfig
 import utility.{LogUtilsOptions, LogUtilsOptionsKey, PerfCounterOptions, PerfCounterOptionsKey, XSPerfLevel}
 import xiangshan._
@@ -932,6 +934,24 @@ class DecodeOldDestHoldProbe(implicit p: Parameters) extends XSModule {
 class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSim {
   behavior of "IntEarlyReleaseParams and IntEarlyReleaseBundles"
 
+  private def sourceText(path: String): String = {
+    val source = Source.fromFile(repoPath(path).toFile)
+    try {
+      source.mkString
+    } finally {
+      source.close()
+    }
+  }
+
+  private def repoPath(path: String): Path = {
+    val relative = Paths.get(path)
+    Iterator.iterate(Paths.get("").toAbsolutePath)(_.getParent)
+      .takeWhile(_ != null)
+      .map(_.resolve(relative))
+      .find(Files.exists(_))
+      .getOrElse(relative)
+  }
+
   private def configWith(params: IntEarlyReleaseParams): Parameters = {
     configWith(params, fastSim = false)
   }
@@ -1475,6 +1495,13 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
   it should "gate rename ER debug output with feature enable" in {
     elaborateRenameERDebugProbe(IntEarlyReleaseParams(), expectedDebug = false)
     elaborateRenameERDebugProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedDebug = true)
+  }
+
+  it should "expose UCA saturated fallback through a stable Rename perf counter name" in {
+    val renameSource = sourceText("src/main/scala/xiangshan/backend/rename/Rename.scala")
+
+    renameSource should include("XSPerfAccumulate(\"int_er_uc_saturated_fallback\"")
+    renameSource should include("intUCA.io.debug.saturatedFallbackCount")
   }
 
   it should "select same-group old destination from older final integer RAT writes" in {
