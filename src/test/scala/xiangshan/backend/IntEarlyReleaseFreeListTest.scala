@@ -6,6 +6,8 @@ import chisel3.util.log2Ceil
 import org.chipsalliance.cde.config.Parameters
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import java.nio.file.{Files, Path, Paths}
+import scala.io.Source
 import top.DefaultConfig
 import utility.{LogUtilsOptions, LogUtilsOptionsKey, PerfCounterOptions, PerfCounterOptionsKey, XSPerfLevel}
 import xiangshan._
@@ -226,6 +228,24 @@ class IntERUCAFreeListProbe(size: Int)(implicit p: Parameters) extends XSModule 
 class IntEarlyReleaseFreeListTest extends AnyFlatSpec with Matchers with ChiselSim {
   behavior of "Int ER integer free list integration"
 
+  private def sourceText(path: String): String = {
+    val source = Source.fromFile(repoPath(path).toFile)
+    try {
+      source.mkString
+    } finally {
+      source.close()
+    }
+  }
+
+  private def repoPath(path: String): Path = {
+    val relative = Paths.get(path)
+    Iterator.iterate(Paths.get("").toAbsolutePath)(_.getParent)
+      .takeWhile(_ != null)
+      .map(_.resolve(relative))
+      .find(Files.exists(_))
+      .getOrElse(relative)
+  }
+
   private def configWith(params: IntEarlyReleaseParams): Parameters = {
     val defaultConfig = new DefaultConfig
     defaultConfig.alterPartial({
@@ -338,6 +358,13 @@ class IntEarlyReleaseFreeListTest extends AnyFlatSpec with Matchers with ChiselS
       clearCombinedInputs(dut)
     }
     sawPreg
+  }
+
+  it should "expose stable MEFreeList early-free perf counter names" in {
+    val source = sourceText("src/main/scala/xiangshan/backend/rename/freelist/MEFreeList.scala")
+
+    source should include("XSPerfAccumulate(\"int_er_me_freelist_early_free_req\"")
+    source should include("XSPerfAccumulate(\"int_er_me_freelist_early_free_merged\"")
   }
 
   it should "merge early-free lanes into later integer allocations" in {

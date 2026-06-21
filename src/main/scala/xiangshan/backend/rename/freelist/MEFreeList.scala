@@ -88,6 +88,8 @@ class MEFreeList(size: Int, commitWidth: Int)(implicit p: Parameters) extends Ba
   val allFreeReq = VecInit(io.freeReq.toSeq ++ earlyFreeReq)
   val allFreePhyReg = VecInit(io.freePhyReg.toSeq ++ earlyFreePhyReg)
   val totalFreeWidth = commitWidth + earlyFreeReq.length
+  val earlyFreeReqCount = PopCount(earlyFreeReq)
+  val earlyFreeMergedCount = PopCount(allFreeReq.toSeq.drop(commitWidth))
 
   io.earlyFreeReq.foreach(_.zip(io.earlyFreePhyReg.get).foreach {
     case (req, preg) => assert(!req || preg =/= 0.U, "MEFreeList early-free physical register must be nonzero")
@@ -136,6 +138,8 @@ class MEFreeList(size: Int, commitWidth: Int)(implicit p: Parameters) extends Ba
 
   XSPerfAccumulate("allocation_blocked_cycle", !io.canAllocate)
   XSPerfAccumulate("can_alloc_wrong", !io.canAllocate && freeRegCnt >= RenameWidth.U)
+  XSPerfAccumulate("int_er_me_freelist_early_free_req", earlyFreeReqCount)
+  XSPerfAccumulate("int_er_me_freelist_early_free_merged", earlyFreeMergedCount)
 
   val perfEvents = Seq(
     ("me_freelist_1_4_valid", freeRegCntReg <  (size / 4).U                                     ),
