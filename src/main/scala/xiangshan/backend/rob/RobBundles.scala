@@ -170,6 +170,14 @@ object RobBundles extends HasCircularQueuePtrHelper {
       robEntry.debug_sim_trig.foreach(_ := debug.debug_sim_trig)
     }
     robEntry.intER.foreach { meta =>
+      val hasTrackedIntER = VecInit(
+        meta.src.indices.map(src => robEnq.intER.get.src(src).valid) ++
+          Seq(robEnq.intER.get.dest.valid, robEnq.intER.get.redef.valid)
+      ).asUInt.orR
+      assert(
+        !hasTrackedIntER || (robEnq.firstUop && robEnq.lastUop && robEnq.numUops === 1.U),
+        "ROB Int ER tracked metadata requires a single-uop entry"
+      )
       for (src <- meta.src.indices) {
         meta.src(src).valid := robEnq.intER.get.src(src).valid
         meta.src(src).trackId := robEnq.intER.get.src(src).trackId

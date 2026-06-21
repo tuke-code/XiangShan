@@ -9,8 +9,9 @@ import org.scalatest.matchers.should.Matchers
 import top.DefaultConfig
 import utility.{LogUtilsOptions, LogUtilsOptionsKey, PerfCounterOptions, PerfCounterOptionsKey, XSPerfLevel}
 import xiangshan._
+import xiangshan.backend.Bundles.EnqRobUop
 import xiangshan.backend.rob.RobBundles.RobEntryBundle
-import xiangshan.backend.rob.{RobIntEROps, RobPtr}
+import xiangshan.backend.rob.{RobBundles, RobIntEROps, RobPtr}
 
 class IntERRobReadDoneValidationProbe(implicit p: Parameters) extends XSModule {
   private val entryCount = 4
@@ -127,6 +128,45 @@ class IntERRobSTGuardProbe(implicit p: Parameters) extends XSModule {
       entries(entry).intER.get.guardEmitted := io.loadGuardEmitted
     }
   }
+}
+
+class IntERRobMultiUopRejectProbe(implicit p: Parameters) extends XSModule {
+  require(EnableIntEarlyRegRelease, "probe requires Int ER metadata")
+
+  val io = IO(new Bundle {
+    val singleUop = Input(Bool())
+    val srcValid = Input(Bool())
+    val destValid = Input(Bool())
+    val redefValid = Input(Bool())
+    val entrySrcValid = Output(Bool())
+  })
+
+  private val enq = Wire(new EnqRobUop)
+  private val entry = Wire(new RobEntryBundle)
+
+  enq := 0.U.asTypeOf(enq)
+  entry := 0.U.asTypeOf(entry)
+
+  enq.firstUop := true.B
+  enq.lastUop := io.singleUop
+  enq.numUops := Mux(io.singleUop, 1.U, 2.U)
+  enq.numWB := enq.numUops
+  enq.intER.get.src(0).valid := io.srcValid
+  enq.intER.get.src(0).trackId := 1.U
+  enq.intER.get.src(0).trackGen := 3.U
+  enq.intER.get.src(0).srcIdx := 0.U
+  enq.intER.get.src(0).psrc := 21.U
+  enq.intER.get.dest.valid := io.destValid
+  enq.intER.get.dest.trackId := 1.U
+  enq.intER.get.dest.trackGen := 3.U
+  enq.intER.get.dest.pdest := 22.U
+  enq.intER.get.redef.valid := io.redefValid
+  enq.intER.get.redef.trackId := 1.U
+  enq.intER.get.redef.trackGen := 3.U
+  enq.intER.get.redef.oldPdest := 23.U
+
+  RobBundles.connectEnq(entry, enq)
+  io.entrySrcValid := entry.intER.get.src(0).valid
 }
 
 class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
@@ -478,5 +518,42 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.guard(1).valid.expect(false.B)
       dut.io.advance.expect(0.U)
     }
+  }
+
+  it should "reject tracked ER metadata on multi-uop ROB entries" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    def expectReject(srcValid: Boolean, destValid: Boolean, redefValid: Boolean): Unit = {
+      assertThrows[Exception] {
+        simulate(new IntERRobMultiUopRejectProbe()(config)) { dut =>
+          dut.io.singleUop.poke(false.B)
+          dut.io.srcValid.poke(srcValid.B)
+          dut.io.destValid.poke(destValid.B)
+          dut.io.redefValid.poke(redefValid.B)
+          dut.clock.step()
+        }
+      }
+    }
+
+    def expectPass(singleUop: Boolean, srcValid: Boolean, destValid: Boolean, redefValid: Boolean): Unit = {
+      noException should be thrownBy {
+        simulate(new IntERRobMultiUopRejectProbe()(config)) { dut =>
+          dut.io.singleUop.poke(singleUop.B)
+          dut.io.srcValid.poke(srcValid.B)
+          dut.io.destValid.poke(destValid.B)
+          dut.io.redefValid.poke(redefValid.B)
+          dut.clock.step()
+          dut.io.entrySrcValid.expect(srcValid.B)
+        }
+      }
+    }
+
+    expectReject(srcValid = true, destValid = false, redefValid = false)
+    expectReject(srcValid = false, destValid = true, redefValid = false)
+    expectReject(srcValid = false, destValid = false, redefValid = true)
+    expectReject(srcValid = true, destValid = true, redefValid = true)
+
+    expectPass(singleUop = false, srcValid = false, destValid = false, redefValid = false)
+    expectPass(singleUop = true, srcValid = true, destValid = true, redefValid = true)
   }
 }
