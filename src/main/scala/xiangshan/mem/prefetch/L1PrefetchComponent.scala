@@ -214,6 +214,85 @@ class TrainFilter(size: Int, name: String, hasLoadTrain: Boolean=true, hasStoreT
   }
 }
 
+class MissTriggerBuffer(size: Int, name: String)(implicit p: Parameters) extends XSModule with HasL1PrefetchHelper {
+  require(size >= MissReqPortCount)
+
+  val io = IO(new Bundle {
+    val enable = Input(Bool())
+    val flush = Input(Bool())
+    val missTriggerVec = Flipped(Vec(MissReqPortCount, ValidIO(new L1MissTriggerBundle)))
+    val trainReq = DecoupledIO(new TrainReqBundle())
+  })
+
+  class Ptr(implicit p: Parameters) extends CircularQueuePtr[Ptr](p => size) {}
+
+  val entries = Reg(Vec(size, new TrainReqBundle))
+  val valids = RegInit(VecInit(Seq.fill(size)(false.B)))
+  val enqPtrExt = RegInit(VecInit((0 until MissReqPortCount).map(_.U.asTypeOf(new Ptr))))
+  val deqPtrExt = RegInit(0.U.asTypeOf(new Ptr))
+  val deqPtr = WireInit(deqPtrExt.value)
+
+  val reqs = io.missTriggerVec.map(_.bits.toTrainReq)
+  val reqsValid = io.missTriggerVec.map(x => x.valid && x.bits.isLoad)
+
+  val needAlloc = Wire(Vec(MissReqPortCount, Bool()))
+  val canAlloc = Wire(Vec(MissReqPortCount, Bool()))
+  for (i <- 0 until MissReqPortCount) {
+    val req = reqs(i)
+    val reqValid = reqsValid(i)
+    val index = PopCount(needAlloc.take(i))
+    val allocPtr = enqPtrExt(index)
+    val entry_match = Cat(entries.zip(valids).map {
+      case (e, v) => v && block_hash_tag(e.vaddr) === block_hash_tag(req.vaddr)
+    }).orR
+    val prev_enq_match = if (i == 0) false.B else Cat(reqs.zip(reqsValid).take(i).map {
+      case (pre, pre_v) => pre_v && block_hash_tag(pre.vaddr) === block_hash_tag(req.vaddr)
+    }).orR
+
+    needAlloc(i) := reqValid && !entry_match && !prev_enq_match
+    canAlloc(i) := needAlloc(i) && allocPtr >= deqPtrExt && io.enable
+
+    when(canAlloc(i)) {
+      valids(allocPtr.value) := true.B
+      entries(allocPtr.value) := req
+    }
+  }
+  val allocNum = PopCount(canAlloc)
+  enqPtrExt.foreach { ptr =>
+    when(canAlloc.asUInt.orR) {
+      ptr := ptr + allocNum
+    }
+  }
+
+  io.trainReq.valid := false.B
+  io.trainReq.bits := DontCare
+  valids.zip(entries).zipWithIndex.foreach {
+    case ((valid, entry), i) =>
+      when(deqPtr === i.U) {
+        io.trainReq.valid := valid && io.enable
+        io.trainReq.bits := entry
+      }
+  }
+
+  when(io.trainReq.fire) {
+    valids(deqPtr) := false.B
+    deqPtrExt := deqPtrExt + 1.U
+  }
+
+  when(RegNext(io.flush)) {
+    valids.foreach(_ := false.B)
+    (0 until MissReqPortCount).foreach { i => enqPtrExt(i) := i.U.asTypeOf(new Ptr) }
+    deqPtrExt := 0.U.asTypeOf(new Ptr)
+  }
+
+  XSPerfAccumulate(s"${name}_full", PopCount(valids) === size.U)
+  XSPerfAccumulate(s"${name}_half", PopCount(valids) >= (size / 2).U)
+  XSPerfAccumulate(s"${name}_empty", PopCount(valids) === 0.U)
+  XSPerfAccumulate(s"${name}_enq_valid", PopCount(reqsValid))
+  XSPerfAccumulate(s"${name}_enq_fire", allocNum)
+  XSPerfAccumulate(s"${name}_deq", io.trainReq.fire)
+}
+
 class MLPReqFilterBundle(implicit p: Parameters) extends XSBundle with HasL1PrefetchHelper {
   val tag = UInt(HASH_TAG_WIDTH.W)
   val region = UInt(REGION_TAG_BITS.W)
@@ -799,6 +878,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamPrefetchHelper with HasStridePrefetchHelper {
   val pf_ctrl = IO(Input(Vec(L1PrefetcherNum, new PrefetchControlBundle)))
   val stride_train = IO(Flipped(Vec(backendParams.LduCnt + backendParams.HyuCnt, ValidIO(new TrainReqBundle()))))
+  val l1MissTriggerVec = IO(Flipped(Vec(MissReqPortCount, ValidIO(new L1MissTriggerBundle))))
   val l2PfqBusy = IO(Input(Bool()))
   val strideEnable = IO(Input(Bool()))
 
@@ -807,6 +887,7 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   val stream_train_filter = Module(new TrainFilter(STREAM_FILTER_SIZE, "stream"))
   val stream_bit_vec_array = Module(new StreamBitVectorArray)
   val pf_queue_filter = Module(new MutiLevelPrefetchFilter)
+  val miss_trigger_buffer = Module(new MissTriggerBuffer(STRIDE_FILTER_SIZE, "miss_trigger_buffer"))
 
   // for now, if the stream is disabled, train and prefetch process will continue, without sending out and reqs
   val enable = io.enable
@@ -823,11 +904,19 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   stream_train_filter.io.enable := enable
   stream_train_filter.io.flush := stream_pf_ctrl.flush
 
+  miss_trigger_buffer.io.missTriggerVec := l1MissTriggerVec
+  miss_trigger_buffer.io.enable := enable
+  miss_trigger_buffer.io.flush := stride_pf_ctrl.flush
+
+  val missTriggerOutValid = miss_trigger_buffer.io.trainReq.valid
+  val missTriggerOutReady = stream_bit_vec_array.io.trigger_req.ready && stride_meta_array.io.trigger_req.ready
+  val missTriggerOutFire = missTriggerOutValid && missTriggerOutReady
+  miss_trigger_buffer.io.trainReq.ready := missTriggerOutReady
+
   stride_train_filter.io.ldTrainOpt.get.zipWithIndex.foreach {
-    case (ld_in, i) => {
+    case (ld_in, i) =>
       ld_in.valid := stride_train(i).valid && enable
       ld_in.bits := stride_train(i).bits
-    }
   }
   stride_train_filter.io.enable := enable
   stride_train_filter.io.flush := stride_pf_ctrl.flush
@@ -836,13 +925,21 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   stream_bit_vec_array.io.flush := stream_pf_ctrl.flush
   stream_bit_vec_array.io.dynamic_depth := stream_pf_ctrl.dynamic_depth
   stream_bit_vec_array.io.confidence := stream_pf_ctrl.confidence
-  stream_bit_vec_array.io.train_req <> stream_train_filter.io.trainReq
+  stream_bit_vec_array.io.train_req.valid := stream_train_filter.io.trainReq.valid && !missTriggerOutFire
+  stream_bit_vec_array.io.train_req.bits := stream_train_filter.io.trainReq.bits
+  stream_train_filter.io.trainReq.ready := stream_bit_vec_array.io.train_req.ready && !missTriggerOutFire
+  stream_bit_vec_array.io.trigger_req.valid := missTriggerOutValid
+  stream_bit_vec_array.io.trigger_req.bits := miss_trigger_buffer.io.trainReq.bits
 
   stride_meta_array.io.enable := enable && strideEnable
   stride_meta_array.io.flush := stride_pf_ctrl.flush
   stride_meta_array.io.dynamic_depth := 0.U
   stride_meta_array.io.confidence := stride_pf_ctrl.confidence
-  stride_meta_array.io.train_req <> stride_train_filter.io.trainReq
+  stride_meta_array.io.train_req.valid := stride_train_filter.io.trainReq.valid && !missTriggerOutFire
+  stride_meta_array.io.train_req.bits := stride_train_filter.io.trainReq.bits
+  stride_train_filter.io.trainReq.ready := stride_meta_array.io.train_req.ready && !missTriggerOutFire
+  stride_meta_array.io.trigger_req.valid := missTriggerOutValid
+  stride_meta_array.io.trigger_req.bits := miss_trigger_buffer.io.trainReq.bits
   stride_meta_array.io.stream_lookup_req <> stream_bit_vec_array.io.stream_lookup_req
   stride_meta_array.io.stream_lookup_resp <> stream_bit_vec_array.io.stream_lookup_resp
 

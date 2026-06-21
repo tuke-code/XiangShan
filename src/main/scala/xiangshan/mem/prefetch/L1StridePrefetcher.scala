@@ -122,6 +122,7 @@ class StrideMetaArray(implicit p: Parameters) extends XSModule with HasStridePre
     val dynamic_depth = Input(UInt(32.W)) // TODO: enable dynamic stride depth
     val confidence = Input(UInt(1.W))
     val train_req = Flipped(DecoupledIO(new TrainReqBundle))
+    val trigger_req = Flipped(DecoupledIO(new TrainReqBundle))
     val l1_prefetch_req = ValidIO(new StreamPrefetchReqBundle)
     val l2_l3_prefetch_req = ValidIO(new StreamPrefetchReqBundle)
     // query Stream component to see if a stream pattern has already been detected
@@ -142,16 +143,20 @@ class StrideMetaArray(implicit p: Parameters) extends XSModule with HasStridePre
 
   // s0: hash pc -> cam all entries
   val s0_can_accept = Wire(Bool())
-  val s0_valid = io.train_req.fire
-  val s0_vaddr = io.train_req.bits.vaddr
-  val s0_pc = io.train_req.bits.pc
+  val s0_from_trigger = io.trigger_req.valid
+  val s0_selected_req = Mux(s0_from_trigger, io.trigger_req.bits, io.train_req.bits)
+  io.trigger_req.ready := s0_can_accept
+  io.train_req.ready := s0_can_accept && !s0_from_trigger
+  val s0_valid = (io.trigger_req.valid || io.train_req.valid) && s0_can_accept
+  val s0_can_issue_pf = s0_from_trigger || isFromStride(s0_selected_req.metaSource)
+  val s0_vaddr = s0_selected_req.vaddr
+  val s0_pc = s0_selected_req.pc
   val s0_pc_hash = pc_hash_tag(s0_pc)
   val s0_pc_match_vec = VecInit(array zip valids map { case (e, v) => e.tag_match(v, s0_valid, s0_pc_hash) }).asUInt
   val s0_hit = s0_pc_match_vec.orR
   val s0_index = Mux(s0_hit, OHToUInt(s0_pc_match_vec), replacement.way)
-  io.train_req.ready := s0_can_accept
   io.stream_lookup_req.valid := s0_valid
-  io.stream_lookup_req.bits := io.train_req.bits.vaddr
+  io.stream_lookup_req.bits := s0_selected_req.vaddr
 
   when(s0_valid) {
     replacement.access(s0_index)
@@ -164,12 +169,14 @@ class StrideMetaArray(implicit p: Parameters) extends XSModule with HasStridePre
 
   // s1: alloc or update
   val s1_valid = GatedValidRegNext(s0_valid)
+  val s1_from_trigger = RegEnable(s0_from_trigger, s0_valid)
+  val s1_can_issue_pf = RegEnable(s0_can_issue_pf, s0_valid)
   val s1_index = RegEnable(s0_index, s0_valid)
   val s1_pc_hash = RegEnable(s0_pc_hash, s0_valid)
   val s1_vaddr = RegEnable(s0_vaddr, s0_valid)
   val s1_hit = RegEnable(s0_hit, s0_valid)
-  val s1_alloc = s1_valid && !s1_hit
-  val s1_update = s1_valid && s1_hit
+  val s1_alloc = s1_valid && !s1_from_trigger && !s1_hit
+  val s1_update = s1_valid && !s1_from_trigger && s1_hit
   val s1_stride = array(s1_index).stride
   val s1_decr_mode = array(s1_index).decr_mode
   val s1_new_stride = WireInit(0.U(STRIDE_BITS.W))
@@ -199,10 +206,12 @@ class StrideMetaArray(implicit p: Parameters) extends XSModule with HasStridePre
   val l2_stride_ratio_const = Constantin.createRecord(s"l2_stride_ratio${p(XSCoreParamsKey).HartId}", initValue = 5)
   val l2_stride_ratio = l2_stride_ratio_const(3, 0)
   // s2: calculate L1 & L2 pf addr
-  val s2_valid = GatedValidRegNext(s1_valid && s1_can_send_pf)
-  val s2_vaddr = RegEnable(s1_vaddr, s1_valid && s1_can_send_pf)
-  val s2_stride = RegEnable(s1_stride, s1_valid && s1_can_send_pf)
-  val s2_decr_mode = RegEnable(s1_decr_mode, s1_valid && s1_can_send_pf)
+  val s1_trigger_can_send_pf = s1_from_trigger && s1_hit && array(s1_index).confidence >= CONF_THRESHOLD.U
+  val s1_will_send_pf = s1_can_issue_pf && Mux(s1_from_trigger, s1_trigger_can_send_pf, s1_can_send_pf)
+  val s2_valid = GatedValidRegNext(s1_valid && s1_will_send_pf)
+  val s2_vaddr = RegEnable(s1_vaddr, s1_valid && s1_will_send_pf)
+  val s2_stride = RegEnable(s1_stride, s1_valid && s1_will_send_pf)
+  val s2_decr_mode = RegEnable(s1_decr_mode, s1_valid && s1_will_send_pf)
   val s2_l1_depth = s2_stride << l1_stride_ratio
   val s2_l1_pf_incr_vaddr = (s2_vaddr + s2_l1_depth)(VAddrBits - 1, 0)
   val s2_l1_pf_decr_vaddr = (s2_vaddr - s2_l1_depth)(VAddrBits - 1, 0)

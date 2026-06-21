@@ -86,6 +86,31 @@ class TrainReqBundle()(implicit p: Parameters) extends DCacheBundle {
   val refillLatency = UInt(LATENCY_WIDTH.W)
 }
 
+class L1MissTriggerBundle()(implicit p: Parameters) extends DCacheBundle {
+  val vaddr = UInt(VAddrBits.W)
+  val paddr = UInt(PAddrBits.W)
+  val pc = UInt(VAddrBits.W)
+  val source = UInt(sourceTypeWidth.W)
+  val cmd = UInt(M_SZ.W)
+  val metaSource = UInt(L1PfSourceBits.W)
+
+  def isLoad: Bool = source === LOAD_SOURCE.U
+
+  def toTrainReq: TrainReqBundle = {
+    val req = Wire(new TrainReqBundle)
+    req := DontCare
+    req.vaddr := vaddr
+    req.paddr := paddr
+    req.pc := pc
+    req.miss := true.B
+    req.metaSource := metaSource
+    req.isFirstIssue := true.B
+    req.isHwPrefetch := false.B
+    req.refillLatency := 0.U
+    req
+  }
+}
+
 class SourcePrefetchReq()(implicit p: Parameters) extends DCacheBundle {
   val triggerPC = UInt(VAddrBits.W)
   val triggerVA = UInt(VAddrBits.W)

@@ -1158,6 +1158,7 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     val mainpipe_info = Input(new MainPipeInfoToMQ)
     val refill_info = ValidIO(new MissQueueRefillInfo)
     val refill_train = ValidIO(new TrainReqBundle)
+    val l1MissTriggerVec = Vec(reqNum, ValidIO(new L1MissTriggerBundle))
 
     // block probe
     val probe = Flipped(new MissQueueBlockIO)
@@ -1578,6 +1579,17 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     )
     io.resp(i).handled := (Cat(req_mshr_handled_vec).orR || can_merge_from_pipe(i)) && query_fire(i)
     io.resp(i).merged := (analysis.strategy(i) & 2.U) =/= 0.U
+  }
+
+  for (i <- 0 until reqNum) {
+    val req = io.queryMQ(i).req.bits
+    io.l1MissTriggerVec(i).valid := query_fire(i) && !req.isFromPrefetch
+    io.l1MissTriggerVec(i).bits.vaddr := req.vaddr
+    io.l1MissTriggerVec(i).bits.paddr := req.addr
+    io.l1MissTriggerVec(i).bits.pc := req.pc
+    io.l1MissTriggerVec(i).bits.source := req.source
+    io.l1MissTriggerVec(i).bits.cmd := req.cmd
+    io.l1MissTriggerVec(i).bits.metaSource := req.pf_source
   }
 
   val source_except_load_cnt = RegInit(0.U(10.W))

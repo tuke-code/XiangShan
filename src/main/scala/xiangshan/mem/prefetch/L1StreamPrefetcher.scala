@@ -174,6 +174,7 @@ class StreamBitVectorArray(implicit p: Parameters) extends XSModule with HasStre
     val dynamic_depth = Input(UInt(DEPTH_BITS.W))
     val confidence = Input(UInt(1.W))
     val train_req = Flipped(DecoupledIO(new TrainReqBundle))
+    val trigger_req = Flipped(DecoupledIO(new TrainReqBundle))
     val l1_prefetch_req = ValidIO(new StreamPrefetchReqBundle)
     val l2_l3_prefetch_req = ValidIO(new StreamPrefetchReqBundle)
 
@@ -195,12 +196,17 @@ class StreamBitVectorArray(implicit p: Parameters) extends XSModule with HasStre
 
   // s0: generate region tag, parallel match
   val s0_can_accept = Wire(Bool())
-  val s0_fire = io.train_req.fire
-  val s0_pc    = io.train_req.bits.pc
-  val s0_vaddr = io.train_req.bits.vaddr
-  val s0_miss  = io.train_req.bits.miss
-  val s0_pfHit = isFromStream(io.train_req.bits.metaSource)
-  val s0_valid = s0_fire && (s0_miss || s0_pfHit)
+  val s0_from_trigger = io.trigger_req.valid
+  val s0_selected_req = Mux(s0_from_trigger, io.trigger_req.bits, io.train_req.bits)
+  io.trigger_req.ready := s0_can_accept
+  io.train_req.ready := s0_can_accept && !s0_from_trigger
+  val s0_fire = (io.trigger_req.valid || io.train_req.valid) && s0_can_accept
+  val s0_pc    = s0_selected_req.pc
+  val s0_vaddr = s0_selected_req.vaddr
+  val s0_miss  = s0_selected_req.miss
+  val s0_pfHit = isFromStream(s0_selected_req.metaSource)
+  val s0_can_issue_pf = s0_from_trigger || s0_pfHit
+  val s0_valid = s0_fire && (s0_from_trigger || s0_miss || s0_pfHit)
   val s0_region_bits = get_region_bits(s0_vaddr)
   val s0_region_tag = get_region_tag(s0_vaddr)
   val s0_region_tag_plus_one = get_region_tag(s0_vaddr) + 1.U
@@ -215,7 +221,6 @@ class StreamBitVectorArray(implicit p: Parameters) extends XSModule with HasStre
   val s0_index = Mux(s0_hit, OHToUInt(s0_hit_vec), replacement.way)
   val s0_plus_one_index = OHToUInt(VecInit(s0_region_tag_plus_one_match_vec).asUInt)
   val s0_minus_one_index = OHToUInt(VecInit(s0_region_tag_minus_one_match_vec).asUInt)
-  io.train_req.ready := s0_can_accept
 
   when(s0_valid) {
     replacement.access(s0_index)
@@ -288,6 +293,8 @@ class StreamBitVectorArray(implicit p: Parameters) extends XSModule with HasStre
 
   // s1: alloc or update
   val s1_valid = GatedValidRegNext(s0_valid)
+  val s1_from_trigger = RegEnable(s0_from_trigger, s0_valid)
+  val s1_can_issue_pf = RegEnable(s0_can_issue_pf, s0_valid)
   val s1_index = RegEnable(s0_index, s0_valid)
   val s1_pc    = RegEnable(s0_pc, s0_valid)
   val s1_vaddr = RegEnable(s0_vaddr, s0_valid)
@@ -306,15 +313,15 @@ class StreamBitVectorArray(implicit p: Parameters) extends XSModule with HasStre
                             RegEnable(s0_minus_one_hit, s0_valid) && array(s1_minus_one_index).active
   val s1_region_tag = RegEnable(s0_region_tag, s0_valid)
   val s1_region_bits = RegEnable(s0_region_bits, s0_valid)
-  val s1_alloc = s1_valid && !s1_hit
-  val s1_update = s1_valid && s1_hit
+  val s1_alloc = s1_valid && !s1_from_trigger && !s1_hit
+  val s1_update = s1_valid && !s1_from_trigger && s1_hit
   val s1_pf_l1_incr_vaddr = Cat(region_to_block_addr(s1_region_tag, s1_region_bits) + l1_depth, 0.U(BLOCK_OFFSET.W))
   val s1_pf_l1_decr_vaddr = Cat(region_to_block_addr(s1_region_tag, s1_region_bits) - l1_depth, 0.U(BLOCK_OFFSET.W))
   val s1_pf_l2_incr_vaddr = Cat(region_to_block_addr(s1_region_tag, s1_region_bits) + l2_depth, 0.U(BLOCK_OFFSET.W))
   val s1_pf_l2_decr_vaddr = Cat(region_to_block_addr(s1_region_tag, s1_region_bits) - l2_depth, 0.U(BLOCK_OFFSET.W))
   val s1_pf_l3_incr_vaddr = Cat(region_to_block_addr(s1_region_tag, s1_region_bits) + l3_depth, 0.U(BLOCK_OFFSET.W))
   val s1_pf_l3_decr_vaddr = Cat(region_to_block_addr(s1_region_tag, s1_region_bits) - l3_depth, 0.U(BLOCK_OFFSET.W))
-  val s1_can_send_pf = Mux(s1_update, !((array(s1_index).bit_vec & UIntToOH(s1_region_bits)).orR), true.B)
+  val s1_can_send_pf = Mux(s1_from_trigger, s1_hit, Mux(s1_update, !((array(s1_index).bit_vec & UIntToOH(s1_region_bits)).orR), true.B))
   // Check s0 s1 same region, avoid duplicate alloc
   val s1_s0_same_region = region_hash_tag(s1_region_tag) === region_hash_tag(s0_region_tag)
   // s1 replace the s0 region entry
@@ -370,12 +377,13 @@ class StreamBitVectorArray(implicit p: Parameters) extends XSModule with HasStre
   val s2_pf_l3_incr_vaddr = RegEnable(s1_pf_l3_incr_vaddr, s1_valid)
   val s2_pf_l3_decr_vaddr = RegEnable(s1_pf_l3_decr_vaddr, s1_valid)
   val s2_can_send_pf = RegEnable(s1_can_send_pf, s1_valid)
+  val s2_can_issue_pf = RegEnable(s1_can_issue_pf, s1_valid)
   val s2_active = array(s2_index).active
   val s2_decr_mode = array(s2_index).decr_mode
   val s2_l1_vaddr = Mux(s2_decr_mode, s2_pf_l1_decr_vaddr, s2_pf_l1_incr_vaddr)
   val s2_l2_vaddr = Mux(s2_decr_mode, s2_pf_l2_decr_vaddr, s2_pf_l2_incr_vaddr)
   val s2_l3_vaddr = Mux(s2_decr_mode, s2_pf_l3_decr_vaddr, s2_pf_l3_incr_vaddr)
-  val s2_will_send_pf = s2_valid && s2_active && s2_can_send_pf
+  val s2_will_send_pf = s2_valid && s2_can_issue_pf && s2_active && s2_can_send_pf
   val s2_pf_req_valid = s2_will_send_pf && io.enable
   val s2_pf_l1_req_bits = (new StreamPrefetchReqBundle).getStreamPrefetchReqBundle(
     valid = s2_valid,

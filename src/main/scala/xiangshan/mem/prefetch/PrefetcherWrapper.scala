@@ -62,6 +62,7 @@ class OOOToPrefetchIO(implicit p: Parameters) extends PrefetchBundle {
 class DCacheToPrefetchIO(implicit p: Parameters) extends PrefetchBundle {
   val sms_agt_evict_req = DecoupledIO(new AGTEvictReq())
   val refillTrain = ValidIO(new TrainReqBundle)
+  val l1MissTriggerVec = Vec(MissReqPortCount, ValidIO(new L1MissTriggerBundle))
 }
 
 class TrainSourceIO(implicit p: Parameters) extends PrefetchBundle {
@@ -223,6 +224,7 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
     pf.pf_ctrl <> io.pfCtrlFromDCache
     pf.l2PfqBusy := io.pfCtrlFromTile.l2PfqBusy
     pf.strideEnable := strideModeEnable
+    pf.l1MissTriggerVec := io.fromDCache.l1MissTriggerVec
 
     // stride will train on miss or prefetch hit
     for(i <- 0 until LD_TRAIN_WIDTH){
