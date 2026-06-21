@@ -35,7 +35,7 @@ import utils._
 import xiangshan._
 import xiangshan.PerfDebugInfo
 import xiangshan.backend.GPAMemEntry
-import xiangshan.backend.{BackendParams, IntERSrcValueReadDone, RatToVecExcpMod, RegWriteFromRab, VecExcpInfo}
+import xiangshan.backend.{BackendParams, IntERSquashSource, IntERSrcValueReadDone, IntERSTGuardDec, RatToVecExcpMod, RegWriteFromRab, VecExcpInfo}
 import xiangshan.backend.Bundles._
 import xiangshan.backend.decode.isa.bitfield.XSInstBitFields
 import xiangshan.backend.fu.{FuConfig, FuType}
@@ -76,6 +76,9 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     val writebackNeedFlush = Input(Vec(params.allExuParams.filter(_.needExceptionGen).length, Bool()))
     val intERReadDone = Option.when(EnableIntEarlyRegRelease)(Flipped(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone))))
     val intERReadDoneDec = Option.when(EnableIntEarlyRegRelease)(Output(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone))))
+    val intERSquash = Option.when(EnableIntEarlyRegRelease)(Output(Vec(IntERReadDoneWidth, Valid(new IntERSquashSource))))
+    val intERSTGuardDec = Option.when(EnableIntEarlyRegRelease)(Output(Vec(IntERSTWalkWidth, Valid(new IntERSTGuardDec))))
+    val intERRecoveryKill = Option.when(EnableIntEarlyRegRelease)(Output(Bool()))
     val commits = Output(new RobCommitIO)
     val trace = new Bundle {
       val blockCommit = Input(Bool())
@@ -176,6 +179,10 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val intERReadDoneMarks = Option.when(EnableIntEarlyRegRelease)(
     Wire(Vec(RobSize, Vec(IntERLogicalSrcWidth, Bool())))
   )
+  val intERSTGuardMarks = Option.when(EnableIntEarlyRegRelease)(
+    Wire(Vec(RobSize, Bool()))
+  )
+  val intERSpecCursor = Option.when(EnableIntEarlyRegRelease)(RegInit(0.U.asTypeOf(new RobPtr)))
   if (EnableIntEarlyRegRelease) {
     RobIntEROps.validateReadDoneEvents(
       out = io.intERReadDoneDec.get,
@@ -191,6 +198,9 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         }
       }
     }
+    io.intERSTGuardDec.get := 0.U.asTypeOf(io.intERSTGuardDec.get)
+    io.intERSquash.get := 0.U.asTypeOf(io.intERSquash.get)
+    intERSTGuardMarks.get := 0.U.asTypeOf(intERSTGuardMarks.get)
   }
   // pointers
   // For enqueue ptr, we don't duplicate it since only enqueue needs it.
@@ -821,6 +831,30 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val blockCommit = misPredBlock || lastCycleFlush || hasWFI || io.redirect.valid ||
     (deqNeedFlush && !deqHasFlushed) || deqFlushBlock || criticalErrorState || traceBlock
 
+  if (EnableIntEarlyRegRelease) {
+    val stStop = blockCommit || state =/= s_idle || io.flushOut.valid ||
+      intrBitSetReg || deqHasException || deqHasFlushPipe || deqHasReplayInst
+    val stCursor = Mux(deqPtr > intERSpecCursor.get, deqPtr, intERSpecCursor.get)
+    val stAdvance = RobIntEROps.emitSTGuardDec(
+      out = io.intERSTGuardDec.get,
+      markResolved = intERSTGuardMarks.get,
+      cursor = stCursor,
+      stop = stStop,
+      entries = robEntries
+    )
+
+    when(io.redirect.valid || io.flushOut.valid || state === s_walk) {
+      intERSpecCursor.get := deqPtr
+    }.otherwise {
+      intERSpecCursor.get := stCursor + stAdvance
+    }
+    for (entry <- 0 until RobSize) {
+      when(intERSTGuardMarks.get(entry)) {
+        robEntries(entry).intER.get.resolved := true.B
+      }
+    }
+  }
+
   io.commits.isWalk := state === s_walk
   io.commits.isCommit := state === s_idle && !blockCommit
 
@@ -900,6 +934,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       state
     )
   )
+  io.intERRecoveryKill.foreach(_ := io.redirect.valid || io.flushOut.valid || state === s_walk || state_next === s_walk)
   XSPerfAccumulate("s_idle_to_idle", state === s_idle && state_next === s_idle)
   XSPerfAccumulate("s_idle_to_walk", state === s_idle && state_next === s_walk)
   XSPerfAccumulate("s_walk_to_idle", state === s_walk && state_next === s_idle)

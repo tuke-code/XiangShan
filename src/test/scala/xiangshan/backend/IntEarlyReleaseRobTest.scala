@@ -66,6 +66,62 @@ class IntERRobReadDoneValidationProbe(implicit p: Parameters) extends XSModule {
   io.selectedReadDone := entries(trackedRobIdx).intER.get.src(trackedSrc).readDone
 }
 
+class IntERRobSTGuardProbe(implicit p: Parameters) extends XSModule {
+  private val entryCount = 4
+  require(EnableIntEarlyRegRelease, "probe requires Int ER metadata")
+
+  val io = IO(new Bundle {
+    val load = Input(Bool())
+    val loadIdx = Input(UInt(log2Ceil(entryCount).W))
+    val loadValid = Input(Bool())
+    val loadUopNum = Input(UInt(log2Up(MaxUopSize + 1).W))
+    val loadNeedFlush = Input(Bool())
+    val loadRedefValid = Input(Bool())
+    val loadResolved = Input(Bool())
+    val loadTrackId = Input(UInt(IntERTrackIdWidth.W))
+    val loadTrackGen = Input(UInt(IntERTrackGenBits.W))
+    val loadOldPdest = Input(UInt(PhyRegIdxWidth.W))
+    val stop = Input(Bool())
+    val cursorValue = Input(UInt(log2Ceil(RobSize).W))
+    val guard = Output(Vec(IntERSTWalkWidth, Valid(new IntERSTGuardDec)))
+    val markResolved = Output(Vec(entryCount, Bool()))
+    val advance = Output(UInt(log2Ceil(IntERSTWalkWidth + 1).W))
+  })
+
+  private val entries = RegInit(VecInit.fill(entryCount)(0.U.asTypeOf(new RobEntryBundle)))
+  private val cursor = Wire(new RobPtr)
+  cursor.flag := false.B
+  cursor.value := io.cursorValue
+
+  io.advance := RobIntEROps.emitSTGuardDec(
+    out = io.guard,
+    markResolved = io.markResolved,
+    cursor = cursor,
+    stop = io.stop || io.load,
+    entries = entries
+  )
+
+  for (entry <- 0 until entryCount) {
+    when(io.markResolved(entry)) {
+      entries(entry).intER.get.resolved := true.B
+    }
+  }
+
+  for (entry <- 0 until entryCount) {
+    when(io.load && io.loadIdx === entry.U) {
+      entries(entry) := 0.U.asTypeOf(new RobEntryBundle)
+      entries(entry).valid := io.loadValid
+      entries(entry).uopNum := io.loadUopNum
+      entries(entry).needFlush := io.loadNeedFlush
+      entries(entry).intER.get.redef.valid := io.loadRedefValid
+      entries(entry).intER.get.redef.trackId := io.loadTrackId
+      entries(entry).intER.get.redef.trackGen := io.loadTrackGen
+      entries(entry).intER.get.redef.oldPdest := io.loadOldPdest
+      entries(entry).intER.get.resolved := io.loadResolved
+    }
+  }
+}
+
 class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
   behavior of "IntEarlyRelease ROB readDone validation"
 
@@ -125,6 +181,48 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     dut.io.loadPsrc.poke(0.U)
     dut.io.redirect.valid.poke(false.B)
     dut.io.redirect.bits.poke(0.U.asTypeOf(dut.io.redirect.bits))
+  }
+
+  private def clearSTGuard(dut: IntERRobSTGuardProbe): Unit = {
+    dut.io.load.poke(false.B)
+    dut.io.loadIdx.poke(0.U)
+    dut.io.loadValid.poke(false.B)
+    dut.io.loadUopNum.poke(0.U)
+    dut.io.loadNeedFlush.poke(false.B)
+    dut.io.loadRedefValid.poke(false.B)
+    dut.io.loadResolved.poke(false.B)
+    dut.io.loadTrackId.poke(0.U)
+    dut.io.loadTrackGen.poke(0.U)
+    dut.io.loadOldPdest.poke(0.U)
+    dut.io.stop.poke(false.B)
+    dut.io.cursorValue.poke(0.U)
+  }
+
+  private def loadSTEntry(
+    dut: IntERRobSTGuardProbe,
+    idx: Int,
+    valid: Boolean = true,
+    writebacked: Boolean = true,
+    needFlush: Boolean = false,
+    redefValid: Boolean = true,
+    resolved: Boolean = false,
+    trackId: Int = 1,
+    trackGen: Int = 3,
+    oldPdest: Int = 21
+  ): Unit = {
+    clearSTGuard(dut)
+    dut.io.load.poke(true.B)
+    dut.io.loadIdx.poke(idx.U)
+    dut.io.loadValid.poke(valid.B)
+    dut.io.loadUopNum.poke((if (writebacked) 0 else 1).U)
+    dut.io.loadNeedFlush.poke(needFlush.B)
+    dut.io.loadRedefValid.poke(redefValid.B)
+    dut.io.loadResolved.poke(resolved.B)
+    dut.io.loadTrackId.poke(trackId.U)
+    dut.io.loadTrackGen.poke(trackGen.U)
+    dut.io.loadOldPdest.poke(oldPdest.U)
+    dut.clock.step()
+    clearSTGuard(dut)
   }
 
   private def loadTrackedSource(
@@ -300,6 +398,62 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
 
       clearRaw(dut)
       dut.io.selectedReadDone.expect(false.B)
+    }
+  }
+
+  it should "emit guard decrement only across resolved ROB entries" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2, stWalkWidth = 2))
+
+    simulate(new IntERRobSTGuardProbe()(config)) { dut =>
+      clearSTGuard(dut)
+      dut.reset.poke(true.B)
+      dut.clock.step()
+      dut.reset.poke(false.B)
+
+      loadSTEntry(dut, idx = 0, trackId = 1, trackGen = 3, oldPdest = 21)
+      loadSTEntry(dut, idx = 1, writebacked = false, trackId = 0, trackGen = 1, oldPdest = 31)
+
+      dut.io.cursorValue.poke(0.U)
+      dut.io.guard(0).valid.expect(true.B)
+      dut.io.guard(0).bits.valid.expect(true.B)
+      dut.io.guard(0).bits.trackId.expect(1.U)
+      dut.io.guard(0).bits.trackGen.expect(3.U)
+      dut.io.guard(0).bits.oldPdest.expect(21.U)
+      dut.io.guard(1).valid.expect(false.B)
+      dut.io.markResolved(0).expect(true.B)
+      dut.io.markResolved(1).expect(false.B)
+      dut.io.advance.expect(1.U)
+      dut.clock.step()
+
+      clearSTGuard(dut)
+      dut.io.cursorValue.poke(0.U)
+      dut.io.guard(0).valid.expect(false.B)
+    }
+  }
+
+  it should "stop guard decrement at explicit stop or unresolved older entry" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2, stWalkWidth = 2))
+
+    simulate(new IntERRobSTGuardProbe()(config)) { dut =>
+      clearSTGuard(dut)
+      dut.reset.poke(true.B)
+      dut.clock.step()
+      dut.reset.poke(false.B)
+
+      loadSTEntry(dut, idx = 0, writebacked = false, trackId = 1, trackGen = 3, oldPdest = 21)
+      loadSTEntry(dut, idx = 1, trackId = 0, trackGen = 1, oldPdest = 31)
+
+      dut.io.cursorValue.poke(0.U)
+      dut.io.guard(0).valid.expect(false.B)
+      dut.io.guard(1).valid.expect(false.B)
+      dut.io.advance.expect(0.U)
+
+      loadSTEntry(dut, idx = 0, writebacked = true, trackId = 1, trackGen = 3, oldPdest = 21)
+      dut.io.cursorValue.poke(0.U)
+      dut.io.stop.poke(true.B)
+      dut.io.guard(0).valid.expect(false.B)
+      dut.io.guard(1).valid.expect(false.B)
+      dut.io.advance.expect(0.U)
     }
   }
 }

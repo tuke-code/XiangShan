@@ -687,6 +687,21 @@ class RenameERFullPathProbe(implicit p: Parameters) extends XSModule {
     val src1Xp = Input(Vec(RenameWidth, Bool()))
     val rfWen = Input(Vec(RenameWidth, Bool()))
     val isMove = Input(Vec(RenameWidth, Bool()))
+    val externalRedirectKill = Input(Bool())
+    val producerReadyValid = Input(Bool())
+    val producerReadyPdest = Input(UInt(PhyRegIdxWidth.W))
+    val producerReadyRobIdx = Input(UInt(log2Ceil(RobSize).W))
+    val readDoneValid = Input(Bool())
+    val readDoneRobIdx = Input(UInt(log2Ceil(RobSize).W))
+    val readDoneTrackId = Input(UInt(IntERTrackIdWidth.W))
+    val readDoneTrackGen = Input(UInt(IntERTrackGenBits.W))
+    val readDoneSrcIdx = Input(UInt(IntERSrcIdxWidth.W))
+    val readDonePsrc = Input(UInt(PhyRegIdxWidth.W))
+    val guardDecValid = Input(Bool())
+    val guardDecRobIdx = Input(UInt(log2Ceil(RobSize).W))
+    val guardDecTrackId = Input(UInt(IntERTrackIdWidth.W))
+    val guardDecTrackGen = Input(UInt(IntERTrackGenBits.W))
+    val guardDecOldPdest = Input(UInt(PhyRegIdxWidth.W))
 
     val inReady = Output(Vec(RenameWidth, Bool()))
     val outValid = Output(Vec(RenameWidth, Bool()))
@@ -700,9 +715,18 @@ class RenameERFullPathProbe(implicit p: Parameters) extends XSModule {
     val erSrc0Valid = Output(Vec(RenameWidth, Bool()))
     val erSrc0Psrc = Output(Vec(RenameWidth, UInt(PhyRegIdxWidth.W)))
     val debugActiveCount = Output(UInt(log2Ceil(IntERTrackEntries + 1).W))
+    val debugReadDoneDecCount = Output(UInt(32.W))
+    val debugProducerReadyCount = Output(UInt(32.W))
+    val debugGuardDecCount = Output(UInt(32.W))
+    val debugEarlyFreeOpportunityCount = Output(UInt(32.W))
+    val debugEarlyFreeCount = Output(UInt(32.W))
   })
 
   val rename = Module(new Rename)
+  private def connectRobPtr(ptr: xiangshan.backend.rob.RobPtr, value: UInt): Unit = {
+    ptr.flag := false.B
+    ptr.value := value
+  }
 
   rename.io.redirect.valid := io.redirect
   rename.io.redirect.bits := 0.U.asTypeOf(new Redirect)
@@ -730,6 +754,29 @@ class RenameERFullPathProbe(implicit p: Parameters) extends XSModule {
   rename.io.debugRobHeadStall.foreach(_ := false.B)
   rename.io.debugLoadReason.foreach(_ := 0.U)
   rename.io.stallReason.in.reason.foreach(_ := NoStall.id.U)
+  rename.io.intER.get := 0.U.asTypeOf(rename.io.intER.get)
+  rename.io.intER.get.redirectKill := io.externalRedirectKill
+  rename.io.intER.get.producerReady(0).valid := io.producerReadyValid
+  rename.io.intER.get.producerReady(0).bits.valid := io.producerReadyValid
+  rename.io.intER.get.producerReady(0).bits.pdest := io.producerReadyPdest
+  connectRobPtr(rename.io.intER.get.producerReady(0).bits.robIdx, io.producerReadyRobIdx)
+  rename.io.intER.get.readDone(0).valid := io.readDoneValid
+  rename.io.intER.get.readDone(0).bits.fallback := false.B
+  rename.io.intER.get.readDone(0).bits.reason := IntERFallbackReason.none
+  connectRobPtr(rename.io.intER.get.readDone(0).bits.robIdx, io.readDoneRobIdx)
+  rename.io.intER.get.readDone(0).bits.src(0).valid := io.readDoneValid
+  rename.io.intER.get.readDone(0).bits.src(0).trackId := io.readDoneTrackId
+  rename.io.intER.get.readDone(0).bits.src(0).trackGen := io.readDoneTrackGen
+  rename.io.intER.get.readDone(0).bits.src(0).srcIdx := io.readDoneSrcIdx
+  rename.io.intER.get.readDone(0).bits.src(0).psrc := io.readDonePsrc
+  rename.io.intER.get.stGuardDec(0).valid := io.guardDecValid
+  rename.io.intER.get.stGuardDec(0).bits.valid := io.guardDecValid
+  connectRobPtr(rename.io.intER.get.stGuardDec(0).bits.robIdx, io.guardDecRobIdx)
+  rename.io.intER.get.stGuardDec(0).bits.trackId := io.guardDecTrackId
+  rename.io.intER.get.stGuardDec(0).bits.trackGen := io.guardDecTrackGen
+  rename.io.intER.get.stGuardDec(0).bits.oldPdest := io.guardDecOldPdest
+  rename.io.intER.get.stGuardDec(0).bits.fallback := false.B
+  rename.io.intER.get.stGuardDec(0).bits.reason := IntERFallbackReason.none
 
   for (i <- 0 until RenameWidth) {
     rename.io.in(i).valid := io.valid(i)
@@ -791,6 +838,11 @@ class RenameERFullPathProbe(implicit p: Parameters) extends XSModule {
   }
 
   io.debugActiveCount := rename.io.intERDebug.get.activeCount
+  io.debugReadDoneDecCount := rename.io.intERDebug.get.readDoneDecCount
+  io.debugProducerReadyCount := rename.io.intERDebug.get.producerReadyCount
+  io.debugGuardDecCount := rename.io.intERDebug.get.guardDecCount
+  io.debugEarlyFreeOpportunityCount := rename.io.intERDebug.get.earlyFreeOpportunityCount
+  io.debugEarlyFreeCount := rename.io.intERDebug.get.earlyFreeCount
 }
 
 class DecodeOldDestHoldProbe(implicit p: Parameters) extends XSModule {
@@ -1044,6 +1096,21 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     dut.io.outReady.poke(true.B)
     dut.io.redirect.poke(false.B)
     dut.io.rabWalk.poke(false.B)
+    dut.io.externalRedirectKill.poke(false.B)
+    dut.io.producerReadyValid.poke(false.B)
+    dut.io.producerReadyPdest.poke(0.U)
+    dut.io.producerReadyRobIdx.poke(0.U)
+    dut.io.readDoneValid.poke(false.B)
+    dut.io.readDoneRobIdx.poke(0.U)
+    dut.io.readDoneTrackId.poke(0.U)
+    dut.io.readDoneTrackGen.poke(0.U)
+    dut.io.readDoneSrcIdx.poke(0.U)
+    dut.io.readDonePsrc.poke(0.U)
+    dut.io.guardDecValid.poke(false.B)
+    dut.io.guardDecRobIdx.poke(0.U)
+    dut.io.guardDecTrackId.poke(0.U)
+    dut.io.guardDecTrackGen.poke(0.U)
+    dut.io.guardDecOldPdest.poke(0.U)
     for (i <- 0 until dut.io.valid.length) {
       dut.io.valid(i).poke(false.B)
       dut.io.readHold(i).poke(false.B)
@@ -1559,6 +1626,81 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       checkFullRenameSameGroupRedef(dut)
       checkFullRenameMoveThenRedef(dut)
       checkFullRenameHeldOldDestRead(dut)
+    }
+  }
+
+  it should "feed validated external events into Rename UCA observe-only release accounting" in {
+    val config = smallRenameConfigWith(IntEarlyReleaseParams(enable = true, observeOnly = true, trackEntries = 4))
+
+    simulate(new RenameERFullPathProbe()(config)) { dut =>
+      resetRenameProbe(dut)
+
+      primeRenameRead(dut, lane = 0, ldest = 5)
+      val producerPdest = fireSingleRenameLane(dut, lane = 0, ldest = 5)
+      producerPdest should not be BigInt(0)
+      dut.io.debugActiveCount.expect(1.U)
+
+      primeRenameRead(dut, lane = 0, ldest = 6, lsrc0 = 5)
+      driveRenameLane(dut, lane = 0, ldest = 6, lsrc0 = 5, src0Xp = true, rfWen = false)
+      dut.io.erSrc0Valid(0).expect(true.B)
+      dut.io.erSrc0Psrc(0).expect(producerPdest.U)
+      dut.clock.step()
+      clearRenameProbe(dut)
+
+      dut.io.readDoneValid.poke(true.B)
+      dut.io.readDoneRobIdx.poke(1.U)
+      dut.io.readDoneTrackId.poke(0.U)
+      dut.io.readDoneTrackGen.poke(1.U)
+      dut.io.readDoneSrcIdx.poke(0.U)
+      dut.io.readDonePsrc.poke(producerPdest.U)
+      dut.clock.step()
+      clearRenameProbe(dut)
+      dut.io.debugReadDoneDecCount.expect(1.U)
+
+      dut.io.producerReadyValid.poke(true.B)
+      dut.io.producerReadyPdest.poke(producerPdest.U)
+      dut.io.producerReadyRobIdx.poke(0.U)
+      dut.clock.step()
+      clearRenameProbe(dut)
+      dut.io.debugProducerReadyCount.expect(1.U)
+
+      primeRenameRead(dut, lane = 0, ldest = 5)
+      driveRenameLane(dut, lane = 0, ldest = 5)
+      dut.io.erRedefValid(0).expect(true.B)
+      dut.io.erRedefOldPdest(0).expect(producerPdest.U)
+      dut.clock.step()
+      clearRenameProbe(dut)
+
+      dut.io.guardDecValid.poke(true.B)
+      dut.io.guardDecRobIdx.poke(2.U)
+      dut.io.guardDecTrackId.poke(0.U)
+      dut.io.guardDecTrackGen.poke(1.U)
+      dut.io.guardDecOldPdest.poke(producerPdest.U)
+      dut.clock.step()
+      clearRenameProbe(dut)
+
+      dut.io.debugGuardDecCount.expect(1.U)
+      dut.io.debugEarlyFreeOpportunityCount.expect(1.U)
+      dut.io.debugEarlyFreeCount.expect(0.U)
+    }
+  }
+
+  it should "let external recovery kill non-released Rename UCA entries" in {
+    val config = smallRenameConfigWith(IntEarlyReleaseParams(enable = true, trackEntries = 4))
+
+    simulate(new RenameERFullPathProbe()(config)) { dut =>
+      resetRenameProbe(dut)
+
+      primeRenameRead(dut, lane = 0, ldest = 5)
+      val producerPdest = fireSingleRenameLane(dut, lane = 0, ldest = 5)
+      producerPdest should not be BigInt(0)
+      dut.io.debugActiveCount.expect(1.U)
+
+      dut.io.externalRedirectKill.poke(true.B)
+      dut.clock.step()
+      clearRenameProbe(dut)
+
+      dut.io.debugActiveCount.expect(0.U)
     }
   }
 

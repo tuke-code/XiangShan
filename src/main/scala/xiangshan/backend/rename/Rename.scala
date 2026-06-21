@@ -32,6 +32,7 @@ import xiangshan.backend.{
   IntERCommitSuppress,
   IntERDebugBundle,
   IntERUopMeta,
+  RenameIntERIO,
   IntSparseUCA,
   StoreBubbleReason,
   PipelineStallReason
@@ -167,6 +168,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     val debugRobHeadFuType = Option.when(backendParams.debugEn)(Input(FuType()))
     val debugRobHeadStall = Option.when(backendParams.debugEn)(Input(Bool()))
     val debugLoadReason = Option.when(backendParams.debugEn)(Input(UInt(log2Ceil(TopDownCounters.NumStallReasons.id).W)))
+    val intER = Option.when(EnableIntEarlyRegRelease)(Flipped(new RenameIntERIO))
     val intERDebug = Option.when(EnableIntEarlyRegRelease)(Output(new IntERDebugBundle))
     val stallReason = new Bundle {
       val in = Flipped(new StallReasonIO(RenameWidth))
@@ -849,12 +851,13 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       VecInit(intRenamePorts.map(_.wen)),
       VecInit(intRenamePorts.map(_.data))
     )
+    val intEREvents = io.intER.get
 
-    intUCA.io.redirectKill := intERRenameBlocked
-    intUCA.io.producerReady := 0.U.asTypeOf(intUCA.io.producerReady)
-    intUCA.io.readDone := 0.U.asTypeOf(intUCA.io.readDone)
-    intUCA.io.squash := 0.U.asTypeOf(intUCA.io.squash)
-    intUCA.io.stGuardDec := 0.U.asTypeOf(intUCA.io.stGuardDec)
+    intUCA.io.redirectKill := intERRenameBlocked || intEREvents.redirectKill
+    intUCA.io.producerReady := intEREvents.producerReady
+    intUCA.io.readDone := intEREvents.readDone
+    intUCA.io.squash := intEREvents.squash
+    intUCA.io.stGuardDec := intEREvents.stGuardDec
     intUCA.io.commitOldPdest := intOldPdestForFree
     intUCA.io.commitNeedFree := int_need_free
 

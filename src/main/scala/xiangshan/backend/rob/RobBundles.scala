@@ -25,7 +25,7 @@ import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
 import utility._
 import utils._
 import xiangshan._
-import xiangshan.backend.{BackendParams, IntERRobUopMeta, IntERSrcValueReadDone}
+import xiangshan.backend.{BackendParams, IntERFallbackReason, IntERRobUopMeta, IntERSrcValueReadDone, IntERSTGuardDec}
 import xiangshan.backend.Bundles.{DynInst, ExceptionInfo, ExuOutput, UopIdx, EnqRobUop}
 import xiangshan.backend.fu.{FuConfig, FuType}
 import xiangshan.frontend.ftq.FtqPtr
@@ -221,6 +221,56 @@ object RobBundles extends HasCircularQueuePtrHelper {
 }
 
 object RobIntEROps {
+  def emitSTGuardDec(
+    out: Vec[ValidIO[IntERSTGuardDec]],
+    markResolved: Vec[Bool],
+    cursor: RobPtr,
+    stop: Bool,
+    entries: Vec[RobBundles.RobEntryBundle]
+  )(implicit p: Parameters): UInt = {
+    require(out.length >= 1, "ROB ER speculation tracker must have at least one output lane")
+    require(markResolved.length == entries.length, "ROB ER resolved mark width must match entry count")
+
+    out := 0.U.asTypeOf(out)
+    markResolved := 0.U.asTypeOf(markResolved)
+
+    val entryIdxWidth = log2Ceil(entries.length max 2)
+    val laneCanCross = Wire(Vec(out.length, Bool()))
+    for (lane <- out.indices) {
+      val ptr = cursor + lane.U
+      val idx = ptr.value(entryIdxWidth - 1, 0)
+      val entry = entries(idx)
+      val inRange = ptr.value < entries.length.U
+      val olderClear = if (lane == 0) {
+        !stop
+      } else {
+        !stop && laneCanCross.take(lane).foldLeft(true.B)(_ && _)
+      }
+      val canCross = olderClear && inRange && entry.valid && entry.isWritebacked && !entry.needFlush
+      val emit = canCross && entry.intER.get.redef.valid && !entry.intER.get.resolved
+
+      laneCanCross(lane) := canCross
+      out(lane).valid := emit
+      out(lane).bits.valid := emit
+      out(lane).bits.robIdx := ptr
+      out(lane).bits.trackId := entry.intER.get.redef.trackId
+      out(lane).bits.trackGen := entry.intER.get.redef.trackGen
+      out(lane).bits.oldPdest := entry.intER.get.redef.oldPdest
+      out(lane).bits.fallback := false.B
+      out(lane).bits.reason := IntERFallbackReason.none
+    }
+
+    for (entryIdx <- entries.indices) {
+      val hits = out.indices.map { lane =>
+        val ptr = cursor + lane.U
+        out(lane).valid && ptr.value === entryIdx.U
+      }
+      markResolved(entryIdx) := VecInit(hits).asUInt.orR
+    }
+
+    PopCount(laneCanCross)
+  }
+
   def validateReadDoneEvents(
     out: Vec[ValidIO[IntERSrcValueReadDone]],
     markReadDone: Vec[Vec[Bool]],

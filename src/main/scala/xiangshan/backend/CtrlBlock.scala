@@ -780,6 +780,26 @@ class CtrlBlockImp(
   rob.io.writebackNums := VecInit(delayedNotFlushedWriteBackNums)
   rob.io.writebackNeedFlush := delayedNotFlushedWriteBackNeedFlush
   rob.io.intERReadDone.foreach(_ := io.fromRegionIntERReadDone.get)
+  if (EnableIntEarlyRegRelease) {
+    val renameIntER = rename.io.intER.get
+    val intProducerReadyWbs = delayedNotFlushedWriteBack.filter(_.bits.params.writeIntRf)
+    require(
+      intProducerReadyWbs.length == backendParams.numPregWb(IntData()),
+      "integer ER producer-ready lanes must follow integer preg writeback ports"
+    )
+
+    renameIntER := 0.U.asTypeOf(renameIntER)
+    renameIntER.redirectKill := rob.io.intERRecoveryKill.get || s1_s3_redirect.valid || rob.io.rabCommits.isWalk
+    renameIntER.readDone := rob.io.intERReadDoneDec.get
+    renameIntER.squash := rob.io.intERSquash.get
+    renameIntER.stGuardDec := rob.io.intERSTGuardDec.get
+    for ((event, wb) <- renameIntER.producerReady.zip(intProducerReadyWbs)) {
+      event.valid := wb.valid
+      event.bits.valid := wb.valid
+      event.bits.robIdx := wb.bits.robIdx
+      event.bits.pdest := wb.bits.pdest
+    }
+  }
   rob.io.readGPAMemData := gpaMem.io.exceptionReadData
   rob.io.fromVecExcpMod.busy := io.fromVecExcpMod.busy
 

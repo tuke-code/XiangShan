@@ -21,6 +21,7 @@ import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import xiangshan._
+import xiangshan.backend.datapath.DataConfig.IntData
 import xiangshan.backend.rob.RobPtr
 
 object IntERFallbackReason {
@@ -161,6 +162,14 @@ class IntERSTGuardDec(implicit p: Parameters) extends XSBundle {
   val oldPdest = UInt(PhyRegIdxWidth.W)
   val fallback = Bool()
   val reason = UInt(IntERFallbackReason.width.W)
+}
+
+class RenameIntERIO(implicit p: Parameters) extends XSBundle {
+  val redirectKill = Bool()
+  val producerReady = Vec(backendParams.numPregWb(IntData()), ValidIO(new IntERProducerReady))
+  val readDone = Vec(IntERReadDoneWidth, ValidIO(new IntERSrcValueReadDone))
+  val squash = Vec(IntERReadDoneWidth, ValidIO(new IntERSquashSource))
+  val stGuardDec = Vec(IntERSTWalkWidth, ValidIO(new IntERSTGuardDec))
 }
 
 class IntEREarlyFreeReq(implicit p: Parameters) extends XSBundle {
