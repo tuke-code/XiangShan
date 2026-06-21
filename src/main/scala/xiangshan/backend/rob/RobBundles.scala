@@ -363,7 +363,10 @@ object RobIntEROps {
         val entryIdxInRange = raw(lane).bits.robIdx.value < entries.length.U
         val killedByRedirect = raw(lane).bits.robIdx.needFlush(redirect)
         val srcIdxInRange = srcEvent.srcIdx < logicalSrcWidth.U
-        val stored = robEntry.intER.get.src(srcEvent.srcIdx)
+        val validLiveSource = raw(lane).valid && srcEvent.valid && !killedByRedirect
+        assert(!validLiveSource || srcIdxInRange, "ROB ER readDone source index out of range")
+        val safeSrcIdx = Mux(srcIdxInRange, srcEvent.srcIdx, 0.U)
+        val stored = robEntry.intER.get.src(safeSrcIdx)
         val duplicate = if (earlierAccepted.isEmpty) {
           false.B
         } else {

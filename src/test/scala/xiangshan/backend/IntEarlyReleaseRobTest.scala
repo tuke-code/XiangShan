@@ -13,6 +13,9 @@ import xiangshan.backend.Bundles.EnqRobUop
 import xiangshan.backend.rob.RobBundles.RobEntryBundle
 import xiangshan.backend.rob.{RobBundles, RobIntDiffOps, RobIntEROps, RobPtr}
 
+import java.nio.file.{Path, Paths}
+import scala.io.Source
+
 class IntERRobReadDoneValidationProbe(implicit p: Parameters) extends XSModule {
   private val entryCount = 4
   private val trackedRobIdx = 1
@@ -220,6 +223,24 @@ class IntERRobDirectDiffShadowProbe(implicit p: Parameters) extends XSModule {
 class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
   behavior of "IntEarlyRelease ROB readDone validation"
 
+  private def sourceText(path: String): String = {
+    val source = Source.fromFile(repoPath(path).toFile)
+    try {
+      source.mkString
+    } finally {
+      source.close()
+    }
+  }
+
+  private def repoPath(path: String): Path = {
+    val relative = Paths.get(path)
+    Iterator.iterate(Paths.get("").toAbsolutePath)(_.getParent)
+      .takeWhile(_ != null)
+      .map(_.resolve(relative))
+      .find(path => java.nio.file.Files.exists(path))
+      .getOrElse(relative)
+  }
+
   private def configWith(params: IntEarlyReleaseParams): Parameters = {
     val defaultConfig = new DefaultConfig
     defaultConfig.alterPartial({
@@ -375,6 +396,15 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     dut.io.redirect.bits.poke(0.U.asTypeOf(dut.io.redirect.bits))
     setRobPtr(dut.io.redirect.bits.robIdx, robIdx)
     dut.io.redirect.bits.level.poke(flushSelf.B)
+  }
+
+  it should "fail fast on out-of-range readDone source indexes before stored-source lookup" in {
+    val robBundlesSource = sourceText("src/main/scala/xiangshan/backend/rob/RobBundles.scala")
+
+    robBundlesSource should include("ROB ER readDone source index out of range")
+    robBundlesSource should include("val safeSrcIdx = Mux(srcIdxInRange, srcEvent.srcIdx, 0.U)")
+    robBundlesSource should include("val stored = robEntry.intER.get.src(safeSrcIdx)")
+    robBundlesSource should not include "val stored = robEntry.intER.get.src(srcEvent.srcIdx)"
   }
 
   it should "emit one validated decrement and suppress later duplicates" in {
