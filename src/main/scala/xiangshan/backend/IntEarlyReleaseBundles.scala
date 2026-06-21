@@ -247,6 +247,7 @@ class IntERDebugBundle(implicit p: Parameters) extends XSBundle {
   val squashDecCount = UInt(32.W)
   val guardDecCount = UInt(32.W)
   val fallbackCount = UInt(32.W)
+  val saturatedFallbackCount = UInt(32.W)
   val producerReadyCount = UInt(32.W)
   val earlyFreeOpportunityCount = UInt(32.W)
   val earlyFreeCount = UInt(32.W)

@@ -551,6 +551,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.debug.entries(0).state.expect(IntEREntryState.fallbackWaitCommit)
       dut.io.debug.entries(0).fallback.expect(true.B)
       dut.io.debug.fallbackCount.expect(1.U)
+      dut.io.debug.saturatedFallbackCount.expect(1.U)
 
       readDone(dut, trackId = 0, gen = 2)
       dut.clock.step()

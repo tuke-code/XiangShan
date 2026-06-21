@@ -440,6 +440,7 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
   private val squashDecCount = RegInit(0.U(32.W))
   private val guardDecCount = RegInit(0.U(32.W))
   private val fallbackCount = RegInit(0.U(32.W))
+  private val saturatedFallbackCount = RegInit(0.U(32.W))
   private val producerReadyCount = RegInit(0.U(32.W))
   private val earlyFreeOpportunityCount = RegInit(0.U(32.W))
   private val earlyFreeCount = RegInit(0.U(32.W))
@@ -455,6 +456,7 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
   squashDecCount := squashDecCount + squashDecByEntry.foldLeft(0.U(32.W))(_ + _)
   guardDecCount := guardDecCount + guardDecByEntry.foldLeft(0.U(32.W))(_ + _)
   fallbackCount := fallbackCount + PopCount(VecInit((0 until entryCount).map(e => setFallbackByEntry(e) || setSaturatedFallbackByEntry(e))))
+  saturatedFallbackCount := saturatedFallbackCount + PopCount(setSaturatedFallbackByEntry)
   producerReadyCount := producerReadyCount + PopCount(setProducedReadyByEntry)
   earlyFreeOpportunityCount := earlyFreeOpportunityCount + PopCount(earlyOpportunity)
   earlyFreeCount := earlyFreeCount + PopCount(io.earlyFree.map(_.valid))
@@ -484,6 +486,7 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
   io.debug.squashDecCount := squashDecCount
   io.debug.guardDecCount := guardDecCount
   io.debug.fallbackCount := fallbackCount
+  io.debug.saturatedFallbackCount := saturatedFallbackCount
   io.debug.producerReadyCount := producerReadyCount
   io.debug.earlyFreeOpportunityCount := earlyFreeOpportunityCount
   io.debug.earlyFreeCount := earlyFreeCount
