@@ -179,6 +179,7 @@ class IntERRobDirectDiffShadowProbe(implicit p: Parameters) extends XSModule {
     val loadAddr = Input(UInt(log2Ceil(IntLogicRegs).W))
     val loadData = Input(UInt(XLEN.W))
     val valid = Input(Vec(lanes, Bool()))
+    val skip = Input(Vec(lanes, Bool()))
     val rfWen = Input(Vec(lanes, Bool()))
     val isMove = Input(Vec(lanes, Bool()))
     val ldest = Input(Vec(lanes, UInt(LogicRegsWidth.W)))
@@ -641,6 +642,7 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
         dut.io.loadData.poke(0.U)
         for (lane <- 0 until dut.io.valid.length) {
           dut.io.valid(lane).poke(false.B)
+          dut.io.skip(lane).poke(false.B)
           dut.io.rfWen(lane).poke(false.B)
           dut.io.isMove(lane).poke(false.B)
           dut.io.ldest(lane).poke(0.U)
@@ -699,6 +701,43 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
 
       clear()
       dut.io.shadow(0).expect(0.U)
+    }
+  }
+
+  it should "update direct integer diff shadow for skipped integer commits" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new IntERRobDirectDiffShadowProbe()(config)) { dut =>
+      dut.reset.poke(true.B)
+      dut.clock.step()
+      dut.reset.poke(false.B)
+
+      def clear(): Unit = {
+        dut.io.load.poke(false.B)
+        dut.io.loadAddr.poke(0.U)
+        dut.io.loadData.poke(0.U)
+        for (lane <- 0 until dut.io.valid.length) {
+          dut.io.valid(lane).poke(false.B)
+          dut.io.skip(lane).poke(false.B)
+          dut.io.rfWen(lane).poke(false.B)
+          dut.io.isMove(lane).poke(false.B)
+          dut.io.ldest(lane).poke(0.U)
+          dut.io.moveSrc(lane).poke(0.U)
+          dut.io.writeData(lane).poke(0.U)
+        }
+      }
+
+      clear()
+      dut.io.valid(0).poke(true.B)
+      dut.io.skip(0).poke(true.B)
+      dut.io.rfWen(0).poke(true.B)
+      dut.io.ldest(0).poke(7.U)
+      dut.io.writeData(0).poke(BigInt("7777", 16).U)
+      dut.io.commitData(0).expect(BigInt("7777", 16).U)
+      dut.clock.step()
+
+      clear()
+      dut.io.shadow(7).expect(BigInt("7777", 16).U)
     }
   }
 }
