@@ -1504,6 +1504,31 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     renameSource should include("intUCA.io.debug.saturatedFallbackCount")
   }
 
+  it should "expose stable UCA event perf counter names" in {
+    val renameSource = sourceText("src/main/scala/xiangshan/backend/rename/Rename.scala")
+
+    Seq(
+      "int_er_uc_producer_ready" -> "producerReadyCount",
+      "int_er_uc_read_done_dec" -> "readDoneDecCount",
+      "int_er_uc_squash_dec" -> "squashDecCount",
+      "int_er_uc_guard_dec" -> "guardDecCount",
+      "int_er_uc_early_free_opportunity" -> "earlyFreeOpportunityCount",
+      "int_er_uc_early_free" -> "earlyFreeCount",
+      "int_er_uc_commit_suppress" -> "commitSuppressCount",
+      "int_er_uc_gen_mismatch" -> "genMismatchCount",
+      "int_er_uc_redirect_kill" -> "redirectKillCount",
+      "int_er_uc_full_untracked" -> "fullUntrackedCount",
+      "int_er_uc_source_duplicate" -> "sourceDuplicateCount"
+    ).foreach { case (counterName, debugField) =>
+      renameSource should include {
+        s"""XSPerfAccumulate("$counterName", intERDebugDelta(intUCA.io.debug.$debugField))"""
+      }
+    }
+    renameSource should include("def intERDebugDelta")
+    renameSource should include("intUCA.io.debug.producerReadyCount")
+    renameSource should include("intUCA.io.debug.genMismatchCount")
+  }
+
   it should "expose Rename fallback reason perf counters with stable names" in {
     val renameSource = sourceText("src/main/scala/xiangshan/backend/rename/Rename.scala")
 

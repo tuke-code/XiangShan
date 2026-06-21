@@ -939,9 +939,10 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     intEREarlyFreeReq.get := VecInit(intUCA.io.earlyFree.map(_.valid))
     intEREarlyFreePhyReg.get := VecInit(intUCA.io.earlyFree.map(_.bits.pdest))
     intERCommitSuppress.get := intUCA.io.commitSuppress
-    val saturatedFallbackCount = intUCA.io.debug.saturatedFallbackCount
-    val saturatedFallbackCountPrev = RegNext(saturatedFallbackCount, 0.U)
-    val saturatedFallbackDelta = saturatedFallbackCount - saturatedFallbackCountPrev
+    def intERDebugDelta(count: UInt): UInt = {
+      val prev = RegNext(count, 0.U)
+      count - prev
+    }
 
     XSPerfAccumulate("int_er_rename_alloc", PopCount(intUCA.io.rename.alloc.map(_.valid)))
     XSPerfAccumulate("int_er_rename_dest_track", PopCount(intUCA.io.rename.destTrack.map(_.valid)))
@@ -955,7 +956,18 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       case (reason, marked) => reason && marked
     }))
     XSPerfAccumulate("int_er_rename_redirect_kill", intUCA.io.redirectKill)
-    XSPerfAccumulate("int_er_uc_saturated_fallback", saturatedFallbackDelta)
+    XSPerfAccumulate("int_er_uc_full_untracked", intERDebugDelta(intUCA.io.debug.fullUntrackedCount))
+    XSPerfAccumulate("int_er_uc_source_duplicate", intERDebugDelta(intUCA.io.debug.sourceDuplicateCount))
+    XSPerfAccumulate("int_er_uc_read_done_dec", intERDebugDelta(intUCA.io.debug.readDoneDecCount))
+    XSPerfAccumulate("int_er_uc_squash_dec", intERDebugDelta(intUCA.io.debug.squashDecCount))
+    XSPerfAccumulate("int_er_uc_guard_dec", intERDebugDelta(intUCA.io.debug.guardDecCount))
+    XSPerfAccumulate("int_er_uc_saturated_fallback", intERDebugDelta(intUCA.io.debug.saturatedFallbackCount))
+    XSPerfAccumulate("int_er_uc_producer_ready", intERDebugDelta(intUCA.io.debug.producerReadyCount))
+    XSPerfAccumulate("int_er_uc_early_free_opportunity", intERDebugDelta(intUCA.io.debug.earlyFreeOpportunityCount))
+    XSPerfAccumulate("int_er_uc_early_free", intERDebugDelta(intUCA.io.debug.earlyFreeCount))
+    XSPerfAccumulate("int_er_uc_commit_suppress", intERDebugDelta(intUCA.io.debug.commitSuppressCount))
+    XSPerfAccumulate("int_er_uc_gen_mismatch", intERDebugDelta(intUCA.io.debug.genMismatchCount))
+    XSPerfAccumulate("int_er_uc_redirect_kill", intERDebugDelta(intUCA.io.debug.redirectKillCount))
   }
 
   val genSnapshot = Cat(io.out.map(out => out.fire && out.bits.snapshot)).orR
