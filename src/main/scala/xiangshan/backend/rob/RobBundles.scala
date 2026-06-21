@@ -278,6 +278,15 @@ object RobIntDiffOps {
 }
 
 object RobIntEROps {
+  def assertGuardEmittedRedefNotFlushed(
+    entry: RobBundles.RobEntryBundle,
+    invalidatedByRedirect: Bool
+  )(implicit p: Parameters): Unit = {
+    val guardEmittedRedefFlushed =
+      entry.valid && invalidatedByRedirect && entry.intER.get.redef.valid && entry.intER.get.guardEmitted
+    assert(!guardEmittedRedefFlushed, "ROB ER guard-emitted redefiner flushed by redirect")
+  }
+
   def emitSTGuardDec(
     out: Vec[ValidIO[IntERSTGuardDec]],
     markGuardEmitted: Vec[Bool],

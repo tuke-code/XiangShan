@@ -1069,9 +1069,17 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       (i.U > redirectBegin) && (i.U < redirectEnd),
       (i.U > redirectBegin) || (i.U < redirectEnd)
     ) || redirectAll)
+    val enqCond = enqOH.asUInt.orR && !io.redirect.valid
+    if (EnableIntEarlyRegRelease) {
+      val invalidatedByRedirect = !commitCond && !enqCond && needFlush
+      RobIntEROps.assertGuardEmittedRedefNotFlushed(
+        entry = robEntries(i),
+        invalidatedByRedirect = invalidatedByRedirect
+      )
+    }
     when(commitCond) {
       robEntries(i).valid := false.B
-    }.elsewhen(enqOH.asUInt.orR && !io.redirect.valid) {
+    }.elsewhen(enqCond) {
       robEntries(i).valid := true.B
     }.elsewhen(needFlush){
       robEntries(i).valid := false.B

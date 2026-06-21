@@ -135,6 +135,31 @@ class IntERRobSTGuardProbe(implicit p: Parameters) extends XSModule {
   }
 }
 
+class IntERRobGuardEmittedRedefFlushProbe(implicit p: Parameters) extends XSModule {
+  require(EnableIntEarlyRegRelease, "probe requires Int ER metadata")
+
+  val io = IO(new Bundle {
+    val entryValid = Input(Bool())
+    val redefValid = Input(Bool())
+    val guardEmitted = Input(Bool())
+    val invalidatedByRedirect = Input(Bool())
+    val alive = Output(Bool())
+  })
+
+  private val entry = Wire(new RobEntryBundle)
+  entry := 0.U.asTypeOf(entry)
+  entry.valid := io.entryValid
+  entry.intER.get.redef.valid := io.redefValid
+  entry.intER.get.guardEmitted := io.guardEmitted
+
+  RobIntEROps.assertGuardEmittedRedefNotFlushed(
+    entry = entry,
+    invalidatedByRedirect = io.invalidatedByRedirect
+  )
+
+  io.alive := entry.valid
+}
+
 class IntERRobMultiUopRejectProbe(implicit p: Parameters) extends XSModule {
   require(EnableIntEarlyRegRelease, "probe requires Int ER metadata")
 
@@ -632,6 +657,49 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.guard(0).valid.expect(false.B)
       dut.io.guard(1).valid.expect(false.B)
       dut.io.advance.expect(0.U)
+    }
+  }
+
+  it should "fail fast if redirect flushes a guard-emitted ER redefiner" in {
+    val robSource = sourceText("src/main/scala/xiangshan/backend/rob/Rob.scala")
+    val robBundlesSource = sourceText("src/main/scala/xiangshan/backend/rob/RobBundles.scala")
+
+    robSource should include("RobIntEROps.assertGuardEmittedRedefNotFlushed")
+    robSource should include("val invalidatedByRedirect = !commitCond && !enqCond && needFlush")
+    robBundlesSource should include("ROB ER guard-emitted redefiner flushed by redirect")
+    robBundlesSource should include("entry.valid && invalidatedByRedirect && entry.intER.get.redef.valid && entry.intER.get.guardEmitted")
+    robBundlesSource should include("!guardEmittedRedefFlushed")
+  }
+
+  it should "assert when a guard-emitted ER redefiner is invalidated by redirect" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    def expectPass(entryValid: Boolean, redefValid: Boolean, guardEmitted: Boolean, invalidated: Boolean): Unit = {
+      noException should be thrownBy {
+        simulate(new IntERRobGuardEmittedRedefFlushProbe()(config)) { dut =>
+          dut.io.entryValid.poke(entryValid.B)
+          dut.io.redefValid.poke(redefValid.B)
+          dut.io.guardEmitted.poke(guardEmitted.B)
+          dut.io.invalidatedByRedirect.poke(invalidated.B)
+          dut.clock.step()
+          dut.io.alive.expect(entryValid.B)
+        }
+      }
+    }
+
+    expectPass(entryValid = false, redefValid = true, guardEmitted = true, invalidated = true)
+    expectPass(entryValid = true, redefValid = false, guardEmitted = true, invalidated = true)
+    expectPass(entryValid = true, redefValid = true, guardEmitted = false, invalidated = true)
+    expectPass(entryValid = true, redefValid = true, guardEmitted = true, invalidated = false)
+
+    assertThrows[Exception] {
+      simulate(new IntERRobGuardEmittedRedefFlushProbe()(config)) { dut =>
+        dut.io.entryValid.poke(true.B)
+        dut.io.redefValid.poke(true.B)
+        dut.io.guardEmitted.poke(true.B)
+        dut.io.invalidatedByRedirect.poke(true.B)
+        dut.clock.step()
+      }
     }
   }
 
