@@ -144,6 +144,24 @@ class IntERSrcValueReadDone(implicit p: Parameters) extends XSBundle {
   val reason = UInt(IntERFallbackReason.width.W)
 }
 
+class IntERDataPathReadDoneStatus extends Bundle {
+  val tracked = Bool()
+  val accepted = Bool()
+  val fallback = Bool()
+  val suppressed = Bool()
+  val unsupportedReadPath = Bool()
+  val replayProne = Bool()
+  val uncertain = Bool()
+}
+
+class IntERRobReadDoneStatus extends Bundle {
+  val sawRaw = Bool()
+  val accepted = Bool()
+  val fallback = Bool()
+  val stale = Bool()
+  val duplicate = Bool()
+}
+
 class IntERSquashSource(implicit p: Parameters) extends XSBundle {
   val robIdx = new RobPtr
   val src = IntERBundleHelper.logicalSrcVec

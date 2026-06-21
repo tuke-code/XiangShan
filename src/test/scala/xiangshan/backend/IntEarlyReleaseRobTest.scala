@@ -31,6 +31,7 @@ class IntERRobReadDoneValidationProbe(implicit p: Parameters) extends XSModule {
     val redirect = Input(Valid(new Redirect))
     val raw = Input(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone)))
     val dec = Output(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone)))
+    val status = Output(Vec(IntERReadDoneWidth, new IntERRobReadDoneStatus))
     val selectedReadDone = Output(Bool())
   })
 
@@ -42,7 +43,8 @@ class IntERRobReadDoneValidationProbe(implicit p: Parameters) extends XSModule {
     markReadDone = marks,
     raw = io.raw,
     redirect = io.redirect,
-    entries = entries
+    entries = entries,
+    status = Some(io.status)
   )
 
   for (entry <- 0 until entryCount) {
@@ -494,6 +496,43 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
 
       clearRaw(dut)
       dut.io.selectedReadDone.expect(false.B)
+    }
+  }
+
+  it should "classify accepted stale fallback and duplicate readDone events for perf" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new IntERRobReadDoneValidationProbe()(config)) { dut =>
+      clearRaw(dut)
+      dut.reset.poke(true.B)
+      dut.clock.step()
+      dut.reset.poke(false.B)
+
+      loadTrackedSource(dut)
+      driveReadDone(dut, lane = 0)
+      driveReadDone(dut, lane = 1)
+      dut.io.status(0).sawRaw.expect(true.B)
+      dut.io.status(0).accepted.expect(true.B)
+      dut.io.status(0).fallback.expect(false.B)
+      dut.io.status(0).stale.expect(false.B)
+      dut.io.status(0).duplicate.expect(false.B)
+      dut.io.status(1).sawRaw.expect(true.B)
+      dut.io.status(1).accepted.expect(false.B)
+      dut.io.status(1).duplicate.expect(true.B)
+
+      clearRaw(dut)
+      driveReadDone(dut, lane = 0, trackGen = 4)
+      dut.io.status(0).sawRaw.expect(true.B)
+      dut.io.status(0).accepted.expect(false.B)
+      dut.io.status(0).stale.expect(true.B)
+      dut.io.status(0).duplicate.expect(false.B)
+
+      clearRaw(dut)
+      driveReadDone(dut, lane = 0, fallback = true, reason = IntERFallbackReason.unsupportedReadPath)
+      dut.io.status(0).sawRaw.expect(true.B)
+      dut.io.status(0).accepted.expect(true.B)
+      dut.io.status(0).fallback.expect(true.B)
+      dut.io.status(0).stale.expect(false.B)
     }
   }
 

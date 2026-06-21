@@ -13,6 +13,7 @@ import xiangshan.backend.{
   BackendParams,
   ExcpModToVprf,
   IntERFallbackReason,
+  IntERDataPathReadDoneStatus,
   IntERSrcTrack,
   IntERSrcValueReadDone,
   PcToDataPathIO,
@@ -52,7 +53,8 @@ object DataPathIntEROps {
     s1Valid: Bool,
     og1Failed: Bool,
     replayPronePath: Bool,
-    uncertainReadPath: Bool
+    uncertainReadPath: Bool,
+    status: Option[IntERDataPathReadDoneStatus] = None
   ): Unit = {
     require(srcShadow.length == dataSources.length, "read observation source vectors must have matching widths")
     require(srcShadow.length == intReadSources.length, "read observation integer-read mask must match source width")
@@ -71,10 +73,20 @@ object DataPathIntEROps {
     }).asUInt.orR
     val fallback = completed && anyTracked && (replayPronePath || uncertainReadPath || anyUnsupported)
     val readDone = completed && anyTracked && !fallback
+    val suppressed = anyTracked && !(fallback || readDone)
 
     out.valid := fallback || readDone
     out.bits.fallback := fallback
     out.bits.reason := Mux(fallback, IntERFallbackReason.unsupportedReadPath, IntERFallbackReason.none)
+    status.foreach { s =>
+      s.tracked := anyTracked
+      s.accepted := readDone
+      s.fallback := fallback
+      s.suppressed := suppressed
+      s.unsupportedReadPath := completed && anyTracked && anyUnsupported
+      s.replayProne := completed && anyTracked && replayPronePath
+      s.uncertain := completed && anyTracked && uncertainReadPath
+    }
 
     for (logicalSrc <- out.bits.src.indices) {
       val sourceHits = srcShadow.zip(intReadSources).zip(supportedSources).map { case ((src, intRead), supported) =>
@@ -97,6 +109,10 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
 
   val io = IO(new DataPathIO())
   io.intERReadDone.foreach(_ := 0.U.asTypeOf(io.intERReadDone.get))
+  private val intERReadDoneStatus = Option.when(EnableIntEarlyRegRelease)(
+    Wire(Vec(IntERReadDoneWidth, new IntERDataPathReadDoneStatus))
+  )
+  intERReadDoneStatus.foreach(_ := 0.U.asTypeOf(intERReadDoneStatus.get))
 
   private val (fromIntIQ, toIntIQ, toIntExu) = (io.fromIntIQ, io.toIntIQ, io.toIntExu)
   private val (fromFpIQ,  toFpIQ,  toFpExu)  = (io.fromFpIQ,  io.toFpIQ,  io.toFpExu)
@@ -748,7 +764,8 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
               s1Valid = s1_toExuValid(iqIdx)(iuIdx),
               og1Failed = og1FailedVec2(iqIdx)(iuIdx),
               replayPronePath = replayPronePath.B,
-              uncertainReadPath = uncertainReadPath
+              uncertainReadPath = uncertainReadPath,
+              status = intERReadDoneStatus.map(_(readDoneIdx))
             )
           }
       }
@@ -843,6 +860,15 @@ class DataPath(implicit p: Parameters, params: BackendParams, param: SchdBlockPa
   XSPerfAccumulate(s"IntUopAfterArb", PopCount(fromIntIQ.flatten.map(_.fire)))
   XSPerfAccumulate(s"VfUopBeforeArb", PopCount(fromVfIQ.flatten.map(_.valid)))
   XSPerfAccumulate(s"VfUopAfterArb", PopCount(fromVfIQ.flatten.map(_.fire)))
+  intERReadDoneStatus.foreach { status =>
+    XSPerfAccumulate("int_er_datapath_tracked_read_obs", PopCount(status.map(_.tracked)))
+    XSPerfAccumulate("int_er_datapath_read_done", PopCount(status.map(_.accepted)))
+    XSPerfAccumulate("int_er_datapath_fallback", PopCount(status.map(_.fallback)))
+    XSPerfAccumulate("int_er_datapath_fallback_unsupported_read_path", PopCount(status.map(_.unsupportedReadPath)))
+    XSPerfAccumulate("int_er_datapath_suppressed_read_obs", PopCount(status.map(_.suppressed)))
+    XSPerfAccumulate("int_er_datapath_replay_prone_fallback", PopCount(status.map(_.replayProne)))
+    XSPerfAccumulate("int_er_datapath_uncertain_fallback", PopCount(status.map(_.uncertain)))
+  }
 
   XSPerfHistogram(s"IntRFReadBeforeArb_hist", PopCount(intRFReadArbiter.io.in.flatten.flatten.map(_.valid)), true.B, 0, 16, 2)
   XSPerfHistogram(s"IntRFReadAfterArb_hist", PopCount(intRFReadArbiter.io.out.map(x => x.map(_.valid)).flatten), true.B, 0, 16, 2)

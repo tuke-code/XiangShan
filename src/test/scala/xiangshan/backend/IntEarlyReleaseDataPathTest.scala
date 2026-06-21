@@ -56,6 +56,7 @@ class IntERDataPathReadDoneProbe(localSrc: Int, replayProne: Boolean)(implicit p
     val dataSources = Input(Vec(localSrc, DataSource()))
     val intReadSrc = Input(Vec(localSrc, Bool()))
     val out = Output(Valid(new IntERSrcValueReadDone))
+    val status = Output(new IntERDataPathReadDoneStatus)
   })
 
   val shadow = Wire(Vec(localSrc, new IntERSrcTrack))
@@ -76,7 +77,8 @@ class IntERDataPathReadDoneProbe(localSrc: Int, replayProne: Boolean)(implicit p
     s1Valid = io.s1Valid,
     og1Failed = io.og1Failed,
     replayPronePath = replayProne.B,
-    uncertainReadPath = io.uncertainReadPath
+    uncertainReadPath = io.uncertainReadPath,
+    status = Some(io.status)
   )
 }
 
@@ -333,6 +335,42 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
       dut.io.out.bits.src(1).trackGen.expect(6.U)
       dut.io.out.bits.src(1).srcIdx.expect(1.U)
       dut.io.out.bits.src(1).psrc.expect(25.U)
+    }
+  }
+
+  it should "classify accepted fallback and suppressed read observations for perf" in {
+    simulate(new IntERDataPathReadDoneProbe(localSrc = 1, replayProne = false)(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2)))) { dut =>
+      clearProbe(dut)
+      dut.io.s1Valid.poke(true.B)
+      setRobPtr(dut.io.robIdx, 14)
+      setTrackedSource(dut, localSrc = 0, logicalSrc = 0, trackId = 1, trackGen = 3, psrc = 21, dataSource = DataSource.reg)
+      dut.io.status.tracked.expect(true.B)
+      dut.io.status.accepted.expect(true.B)
+      dut.io.status.fallback.expect(false.B)
+      dut.io.status.suppressed.expect(false.B)
+      dut.io.status.unsupportedReadPath.expect(false.B)
+
+      dut.io.og1Failed.poke(true.B)
+      dut.io.status.tracked.expect(true.B)
+      dut.io.status.accepted.expect(false.B)
+      dut.io.status.fallback.expect(false.B)
+      dut.io.status.suppressed.expect(true.B)
+
+      dut.io.og1Failed.poke(false.B)
+      dut.io.dataSources(0).value.poke(DataSource.forward)
+      dut.io.status.tracked.expect(true.B)
+      dut.io.status.accepted.expect(false.B)
+      dut.io.status.fallback.expect(true.B)
+      dut.io.status.unsupportedReadPath.expect(true.B)
+    }
+
+    simulate(new IntERDataPathReadDoneProbe(localSrc = 1, replayProne = true)(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2)))) { dut =>
+      clearProbe(dut)
+      dut.io.s1Valid.poke(true.B)
+      setTrackedSource(dut, localSrc = 0, logicalSrc = 0, trackId = 1, trackGen = 3, psrc = 21, dataSource = DataSource.reg)
+      dut.io.status.tracked.expect(true.B)
+      dut.io.status.fallback.expect(true.B)
+      dut.io.status.replayProne.expect(true.B)
     }
   }
 }

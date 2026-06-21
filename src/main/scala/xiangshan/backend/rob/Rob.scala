@@ -35,7 +35,7 @@ import utils._
 import xiangshan._
 import xiangshan.PerfDebugInfo
 import xiangshan.backend.GPAMemEntry
-import xiangshan.backend.{BackendParams, IntERSquashSource, IntERSrcValueReadDone, IntERSTGuardDec, RatToVecExcpMod, RegWriteFromRab, VecExcpInfo}
+import xiangshan.backend.{BackendParams, IntERRobReadDoneStatus, IntERSquashSource, IntERSrcValueReadDone, IntERSTGuardDec, RatToVecExcpMod, RegWriteFromRab, VecExcpInfo}
 import xiangshan.backend.Bundles._
 import xiangshan.backend.decode.isa.bitfield.XSInstBitFields
 import xiangshan.backend.fu.{FuConfig, FuType}
@@ -188,6 +188,9 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val intERCommitSafeNow = Option.when(EnableIntEarlyRegRelease)(
     Wire(Vec(RobSize, Bool()))
   )
+  val intERReadDoneStatus = Option.when(EnableIntEarlyRegRelease)(
+    Wire(Vec(IntERReadDoneWidth, new IntERRobReadDoneStatus))
+  )
   val intERSpecCursor = Option.when(EnableIntEarlyRegRelease)(RegInit(0.U.asTypeOf(new RobPtr)))
   if (EnableIntEarlyRegRelease) {
     RobIntEROps.validateReadDoneEvents(
@@ -195,7 +198,8 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       markReadDone = intERReadDoneMarks.get,
       raw = io.intERReadDone.get,
       redirect = io.redirect,
-      entries = robEntries
+      entries = robEntries,
+      status = intERReadDoneStatus
     )
     for (entry <- 0 until RobSize) {
       for (src <- 0 until IntERLogicalSrcWidth) {
@@ -1416,6 +1420,13 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   val commitIsStore = io.commits.info.map(_.commitType).map(_ === CommitType.STORE)
   XSPerfAccumulate("commitInstrStore", ifCommit(PopCount(io.commits.commitValid.zip(commitIsStore).map { case (v, t) => v && t })))
   XSPerfAccumulate("writeback", PopCount((0 until RobSize).map(i => robEntries(i).valid && robEntries(i).isWritebacked)))
+  intERReadDoneStatus.foreach { status =>
+    XSPerfAccumulate("int_er_rob_raw_read_done", PopCount(status.map(_.sawRaw)))
+    XSPerfAccumulate("int_er_rob_read_done_accept", PopCount(status.map(_.accepted)))
+    XSPerfAccumulate("int_er_rob_read_done_fallback", PopCount(status.map(_.fallback)))
+    XSPerfAccumulate("int_er_rob_read_done_stale", PopCount(status.map(_.stale)))
+    XSPerfAccumulate("int_er_rob_read_done_duplicate", PopCount(status.map(_.duplicate)))
+  }
   // XSPerfAccumulate("enqInstr", PopCount(io.dp1Req.map(_.fire)))
   // XSPerfAccumulate("d2rVnR", PopCount(io.dp1Req.map(p => p.valid && !p.ready)))
   XSPerfAccumulate("walkInstr", Mux(io.commits.isWalk, PopCount(io.commits.walkValid), 0.U))

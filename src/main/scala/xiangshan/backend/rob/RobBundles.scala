@@ -25,7 +25,7 @@ import freechips.rocketchip.diplomacy.{LazyModule, LazyModuleImp}
 import utility._
 import utils._
 import xiangshan._
-import xiangshan.backend.{BackendParams, IntERFallbackReason, IntERRobUopMeta, IntERSrcValueReadDone, IntERSTGuardDec}
+import xiangshan.backend.{BackendParams, IntERFallbackReason, IntERRobReadDoneStatus, IntERRobUopMeta, IntERSrcValueReadDone, IntERSTGuardDec}
 import xiangshan.backend.Bundles.{DynInst, ExceptionInfo, ExuOutput, UopIdx, EnqRobUop}
 import xiangshan.backend.fu.{FuConfig, FuType}
 import xiangshan.frontend.ftq.FtqPtr
@@ -335,7 +335,8 @@ object RobIntEROps {
     markReadDone: Vec[Vec[Bool]],
     raw: Vec[ValidIO[IntERSrcValueReadDone]],
     redirect: Valid[Redirect],
-    entries: Vec[RobBundles.RobEntryBundle]
+    entries: Vec[RobBundles.RobEntryBundle],
+    status: Option[Vec[IntERRobReadDoneStatus]] = None
   )(implicit p: Parameters): Unit = {
     val logicalSrcWidth = p(XSCoreParamsKey).backendParams.numSrc
     require(out.length == raw.length, "ROB ER readDone output width must match raw input width")
@@ -345,7 +346,14 @@ object RobIntEROps {
     out := 0.U.asTypeOf(out)
     markReadDone := 0.U.asTypeOf(markReadDone)
 
+    status.foreach(_ := 0.U.asTypeOf(status.get))
+
     var earlierAccepted = Seq.empty[(Int, Int, Bool)]
+    val sawSource = Seq.tabulate(raw.length) { lane =>
+      VecInit(raw(lane).bits.src.map(src => raw(lane).valid && src.valid)).asUInt.orR
+    }
+    val duplicateSource = Wire(Vec(raw.length, Vec(logicalSrcWidth, Bool())))
+    duplicateSource := 0.U.asTypeOf(duplicateSource)
     val accepted = Seq.tabulate(raw.length) { lane =>
       Seq.tabulate(logicalSrcWidth) { slot =>
         val srcEvent = raw(lane).bits.src(slot)
@@ -375,6 +383,7 @@ object RobIntEROps {
             stored.trackGen === srcEvent.trackGen &&
             !stored.readDone
         val acceptedSource = raw(lane).valid && srcEvent.valid && storedMatches && !duplicate
+        duplicateSource(lane)(slot) := raw(lane).valid && srcEvent.valid && duplicate
         earlierAccepted = earlierAccepted :+ (lane, slot, acceptedSource)
         acceptedSource
       }
@@ -386,6 +395,15 @@ object RobIntEROps {
         out(lane).bits.src(slot).valid := accepted(lane)(slot)
       }
       out(lane).valid := VecInit(accepted(lane)).asUInt.orR
+      status.foreach { s =>
+        val acceptedLane = VecInit(accepted(lane)).asUInt.orR
+        val duplicateLane = duplicateSource(lane).asUInt.orR && !acceptedLane
+        s(lane).sawRaw := sawSource(lane)
+        s(lane).accepted := acceptedLane
+        s(lane).fallback := acceptedLane && raw(lane).bits.fallback
+        s(lane).duplicate := duplicateLane
+        s(lane).stale := sawSource(lane) && !acceptedLane && !duplicateLane
+      }
     }
 
     for (entryIdx <- entries.indices) {
