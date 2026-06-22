@@ -671,26 +671,28 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     robBundlesSource should include("!guardEmittedRedefFlushed")
   }
 
-  it should "assert when a guard-emitted ER redefiner is invalidated by redirect" in {
+  it should "not assert for safe guard-emitted redefiner redirect combinations" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
 
-    def expectPass(entryValid: Boolean, redefValid: Boolean, guardEmitted: Boolean, invalidated: Boolean): Unit = {
-      noException should be thrownBy {
-        simulate(new IntERRobGuardEmittedRedefFlushProbe()(config)) { dut =>
-          dut.io.entryValid.poke(entryValid.B)
-          dut.io.redefValid.poke(redefValid.B)
-          dut.io.guardEmitted.poke(guardEmitted.B)
-          dut.io.invalidatedByRedirect.poke(invalidated.B)
-          dut.clock.step()
-          dut.io.alive.expect(entryValid.B)
-        }
+    simulate(new IntERRobGuardEmittedRedefFlushProbe()(config)) { dut =>
+      Seq(
+        (false, true, true, true),
+        (true, false, true, true),
+        (true, true, false, true),
+        (true, true, true, false)
+      ).foreach { case (entryValid, redefValid, guardEmitted, invalidated) =>
+        dut.io.entryValid.poke(entryValid.B)
+        dut.io.redefValid.poke(redefValid.B)
+        dut.io.guardEmitted.poke(guardEmitted.B)
+        dut.io.invalidatedByRedirect.poke(invalidated.B)
+        dut.clock.step()
+        dut.io.alive.expect(entryValid.B)
       }
     }
+  }
 
-    expectPass(entryValid = false, redefValid = true, guardEmitted = true, invalidated = true)
-    expectPass(entryValid = true, redefValid = false, guardEmitted = true, invalidated = true)
-    expectPass(entryValid = true, redefValid = true, guardEmitted = false, invalidated = true)
-    expectPass(entryValid = true, redefValid = true, guardEmitted = true, invalidated = false)
+  it should "assert when a guard-emitted ER redefiner is invalidated by redirect" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
 
     assertThrows[Exception] {
       simulate(new IntERRobGuardEmittedRedefFlushProbe()(config)) { dut =>

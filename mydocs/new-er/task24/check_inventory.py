@@ -55,7 +55,9 @@ UNSUPPORTED_SCOPE_MARKERS = [
 ]
 
 FOCUSED_SWEEP_MARKERS = [
-    "Round 39 focused sweep",
+    "Round 40 focused sweep",
+    "Round 39 review rejected the previous focused sweep",
+    "ROB/ST suite-level harness check",
     "IntSparseUCATest",
     "IntEarlyReleaseBundlesTest",
     "IntEarlyReleaseFreeListTest",
@@ -64,7 +66,8 @@ FOCUSED_SWEEP_MARKERS = [
     "PreprocessTest",
     "xiangshan.test.compile",
     "difftest.test.compile not required",
-    "70 tests run, 70 succeeded",
+    "14 tests run, 14 succeeded",
+    "71 tests run, 71 succeeded",
     "5 tests run, 5 succeeded",
 ]
 
