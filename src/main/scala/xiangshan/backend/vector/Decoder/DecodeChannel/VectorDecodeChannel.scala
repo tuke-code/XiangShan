@@ -143,7 +143,7 @@ class VectorDecodeChannel(
     IllegalField,
     NumUopOhField,
     WritePartVdField,
-    IsSegmentField,
+    IsIndexSegmentField,
     VRegTypesField,
   )
 
@@ -201,7 +201,7 @@ class VectorDecodeChannel(
   vecExDecodes.isVstartForceZero := instBundle(IsVstartForceZeroField)
   vecExDecodes.maskUsed := instFields.VM === 0.U
   vecExDecodes.vregTypes := instSewLmulNfBundle(VRegTypesField)
-  vecExDecodes.isSegment := instSewLmulNfBundle(IsSegmentField)
+  vecExDecodes.isIndexSegment := instSewLmulNfBundle(IsIndexSegmentField)
   vecExDecodes.nffield := nf
   vecExDecodes.isSrcDstOverlapIgnore := instBundle(IsSrcDstOverlapIgnoreField)
   vecExDecodes.isSrcdstOverlapStrict := instBundle(IsSrcdstOverlapStrictField)

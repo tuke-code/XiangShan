@@ -18,7 +18,7 @@ class VecExceptionDecodes extends Bundle {
   val isVstartForceZero = Bool()
   val maskUsed = Bool()
   val vregTypes = new VRegTypes()
-  val isSegment = Bool()
+  val isIndexSegment = Bool()
   val nffield = UInt(3.W)
   val isSrcDstOverlapIgnore = Bool()
   val isSrcdstOverlapStrict = Bool() // slideup and other
@@ -181,7 +181,8 @@ class VecExceptionGen(implicit p: Parameters) extends XSModule
     }
     
     val vs3RegHiWithNf = emulNfLoToHi(Reg.emulVs3, Dec.nffield, vs3RegLo)
-    val segmentOverlap = Reg.useVs2 && Reg.useVd && Dec.isSegment &&
+    val vs3WithNfOutOfBound = (Reg.useVs3 || Reg.useVd) && Dec.isIndexSegment && (vs3RegHiWithNf >= 32.U)
+    val segmentOverlap = Reg.useVs2 && Reg.useVd && Dec.isIndexSegment &&
                       regRangeOverlap(vs2RegLo, vs2RegHi, vs3RegLo, vs3RegHiWithNf)
 
     out.exception := Seq(

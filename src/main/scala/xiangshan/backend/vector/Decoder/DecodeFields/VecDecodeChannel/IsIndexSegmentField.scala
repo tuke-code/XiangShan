@@ -6,11 +6,11 @@ import xiangshan.backend.vector.Decoder.InstPattern.{VecInstPattern, VecMemInstP
 import xiangshan.backend.vector.Decoder.RVVDecodeUtil.{DecodePatternComb, DecodePatternComb4, LmulPattern, NfPattern, SewPattern}
 import xiangshan.backend.vector.Decoder.util.DecodeField
 
-object IsSegmentField extends DecodeField[
+object IsIndexSegmentField extends DecodeField[
   DecodePatternComb4[VecInstPattern, SewPattern, LmulPattern, NfPattern],
   Bool,
 ] {
-  override def name: String = "isSegment"
+  override def name: String = "isIndexSegment"
 
   override def chiselType: Bool = Bool()
 
