@@ -46,8 +46,8 @@ class VTypeGen(implicit p: Parameters) extends XSModule {
     vsetModule.in.vsetivliVType.bits := instFieldVec(i).ZIMM_VSETIVLI
     vsetModule.in.readVl.valid := false.B
     vsetModule.in.readVl.bits := DontCare
-    vsetModule.in.rdIsZero := instFieldVec(i).RD === 0.U
-    vsetModule.in.rs1IsZero := instFieldVec(i).RS1 === 0.U
+    vsetModule.in.rdIsZero := false.B
+    vsetModule.in.rs1IsZero := false.B
     // only used for vill generation, set it false
     // vlmax comparison will be done in VTypeGen not in VSetFuncUnit
     vsetModule.in.oldVType.valid := false.B
@@ -89,7 +89,7 @@ class VTypeGen(implicit p: Parameters) extends XSModule {
 
   // Detect keepVl vsets: rd == 0 && rs1 == 0
   private val keepVlMask = VecInit((0 until DecodeWidth).map { i =>
-    isVsetiVec(i) && instFieldVec(i).RD === 0.U && instFieldVec(i).RS1 === 0.U
+    isVsetvli(i) && instFieldVec(i).RD === 0.U && instFieldVec(i).RS1 === 0.U
   })
 
   // For keepVl vsets, compute the correct vlmaxChange against the true prevVlmax
