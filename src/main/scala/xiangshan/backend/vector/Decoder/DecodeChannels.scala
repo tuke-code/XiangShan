@@ -51,12 +51,20 @@ class DecodeChannels(
     s"_M2x${MaxM2UopIdx}_M4x${MaxM4UopIdx}_M8x${MaxM8UopIdx}"
 
   require(extensions.distinct.size == extensions.size, "Duplicate extensions are not allowed")
-  val simpleExts: Seq[ExtBase] = extensions.diff(Seq(V, Zvbb, Zvknha, Zacas, ZacasZabha))
+  val vectorExtsSeq = Seq(V, Zvbb, Zvknha, Zacas, ZacasZabha)
+
+  val simpleExts: Seq[ExtBase] = extensions.diff(vectorExtsSeq)
   val simpleInsts = InstPattern.extensionInsts(simpleExts: _*)
 
   // Get vector instruction bits pattern by extensions
-  val vectorExts = extensions.intersect(Seq(V, Zvbb, Zvknha, Zacas, ZacasZabha))
+  val vectorExts = extensions.intersect(vectorExtsSeq)
   val vectorInsts = InstPattern.extensionInsts(vectorExts: _*).map(_.asInstanceOf[VecInstPattern])
+
+  val pseudoInsts: Seq[InstPattern] = PseudoDecodeChannel.uopTable.keys.toSeq
+  val vsetInsts: Seq[InstPattern] = vectorInsts.collect { case p: VecConfigInstPattern => p }
+
+  val vecComputeInsts = vectorInsts.diff(vsetInsts)
+  val allChannelInsts: Seq[InstPattern] = simpleInsts ++ pseudoInsts ++ vecComputeInsts ++ vsetInsts
 
   val uopBufferSize = maxSplitUopNum - 1
 
@@ -83,7 +91,7 @@ class DecodeChannels(
   val inMopCtrl: Seq[MopCtrlBundle] = in.mops.map(_.bits.ctrl)
 
   // Instantiate vector decode channel by vector instruction patterns
-  val vectorDecodeChannelM8: Definition[VectorDecodeChannel] = Definition(new VectorDecodeChannel(vectorInsts))
+  val vectorDecodeChannelM8: Definition[VectorDecodeChannel] = Definition(new VectorDecodeChannel(vecComputeInsts))
   val vsetDecodeChannel: Definition[VsetDecoder] = Definition(new VsetDecoder)
 
 //  lazy val vecDecodeChannelM8: Definition[VecDecodeChannel] = Definition(new VecDecodeChannel(vecInstPatterns, enableM2M4M8 = (true, true, true)))
