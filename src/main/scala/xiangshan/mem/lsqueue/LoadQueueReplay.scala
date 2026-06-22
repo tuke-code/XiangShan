@@ -665,7 +665,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     val replay_req_size = LSUOpType.size(s2_replayUop.fuOpType)
     replay_req(i).valid := s2_oldestSel(i).valid && !s2_cancelReplay(i)
     replay_req(i).bits.entrance := Mux(
-      s2_replayCauses(LoadReplayCauses.C_DM) || s2_replayCauses(LoadReplayCauses.C_UNCACHE) || s2_replayCauses(LoadReplayCauses.C_FF),
+      s2_replayCauses(LoadReplayCauses.C_DM) || s2_replayCauses(LoadReplayCauses.C_UNCACHE),
       LoadEntrance.replayHiPrio.U,
       LoadEntrance.replayLoPrio.U
     )
