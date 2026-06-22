@@ -94,7 +94,7 @@ class VectorDecodeChannel(
 
               case _ => Seq()
             }
-          case _: VecConfigInstPattern => Seq()
+          case p: VecConfigInstPattern => throw new IllegalArgumentException(s"VecConfigInstPattern ${p.name} should not be in VectorDecodeChannel")
           case _: ScaMultUopInstPattern => Seq(vi ## SewLmulPattern.dontCare ## NfPattern.dontCare)
         }
     }
