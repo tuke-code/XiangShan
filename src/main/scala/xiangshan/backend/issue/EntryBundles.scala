@@ -384,6 +384,7 @@ object EntryBundles extends HasCircularQueuePtrHelper {
       }
 
       srcStatusNext.psrc                              := srcStatus.psrc
+      srcStatusNext.intER.foreach(_                   := srcStatus.intER.get)
       srcStatusNext.srcType                           := Mux(ignoreOldVd, SrcType.no, srcStatus.srcType)
       srcStatusNext.srcState                          := srcStatus.srcState & !srcLoadCancel | wakeupByWB | wakeupByIQ | ignoreOldVd
       srcStatusNext.dataSources.value                 := (if (params.inVfSchd && params.readVfRf && params.hasIQWakeUp) {

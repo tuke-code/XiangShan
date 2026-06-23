@@ -571,6 +571,26 @@ class XSNoCDiffTopMinimalConfig(n: Int = 1) extends Config(
   })
 )
 
+private class WithIntEarlyReleaseObserveOnly extends Config((site, here, up) => {
+  case XSTileKey => up(XSTileKey).map(_.copy(
+    intEarlyRelease = IntEarlyReleaseParams(
+      enable = true,
+      observeOnly = true,
+      conservativeRedirectKill = true
+    )
+  ))
+})
+
+class IntERObserveOnlyConfig(n: Int = 1) extends Config(
+  new WithIntEarlyReleaseObserveOnly
+    ++ new DefaultConfig(n)
+)
+
+class IntERObserveOnlyMinimalConfig(n: Int = 1) extends Config(
+  new WithIntEarlyReleaseObserveOnly
+    ++ new MinimalConfig(n)
+)
+
 class FpgaDefaultConfig(n: Int = 1) extends Config(
   (OpenLLCConfig("3MB", banks = 1, ways = 6)
     ++ L2CacheConfig("1MB", inclusive = true, banks = 4)

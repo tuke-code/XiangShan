@@ -63,6 +63,25 @@ class BackendImp(wrapper: Backend)(implicit p: Parameters) extends LazyModuleImp
 }
 
 object BackendIntEROps {
+  def connectIntRfOwnerCommitWriteback(
+    out: Vec[ValidIO[IntCommitWriteback]],
+    ownerWriteback: Vec[ValidIO[IntCommitWriteback]]
+  )(implicit p: Parameters): Unit = {
+    require(ownerWriteback.length == out.length, "Backend integer RF owner writeback lane widths must match")
+    out := ownerWriteback
+  }
+
+  def connectIntRfOwnerProducerReady(
+    out: Vec[ValidIO[IntERProducerReady]],
+    ownerProducerReady: Vec[ValidIO[IntERProducerReady]]
+  )(implicit p: Parameters): Unit = {
+    require(ownerProducerReady.length == out.length, "Backend integer RF owner producer-ready lane widths must match")
+    out := ownerProducerReady
+    for (lane <- out.indices) {
+      out(lane).bits.valid := out(lane).valid
+    }
+  }
+
   def mergeReadDoneRegions(
     out: Vec[ValidIO[IntERSrcValueReadDone]],
     regionReadDone: Seq[Vec[ValidIO[IntERSrcValueReadDone]]]
@@ -266,7 +285,15 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   assert(ctrlBlock.io.fromWB.wbData.size == wbDataPathToCtrlBlock.size, "ctrlBlock.io.fromWB.wbData.size == wbDataPathToCtrlBlock.size")
   ctrlBlock.io.fromWB.wbData.zip(wbDataPathToCtrlBlock).map(x => x._1 := x._2)
   ctrlBlock.io.fromWB.delayedOldestExuRedirect := intRegion.io.wbDataPathToCtrlBlock.delayedOldestExuRedirect.get
+  BackendIntEROps.connectIntRfOwnerCommitWriteback(
+    ctrlBlock.io.fromWB.intCommitWriteback,
+    intRegion.io.wbDataPathToCtrlBlock.intCommitWriteback
+  )
   if (EnableIntEarlyRegRelease) {
+    BackendIntEROps.connectIntRfOwnerProducerReady(
+      ctrlBlock.io.fromWB.intERProducerReady.get,
+      intRegion.io.wbDataPathToCtrlBlock.intERProducerReady.get
+    )
     BackendIntEROps.mergeReadDoneRegions(
       ctrlBlock.io.fromRegionIntERReadDone.get,
       Seq(

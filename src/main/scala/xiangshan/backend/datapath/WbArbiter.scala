@@ -5,12 +5,37 @@ import chisel3._
 import chisel3.util._
 import utility.XSError
 import xiangshan._
-import xiangshan.backend.BackendParams
+import xiangshan.backend.{BackendParams, IntCommitWriteback, IntERProducerReady}
 import xiangshan.backend.Bundles._
 import xiangshan.backend.datapath.DataConfig._
 import xiangshan.backend.fu.vector.Bundles.Vstart
 import xiangshan.backend.issue.SchdBlockParams
 import xiangshan.backend.regfile.RfWritePortBundle
+
+object WbArbiterIntEROps {
+  def emitProducerReady(
+    out: ValidIO[IntERProducerReady],
+    portValid: Bool,
+    wb: WriteBackRFBundle
+  ): Unit = {
+    out.valid := portValid && wb.rfWen
+    out.bits.valid := out.valid
+    out.bits.pdest := wb.pdest
+    out.bits.robIdx := wb.intERRobIdx.get
+  }
+}
+
+object WbArbiterIntDiffOps {
+  def emitCommitWriteback(
+    out: ValidIO[IntCommitWriteback],
+    portValid: Bool,
+    wb: WriteBackRFBundle
+  ): Unit = {
+    out.valid := portValid && wb.rfWen
+    out.bits.robIdx := wb.robIdx
+    out.bits.data := wb.data
+  }
+}
 
 class WbArbiterDispatcherIO[T <: Data](private val gen: T, n: Int) extends Bundle {
   val in = Flipped(DecoupledIO(gen))
@@ -106,6 +131,10 @@ class WbDataPathIO()(implicit p: Parameters, params: BackendParams, schdParams: 
 
   val toCtrlBlock = new Bundle {
     val writeback: MixedVec[ValidIO[WriteBackRobBundle]] = MixedVec(schdParams.genWriteBackRobValidBundle.flatten)
+    val intCommitWriteback = Output(Vec(backendParams.numPregWb(IntData()), ValidIO(new IntCommitWriteback)))
+    val intERProducerReady = Option.when(EnableIntEarlyRegRelease)(
+      Output(Vec(backendParams.numPregWb(IntData()), ValidIO(new IntERProducerReady)))
+    )
   }
 }
 
@@ -384,8 +413,20 @@ class WbDataPath(params: BackendParams, schdParams: SchdBlockParams)(implicit p:
     sink.valid := source.bits.toRob.valid
     source.ready := true.B
   }
+  require(
+    io.toCtrlBlock.intCommitWriteback.length == intWbArbiterOut.length,
+    "integer direct diff commit writeback lanes must follow integer RF writeback ports"
+  )
+  io.toCtrlBlock.intCommitWriteback.zip(intWbArbiterOut).foreach { case (event, wb) =>
+    WbArbiterIntDiffOps.emitCommitWriteback(event, wb.valid, wb.bits)
+  }
+  io.toCtrlBlock.intERProducerReady.foreach { producerReady =>
+    require(
+      producerReady.length == intWbArbiterOut.length,
+      "integer ER producer-ready lanes must follow integer RF writeback ports"
+    )
+    producerReady.zip(intWbArbiterOut).foreach { case (event, wb) =>
+      WbArbiterIntEROps.emitProducerReady(event, wb.valid, wb.bits)
+    }
+  }
 }
-
-
-
-

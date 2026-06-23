@@ -144,6 +144,12 @@ class CtrlBlockImp(
     x.valid := GatedValidRegNext(io.fromWB.wbData(i).valid)
     x.bits := delayedNotFlushedWriteBack(i).bits
   }
+  private val delayedIntCommitWriteback = Wire(chiselTypeOf(io.fromWB.intCommitWriteback))
+  delayedIntCommitWriteback.zip(io.fromWB.intCommitWriteback).foreach { case (delayed, raw) =>
+    val killedByOlder = raw.bits.robIdx.needFlush(Seq(s1_s3_redirect, s2_s4_redirect))
+    delayed.valid := GatedValidRegNext(raw.valid && !killedByOlder)
+    delayed.bits := RegEnable(raw.bits, raw.valid)
+  }
   val delayedNotFlushedWriteBackNeedFlush = Wire(Vec(params.allExuParams.filter(_.needExceptionGen).length, Bool()))
   delayedNotFlushedWriteBackNeedFlush := delayedNotFlushedWriteBack.filter(_.bits.params.needExceptionGen).map{ x =>
     x.bits.exceptionVec.orR || x.bits.flushPipe.getOrElse(false.B) || x.bits.replay.getOrElse(false.B) ||
@@ -777,28 +783,19 @@ class CtrlBlockImp(
   rob.io.redirect := s1_s3_redirect
   rob.io.writeback := delayedNotFlushedWriteBack
   rob.io.exuWriteback := delayedWriteBack
+  rob.io.intCommitWriteback := delayedIntCommitWriteback
   rob.io.writebackNums := VecInit(delayedNotFlushedWriteBackNums)
   rob.io.writebackNeedFlush := delayedNotFlushedWriteBackNeedFlush
   rob.io.intERReadDone.foreach(_ := io.fromRegionIntERReadDone.get)
   if (EnableIntEarlyRegRelease) {
     val renameIntER = rename.io.intER.get
-    val intProducerReadyWbs = delayedNotFlushedWriteBack.filter(_.bits.params.writeIntRf)
-    require(
-      intProducerReadyWbs.length == backendParams.numPregWb(IntData()),
-      "integer ER producer-ready lanes must follow integer preg writeback ports"
-    )
 
     renameIntER := 0.U.asTypeOf(renameIntER)
     renameIntER.redirectKill := rob.io.intERRecoveryKill.get || s1_s3_redirect.valid || rob.io.rabCommits.isWalk
     renameIntER.readDone := rob.io.intERReadDoneDec.get
     renameIntER.squash := rob.io.intERSquash.get
     renameIntER.stGuardDec := rob.io.intERSTGuardDec.get
-    for ((event, wb) <- renameIntER.producerReady.zip(intProducerReadyWbs)) {
-      event.valid := wb.valid
-      event.bits.valid := wb.valid
-      event.bits.robIdx := wb.bits.robIdx
-      event.bits.pdest := wb.bits.pdest
-    }
+    renameIntER.producerReady := io.fromWB.intERProducerReady.get
   }
   rob.io.readGPAMemData := gpaMem.io.exceptionReadData
   rob.io.fromVecExcpMod.busy := io.fromVecExcpMod.busy
@@ -970,6 +967,10 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
   val fromWB = new Bundle {
     val wbData = Flipped(MixedVec(params.genWrite2RobBundles))
     val delayedOldestExuRedirect = Flipped(ValidIO(new Redirect))
+    val intCommitWriteback = Input(Vec(backendParams.numPregWb(IntData()), ValidIO(new IntCommitWriteback)))
+    val intERProducerReady = Option.when(EnableIntEarlyRegRelease)(
+      Input(Vec(backendParams.numPregWb(IntData()), ValidIO(new IntERProducerReady)))
+    )
   }
   val fromRegionIntERReadDone = Option.when(EnableIntEarlyRegRelease)(Input(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone))))
   val redirect = ValidIO(new Redirect)

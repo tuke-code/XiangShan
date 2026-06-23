@@ -9,7 +9,8 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import top.DefaultConfig
 import xiangshan._
-import xiangshan.backend.datapath.{DataPathIO, DataPathIntEROps, DataSource}
+import xiangshan.backend.datapath.{DataPathIO, DataPathIntEROps, DataSource, WbArbiterIntEROps}
+import xiangshan.backend.datapath.WbConfig.IntWB
 import xiangshan.backend.issue.{IntScheduler, SchdBlockParams}
 
 class IntERDataPathIOShapeProbe(expectedER: Boolean)(implicit p: Parameters) extends XSModule {
@@ -89,6 +90,39 @@ class IntERBackendReadDoneMergeProbe(regionCount: Int, laneCount: Int)(implicit 
   })
 
   BackendIntEROps.mergeReadDoneRegions(io.out, io.region)
+}
+
+class IntERWbProducerReadyProbe(implicit p: Parameters) extends XSModule {
+  val io = IO(new Bundle {
+    val portValid = Input(Bool())
+    val rfWen = Input(Bool())
+    val pdest = Input(UInt(PhyRegIdxWidth.W))
+    val robIdx = Input(new rob.RobPtr)
+    val out = Output(Valid(new IntERProducerReady))
+  })
+
+  val wb = Wire(new Bundles.WriteBackRFBundle(IntWB(port = 0), backendParams))
+  wb := 0.U.asTypeOf(wb)
+  wb.rfWen := io.rfWen
+  wb.pdest := io.pdest
+  wb.intERRobIdx.get := io.robIdx
+
+  WbArbiterIntEROps.emitProducerReady(io.out, io.portValid, wb)
+}
+
+class IntERBackendIntRfOwnerProbe(regionCount: Int, laneCount: Int)(implicit p: Parameters) extends XSModule {
+  val io = IO(new Bundle {
+    val ownerCommit = Input(Vec(laneCount, Valid(new IntCommitWriteback)))
+    val otherCommit = Input(Vec(regionCount - 1, Vec(laneCount, Valid(new IntCommitWriteback))))
+    val ownerProducer = Input(Vec(laneCount, Valid(new IntERProducerReady)))
+    val otherProducer = Input(Vec(regionCount - 1, Vec(laneCount, Valid(new IntERProducerReady))))
+    val commitOut = Output(Vec(laneCount, Valid(new IntCommitWriteback)))
+    val producerOut = Output(Vec(laneCount, Valid(new IntERProducerReady)))
+  })
+
+  require(regionCount > 1, "owner probe needs at least one non-owner region")
+  BackendIntEROps.connectIntRfOwnerCommitWriteback(io.commitOut, io.ownerCommit)
+  BackendIntEROps.connectIntRfOwnerProducerReady(io.producerOut, io.ownerProducer)
 }
 
 class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselSim {
@@ -195,6 +229,62 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
       dut.io.out(0).bits.src(1).valid.expect(true.B)
       dut.io.out(0).bits.src(1).trackGen.expect(3.U)
       dut.io.out(1).valid.expect(false.B)
+    }
+  }
+
+  it should "emit producer-ready only for accepted integer RF writeback ports" in {
+    simulate(new IntERWbProducerReadyProbe()(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2)))) { dut =>
+      dut.io.portValid.poke(false.B)
+      dut.io.rfWen.poke(true.B)
+      dut.io.pdest.poke(21.U)
+      setRobPtr(dut.io.robIdx, 7)
+      dut.io.out.valid.expect(false.B)
+
+      dut.io.portValid.poke(true.B)
+      dut.io.rfWen.poke(false.B)
+      dut.io.out.valid.expect(false.B)
+
+      dut.io.rfWen.poke(true.B)
+      dut.io.out.valid.expect(true.B)
+      dut.io.out.bits.valid.expect(true.B)
+      dut.io.out.bits.pdest.expect(21.U)
+      dut.io.out.bits.robIdx.value.expect(7.U)
+    }
+  }
+
+  it should "select integer RF owner writeback events instead of merging local region lanes" in {
+    simulate(new IntERBackendIntRfOwnerProbe(regionCount = 3, laneCount = 2)(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2)))) { dut =>
+      dut.io.ownerCommit.poke(0.U.asTypeOf(dut.io.ownerCommit))
+      dut.io.otherCommit.poke(0.U.asTypeOf(dut.io.otherCommit))
+      dut.io.ownerProducer.poke(0.U.asTypeOf(dut.io.ownerProducer))
+      dut.io.otherProducer.poke(0.U.asTypeOf(dut.io.otherProducer))
+
+      dut.io.ownerCommit(0).valid.poke(true.B)
+      setRobPtr(dut.io.ownerCommit(0).bits.robIdx, 9)
+      dut.io.ownerCommit(0).bits.data.poke(0x1111.U)
+      dut.io.otherCommit(1)(0).valid.poke(true.B)
+      setRobPtr(dut.io.otherCommit(1)(0).bits.robIdx, 10)
+      dut.io.otherCommit(1)(0).bits.data.poke(0x2222.U)
+
+      dut.io.ownerProducer(0).valid.poke(true.B)
+      dut.io.ownerProducer(0).bits.valid.poke(true.B)
+      dut.io.ownerProducer(0).bits.pdest.poke(31.U)
+      setRobPtr(dut.io.ownerProducer(0).bits.robIdx, 11)
+      dut.io.otherProducer(1)(0).valid.poke(true.B)
+      dut.io.otherProducer(1)(0).bits.valid.poke(true.B)
+      dut.io.otherProducer(1)(0).bits.pdest.poke(32.U)
+      setRobPtr(dut.io.otherProducer(1)(0).bits.robIdx, 12)
+
+      dut.io.commitOut(0).valid.expect(true.B)
+      dut.io.commitOut(0).bits.robIdx.value.expect(9.U)
+      dut.io.commitOut(0).bits.data.expect(0x1111.U)
+      dut.io.commitOut(1).valid.expect(false.B)
+
+      dut.io.producerOut(0).valid.expect(true.B)
+      dut.io.producerOut(0).bits.valid.expect(true.B)
+      dut.io.producerOut(0).bits.pdest.expect(31.U)
+      dut.io.producerOut(0).bits.robIdx.value.expect(11.U)
+      dut.io.producerOut(1).valid.expect(false.B)
     }
   }
 

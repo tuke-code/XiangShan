@@ -35,7 +35,7 @@ import utils._
 import xiangshan._
 import xiangshan.PerfDebugInfo
 import xiangshan.backend.GPAMemEntry
-import xiangshan.backend.{BackendParams, IntERRobReadDoneStatus, IntERSquashSource, IntERSrcValueReadDone, IntERSTGuardDec, RatToVecExcpMod, RegWriteFromRab, VecExcpInfo}
+import xiangshan.backend.{BackendParams, IntCommitWriteback, IntERRobReadDoneStatus, IntERSquashSource, IntERSrcValueReadDone, IntERSTGuardDec, RatToVecExcpMod, RegWriteFromRab, VecExcpInfo}
 import xiangshan.backend.Bundles._
 import xiangshan.backend.decode.isa.bitfield.XSInstBitFields
 import xiangshan.backend.fu.{FuConfig, FuType}
@@ -72,6 +72,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     // exu + brq
     val writeback: MixedVec[ValidIO[WriteBackRobBundle]] = Flipped(params.genWrite2RobBundles)
     val exuWriteback: MixedVec[ValidIO[WriteBackRobBundle]] = Flipped(params.genWrite2RobBundles)
+    val intCommitWriteback = Flipped(Vec(backendParams.numPregWb(xiangshan.backend.datapath.DataConfig.IntData()), ValidIO(new IntCommitWriteback)))
     val writebackNums = Flipped(Vec(writeback.size, ValidIO(UInt(writeback.size.U.getWidth.W))))
     val writebackNeedFlush = Input(Vec(params.allExuParams.filter(_.needExceptionGen).length, Bool()))
     val intERReadDone = Option.when(EnableIntEarlyRegRelease)(Flipped(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone))))
@@ -1690,6 +1691,13 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         dt_exuDebug(wbIdx) := wb.bits.debug
       }
     }
+    val dtIntWriteDataShadow = RegInit(VecInit.fill(RobSize)(0.U(XLEN.W)))
+    RobIntDiffOps.updateWriteDataShadow(
+      shadow = dtIntWriteDataShadow,
+      writebackValid = io.intCommitWriteback.map(_.valid),
+      writebackRobIdx = io.intCommitWriteback.map(_.bits.robIdx),
+      writebackData = io.intCommitWriteback.map(_.bits.data)
+    )
     val dtArchIntShadow = RegInit(VecInit.fill(IntLogicRegs)(0.U(XLEN.W)))
     val dtArchIntShadowNext = Wire(Vec(IntLogicRegs, UInt(XLEN.W)))
     val dtCommitIntData = Wire(Vec(CommitWidth, UInt(XLEN.W)))
@@ -1707,7 +1715,13 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       dtCommitIsMove(i) := dt_eliminatedMove(ptr)
       dtCommitLdest(i) := io.commits.info(i).debug_ldest.get
       dtCommitMoveSrc(i) := dt_moveSrcLReg(ptr)
-      dtCommitWdata(i) := debug_exuData(ptr)
+      dtCommitWdata(i) := RobIntDiffOps.selectCommitWriteData(
+        stored = dtIntWriteDataShadow(ptr),
+        commitRobIdx = deqPtrVec(i),
+        writebackValid = io.intCommitWriteback.map(_.valid),
+        writebackRobIdx = io.intCommitWriteback.map(_.bits.robIdx),
+        writebackData = io.intCommitWriteback.map(_.bits.data)
+      )
     }
 
     RobIntDiffOps.updateShadow(

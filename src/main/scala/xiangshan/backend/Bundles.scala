@@ -1562,6 +1562,8 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
     val vlWen  = Bool()
     val pdest  = UInt(params.pregIdxWidth(backendParams).W)
     val data   = UInt(params.dataWidth.W)
+    val robIdx = new RobPtr()(p)
+    val intERRobIdx = Option.when(EnableIntEarlyRegRelease)(new RobPtr()(p))
 
     this.wakeupSource = s"WB(${params.toString()})"
 
@@ -1577,6 +1579,8 @@ class ExuOutputVLoad(val params: ExeUnitParams)(implicit val p: Parameters) exte
                       else if (wbType == "vf") { source.toVecRf.map(_.bits).getOrElse(0.U(params.dataWidth.W)) }
                       else if (wbType == "v0") { source.toV0Rf.map(_.bits).getOrElse(0.U(params.dataWidth.W)) }
                       else                     { source.toVlRf.map(_.bits).getOrElse(0.U(params.dataWidth.W)) })
+      this.robIdx := source.toRob.bits.robIdx
+      this.intERRobIdx.foreach(_ := source.toRob.bits.robIdx)
     }
 
     def asIntRfWriteBundle(fire: Bool): RfWritePortBundle = {

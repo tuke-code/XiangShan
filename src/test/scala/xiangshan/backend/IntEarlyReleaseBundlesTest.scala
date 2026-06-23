@@ -15,7 +15,7 @@ import xiangshan._
 import xiangshan.TopDownCounters._
 import xiangshan.backend.Bundles.{DecodeOutUop, DispatchOutUop, DynInst, EnqRobUop, IssueQueueDeqOg1Payload, IssueQueuePayload, RegionInUop, RenameOutUop, connectSamePort}
 import xiangshan.backend.decode.{DecodeStage, DecodeStageIO, FusionDecodeInfo}
-import xiangshan.backend.issue.{EntryBundles, IssueBlockParams}
+import xiangshan.backend.issue.{EnqEntry, EntryBundles, IssueBlockParams, OthersEntry}
 import xiangshan.backend.rename.{RatReadPort, Reg_I, Rename, RenameIntEROps, RenameTable, RenameTableWrapper}
 import xiangshan.backend.regfile.{FpPregParams, IntPregParams, V0PregParams, VfPregParams, VlPregParams}
 import xiangshan.backend.rob.RobBundles.{RobCommitEntryBundle, RobEntryBundle, connectCommitEntry, connectEnq}
@@ -422,6 +422,32 @@ class IntERIssueQueueOwnershipProbe(
       require(fields == Set("valid", "trackId", "trackGen", "srcIdx", "psrc"), s"SrcStatus ER metadata carries side-effect state for ${issue.getIQName}")
     }
   }
+}
+
+class IntERIssueEntryInitializationProbe(implicit p: Parameters) extends XSModule {
+  private val issueParams = backendParams.allIssueParams
+  backendParams.allExuParams.zipWithIndex.foreach { case (exu, idx) =>
+    exu.bindBackendParam(backendParams)
+    exu.updateIQWakeUpConfigs(backendParams.iqWakeUpParams)
+    exu.updateExuIdx(idx)
+  }
+  issueParams.foreach { issue =>
+    issue.bindBackendParam(backendParams)
+    issue.allExuParams.foreach(_.bindBackendParam(backendParams))
+    issue.exuBlockParams.foreach(_.bindIssueBlockParam(issue))
+  }
+  private val issueParam = issueParams.find { issue =>
+    issue.numRegSrc > 0 && !issue.needReadRegCache && !issue.isVecMemIQ
+  }.get
+  private implicit val implicitIssueParam: IssueBlockParams = issueParam
+
+  val enqEntry = Module(new EnqEntry(isComp = false))
+  val othersEntry = Module(new OthersEntry(isComp = false))
+
+  enqEntry.io.commonIn := 0.U.asTypeOf(enqEntry.io.commonIn)
+  enqEntry.io.enqDelayIn1 := 0.U.asTypeOf(enqEntry.io.enqDelayIn1)
+  enqEntry.io.enqDelayIn2 := 0.U.asTypeOf(enqEntry.io.enqDelayIn2)
+  othersEntry.io.commonIn := 0.U.asTypeOf(othersEntry.io.commonIn)
 }
 
 class IntERDownstreamPropagationProbe(implicit p: Parameters) extends XSModule {
@@ -1077,6 +1103,10 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     ChiselStage.elaborate(new IntERIssueQueueOwnershipProbe(expectedERMeta)(configWith(params)))
   }
 
+  private def checkIssueEntryInitialization(params: IntEarlyReleaseParams): Unit = {
+    simulate(new IntERIssueEntryInitializationProbe()(configWith(params))) { _ => }
+  }
+
   private def elaborateRenameERDebugProbe(params: IntEarlyReleaseParams, expectedDebug: Boolean): Unit = {
     ChiselStage.elaborate(new RenameERDebugShapeProbe(expectedDebug)(smallRenameConfigWith(params)))
   }
@@ -1404,6 +1434,10 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
   it should "keep IssueQueue ER ownership to metadata carriers" in {
     elaborateIssueQueueOwnershipProbe(IntEarlyReleaseParams(), expectedERMeta = false)
     elaborateIssueQueueOwnershipProbe(IntEarlyReleaseParams(enable = true, trackEntries = 2), expectedERMeta = true)
+  }
+
+  it should "fully initialize IssueQueue ER metadata across entry updates" in {
+    checkIssueEntryInitialization(IntEarlyReleaseParams(enable = true, trackEntries = 2))
   }
 
   it should "propagate local ER source metadata through dispatch and issue payload carriers" in {

@@ -234,6 +234,41 @@ object RobBundles extends HasCircularQueuePtrHelper {
 }
 
 object RobIntDiffOps {
+  def selectCommitWriteData(
+    stored: UInt,
+    commitRobIdx: RobPtr,
+    writebackValid: Seq[Bool],
+    writebackRobIdx: Seq[RobPtr],
+    writebackData: Seq[UInt]
+  ): UInt = {
+    require(writebackValid.length == writebackRobIdx.length, "ROB direct integer diff writeback valid/robIdx counts must match")
+    require(writebackValid.length == writebackData.length, "ROB direct integer diff writeback valid/data counts must match")
+
+    val selected = WireDefault(stored)
+    for (port <- writebackValid.indices.reverse) {
+      when(writebackValid(port) && writebackRobIdx(port).asUInt === commitRobIdx.asUInt) {
+        selected := writebackData(port)
+      }
+    }
+    selected
+  }
+
+  def updateWriteDataShadow(
+    shadow: Vec[UInt],
+    writebackValid: Seq[Bool],
+    writebackRobIdx: Seq[RobPtr],
+    writebackData: Seq[UInt]
+  ): Unit = {
+    require(writebackValid.length == writebackRobIdx.length, "ROB direct integer diff writeback valid/robIdx counts must match")
+    require(writebackValid.length == writebackData.length, "ROB direct integer diff writeback valid/data counts must match")
+
+    for (port <- writebackValid.indices) {
+      when(writebackValid(port)) {
+        shadow(writebackRobIdx(port).value) := writebackData(port)
+      }
+    }
+  }
+
   def updateShadow(
     current: Vec[UInt],
     next: Vec[UInt],

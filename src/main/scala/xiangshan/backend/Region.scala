@@ -723,6 +723,8 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
     }
   }
   io.wbDataPathToCtrlBlock.writeback := wbDataPath.io.toCtrlBlock.writeback
+  io.wbDataPathToCtrlBlock.intCommitWriteback := wbDataPath.io.toCtrlBlock.intCommitWriteback
+  io.wbDataPathToCtrlBlock.intERProducerReady.foreach(_ := wbDataPath.io.toCtrlBlock.intERProducerReady.get)
   io.intERReadDone.foreach(_ := dataPath.io.intERReadDone.get)
   // oldestRedirect
   if (params.isIntSchd) {
@@ -881,7 +883,11 @@ class RegionIO(val params: SchdBlockParams)(implicit p: Parameters) extends XSBu
   val vtype = Option.when(params.writeVConfig)((Valid(new VType)))
   val wbDataPathToCtrlBlock = new Bundle {
     val writeback: MixedVec[ValidIO[WriteBackRobBundle]] = MixedVec(params.genWriteBackRobValidBundle.flatten)
+    val intCommitWriteback = Output(Vec(backendParams.numPregWb(IntData()), ValidIO(new IntCommitWriteback)))
     val delayedOldestExuRedirect = Option.when(params.isIntSchd)(ValidIO(new Redirect))
+    val intERProducerReady = Option.when(EnableIntEarlyRegRelease)(
+      Output(Vec(backendParams.numPregWb(IntData()), ValidIO(new IntERProducerReady)))
+    )
   }
   val intERReadDone = Option.when(EnableIntEarlyRegRelease)(Output(Vec(IntERReadDoneWidth, Valid(new IntERSrcValueReadDone))))
   val memWriteback: MixedVec[MixedVec[DecoupledIO[NewExuOutput]]] = Flipped(params.genNewExuOutputDecoupledBundleMemBlock)

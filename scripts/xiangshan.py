@@ -26,7 +26,6 @@ import subprocess
 import sys
 import time
 import shlex
-import psutil
 import re
 
 def find_files_with_suffix(root_dir, suffixes):
@@ -670,6 +669,11 @@ class XiangShan(object):
         return 0
 
 def get_free_cores(n):
+    try:
+        import psutil
+    except ModuleNotFoundError as e:
+        raise RuntimeError("python package psutil is required when --numa is used") from e
+
     def numa_count():
         node_dir = "/sys/devices/system/node/"
         nodes = [node for node in os.listdir(node_dir) if node.startswith("node")]
