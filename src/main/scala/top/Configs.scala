@@ -575,8 +575,7 @@ private class WithIntEarlyReleaseObserveOnly extends Config((site, here, up) => 
   case XSTileKey => up(XSTileKey).map(_.copy(
     intEarlyRelease = IntEarlyReleaseParams(
       enable = true,
-      observeOnly = true,
-      conservativeRedirectKill = true
+      observeOnly = true
     )
   ))
 })
@@ -586,8 +585,7 @@ private class WithIntEarlyReleaseFunctional extends Config((site, here, up) => {
     intEarlyRelease = IntEarlyReleaseParams(
       enable = true,
       observeOnly = false,
-      earlyFreeWidth = 1,
-      conservativeRedirectKill = true
+      earlyFreeWidth = 1
     )
   ))
 })

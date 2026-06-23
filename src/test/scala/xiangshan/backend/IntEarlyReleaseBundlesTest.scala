@@ -1410,12 +1410,28 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     elaborateProbe(IntEarlyReleaseParams(), localSrc = 1, expectedTrackIdWidth = 4)
   }
 
+  it should "not expose unimplemented Int ER configuration knobs" in {
+    val paramsSource = sourceText("src/main/scala/xiangshan/Parameters.scala")
+
+    Seq(
+      "readDoneQueueDepth",
+      "eventQueueDepth",
+      "allowNonIntSchedulerConsumers",
+      "conservativeRedirectKill",
+      "IntERReadDoneQueueDepth",
+      "IntEREventQueueDepth",
+      "IntERAllowNonIntSchedulerConsumers",
+      "IntERConservativeRedirectKill"
+    ).foreach { removedName =>
+      paramsSource should not include removedName
+    }
+  }
+
   it should "define a correctness-first functional ER minimal config" in {
     val params = (new IntERFunctionalMinimalConfig)(XSTileKey).head.intEarlyRelease
 
     params.enable shouldBe true
     params.observeOnly shouldBe false
-    params.conservativeRedirectKill shouldBe true
     params.earlyFreeWidth shouldBe 1
   }
 

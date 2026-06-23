@@ -53,11 +53,7 @@ case class IntEarlyReleaseParams(
   genBits: Int = 4,
   earlyFreeWidth: Int = 1,
   stWalkWidth: Int = 2,
-  readDoneQueueDepth: Int = 16,
-  eventQueueDepth: Int = 16,
   allowSameCycleRenameBypassMatch: Boolean = true,
-  allowNonIntSchedulerConsumers: Boolean = true,
-  conservativeRedirectKill: Boolean = false,
   enableDiffShadowXRF: Boolean = true
 ) {
   private def isPowerOf2(x: Int): Boolean = x > 0 && ((x & (x - 1)) == 0)
@@ -68,8 +64,6 @@ case class IntEarlyReleaseParams(
   require(genBits >= 3, "IntEarlyReleaseParams.genBits must be at least 3")
   require(earlyFreeWidth >= 1, "IntEarlyReleaseParams.earlyFreeWidth must be positive")
   require(stWalkWidth >= 1, "IntEarlyReleaseParams.stWalkWidth must be positive")
-  require(readDoneQueueDepth >= 1, "IntEarlyReleaseParams.readDoneQueueDepth must be positive")
-  require(eventQueueDepth >= 1, "IntEarlyReleaseParams.eventQueueDepth must be positive")
 
   def trackIdWidth: Int = log2Ceil(trackEntries max 2)
   def counterWidth: Int = counterBits
@@ -689,11 +683,7 @@ trait HasXSParameter {
   def IntERTrackGenBits = intEarlyRelease.trackGenBits
   def IntEREarlyFreeWidth = intEarlyRelease.earlyFreeWidth
   def IntERSTWalkWidth = intEarlyRelease.stWalkWidth
-  def IntERReadDoneQueueDepth = intEarlyRelease.readDoneQueueDepth
-  def IntEREventQueueDepth = intEarlyRelease.eventQueueDepth
   def IntERAllowSameCycleRenameBypassMatch = intEarlyRelease.allowSameCycleRenameBypassMatch
-  def IntERAllowNonIntSchedulerConsumers = intEarlyRelease.allowNonIntSchedulerConsumers
-  def IntERConservativeRedirectKill = intEarlyRelease.conservativeRedirectKill
   def IntEREnableDiffShadowXRF = intEarlyRelease.enableDiffShadowXRF
   def IntEREnableDirectDiffShadowXRF = EnableIntEarlyRegRelease && IntEREnableDiffShadowXRF
   def IntERMaxIntSrc = backendParams.numIntRegSrc
