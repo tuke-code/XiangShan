@@ -902,6 +902,18 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     }
   }
 
+  it should "gate direct integer diff xrf on ER and shadow config" in {
+    val paramsSource = sourceText("src/main/scala/xiangshan/Parameters.scala")
+    val robSource = sourceText("src/main/scala/xiangshan/backend/rob/Rob.scala")
+    val directXrf = "val directXrf = DifftestModule(new DiffArchIntRegState, delay = 3)"
+    val directIdx = robSource.indexOf(directXrf)
+    val gateIdx = robSource.lastIndexOf("if (IntEREnableDirectDiffShadowXRF)", directIdx)
+
+    paramsSource should include("def IntEREnableDirectDiffShadowXRF = EnableIntEarlyRegRelease && IntEREnableDiffShadowXRF")
+    directIdx should be >= 0
+    gateIdx should be >= 0
+  }
+
   it should "reject tracked ER metadata on multi-uop ROB entries" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
 

@@ -1804,9 +1804,11 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     )
     dtArchIntShadow := dtArchIntShadowNext
 
-    val directXrf = DifftestModule(new DiffArchIntRegState, delay = 3)
-    directXrf.coreid := io.hartId
-    directXrf.value := dtArchIntShadowNext
+    if (IntEREnableDirectDiffShadowXRF) {
+      val directXrf = DifftestModule(new DiffArchIntRegState, delay = 3)
+      directXrf.coreid := io.hartId
+      directXrf.value := dtArchIntShadowNext
+    }
 
     // Always instantiate basic difftest modules.
     for (i <- 0 until CommitWidth) {

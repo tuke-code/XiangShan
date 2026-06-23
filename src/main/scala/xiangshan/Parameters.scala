@@ -695,6 +695,7 @@ trait HasXSParameter {
   def IntERAllowNonIntSchedulerConsumers = intEarlyRelease.allowNonIntSchedulerConsumers
   def IntERConservativeRedirectKill = intEarlyRelease.conservativeRedirectKill
   def IntEREnableDiffShadowXRF = intEarlyRelease.enableDiffShadowXRF
+  def IntEREnableDirectDiffShadowXRF = EnableIntEarlyRegRelease && IntEREnableDiffShadowXRF
   def IntERMaxIntSrc = backendParams.numIntRegSrc
   def IntERLogicalSrcWidth = backendParams.numSrc
   def IntERSrcIdxWidth = log2Ceil(IntERLogicalSrcWidth max 2)
