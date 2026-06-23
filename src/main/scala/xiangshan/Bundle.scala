@@ -344,6 +344,7 @@ class DiffCommitIO(implicit p: Parameters) extends XSBundle {
   val commitValid = Vec(CommitWidth * MaxUopSize, Bool())
 
   val info = Vec(CommitWidth * MaxUopSize, new RabCommitInfo)
+  val robIdx = Vec(CommitWidth * MaxUopSize, new RobPtr)
 }
 
 class DiffVlCommitBundle(commitWidth: Int)(implicit p: Parameters) extends XSBundle {
@@ -371,6 +372,7 @@ class RobCommitIO(implicit p: Parameters) extends XSBundle {
 class RabCommitInfo(implicit p: Parameters) extends XSBundle {
   val ldest = UInt(LogicRegsWidth.W)
   val pdest = UInt(PhyRegIdxWidth.W)
+  val moveSrcLReg = UInt(LogicRegsWidth.W)
   val rfWen = Bool()
   val fpWen = Bool()
   val vecWen = Bool()

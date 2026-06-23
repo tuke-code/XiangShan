@@ -175,6 +175,7 @@ class IntERProducerReady(implicit p: Parameters) extends XSBundle {
 
 class IntCommitWriteback(implicit p: Parameters) extends XSBundle {
   val robIdx = new RobPtr
+  val pdest = UInt(PhyRegIdxWidth.W)
   val data = UInt(XLEN.W)
 }
 

@@ -33,6 +33,7 @@ object WbArbiterIntDiffOps {
   ): Unit = {
     out.valid := portValid && wb.rfWen
     out.bits.robIdx := wb.robIdx
+    out.bits.pdest := wb.pdest
     out.bits.data := wb.data
   }
 }

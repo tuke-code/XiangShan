@@ -261,9 +261,11 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
 
       dut.io.ownerCommit(0).valid.poke(true.B)
       setRobPtr(dut.io.ownerCommit(0).bits.robIdx, 9)
+      dut.io.ownerCommit(0).bits.pdest.poke(21.U)
       dut.io.ownerCommit(0).bits.data.poke(0x1111.U)
       dut.io.otherCommit(1)(0).valid.poke(true.B)
       setRobPtr(dut.io.otherCommit(1)(0).bits.robIdx, 10)
+      dut.io.otherCommit(1)(0).bits.pdest.poke(22.U)
       dut.io.otherCommit(1)(0).bits.data.poke(0x2222.U)
 
       dut.io.ownerProducer(0).valid.poke(true.B)
@@ -277,6 +279,7 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
 
       dut.io.commitOut(0).valid.expect(true.B)
       dut.io.commitOut(0).bits.robIdx.value.expect(9.U)
+      dut.io.commitOut(0).bits.pdest.expect(21.U)
       dut.io.commitOut(0).bits.data.expect(0x1111.U)
       dut.io.commitOut(1).valid.expect(false.B)
 

@@ -1691,21 +1691,29 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
         dt_exuDebug(wbIdx) := wb.bits.debug
       }
     }
-    val dtIntWriteDataShadow = RegInit(VecInit.fill(RobSize)(0.U(XLEN.W)))
-    RobIntDiffOps.updateWriteDataShadow(
-      shadow = dtIntWriteDataShadow,
-      writebackValid = io.intCommitWriteback.map(_.valid),
-      writebackRobIdx = io.intCommitWriteback.map(_.bits.robIdx),
-      writebackData = io.intCommitWriteback.map(_.bits.data)
-    )
+    val dtIntWriteShadowSlots = backendParams.numPregWb(xiangshan.backend.datapath.DataConfig.IntData())
+    val dtIntWriteValidShadow = RegInit(VecInit.fill(RobSize, dtIntWriteShadowSlots)(false.B))
+    val dtIntWritePdestShadow = RegInit(VecInit.fill(RobSize, dtIntWriteShadowSlots)(0.U(PhyRegIdxWidth.W)))
+    val dtIntWriteDataShadow = RegInit(VecInit.fill(RobSize, dtIntWriteShadowSlots)(0.U(XLEN.W)))
     val dtArchIntShadow = RegInit(VecInit.fill(IntLogicRegs)(0.U(XLEN.W)))
     val dtArchIntShadowNext = Wire(Vec(IntLogicRegs, UInt(XLEN.W)))
+    val dtExpandedDiffCommit = rab.io.diffCommits.get
+    val dtExpandedCommitValid = Wire(Vec(CommitWidth * MaxUopSize, Bool()))
+    val dtExpandedCommitRfWen = Wire(Vec(CommitWidth * MaxUopSize, Bool()))
+    val dtExpandedCommitIsMove = Wire(Vec(CommitWidth * MaxUopSize, Bool()))
+    val dtExpandedCommitLdest = Wire(Vec(CommitWidth * MaxUopSize, UInt(LogicRegsWidth.W)))
+    val dtExpandedCommitMoveSrc = Wire(Vec(CommitWidth * MaxUopSize, UInt(LogicRegsWidth.W)))
+    val dtExpandedCommitPdest = Wire(Vec(CommitWidth * MaxUopSize, UInt(PhyRegIdxWidth.W)))
+    val dtExpandedCommitRobIdx = Wire(Vec(CommitWidth * MaxUopSize, new RobPtr))
+    val dtExpandedCommitWdata = Wire(Vec(CommitWidth * MaxUopSize, UInt(XLEN.W)))
+    val dtExpandedCommitIntData = Wire(Vec(CommitWidth * MaxUopSize, UInt(XLEN.W)))
     val dtCommitIntData = Wire(Vec(CommitWidth, UInt(XLEN.W)))
     val dtCommitValid = Wire(Vec(CommitWidth, Bool()))
     val dtCommitRfWen = Wire(Vec(CommitWidth, Bool()))
     val dtCommitIsMove = Wire(Vec(CommitWidth, Bool()))
     val dtCommitLdest = Wire(Vec(CommitWidth, UInt(LogicRegsWidth.W)))
     val dtCommitMoveSrc = Wire(Vec(CommitWidth, UInt(LogicRegsWidth.W)))
+    val dtCommitPdest = Wire(Vec(CommitWidth, UInt(PhyRegIdxWidth.W)))
     val dtCommitWdata = Wire(Vec(CommitWidth, UInt(XLEN.W)))
 
     for (i <- 0 until CommitWidth) {
@@ -1715,18 +1723,65 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       dtCommitIsMove(i) := dt_eliminatedMove(ptr)
       dtCommitLdest(i) := io.commits.info(i).debug_ldest.get
       dtCommitMoveSrc(i) := dt_moveSrcLReg(ptr)
+      dtCommitPdest(i) := io.commits.info(i).debug_pdest.get
+      val storedWdata = RobIntDiffOps.selectStoredWriteData(
+        storedValid = dtIntWriteValidShadow(ptr),
+        storedPdest = dtIntWritePdestShadow(ptr),
+        storedData = dtIntWriteDataShadow(ptr),
+        commitPdest = dtCommitPdest(i)
+      )
       dtCommitWdata(i) := RobIntDiffOps.selectCommitWriteData(
-        stored = dtIntWriteDataShadow(ptr),
+        stored = storedWdata,
         commitRobIdx = deqPtrVec(i),
+        commitPdest = dtCommitPdest(i),
         writebackValid = io.intCommitWriteback.map(_.valid),
         writebackRobIdx = io.intCommitWriteback.map(_.bits.robIdx),
+        writebackPdest = io.intCommitWriteback.map(_.bits.pdest),
         writebackData = io.intCommitWriteback.map(_.bits.data)
       )
     }
 
+    for (i <- 0 until CommitWidth * MaxUopSize) {
+      val info = dtExpandedDiffCommit.info(i)
+      dtExpandedCommitValid(i) := dtExpandedDiffCommit.isCommit && dtExpandedDiffCommit.commitValid(i)
+      dtExpandedCommitRfWen(i) := info.rfWen
+      dtExpandedCommitIsMove(i) := info.isMove
+      dtExpandedCommitLdest(i) := info.ldest
+      dtExpandedCommitMoveSrc(i) := info.moveSrcLReg
+      dtExpandedCommitPdest(i) := info.pdest
+      dtExpandedCommitRobIdx(i) := dtExpandedDiffCommit.robIdx(i)
+    }
+    dtExpandedCommitWdata := RobIntDiffOps.selectExpandedCommitWriteData(
+      shadowValid = dtIntWriteValidShadow,
+      shadowPdest = dtIntWritePdestShadow,
+      shadowData = dtIntWriteDataShadow,
+      commitRobIdx = dtExpandedCommitRobIdx,
+      commitPdest = dtExpandedCommitPdest,
+      writebackValid = io.intCommitWriteback.map(_.valid),
+      writebackRobIdx = io.intCommitWriteback.map(_.bits.robIdx),
+      writebackPdest = io.intCommitWriteback.map(_.bits.pdest),
+      writebackData = io.intCommitWriteback.map(_.bits.data)
+    )
+
+    RobIntDiffOps.updateWriteDataShadow(
+      shadowValid = dtIntWriteValidShadow,
+      shadowPdest = dtIntWritePdestShadow,
+      shadowData = dtIntWriteDataShadow,
+      writebackValid = io.intCommitWriteback.map(_.valid),
+      writebackRobIdx = io.intCommitWriteback.map(_.bits.robIdx),
+      writebackPdest = io.intCommitWriteback.map(_.bits.pdest),
+      writebackData = io.intCommitWriteback.map(_.bits.data)
+    )
+    RobIntDiffOps.clearWriteDataShadow(
+      shadowValid = dtIntWriteValidShadow,
+      clearValid = dtCommitValid,
+      clearRobIdx = deqPtrVec
+    )
+
+    val dtRobLaneShadowNext = Wire(Vec(IntLogicRegs, UInt(XLEN.W)))
     RobIntDiffOps.updateShadow(
       current = dtArchIntShadow,
-      next = dtArchIntShadowNext,
+      next = dtRobLaneShadowNext,
       commitData = dtCommitIntData,
       valid = dtCommitValid,
       rfWen = dtCommitRfWen,
@@ -1734,6 +1789,18 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       ldest = dtCommitLdest,
       moveSrc = dtCommitMoveSrc,
       writeData = dtCommitWdata
+    )
+
+    RobIntDiffOps.updateShadow(
+      current = dtArchIntShadow,
+      next = dtArchIntShadowNext,
+      commitData = dtExpandedCommitIntData,
+      valid = dtExpandedCommitValid,
+      rfWen = dtExpandedCommitRfWen,
+      isMove = dtExpandedCommitIsMove,
+      ldest = dtExpandedCommitLdest,
+      moveSrc = dtExpandedCommitMoveSrc,
+      writeData = dtExpandedCommitWdata
     )
     dtArchIntShadow := dtArchIntShadowNext
 

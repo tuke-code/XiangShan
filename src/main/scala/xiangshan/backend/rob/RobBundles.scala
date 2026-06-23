@@ -234,37 +234,166 @@ object RobBundles extends HasCircularQueuePtrHelper {
 }
 
 object RobIntDiffOps {
+  def selectStoredWriteData(
+    storedValid: Seq[Bool],
+    storedPdest: Seq[UInt],
+    storedData: Seq[UInt],
+    commitPdest: UInt
+  ): UInt = {
+    require(storedValid.length == storedPdest.length, "ROB direct integer diff stored valid/pdest slot counts must match")
+    require(storedValid.length == storedData.length, "ROB direct integer diff stored valid/data slot counts must match")
+
+    val selected = WireDefault(0.U(storedData.head.getWidth.W))
+    for (slot <- storedValid.indices.reverse) {
+      when(storedValid(slot) && storedPdest(slot) === commitPdest) {
+        selected := storedData(slot)
+      }
+    }
+    selected
+  }
+
   def selectCommitWriteData(
     stored: UInt,
     commitRobIdx: RobPtr,
+    commitPdest: UInt,
     writebackValid: Seq[Bool],
     writebackRobIdx: Seq[RobPtr],
+    writebackPdest: Seq[UInt],
     writebackData: Seq[UInt]
   ): UInt = {
     require(writebackValid.length == writebackRobIdx.length, "ROB direct integer diff writeback valid/robIdx counts must match")
+    require(writebackValid.length == writebackPdest.length, "ROB direct integer diff writeback valid/pdest counts must match")
     require(writebackValid.length == writebackData.length, "ROB direct integer diff writeback valid/data counts must match")
 
     val selected = WireDefault(stored)
     for (port <- writebackValid.indices.reverse) {
-      when(writebackValid(port) && writebackRobIdx(port).asUInt === commitRobIdx.asUInt) {
+      when(
+        writebackValid(port) &&
+          writebackRobIdx(port).asUInt === commitRobIdx.asUInt &&
+          writebackPdest(port) === commitPdest
+      ) {
         selected := writebackData(port)
       }
     }
     selected
   }
 
-  def updateWriteDataShadow(
-    shadow: Vec[UInt],
+  def selectExpandedCommitWriteData(
+    shadowValid: Vec[Vec[Bool]],
+    shadowPdest: Vec[Vec[UInt]],
+    shadowData: Vec[Vec[UInt]],
+    commitRobIdx: Seq[RobPtr],
+    commitPdest: Seq[UInt],
     writebackValid: Seq[Bool],
     writebackRobIdx: Seq[RobPtr],
+    writebackPdest: Seq[UInt],
+    writebackData: Seq[UInt]
+  ): Vec[UInt] = {
+    require(commitRobIdx.length == commitPdest.length, "ROB direct integer diff expanded robIdx/pdest lane counts must match")
+    require(writebackData.nonEmpty, "ROB direct integer diff expanded selector requires at least one writeback data port")
+    val selected = Wire(Vec(commitPdest.length, UInt(writebackData.head.getWidth.W)))
+    for (lane <- commitPdest.indices) {
+      val ptr = commitRobIdx(lane).value
+      val stored = selectStoredWriteData(
+        storedValid = shadowValid(ptr),
+        storedPdest = shadowPdest(ptr),
+        storedData = shadowData(ptr),
+        commitPdest = commitPdest(lane)
+      )
+      selected(lane) := selectCommitWriteData(
+        stored = stored,
+        commitRobIdx = commitRobIdx(lane),
+        commitPdest = commitPdest(lane),
+        writebackValid = writebackValid,
+        writebackRobIdx = writebackRobIdx,
+        writebackPdest = writebackPdest,
+        writebackData = writebackData
+      )
+    }
+    selected
+  }
+
+  def updateWriteDataShadow(
+    shadowValid: Vec[Vec[Bool]],
+    shadowPdest: Vec[Vec[UInt]],
+    shadowData: Vec[Vec[UInt]],
+    writebackValid: Seq[Bool],
+    writebackRobIdx: Seq[RobPtr],
+    writebackPdest: Seq[UInt],
     writebackData: Seq[UInt]
   ): Unit = {
     require(writebackValid.length == writebackRobIdx.length, "ROB direct integer diff writeback valid/robIdx counts must match")
+    require(writebackValid.length == writebackPdest.length, "ROB direct integer diff writeback valid/pdest counts must match")
     require(writebackValid.length == writebackData.length, "ROB direct integer diff writeback valid/data counts must match")
+    require(shadowValid.length == shadowPdest.length, "ROB direct integer diff shadow valid/pdest entry counts must match")
+    require(shadowValid.length == shadowData.length, "ROB direct integer diff shadow valid/data entry counts must match")
+    require(shadowValid.nonEmpty, "ROB direct integer diff write-data shadow must have entries")
+    require(shadowValid.head.nonEmpty, "ROB direct integer diff write-data shadow must have slots")
+    require(shadowPdest.forall(_.length == shadowValid.head.length), "ROB direct integer diff pdest slots must match valid slots")
+    require(shadowData.forall(_.length == shadowValid.head.length), "ROB direct integer diff data slots must match valid slots")
 
-    for (port <- writebackValid.indices) {
-      when(writebackValid(port)) {
-        shadow(writebackRobIdx(port).value) := writebackData(port)
+    var nextValid = Wire(chiselTypeOf(shadowValid))
+    var nextPdest = Wire(chiselTypeOf(shadowPdest))
+    var nextData = Wire(chiselTypeOf(shadowData))
+    nextValid := shadowValid
+    nextPdest := shadowPdest
+    nextData := shadowData
+
+    val entryIdxWidth = log2Ceil(shadowValid.length max 2)
+    val slotCount = shadowValid.head.length
+    for (port <- writebackValid.indices.reverse) {
+      val afterValid = Wire(chiselTypeOf(shadowValid))
+      val afterPdest = Wire(chiselTypeOf(shadowPdest))
+      val afterData = Wire(chiselTypeOf(shadowData))
+      afterValid := nextValid
+      afterPdest := nextPdest
+      afterData := nextData
+
+      val entryIdx = writebackRobIdx(port).value(entryIdxWidth - 1, 0)
+      val entryIdxInRange = writebackRobIdx(port).value < shadowValid.length.U
+      val matchOH = VecInit((0 until slotCount).map { slot =>
+        nextValid(entryIdx)(slot) && nextPdest(entryIdx)(slot) === writebackPdest(port)
+      })
+      val freeOH = VecInit((0 until slotCount).map(slot => !nextValid(entryIdx)(slot)))
+      val updateOH = Mux(matchOH.asUInt.orR, matchOH.asUInt, PriorityEncoderOH(freeOH.asUInt))
+      val hasSlot = matchOH.asUInt.orR || freeOH.asUInt.orR
+
+      assert(!writebackValid(port) || entryIdxInRange, "ROB direct integer diff write-data shadow robIdx out of range")
+      assert(!writebackValid(port) || hasSlot, "ROB direct integer diff write-data shadow has no free slot")
+
+      when(writebackValid(port) && entryIdxInRange && hasSlot) {
+        for (slot <- 0 until slotCount) {
+          when(updateOH(slot)) {
+            afterValid(entryIdx)(slot) := true.B
+            afterPdest(entryIdx)(slot) := writebackPdest(port)
+            afterData(entryIdx)(slot) := writebackData(port)
+          }
+        }
+      }
+
+      nextValid = afterValid
+      nextPdest = afterPdest
+      nextData = afterData
+    }
+
+    shadowValid := nextValid
+    shadowPdest := nextPdest
+    shadowData := nextData
+  }
+
+  def clearWriteDataShadow(
+    shadowValid: Vec[Vec[Bool]],
+    clearValid: Seq[Bool],
+    clearRobIdx: Seq[RobPtr]
+  ): Unit = {
+    require(clearValid.length == clearRobIdx.length, "ROB direct integer diff shadow clear valid/robIdx counts must match")
+    val entryIdxWidth = log2Ceil(shadowValid.length max 2)
+    for (lane <- clearValid.indices) {
+      val entryIdx = clearRobIdx(lane).value(entryIdxWidth - 1, 0)
+      val entryIdxInRange = clearRobIdx(lane).value < shadowValid.length.U
+      assert(!clearValid(lane) || entryIdxInRange, "ROB direct integer diff write-data shadow clear robIdx out of range")
+      when(clearValid(lane) && entryIdxInRange) {
+        shadowValid(entryIdx) := 0.U.asTypeOf(shadowValid(entryIdx))
       }
     }
   }

@@ -210,6 +210,7 @@ class RenameBuffer(size: Int)(implicit p: Parameters) extends XSModule with HasC
       val info = renameBuffer(allocatePtr).info
       info.ldest := req.bits.ldest
       info.pdest := req.bits.pdest
+      info.moveSrcLReg := req.bits.moveSrcLReg
       info.rfWen := req.bits.rfWen
       info.fpWen := req.bits.fpWen
       info.vecWen := req.bits.vecWen
@@ -304,6 +305,12 @@ class RenameBuffer(size: Int)(implicit p: Parameters) extends XSModule with HasC
   for(i <- 0 until RabCommitWidth * MaxUopSize) {
     io.diffCommits.foreach(_.commitValid(i) := i.U < newCommitSize)
     io.diffCommits.foreach(_.info(i) := renameBufferEntries((diffPtr + i.U).value).info)
+    io.diffCommits.foreach { diff =>
+      val robIdx = Wire(new RobPtr)
+      robIdx := 0.U.asTypeOf(robIdx)
+      renameBufferEntries((diffPtr + i.U).value).robIdx.foreach(robIdx := _)
+      diff.robIdx(i) := robIdx
+    }
   }
 
   XSError(isBefore(enqPtr, deqPtr) && !isFull(enqPtr, deqPtr), "\ndeqPtr is older than enqPtr!\n")
