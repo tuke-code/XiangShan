@@ -914,6 +914,15 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     gateIdx should be >= 0
   }
 
+  it should "clear direct integer diff writeback shadow on walk and ROB index reuse" in {
+    val robSource = sourceText("src/main/scala/xiangshan/backend/rob/Rob.scala")
+
+    robSource should include("dtWriteShadowWalkClearValid")
+    robSource should include("dtWriteShadowEnqClearValid")
+    robSource should include("dtCommitValid ++ dtWriteShadowWalkClearValid ++ dtWriteShadowEnqClearValid")
+    robSource should include("deqPtrVec ++ walkPtrVec ++ allocatePtrVec")
+  }
+
   it should "reject tracked ER metadata on multi-uop ROB entries" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
 

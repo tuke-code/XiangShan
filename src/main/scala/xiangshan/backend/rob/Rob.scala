@@ -1772,10 +1772,12 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       writebackPdest = io.intCommitWriteback.map(_.bits.pdest),
       writebackData = io.intCommitWriteback.map(_.bits.data)
     )
+    val dtWriteShadowWalkClearValid = (0 until CommitWidth).map(i => io.commits.isWalk && io.commits.walkValid(i))
+    val dtWriteShadowEnqClearValid = canEnqueue.map(_ && !io.redirect.valid)
     RobIntDiffOps.clearWriteDataShadow(
       shadowValid = dtIntWriteValidShadow,
-      clearValid = dtCommitValid,
-      clearRobIdx = deqPtrVec
+      clearValid = dtCommitValid ++ dtWriteShadowWalkClearValid ++ dtWriteShadowEnqClearValid,
+      clearRobIdx = deqPtrVec ++ walkPtrVec ++ allocatePtrVec
     )
 
     val dtRobLaneShadowNext = Wire(Vec(IntLogicRegs, UInt(XLEN.W)))
