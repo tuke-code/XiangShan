@@ -358,6 +358,9 @@ abstract class NewStoreQueueBase(implicit p: Parameters) extends LSQModule {
       val s0DifferentFlag    = io.ctrlInfo.deqPtr.flag =/= s0Req.bits.sqIdx.flag
       val s0ForwardMask      = UIntToMask(s0Req.bits.sqIdx.value, StoreQueueSize)
       // generate load byte start and end
+      val s0LoadVaddr        = s0Req.bits.vaddr(VAddrBits - 1, VWordOffset)
+      val s0LoadPrev16BVaddr = s0LoadVaddr - 1.U
+      val s0LoadHasPrev16B   = s0LoadVaddr =/= 0.U
       val s0LoadStart        = s0Req.bits.vaddr(VWordOffset - 1, 0)
       val s0ByteOffset       = MemorySize.ByteOffset(s0Req.bits.size)
       val s0LoadEnd          = s0LoadStart + s0ByteOffset
@@ -376,11 +379,13 @@ abstract class NewStoreQueueBase(implicit p: Parameters) extends LSQModule {
       val s0AgeMaskLow     = s0DeqMask & s0ForwardMask & VecInit(Seq.fill(StoreQueueSize)(s0DifferentFlag)).asUInt
       val s0AgeMaskHigh    = (~s0DeqMask).asUInt & (VecInit(Seq.fill(StoreQueueSize)(s0DifferentFlag)).asUInt | s0ForwardMask)
 
-      val s1ForwardMask  = RegEnable(s0ForwardMask, s0Valid)
-      val s1LoadVaddr    = RegEnable(s0Req.bits.vaddr(VAddrBits - 1, VWordOffset), s0Valid)
-      val s1deqMask      = RegEnable(s0DeqMask, s0Valid)
-      val s1LoadStart    = RegEnable(s0LoadStart, s0Valid)
-      val s1LoadEnd      = RegEnable(s0LoadEnd, s0Valid)
+      val s1ForwardMask       = RegEnable(s0ForwardMask, s0Valid)
+      val s1LoadVaddr         = RegEnable(s0LoadVaddr, s0Valid)
+      val s1LoadPrev16BVaddr = RegEnable(s0LoadPrev16BVaddr, s0Valid)
+      val s1LoadHasPrev16B   = RegEnable(s0LoadHasPrev16B, s0Valid)
+      val s1deqMask           = RegEnable(s0DeqMask, s0Valid)
+      val s1LoadStart         = RegEnable(s0LoadStart, s0Valid)
+      val s1LoadEnd           = RegEnable(s0LoadEnd, s0Valid)
       val s1StoreSetHitVec = RegEnable(s0StoreSetHitVec, s0Valid)
       val s1LoadWaitStrict = RegEnable(s0LoadWaitStrict, s0Valid)
       val s1LoadSqIdx      = RegEnable(s0LoadSqIdx, s0Valid)
@@ -420,7 +425,9 @@ abstract class NewStoreQueueBase(implicit p: Parameters) extends LSQModule {
       // prevent X-state
       val s1Same16BMatchVec = WireInit(VecInit(io.dataEntriesIn.map(_.vaddr(VAddrBits - 1, VWordOffset) === s1LoadVaddr)))
       val s1Next16BMatchVec = WireInit(VecInit(io.dataEntriesIn.zip(io.ctrlEntriesIn).map { case (dataEntry, ctrlEntry) =>
-        ctrlEntry.cross16Byte && (dataEntry.vaddr(VAddrBits - 1, VWordOffset) + 1.U) === s1LoadVaddr
+        ctrlEntry.cross16Byte &&
+        s1LoadHasPrev16B &&
+        (dataEntry.vaddr(VAddrBits - 1, VWordOffset) === s1LoadPrev16BVaddr)
       }))
       val s1SameLineMatchVec = WireInit(VecInit(io.dataEntriesIn.map(dataEntry =>
         dataEntry.vaddr(VAddrBits - 1, DCacheLineOffset) ===
