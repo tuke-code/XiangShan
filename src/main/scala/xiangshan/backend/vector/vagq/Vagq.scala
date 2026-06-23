@@ -6,6 +6,10 @@ import org.chipsalliance.cde.config.Parameters
 import utility._
 import xiangshan._
 import xiangshan.backend.Bundles._
+import xiangshan.backend.fu.NewCSR.CSRConfig
+import xiangshan.backend.rob.RobPtr
+import xiangshan.frontend.ftq.FtqPtr
+import xiangshan.mem.{LqPtr, SqPtr}
 
 import VAGQConstants._
 
@@ -45,4 +49,133 @@ abstract class VAGQBundle(implicit p: Parameters) extends XSBundle with HasVAGQP
 
 abstract class VAGQModule(implicit p: Parameters) extends XSModule with HasVAGQParameters
 
+class VAGQMeta(implicit p: Parameters) extends VAGQBundle {
+  val pc = UInt(VAddrBits.W)
+  val isRVC = Bool()
+  val ftqPtr = new FtqPtr
+  val ftqOffset = UInt(FetchBlockInstOffsetWidth.W)
+  val lqIdx = new LqPtr
+  val sqIdx = new SqPtr
+  val trigger = TriggerAction()
+  val perfDebugInfo = new PerfDebugInfo
+  val debug_seqNum = InstSeqNum()
+}
 
+class VAGQAddrSideUop(implicit p: Parameters) extends VAGQBundle {
+  val meta = new VAGQMeta
+  val entryIdx = UInt(vagqEntryIdxWidth.W)
+  val uopType = UInt(3.W)
+  val robIdx = new RobPtr
+  val pdest = UInt(VfPhyRegIdxWidth.W)
+  val baseAddr = UInt(XLEN.W)
+  val op2Data = UInt(VLEN.W)
+  val vl = UInt(CSRConfig.VlWidth.W)
+  val vstart = UInt((CSRConfig.VlWidth-1).W)
+  val useVstart = Bool()
+  val vm = Bool()
+  val v0Mask = UInt(vagqFlowBytes.W)
+  val deew = UInt(EewWidth.W)
+  val ieew = UInt(EewWidth.W)
+  val vma = Bool()
+  val vta = Bool()
+  val uopIdx = UInt(UopIdxWidth.W)
+  val nf = UInt(NfWidth.W)
+}
+
+class VAGQDataSideUop(implicit p: Parameters) extends VAGQBundle {
+  val entryIdx = UInt(vagqEntryIdxWidth.W)
+  val robIdx = new RobPtr
+  val psrc2 = UInt(VfPhyRegIdxWidth.W)
+}
+
+class VAGQLsuReq(implicit p: Parameters) extends VAGQBundle {
+  val entryIdx = UInt(vagqEntryIdxWidth.W)
+  val robIdx = new RobPtr
+  val isLoad = Bool()
+  val isStore = Bool()
+  val byteOffset = UInt(vagqFlowByteWidth.W)
+  val vaddr = UInt(XLEN.W)
+  val mask = UInt(vagqFlowBytes.W)
+  val data = UInt(VLEN.W)
+  val pdest = UInt(VfPhyRegIdxWidth.W)
+  val alignedType = UInt(AlignedTypeWidth.W)  // deew
+  val nf = UInt(NfWidth.W)
+}
+
+class VAGQLsqEmptyReq(implicit p: Parameters) extends VAGQBundle {
+  val entryIdx = UInt(vagqEntryIdxWidth.W)
+  val robIdx = new RobPtr
+  val isLoad = Bool()
+  val isStore = Bool()
+  val byteOffset = UInt(vagqFlowByteWidth.W)
+  val mask = UInt(vagqFlowBytes.W)
+  val alignedType = UInt(AlignedTypeWidth.W)  // deew
+}
+
+class VAGQResp(implicit p: Parameters) extends VAGQBundle {
+  val entryIdx = UInt(vagqEntryIdxWidth.W)
+  val robIdx = new RobPtr
+  val isLoad = Bool()
+  val isStore = Bool()
+  val byteOffset = UInt(vagqFlowByteWidth.W)
+  val mask = UInt(vagqFlowBytes.W)
+  val data = UInt(VLEN.W)
+  val isNACK = Bool()
+  val exception = Bool()
+  val exceptionNumber = UInt(ExceptionNumberWidth.W)
+}
+
+class VAGQVRFReadReq(implicit p: Parameters) extends VAGQBundle {
+  val entryIdx = UInt(vagqEntryIdxWidth.W)
+  val robIdx = new RobPtr
+  val psrc = UInt(VfPhyRegIdxWidth.W)
+}
+
+class VAGQVRFReadResp(implicit p: Parameters) extends VAGQBundle {
+  val entryIdx = UInt(vagqEntryIdxWidth.W)
+  val robIdx = new RobPtr
+  val data = UInt(VLEN.W)
+}
+
+class VAGQVRFWriteReq(implicit p: Parameters) extends VAGQBundle {
+  val entryIdx = UInt(vagqEntryIdxWidth.W)
+  val robIdx = new RobPtr
+  val pdest = UInt(VfPhyRegIdxWidth.W)
+  val data = UInt(VLEN.W)
+  val mask = UInt(vagqFlowBytes.W)
+}
+
+class VAGQWritebackReq(implicit p: Parameters) extends VAGQBundle {
+  val meta = new VAGQMeta
+  val entryIdx = UInt(vagqEntryIdxWidth.W)
+  val robIdx = new RobPtr
+  val exception = Bool()
+  val exceptionNumber = UInt(ExceptionNumberWidth.W)
+  val faultElemIdx = UInt(vagqFlowByteWidth.W)
+  val faultVstart = UInt(VAGQConstants.FaultVstartWidth.W)
+}
+
+class VAGQIO(implicit p: Parameters) extends VAGQBundle {
+  // from iq
+  val addrUop = Flipped(Decoupled(new VAGQAddrSideUop))
+  val dataUop = Flipped(Decoupled(new VAGQDataSideUop))
+  // active req to ldu
+  val lsuReq = Decoupled(new VAGQLsuReq)
+  val lsuResp = Flipped(Vec(VAGQConstants.LsuRespWidth, Valid(new VAGQResp)))
+  // unactive req to lsq
+  val lsqEmptyReq = Decoupled(new VAGQLsqEmptyReq)
+  val lsqEmptyResp = Flipped(Valid(new VAGQResp))
+  // load read oldvd, store read storeData
+  val vrfReadReq = Decoupled(new VAGQVRFReadReq)
+  val vrfReadResp = Flipped(Valid(new VAGQVRFReadResp))
+  // write vrf with mask
+  val vrfWriteReq = Decoupled(new VAGQVRFWriteReq)
+  // to rob
+  val robWriteback = Decoupled(new VAGQWritebackReq)
+  val redirect = Flipped(Valid(new Redirect))
+}
+
+class VAGQ(implicit p: Parameters) extends VAGQModule {
+  val io = IO(new VAGQIO)
+
+}
