@@ -47,7 +47,6 @@ import xiangshan.backend.rename.SnapshotGenerator
 import yunsuan.VfaluType
 import xiangshan.backend.rob.RobBundles._
 import xiangshan.backend.trace._
-import chisel3.experimental.BundleLiterals._
 import chisel3.util.experimental.decode.TruthTable
 
 class Rob(params: BackendParams)(implicit p: Parameters) extends LazyModule with HasXSParameter {
@@ -1774,10 +1773,12 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     )
     val dtWriteShadowWalkClearValid = (0 until CommitWidth).map(i => io.commits.isWalk && io.commits.walkValid(i))
     val dtWriteShadowEnqClearValid = canEnqueue.map(_ && !io.redirect.valid)
+    val dtWriteShadowClearValid = dtCommitValid ++ dtWriteShadowWalkClearValid ++ dtWriteShadowEnqClearValid
+    val dtWriteShadowClearRobIdx = deqPtrVec ++ walkPtrVec ++ allocatePtrVec
     RobIntDiffOps.clearWriteDataShadow(
       shadowValid = dtIntWriteValidShadow,
-      clearValid = dtCommitValid ++ dtWriteShadowWalkClearValid ++ dtWriteShadowEnqClearValid,
-      clearRobIdx = deqPtrVec ++ walkPtrVec ++ allocatePtrVec
+      clearValid = dtWriteShadowClearValid,
+      clearRobIdx = dtWriteShadowClearRobIdx
     )
 
     val dtRobLaneShadowNext = Wire(Vec(IntLogicRegs, UInt(XLEN.W)))
