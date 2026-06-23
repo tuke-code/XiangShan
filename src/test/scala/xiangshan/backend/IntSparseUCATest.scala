@@ -490,6 +490,35 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
     }
   }
 
+  it should "ignore a released pdest match when the newer owner is untracked" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 1, observeOnly = false))
+    noException should be thrownBy {
+      simulate(new IntSparseUCA()(config)) { dut =>
+        resetDut(dut)
+
+        allocate(dut, pdest = 5, robIdx = 1)
+        dut.clock.step()
+        clearInputs(dut)
+        redef(dut, oldPdest = 5, robIdx = 7)
+        producerReady(dut, pdest = 5, robIdx = 1)
+        guardDec(dut)
+        dut.clock.step()
+        clearInputs(dut)
+        dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
+
+        allocate(dut, pdest = 5, robIdx = 2)
+        dut.io.rename.destTrack(0).valid.expect(false.B)
+        dut.clock.step()
+        clearInputs(dut)
+        dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
+
+        redef(dut, oldPdest = 5, robIdx = 11)
+        dut.io.rename.redefTrack(0).valid.expect(false.B)
+        dut.clock.step()
+      }
+    }
+  }
+
   it should "ignore pdest-only commit free and fail fast on wrong released identity" in {
     val config = configWith(IntEarlyReleaseParams(trackEntries = 2, observeOnly = false))
     simulate(new IntSparseUCA()(config)) { dut =>

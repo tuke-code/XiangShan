@@ -9,7 +9,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import java.nio.file.{Files, Path, Paths}
 import scala.io.Source
-import top.DefaultConfig
+import top.{DefaultConfig, IntERFunctionalMinimalConfig}
 import utility.{LogUtilsOptions, LogUtilsOptionsKey, PerfCounterOptions, PerfCounterOptionsKey, XSPerfLevel}
 import xiangshan._
 import xiangshan.TopDownCounters._
@@ -1396,6 +1396,15 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
 
   it should "keep default feature config disabled" in {
     elaborateProbe(IntEarlyReleaseParams(), localSrc = 1, expectedTrackIdWidth = 4)
+  }
+
+  it should "define a correctness-first functional ER minimal config" in {
+    val params = (new IntERFunctionalMinimalConfig)(XSTileKey).head.intEarlyRelease
+
+    params.enable shouldBe true
+    params.observeOnly shouldBe false
+    params.conservativeRedirectKill shouldBe true
+    params.earlyFreeWidth shouldBe 1
   }
 
   it should "gate old-destination integer RAT read ports with feature enable" in {

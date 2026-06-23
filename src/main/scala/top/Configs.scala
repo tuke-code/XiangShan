@@ -581,6 +581,17 @@ private class WithIntEarlyReleaseObserveOnly extends Config((site, here, up) => 
   ))
 })
 
+private class WithIntEarlyReleaseFunctional extends Config((site, here, up) => {
+  case XSTileKey => up(XSTileKey).map(_.copy(
+    intEarlyRelease = IntEarlyReleaseParams(
+      enable = true,
+      observeOnly = false,
+      earlyFreeWidth = 1,
+      conservativeRedirectKill = true
+    )
+  ))
+})
+
 class IntERObserveOnlyConfig(n: Int = 1) extends Config(
   new WithIntEarlyReleaseObserveOnly
     ++ new DefaultConfig(n)
@@ -588,6 +599,16 @@ class IntERObserveOnlyConfig(n: Int = 1) extends Config(
 
 class IntERObserveOnlyMinimalConfig(n: Int = 1) extends Config(
   new WithIntEarlyReleaseObserveOnly
+    ++ new MinimalConfig(n)
+)
+
+class IntERFunctionalConfig(n: Int = 1) extends Config(
+  new WithIntEarlyReleaseFunctional
+    ++ new DefaultConfig(n)
+)
+
+class IntERFunctionalMinimalConfig(n: Int = 1) extends Config(
+  new WithIntEarlyReleaseFunctional
     ++ new MinimalConfig(n)
 )
 

@@ -175,10 +175,6 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
     io.rename.redefTrack(i).trackGen := Mux1H(redefMatchOH(i), redefMatchGen(i))
     io.rename.redefTrack(i).oldPdest := probe.bits.oldPdest
 
-    val releasedMatches = VecInit((0 until entryCount).map { e =>
-      probe.valid && isReleased(entries(e)) && entries(e).pdest === probe.bits.oldPdest
-    })
-    assert(!(releasedMatches.asUInt.orR && !redefFire(i)), "IntSparseUCA redef matched an already released entry without an active owner")
   }
 
   private val commitSuppressOH = Wire(Vec(RabCommitWidth, UInt(entryCount.W)))
