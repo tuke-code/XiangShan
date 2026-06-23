@@ -92,6 +92,14 @@ object RenameIntEROps {
     supportedConsumer(renameFire, singleUop, hasException, flushPipe, singleStep, blocked) &&
       needIntDest && !isMove && logicLdest =/= 0.U
 
+  def redefinitionProbeValid(
+    renameFire: Bool,
+    needIntDest: Bool,
+    logicLdest: UInt,
+    blocked: Bool
+  ): Bool =
+    sourceProbeAllowed(renameFire, blocked) && needIntDest && logicLdest =/= 0.U
+
   def sameGroupOldDest(
     base: Vec[UInt],
     ldest: Vec[UInt],
@@ -900,6 +908,12 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
         singleStep = io.singleStep,
         blocked = intERRenameBlocked
       )
+      val intERRedefProbeValid = RenameIntEROps.redefinitionProbeValid(
+        renameFire = renameFire,
+        needIntDest = needIntDest(i),
+        logicLdest = intLogicLdest(i),
+        blocked = intERRenameBlocked
+      )
 
       intUCA.io.rename.sourceFallback(i) := RenameIntEROps.sourceFallback(
         renameFire = renameFire,
@@ -915,7 +929,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
       intUCA.io.rename.alloc(i).valid := intEREligible
       intUCA.io.rename.alloc(i).bits.pdest := out.pdest
       intUCA.io.rename.alloc(i).bits.robIdx := out.robIdx
-      intUCA.io.rename.redef(i).valid := intEREligible
+      intUCA.io.rename.redef(i).valid := intERRedefProbeValid
       intUCA.io.rename.redef(i).bits.oldPdest := intOldDestForER(i)
       intUCA.io.rename.redef(i).bits.robIdx := out.robIdx
 

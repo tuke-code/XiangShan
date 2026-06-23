@@ -110,7 +110,7 @@ class IntERWbProducerReadyProbe(implicit p: Parameters) extends XSModule {
   WbArbiterIntEROps.emitProducerReady(io.out, io.portValid, wb)
 }
 
-class IntERBackendIntRfOwnerProbe(regionCount: Int, laneCount: Int)(implicit p: Parameters) extends XSModule {
+class IntERBackendIntRfMergeProbe(regionCount: Int, laneCount: Int)(implicit p: Parameters) extends XSModule {
   val io = IO(new Bundle {
     val ownerCommit = Input(Vec(laneCount, Valid(new IntCommitWriteback)))
     val otherCommit = Input(Vec(regionCount - 1, Vec(laneCount, Valid(new IntCommitWriteback))))
@@ -120,8 +120,8 @@ class IntERBackendIntRfOwnerProbe(regionCount: Int, laneCount: Int)(implicit p: 
     val producerOut = Output(Vec(laneCount, Valid(new IntERProducerReady)))
   })
 
-  require(regionCount > 1, "owner probe needs at least one non-owner region")
-  BackendIntEROps.connectIntRfOwnerCommitWriteback(io.commitOut, io.ownerCommit)
+  require(regionCount > 1, "integer RF merge probe needs at least one non-owner region")
+  BackendIntEROps.mergeIntCommitWritebackRegions(io.commitOut, Seq(io.ownerCommit) ++ io.otherCommit)
   BackendIntEROps.connectIntRfOwnerProducerReady(io.producerOut, io.ownerProducer)
 }
 
@@ -252,8 +252,8 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
     }
   }
 
-  it should "select integer RF owner writeback events instead of merging local region lanes" in {
-    simulate(new IntERBackendIntRfOwnerProbe(regionCount = 3, laneCount = 2)(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2)))) { dut =>
+  it should "merge integer RF commit writebacks from non-owner regions while keeping producer-ready owner-only" in {
+    simulate(new IntERBackendIntRfMergeProbe(regionCount = 3, laneCount = 2)(configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2)))) { dut =>
       dut.io.ownerCommit.poke(0.U.asTypeOf(dut.io.ownerCommit))
       dut.io.otherCommit.poke(0.U.asTypeOf(dut.io.otherCommit))
       dut.io.ownerProducer.poke(0.U.asTypeOf(dut.io.ownerProducer))
@@ -263,25 +263,28 @@ class IntEarlyReleaseDataPathTest extends AnyFlatSpec with Matchers with ChiselS
       setRobPtr(dut.io.ownerCommit(0).bits.robIdx, 9)
       dut.io.ownerCommit(0).bits.pdest.poke(21.U)
       dut.io.ownerCommit(0).bits.data.poke(0x1111.U)
-      dut.io.otherCommit(1)(0).valid.poke(true.B)
-      setRobPtr(dut.io.otherCommit(1)(0).bits.robIdx, 10)
-      dut.io.otherCommit(1)(0).bits.pdest.poke(22.U)
-      dut.io.otherCommit(1)(0).bits.data.poke(0x2222.U)
+      dut.io.otherCommit(1)(1).valid.poke(true.B)
+      setRobPtr(dut.io.otherCommit(1)(1).bits.robIdx, 10)
+      dut.io.otherCommit(1)(1).bits.pdest.poke(22.U)
+      dut.io.otherCommit(1)(1).bits.data.poke(0x2222.U)
 
       dut.io.ownerProducer(0).valid.poke(true.B)
       dut.io.ownerProducer(0).bits.valid.poke(true.B)
       dut.io.ownerProducer(0).bits.pdest.poke(31.U)
       setRobPtr(dut.io.ownerProducer(0).bits.robIdx, 11)
-      dut.io.otherProducer(1)(0).valid.poke(true.B)
-      dut.io.otherProducer(1)(0).bits.valid.poke(true.B)
-      dut.io.otherProducer(1)(0).bits.pdest.poke(32.U)
-      setRobPtr(dut.io.otherProducer(1)(0).bits.robIdx, 12)
+      dut.io.otherProducer(1)(1).valid.poke(true.B)
+      dut.io.otherProducer(1)(1).bits.valid.poke(true.B)
+      dut.io.otherProducer(1)(1).bits.pdest.poke(32.U)
+      setRobPtr(dut.io.otherProducer(1)(1).bits.robIdx, 12)
 
       dut.io.commitOut(0).valid.expect(true.B)
       dut.io.commitOut(0).bits.robIdx.value.expect(9.U)
       dut.io.commitOut(0).bits.pdest.expect(21.U)
       dut.io.commitOut(0).bits.data.expect(0x1111.U)
-      dut.io.commitOut(1).valid.expect(false.B)
+      dut.io.commitOut(1).valid.expect(true.B)
+      dut.io.commitOut(1).bits.robIdx.value.expect(10.U)
+      dut.io.commitOut(1).bits.pdest.expect(22.U)
+      dut.io.commitOut(1).bits.data.expect(0x2222.U)
 
       dut.io.producerOut(0).valid.expect(true.B)
       dut.io.producerOut(0).bits.valid.expect(true.B)

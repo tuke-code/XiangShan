@@ -641,9 +641,12 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
     val sourceProbeValid = Output(Bool())
     val sourceFallback = Output(Bool())
     val producerEligible = Output(Bool())
+    val redefProbeValid = Output(Bool())
     val srcValid = Output(Bool())
     val fallbackMark = Output(Bool())
     val destValid = Output(Bool())
+    val redefValid = Output(Bool())
+    val redefOldPdest = Output(UInt(PhyRegIdxWidth.W))
     val debugActiveCount = Output(UInt(log2Ceil(IntERTrackEntries + 1).W))
     val debugFallbackCount = Output(UInt(32.W))
     val debugRedirectKillCount = Output(UInt(32.W))
@@ -672,6 +675,12 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
     singleStep = io.singleStep,
     blocked = blocked
   )
+  val redefProbeValid = RenameIntEROps.redefinitionProbeValid(
+    renameFire = io.renameFire,
+    needIntDest = io.needIntDest,
+    logicLdest = io.ldest,
+    blocked = blocked
+  )
 
   uca.io.redirectKill := blocked
   uca.io.producerReady := 0.U.asTypeOf(uca.io.producerReady)
@@ -690,7 +699,7 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
   uca.io.rename.alloc(0).valid := producerEligible
   uca.io.rename.alloc(0).bits.pdest := io.pdest
   uca.io.rename.alloc(0).bits.robIdx := io.robIdx
-  uca.io.rename.redef(0).valid := producerEligible
+  uca.io.rename.redef(0).valid := redefProbeValid
   uca.io.rename.redef(0).bits.oldPdest := io.oldPdest
   uca.io.rename.redef(0).bits.robIdx := io.robIdx
   uca.io.rename.source(0)(0).valid := sourceProbeAllowed && io.sourceValid && io.sourcePsrc =/= 0.U
@@ -700,9 +709,12 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
   io.sourceProbeValid := uca.io.rename.source(0)(0).valid
   io.sourceFallback := sourceFallback
   io.producerEligible := producerEligible
+  io.redefProbeValid := redefProbeValid
   io.srcValid := uca.io.rename.srcMatch(0)(0).valid
   io.fallbackMark := uca.io.rename.fallbackMark(0)
   io.destValid := uca.io.rename.destTrack(0).valid
+  io.redefValid := uca.io.rename.redefTrack(0).valid
+  io.redefOldPdest := uca.io.rename.redefTrack(0).oldPdest
   io.debugActiveCount := uca.io.debug.activeCount
   io.debugFallbackCount := uca.io.debug.fallbackCount
   io.debugRedirectKillCount := uca.io.debug.redirectKillCount
@@ -1709,6 +1721,35 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
 
       dut.io.debugActiveCount.expect(1.U)
       dut.io.debugFallbackCount.expect(1.U)
+    }
+  }
+
+  it should "mark redef for ineligible integer writers without tracking a new destination" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new RenameERPolicyProbe()(config)) { dut =>
+      resetPolicyProbe(dut)
+
+      allocatePolicyProbe(dut, pdest = 7)
+      dut.io.producerEligible.expect(true.B)
+      dut.io.destValid.expect(true.B)
+      dut.clock.step()
+      clearPolicyProbe(dut)
+      dut.io.debugActiveCount.expect(1.U)
+
+      dut.io.renameFire.poke(true.B)
+      dut.io.singleUop.poke(false.B)
+      dut.io.needIntDest.poke(true.B)
+      dut.io.ldest.poke(5.U)
+      dut.io.oldPdest.poke(7.U)
+      setRobPtr(dut.io.robIdx, 2)
+      dut.io.producerEligible.expect(false.B)
+      dut.io.redefProbeValid.expect(true.B)
+      dut.io.destValid.expect(false.B)
+      dut.io.redefValid.expect(true.B)
+      dut.io.redefOldPdest.expect(7.U)
+      dut.clock.step()
+      clearPolicyProbe(dut)
     }
   }
 

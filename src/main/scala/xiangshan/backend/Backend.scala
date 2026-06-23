@@ -63,12 +63,34 @@ class BackendImp(wrapper: Backend)(implicit p: Parameters) extends LazyModuleImp
 }
 
 object BackendIntEROps {
-  def connectIntRfOwnerCommitWriteback(
+  def mergeIntCommitWritebackRegions(
     out: Vec[ValidIO[IntCommitWriteback]],
-    ownerWriteback: Vec[ValidIO[IntCommitWriteback]]
+    regionWritebacks: Seq[Vec[ValidIO[IntCommitWriteback]]]
   )(implicit p: Parameters): Unit = {
-    require(ownerWriteback.length == out.length, "Backend integer RF owner writeback lane widths must match")
-    out := ownerWriteback
+    require(regionWritebacks.nonEmpty, "Backend integer commit writeback merge needs at least one region input")
+    require(regionWritebacks.forall(_.length == out.length), "Backend integer commit writeback lane widths must match")
+
+    out := 0.U.asTypeOf(out)
+    for (lane <- out.indices) {
+      val validSeq = regionWritebacks.map(_(lane).valid)
+      val valids = VecInit(validSeq)
+      val selected = PriorityMux(
+        validSeq.zip(regionWritebacks.map(_(lane).bits)) :+
+          (true.B -> 0.U.asTypeOf(out(lane).bits))
+      )
+
+      out(lane).valid := valids.asUInt.orR
+      out(lane).bits := selected
+
+      when(PopCount(valids) > 1.U) {
+        assert(
+          VecInit(regionWritebacks.map(port =>
+            !port(lane).valid || port(lane).bits.asUInt === selected.asUInt
+          )).asUInt.andR,
+          "Int ER same-lane commit writeback merge observed mismatched data"
+        )
+      }
+    }
   }
 
   def connectIntRfOwnerProducerReady(
@@ -285,9 +307,13 @@ class BackendInlinedImp(override val wrapper: BackendInlined)(implicit p: Parame
   assert(ctrlBlock.io.fromWB.wbData.size == wbDataPathToCtrlBlock.size, "ctrlBlock.io.fromWB.wbData.size == wbDataPathToCtrlBlock.size")
   ctrlBlock.io.fromWB.wbData.zip(wbDataPathToCtrlBlock).map(x => x._1 := x._2)
   ctrlBlock.io.fromWB.delayedOldestExuRedirect := intRegion.io.wbDataPathToCtrlBlock.delayedOldestExuRedirect.get
-  BackendIntEROps.connectIntRfOwnerCommitWriteback(
+  BackendIntEROps.mergeIntCommitWritebackRegions(
     ctrlBlock.io.fromWB.intCommitWriteback,
-    intRegion.io.wbDataPathToCtrlBlock.intCommitWriteback
+    Seq(
+      intRegion.io.wbDataPathToCtrlBlock.intCommitWriteback,
+      fpRegion.io.wbDataPathToCtrlBlock.intCommitWriteback,
+      vecRegion.io.wbDataPathToCtrlBlock.intCommitWriteback
+    )
   )
   if (EnableIntEarlyRegRelease) {
     BackendIntEROps.connectIntRfOwnerProducerReady(
