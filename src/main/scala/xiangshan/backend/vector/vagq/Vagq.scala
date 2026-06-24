@@ -47,7 +47,7 @@ trait HasVAGQParameters extends HasXSParameter {
 
 abstract class VAGQBundle(implicit p: Parameters) extends XSBundle with HasVAGQParameters
 
-abstract class VAGQModule(implicit p: Parameters) extends XSModule with HasVAGQParameters
+abstract class VAGQModule(implicit p: Parameters) extends XSModule with HasVAGQParameters with HasVAGQHelper
 
 class VAGQMeta(implicit p: Parameters) extends VAGQBundle {
   val pc = UInt(VAddrBits.W)
@@ -178,4 +178,11 @@ class VAGQIO(implicit p: Parameters) extends VAGQBundle {
 class VAGQ(implicit p: Parameters) extends VAGQModule {
   val io = IO(new VAGQIO)
 
+  private val entryTable = Module(new VAGQEntryTable)
+  entryTable.io.addrUop <> io.addrUop
+  entryTable.io.dataUop <> io.dataUop
+  entryTable.io.maskInfo := 0.U
+  entryTable.io.redirect := io.redirect
+
+  val entries = entryTable.io.entries
 }
