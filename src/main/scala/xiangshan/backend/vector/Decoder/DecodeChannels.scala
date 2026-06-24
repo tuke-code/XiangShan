@@ -207,6 +207,7 @@ class DecodeChannels(
   vsetDecodeChannelsIn.zipWithIndex.foreach { case (modIn, i) =>
     modIn.rawInst := in.mops(i).bits.info.rawInst
     modIn.vsIsOff := in.mops(i).bits.info.fromCSR.illegalInst.vsIsOff
+    modIn.vtype   := in.mops(i).bits.info.vtype
   }
 
   val simDecodeChannelsIn: Seq[DecodeChannelInput] = simpleDecodeChannels.map(_.in)

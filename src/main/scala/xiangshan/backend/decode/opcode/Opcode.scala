@@ -1145,7 +1145,7 @@ object Opcode {
     val uvset_vtypei_vlx   = Value(vset, notIll, vtypeI, avlX)     + GpWen + VlWen          + Src1Gp
     val uvset_vtypei_vlmax = Value(vset, notIll, vtypeI, avlVlmax) + GpWen + VlWen
     val uvset_vtypei_vli   = Value(vset, notIll, vtypeI, avlImm)   + GpWen + VlWen
-    val uvset_vtypei_nop   = Value(vset, notIll, vtypeI, avlVl)
+    val uvset_vtypei_nop   = Value(vset, notIll, vtypeI, avlVl)            + VlWen                   + VlRen
     val uvset_ill          = Value(vset, isIll,  vtypeI, avlImm)   + GpWen + VlWen
     val readvl             = Value(rdvl, notIll, dc(1),  avlVl)    + GpWen                           + VlRen
 

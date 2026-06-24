@@ -11,6 +11,7 @@ import xiangshan.backend.decode.opcode.Opcode
 import xiangshan.backend.decode.opcode.Opcode.VSetOpcodes._
 import xiangshan.backend.decode.opcode.Opcode.{Opcode, toOpcodeUtil}
 import xiangshan.backend.fu.FuType
+import xiangshan.backend.fu.vector.Bundles.VType
 import xiangshan.backend.vector.Decoder.DecodePatterns.{RdZeroPattern, Rs1ZeroPattern}
 import xiangshan.backend.vector.Decoder.InstPattern._
 import xiangshan.backend.vector.Decoder.RVVDecodeUtil._
@@ -42,24 +43,8 @@ class VsetDecoder extends Module {
   val isVSETIVLI = rawInst(31, 30) === b"11"
   val isVSETVL = rawInst(31, 25) === b"1000000"
 
-  val vsetvliVill = instFields.ZIMM_VSETVLI.drop(8) =/= 0.U
-  val vsetivliVill = instFields.ZIMM_VSETIVLI.drop(8) =/= 0.U
-
   val rs1IsZero = instFields.RS1 === 0.U
   val rdIsZero = instFields.RD === 0.U
-
-  val sewLmulPatterns: Seq[DecodePatternComb2[SewPattern, LmulPattern]] = for {
-    sew <- SewPattern.all
-    lmul <- LmulPattern.all
-  } yield {
-    sew ## lmul
-  }
-
-  val sewLmulDecodeTable = new DecodeTable(sewLmulPatterns, Seq(SewLmulIllegalField))
-
-  val sewLmulDecodeBundle = sewLmulDecodeTable.decode(instFields.ZIMM_VSETVLI.take(6))
-
-  val sewLmulIllegal = sewLmulDecodeBundle(SewLmulIllegalField)
 
   val uop = Wire(new UopInfoRename)
 
@@ -70,7 +55,7 @@ class VsetDecoder extends Module {
       (!rs1IsZero) -> bitPatToUInt(uvset_vtypex_vlx.genUopInfoRenameBitPat),
     )),
     isVSETVLI -> Mux(
-      sewLmulIllegal || vsetvliVill,
+      in.vtype.illegal,
       bitPatToUInt(uvset_ill.genUopInfoRenameBitPat),
       Mux1H(Seq(
         (rdIsZero && rs1IsZero) -> bitPatToUInt(uvset_vtypei_nop.genUopInfoRenameBitPat),
@@ -79,7 +64,7 @@ class VsetDecoder extends Module {
       )),
     ),
     isVSETIVLI -> Mux(
-      sewLmulIllegal || vsetivliVill,
+      in.vtype.illegal,
       bitPatToUInt(uvset_ill.genUopInfoRenameBitPat),
       bitPatToUInt(uvset_vtypei_vli.genUopInfoRenameBitPat)
     ),
@@ -93,7 +78,7 @@ class VsetDecoder extends Module {
       (!rs1IsZero) -> uvset_vtypex_vlx.encode,
     )),
     isVSETVLI -> Mux(
-      sewLmulIllegal || vsetvliVill,
+      in.vtype.illegal,
       uvset_ill.encode,
       Mux1H(Seq(
         (rdIsZero && rs1IsZero) -> uvset_vtypei_nop.encode,
@@ -102,7 +87,7 @@ class VsetDecoder extends Module {
       )),
     ),
     isVSETIVLI -> Mux(
-      sewLmulIllegal || vsetivliVill,
+      in.vtype.illegal,
       uvset_ill.encode,
       uvset_vtypei_vli.encode,
     ),
@@ -414,6 +399,7 @@ object VsetDecoder {
   class In extends Bundle {
     val rawInst = UInt(32.W)
     val vsIsOff = Bool()
+    val vtype = new VType()
   }
 
   class Out extends Bundle {
