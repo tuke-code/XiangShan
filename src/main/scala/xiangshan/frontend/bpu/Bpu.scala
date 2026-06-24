@@ -459,8 +459,11 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   s3_redirectMeta.ras          := ras.io.redirectMeta
 
   private val s3_resolveMeta = Wire(new BpuResolveMeta)
-  s3_resolveMeta.mbtb     := RegEnable(mbtb.io.meta, s2_fire)
-  s3_resolveMeta.tage     := RegEnable(tage.io.meta, s2_fire)
+  s3_resolveMeta.mbtb := RegEnable(mbtb.io.meta, s2_fire)
+  s3_resolveMeta.tage := RegEnable(tage.io.meta, s2_fire)
+  s3_resolveMeta.tage.entries.zipWithIndex.foreach { case (e, i) =>
+    e.debug_useSc := s3_scUsed(i)
+  }
   s3_resolveMeta.sc       := sc.io.meta
   s3_resolveMeta.commonHR := commonHR.io.s3ResolveMeta
   s3_resolveMeta.ittage   := ittage.io.meta
@@ -791,7 +794,10 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
     io.fromFtq.train.valid,
     Seq(
       ("total", io.fromFtq.train.ready),
-      ("stall", !io.fromFtq.train.ready)
+      ("stall", !io.fromFtq.train.ready),
+      ("stall_tage", !io.fromFtq.train.ready && !tage.io.trainReady && sc.io.trainReady),
+      ("stall_sc", !io.fromFtq.train.ready && tage.io.trainReady && !sc.io.trainReady),
+      ("stall_tage_sc", !io.fromFtq.train.ready && !tage.io.trainReady && !sc.io.trainReady)
     )
   )
   XSPerfSeqAccumulate(

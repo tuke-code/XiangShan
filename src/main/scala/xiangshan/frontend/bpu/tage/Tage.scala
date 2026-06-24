@@ -23,6 +23,7 @@ import utility.ChiselDB
 import utility.DataHoldBypass
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
+import utility.XSPerfRolling
 import xiangshan.frontend.bpu.BasePredictor
 import xiangshan.frontend.bpu.BasePredictorIO
 import xiangshan.frontend.bpu.HalfAlignHelper
@@ -161,6 +162,14 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
     io.meta.entries(i).providerUsefulCtr := provider.usefulCtr
     io.meta.entries(i).altOrBasePred     := Mux(hasAlt, alt.takenCtr.isPositive, branch.bits.taken)
 
+    io.meta.entries(i).debug_tageFinalPredValid := useProvider || hasAlt
+    io.meta.entries(i).debug_tageFinalPred := Mux(
+      useProvider,
+      provider.takenCtr.isPositive,
+      Mux(hasAlt, alt.takenCtr.isPositive, branch.bits.taken)
+    )
+    io.meta.entries(i).debug_useSc := false.B
+
     XSPerfAccumulate(
       s"s2_branch_${i}_multihit_on_same_table",
       allTableTagMatchResults.map(e => (s2_fire && PopCount(e.hitWayMask) > 1.U).asUInt).reduce(_ +& _)
@@ -224,6 +233,20 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
     table.io.readReq(1).bits.setIdx   := t0_setIdx(tableIdx)
     table.io.readReq(1).bits.bankMask := t0_bankMask
   }
+
+  private val t0_mispredictMask   = t0_branches.map(b => b.valid && b.bits.attribute.isConditional && b.bits.mispredict)
+  private val t0_hasMispredict    = t0_mispredictMask.reduce(_ || _)
+  private val t0_mispredictBranch = Mux1H(t0_mispredictMask, t0_branches)
+  private val t0_mispredictBranchMeta = Mux1H(t0_mispredictMask, t0_meta)
+  private val t0_tageWrongNoSc = t0_hasMispredict && !t0_mispredictBranchMeta.debug_useSc &&
+    t0_mispredictBranchMeta.debug_tageFinalPredValid &&
+    t0_mispredictBranchMeta.debug_tageFinalPred =/= t0_mispredictBranch.bits.taken
+  private val t0_tageRightScWrong = t0_hasMispredict && t0_mispredictBranchMeta.debug_useSc &&
+    t0_mispredictBranchMeta.debug_tageFinalPredValid &&
+    t0_mispredictBranchMeta.debug_tageFinalPred === t0_mispredictBranch.bits.taken
+  private val t0_tageWrongScWrong = t0_hasMispredict && t0_mispredictBranchMeta.debug_useSc &&
+    t0_mispredictBranchMeta.debug_tageFinalPredValid &&
+    t0_mispredictBranchMeta.debug_tageFinalPred =/= t0_mispredictBranch.bits.taken
 
   // only for perf
   private val debug_readBankConflictReg     = RegNext(debug_readBankConflict)
@@ -760,6 +783,10 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
     "resolve_branch_use_base_table",
     t3_trainInfoVec.map(e => (t3_fire && e.valid && !e.useProvider && !e.useAlt).asUInt).reduce(_ +& _)
   )
+  XSPerfAccumulate("t0_hasMispredict", t0_hasMispredict)
+  XSPerfAccumulate("t0_tageWrongNoSc", t0_tageWrongNoSc)
+  XSPerfAccumulate("t0_tageRightScWrong", t0_tageRightScWrong)
+  XSPerfAccumulate("t0_tageWrongScWrong", t0_tageRightScWrong)
 
   /*
   sum -> total bubbles caused by read bank conflict
@@ -784,5 +811,12 @@ class Tage(implicit p: Parameters) extends BasePredictor with HasTageParameters 
     debug_readBankConflictShortLoopNeg,
     0,
     16
+  )
+  XSPerfRolling(
+    "read_conflict_rolling",
+    debug_readBankConflict,
+    50000,
+    clock,
+    reset
   )
 }

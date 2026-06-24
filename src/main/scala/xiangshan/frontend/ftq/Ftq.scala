@@ -30,6 +30,7 @@ import utility.UIntToMask
 import utility.XSError
 import utility.XSPerfAccumulate
 import utility.XSPerfHistogram
+import utility.XSPerfRolling
 import utility.XSPerfSeqAccumulate
 import xiangshan.RedirectLevel
 import xiangshan.TopDownCounters
@@ -633,6 +634,14 @@ class Ftq(implicit p: Parameters) extends FtqModule
       ("call", commitPerfMeta.mispredictBranchInfo.attribute.isCall),
       ("ret", commitPerfMeta.mispredictBranchInfo.attribute.isReturn)
     )
+  )
+
+  XSPerfRolling(
+    "commit_cond_mispredict",
+    perf_commitHasMispredict && commitPerfMeta.mispredictBranchInfo.attribute.isConditional,
+    50000,
+    clock,
+    reset
   )
 
   XSPerfHistogram(
