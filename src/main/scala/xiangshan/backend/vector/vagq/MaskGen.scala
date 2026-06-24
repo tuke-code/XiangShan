@@ -1,0 +1,52 @@
+package xiangshan.backend.vector.vagq
+
+import chisel3._
+import chisel3.util._
+import org.chipsalliance.cde.config.Parameters
+
+import xiangshan.backend.fu.NewCSR.CSRConfig
+
+class MaskGen(implicit p: Parameters) extends VAGQModule {
+  val in = IO(Input(new MaskGenInput))
+  val out = IO(Output(new VAGQMaskInfo))
+
+  private val zeroVstart = 0.U(in.vstart.getWidth.W)
+  private val effectiveVstart = Mux(in.useVstart, in.vstart, zeroVstart)
+  private val uvlByte = uopByteRangeLen(in.vl, in.deew, in.uopIdx)
+  private val uvstartByte = uopByteRangeLen(effectiveVstart, in.deew, in.uopIdx)
+
+  private val tailBits     = Wire(Vec(vagqFlowBytes, Bool()))
+  private val inactiveBits = Wire(Vec(vagqFlowBytes, Bool()))
+  private val activeBits   = Wire(Vec(vagqFlowBytes, Bool()))
+
+  for (byteIdx <- 0 until vagqFlowBytes) {
+    val byteIdxUInt = byteIdx.U(vagqUvlByteWidth.W)
+    val inPrestart = byteIdxUInt < uvstartByte
+    val inTail = !inPrestart && byteIdxUInt >= uvlByte
+    val maskActive = in.vm || elemMaskBit(byteIdx, in.deew, in.v0Mask)
+
+    tailBits(byteIdx)     := inTail
+    inactiveBits(byteIdx) := !inPrestart && !inTail && !maskActive
+    activeBits(byteIdx)   := !inPrestart && !inTail &&  maskActive
+  }
+
+  private val inactiveAgnosticMask = inactiveBits.asUInt & Fill(vagqFlowBytes, in.vma)
+  private val tailAgnosticMask = tailBits.asUInt & Fill(vagqFlowBytes, in.vta)
+  private val elemActiveMask = activeBits.asUInt
+  private val agnosticMask = inactiveAgnosticMask | tailAgnosticMask
+
+  out.elemActiveMask := elemActiveMask
+  out.agnosticMask := agnosticMask
+}
+
+class MaskGenInput(implicit p: Parameters) extends VAGQBundle {
+  val uopIdx    = UInt(vagqUopIdxWidth.W)
+  val useVstart = Bool()
+  val vstart    = UInt((CSRConfig.VlWidth-1).W)
+  val vl        = UInt(CSRConfig.VlWidth.W)
+  val vm        = Bool()
+  val v0Mask    = UInt(vagqFlowBytes.W)
+  val deew      = UInt(VAGQConstants.EewWidth.W)
+  val vma       = Bool()
+  val vta       = Bool()
+}

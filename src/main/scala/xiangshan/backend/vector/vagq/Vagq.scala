@@ -178,10 +178,21 @@ class VAGQIO(implicit p: Parameters) extends VAGQBundle {
 class VAGQ(implicit p: Parameters) extends VAGQModule {
   val io = IO(new VAGQIO)
 
+  private val addrMaskGen = Module(new MaskGen)
+  addrMaskGen.in.uopIdx    := io.addrUop.bits.uopIdx
+  addrMaskGen.in.useVstart := io.addrUop.bits.useVstart
+  addrMaskGen.in.vstart    := io.addrUop.bits.vstart
+  addrMaskGen.in.vl        := io.addrUop.bits.vl
+  addrMaskGen.in.vm        := io.addrUop.bits.vm
+  addrMaskGen.in.v0Mask    := io.addrUop.bits.v0Mask
+  addrMaskGen.in.deew      := io.addrUop.bits.deew
+  addrMaskGen.in.vma       := io.addrUop.bits.vma
+  addrMaskGen.in.vta       := io.addrUop.bits.vta
+
   private val entryTable = Module(new VAGQEntryTable)
   entryTable.io.addrUop <> io.addrUop
   entryTable.io.dataUop <> io.dataUop
-  entryTable.io.maskInfo := 0.U
+  entryTable.io.maskInfo := addrMaskGen.out
   entryTable.io.redirect := io.redirect
 
   val entries = entryTable.io.entries
