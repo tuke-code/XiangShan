@@ -118,6 +118,10 @@ class TageMetaEntry(implicit p: Parameters) extends TageBundle {
   val providerTakenCtr:  SaturateCounter = TakenCounter()
   val providerUsefulCtr: SaturateCounter = UsefulCounter()
   val altOrBasePred:     Bool            = Bool()
+
+  val debug_tageFinalPredValid: Bool = Bool()
+  val debug_tageFinalPred:      Bool = Bool()
+  val debug_useSc:              Bool = Bool()
 }
 
 class TageMeta(implicit p: Parameters) extends TageBundle {
