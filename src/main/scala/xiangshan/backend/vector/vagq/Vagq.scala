@@ -88,29 +88,25 @@ class VAGQDataSideUop(implicit p: Parameters) extends VAGQBundle {
   val psrc2 = UInt(VfPhyRegIdxWidth.W)
 }
 
-class VAGQLsuReq(implicit p: Parameters) extends VAGQBundle {
-  val entryIdx = UInt(vagqEntryIdxWidth.W)
-  val robIdx = new RobPtr
-  val isLoad = Bool()
-  val isStore = Bool()
-  val byteOffset = UInt(vagqFlowByteWidth.W)
-  val vaddr = UInt(XLEN.W)
-  val mask = UInt(vagqFlowBytes.W)
-  val data = UInt(VLEN.W)
-  val pdest = UInt(VfPhyRegIdxWidth.W)
+class VAGQReqBase(implicit p: Parameters) extends VAGQBundle {
+  val entryIdx    = UInt(vagqEntryIdxWidth.W)
+  val robIdx      = new RobPtr
+  val isLoad      = Bool()
+  val isStore     = Bool()
+  val byteOffset  = UInt(vagqFlowByteWidth.W)
+  val elemIdx     = UInt(vagqFlowByteWidth.W)
+  val mask        = UInt(vagqFlowBytes.W)
   val alignedType = UInt(AlignedTypeWidth.W)  // deew
-  val nf = UInt(NfWidth.W)
 }
 
-class VAGQLsqEmptyReq(implicit p: Parameters) extends VAGQBundle {
-  val entryIdx = UInt(vagqEntryIdxWidth.W)
-  val robIdx = new RobPtr
-  val isLoad = Bool()
-  val isStore = Bool()
-  val byteOffset = UInt(vagqFlowByteWidth.W)
-  val mask = UInt(vagqFlowBytes.W)
-  val alignedType = UInt(AlignedTypeWidth.W)  // deew
+class VAGQLsuReq(implicit p: Parameters) extends VAGQReqBase {
+  val vaddr       = UInt(XLEN.W)
+  val data        = UInt(VLEN.W)
+  val pdest       = UInt(VfPhyRegIdxWidth.W)
+  val nf          = UInt(NfWidth.W)
 }
+
+class VAGQLsqEmptyReq(implicit p: Parameters) extends VAGQReqBase
 
 class VAGQResp(implicit p: Parameters) extends VAGQBundle {
   val entryIdx = UInt(vagqEntryIdxWidth.W)
