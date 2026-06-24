@@ -13,13 +13,15 @@ class SplitCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
 
   private val activePending  = Wire(Vec(numEntries, UInt(vagqFlowBytes.W)))
   private val emptyPending   = Wire(Vec(numEntries, UInt(vagqFlowBytes.W)))
+  private val orderedBlocked = Wire(Vec(numEntries, Bool()))
   private val canSplit       = Wire(Vec(numEntries, Bool()))
 
   for (i <- 0 until numEntries) {
     val entry = io.in(i).entry
     canSplit(i) := entry.valid && entry.state === VAGQEntryState.split && !entry.robIdx.needFlush(io.redirect)
+    orderedBlocked(i) := entry.isOrdered && ((entry.reqSent & ~entry.reqAck & entry.elemActiveMask).orR)
     activePending(i) := Mux(
-      canSplit(i),
+      canSplit(i) && !orderedBlocked(i),
       ~entry.reqSent & ~entry.reqAck & entry.elemActiveMask,
       0.U(vagqFlowBytes.W)
     )

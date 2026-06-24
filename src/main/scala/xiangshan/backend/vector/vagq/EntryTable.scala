@@ -64,6 +64,12 @@ class VAGQEntryMeta(implicit p: Parameters) extends VAGQBundle {
   val exceptionNumber = UInt(ExceptionNumberWidth.W)
   val faultElemIdx = UInt(vagqFlowByteWidth.W)
   val state = UInt(3.W)
+
+  def isLoad: Bool    = VAGQUopType.isLoad(uopType)
+  def isStore: Bool   = VAGQUopType.isStore(uopType)
+  def isStride: Bool  = VAGQUopType.isStride(uopType)
+  def isIndexed: Bool = VAGQUopType.isIndexed(uopType)
+  def isOrdered: Bool = VAGQUopType.isOrdered(uopType)
 }
 
 class VAGQEntry(implicit p: Parameters) extends VAGQEntryMeta
@@ -75,4 +81,19 @@ object VAGQEntryState {
   val merge  = "b100".U(3.W)
   val wb     = "b101".U(3.W)
   val excp   = "b110".U(3.W)
+}
+
+object VAGQUopType {
+  val strideLoad            = "b000".U(3.W)
+  val strideStore           = "b001".U(3.W)
+  val indexedUnorderedLoad  = "b100".U(3.W)
+  val indexedUnorderedStore = "b101".U(3.W)
+  val indexedOrderedLoad    = "b110".U(3.W)
+  val indexedOrderedStore   = "b111".U(3.W)
+
+  def isLoad(uopType: UInt): Bool    = !uopType(0)
+  def isStore(uopType: UInt): Bool   =  uopType(0)
+  def isStride(uopType: UInt): Bool  = !uopType(2) && !uopType(1)
+  def isIndexed(uopType: UInt): Bool =  uopType(2)
+  def isOrdered(uopType: UInt): Bool =  uopType(1)
 }
