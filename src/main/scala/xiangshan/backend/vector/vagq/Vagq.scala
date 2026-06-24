@@ -196,4 +196,18 @@ class VAGQ(implicit p: Parameters) extends VAGQModule {
   entryTable.io.redirect := io.redirect
 
   val entries = entryTable.io.entries
+
+  private val splitCtrl = Module(new SplitCtrl(vagqSize))
+  splitCtrl.io.redirect := io.redirect
+  for (i <- 0 until vagqSize) {
+    splitCtrl.io.in(i).entryIdx := i.U(vagqEntryIdxWidth.W)
+    splitCtrl.io.in(i).entry := entries(i)
+  }
+
+  io.lsuReq <> splitCtrl.io.lsuReq
+  io.lsqEmptyReq <> splitCtrl.io.lsqEmptyReq
+
+  entryTable.io.splitUpdate := splitCtrl.io.update
+
+
 }

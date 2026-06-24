@@ -23,11 +23,12 @@ class VAGQEntryTable(implicit p: Parameters) extends VAGQModule {
 }
 
 class VAGQEntryTableIO(implicit p: Parameters) extends VAGQBundle {
-  val addrUop = Flipped(Decoupled(new VAGQAddrSideUop))
-  val dataUop = Flipped(Decoupled(new VAGQDataSideUop))
-  val maskInfo = Input(new VAGQMaskInfo)
-  val entries = Output(Vec(vagqSize, new VAGQEntry))
-  val redirect = Flipped(Valid(new Redirect))
+  val addrUop     = Flipped(Decoupled(new VAGQAddrSideUop))
+  val dataUop     = Flipped(Decoupled(new VAGQDataSideUop))
+  val maskInfo    = Input(new VAGQMaskInfo)
+  val entries     = Output(Vec(vagqSize, new VAGQEntry))
+  val splitUpdate = Input(Valid(new VAGQReqBitmapUpdate))
+  val redirect    = Flipped(Valid(new Redirect))
 }
 
 class VAGQMaskInfo(implicit p: Parameters) extends VAGQBundle {
