@@ -368,12 +368,14 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   })
 
   val storeAddrWakeupCancelVec = VecInit((0 until LoadQueueReplaySize).map(i =>
-    allocated(i) && cause(i)(LoadReplayCauses.C_MA) &&
-      StoreWakeupShouldCancel(storeIssueScoreBoard(i), io.storeAddrWakeupCancel)
+    // allocated(i) && cause(i)(LoadReplayCauses.C_MA) &&
+    //   StoreWakeupShouldCancel(storeIssueScoreBoard(i), io.storeAddrWakeupCancel)
+    false.B
   ))
   val storeDataWakeupCancelVec = VecInit((0 until LoadQueueReplaySize).map(i =>
-    allocated(i) && cause(i)(LoadReplayCauses.C_FF) &&
-      StoreWakeupShouldCancel(storeIssueScoreBoard(i), io.storeDataWakeupCancel)
+    // allocated(i) && cause(i)(LoadReplayCauses.C_FF) &&
+    //   StoreWakeupShouldCancel(storeIssueScoreBoard(i), io.storeDataWakeupCancel)
+    false.B
   ))
   val storeAddrWakeupCount = PopCount((0 until LoadQueueReplaySize).map(i => storeAddrWakeupVec(i).asUInt.orR && allocated(i)))
   val storeDataWakeupCount = PopCount((0 until LoadQueueReplaySize).map(i => storeDataWakeupVec(i).asUInt.orR && allocated(i)))
