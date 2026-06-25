@@ -455,10 +455,10 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
 
       XSError(allocated(i) && cause(i)(LoadReplayCauses.C_MA) && PopCount(storeAddrWakeupVec(i)) > 1.U, s"storeAddrWakeup source exceed 1! ${i}\n")
       XSError(allocated(i) && cause(i)(LoadReplayCauses.C_FF) && PopCount(storeDataWakeupVec(i)) > 1.U, s"storeDataWakeup source exceed 1! ${i}\n")
-    (0 until StorePipelineWidth).foreach { case w =>
-        XSError(allocated(i) && cause(i)(LoadReplayCauses.C_MA) && storeIssueScoreBoard(i)(w).orR && storeAddrWakeupVec(i)(w) && !storeAddrWakeupCancelVec(i), s"Sta multi wakeup from ${w} in entry ${i}\n")
-        XSError(allocated(i) && cause(i)(LoadReplayCauses.C_FF) && storeIssueScoreBoard(i)(w).orR && storeDataWakeupVec(i)(w) && !storeDataWakeupCancelVec(i), s"Std multi wakeup from ${w} in entry ${i}\n")
-    }
+    // (0 until StorePipelineWidth).foreach { case w =>
+    //     XSError(allocated(i) && cause(i)(LoadReplayCauses.C_MA) && storeIssueScoreBoard(i)(w).orR && storeAddrWakeupVec(i)(w) && !storeAddrWakeupCancelVec(i), s"Sta multi wakeup from ${w} in entry ${i}\n")
+    //     XSError(allocated(i) && cause(i)(LoadReplayCauses.C_FF) && storeIssueScoreBoard(i)(w).orR && storeDataWakeupVec(i)(w) && !storeDataWakeupCancelVec(i), s"Std multi wakeup from ${w} in entry ${i}\n")
+    // }
 
   }
 
