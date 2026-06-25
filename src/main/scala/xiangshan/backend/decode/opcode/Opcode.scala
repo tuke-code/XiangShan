@@ -1028,6 +1028,7 @@ object Opcode {
     val hfence_v = IntBSType(bb"10011") + NoSpec + BlockBack + FlushPipe // HFENCE_VVMA     / HINVAL_VVMA (no flushpipe)
     val hfence_g = IntBSType(bb"10100") + NoSpec + BlockBack + FlushPipe // HFENCE_GVMA     / HINVAL_GVMA (no flushpipe)
     val nofence  = Value    (bb"00000") + NoSpec + BlockBack + FlushPipe // SFENCE_INVAL_IR / SFENCE_W_INVAL (no flushpipe)
+    val mfence   = IntBSType(bb"10111") + NoSpec + BlockBack + FlushPipe // HasMptCheck self defined instruction
   }
 
   object BkuOpcodes extends Opcodes {
