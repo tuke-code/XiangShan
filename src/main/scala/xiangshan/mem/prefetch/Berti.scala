@@ -295,32 +295,25 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val a0_replaceWay = wayReplacer.way(a0_set)
   val a0_way = Mux(a0_wayPrevMatch, a1_way, Mux(a0_pcMatch, a0_hitWay, a0_replaceWay))
 
-  val a0_listIdx = accessPtrs(a0_set)(a0_way).value
-  val a0_lastListIdx = (accessPtrs(a0_set)(a0_way) - 1.U).value
-  val a0_vaMatchVec = listMap(idx => valids(a0_set)(a0_way)(idx) && entries(a0_set)(a0_way)(idx).baseVAddr === a0_baseVAddr)
-  val a0_vaMatch = a0_vaMatchVec.orR
-  val a0_doInsert = a0_pcMatch && !a0_vaMatch
   assert(PopCount(a0_wayMatchVec) <= 1.U, s"HistoryTable access way match should be unique in ${this.getClass.getSimpleName}")
-
-  when(a0_valid && a0_doInsert) {
-    accessPtrs(a0_set)(a0_way) := accessPtrs(a0_set)(a0_way) + 1.U
-  }
 
   a1_valid := GatedValidRegNext(a0_valid, false.B)
   a1_set := RegEnable(a0_set, a0_valid)
   a1_tag := RegEnable(a0_tag, a0_valid)
   a1_way := RegEnable(a0_way, a0_valid)
-  val a1_baseVAddr = RegEnable(a0_baseVAddr, a0_valid)
-  val a1_listIdx = RegEnable(a0_listIdx, a0_valid)
-  val a1_lastListIdx = RegEnable(a0_lastListIdx, a0_valid)
-  val a1_pcMatch = RegEnable(a0_pcMatch, a0_valid)
-  val a1_vaMatch = RegEnable(a0_vaMatch, a0_valid)
   val a1_pc = RegEnable(a0_req.pc, a0_valid)
+  val a1_pcMatch = RegEnable(a0_pcMatch, a0_valid)
+  val a1_baseVAddr = RegEnable(a0_baseVAddr, a0_valid)
+  val a1_vaMatchVec = listMap(idx => valids(a1_set)(a1_way)(idx) && entries(a1_set)(a1_way)(idx).baseVAddr === a1_baseVAddr)
+  val a1_vaMatch = a1_vaMatchVec.orR
+  val a1_listIdx = accessPtrs(a1_set)(a1_way).value
+  val a1_lastListIdx = (accessPtrs(a1_set)(a1_way) - 1.U).value
 
   when(a1_valid) {
     when(a1_pcMatch) {
       wayReplacer.access(a1_set, a1_way)
       when(!a1_vaMatch) {
+        accessPtrs(a1_set)(a1_way) := accessPtrs(a1_set)(a1_way) + 1.U
         hysteresis(a1_set)(a1_way) := true.B
         valids(a1_set)(a1_way)(a1_listIdx) := true.B
         entries(a1_set)(a1_way)(a1_listIdx).alloc(a1_baseVAddr, currTsp)
@@ -778,6 +771,7 @@ extends DCacheModule {
     val pline = UInt(PLineWidth.W)
     val pvalid = Bool()
     val target = UInt(PrefetchTarget.PfTgtBits.W)
+    val tlbPending = Bool()
 
     def getPrefetchVA: UInt = Cat(vline, 0.U(DCacheLineOffset.W))
     def getPrefetchPA: UInt = Cat(pline, 0.U(DCacheLineOffset.W))
@@ -787,15 +781,20 @@ extends DCacheModule {
       this.pline := 0.U
       this.pvalid := false.B
       this.target := src.prefetchTarget
+      this.tlbPending := false.B
     }
     def updateEntryMerge(target: UInt): Unit = {
       when(target < this.target) {
         this.target := target
       }
     }
+    def updateTlbReq(): Unit = {
+      this.tlbPending := true.B
+    }
     def updateTlbResp(paddr: UInt): Unit = {
       this.pline := getLine(paddr)
       this.pvalid := true.B
+      this.tlbPending := false.B
     }
   }
 
@@ -895,19 +894,14 @@ extends DCacheModule {
    *  s2: receive tlb resp
    *  s3: reveive pmp resp
    ******************************************************************/
-  val s0_tlbFireOH = VecInit(tlbReqArb.io.in.map(_.fire))
-  // control
-  val s0_tlbFire = s0_tlbFireOH.orR
-  val s1_tlbFire = RegNext(s0_tlbFire, false.B)
-  val s2_tlbFire = RegNext(s1_tlbFire, false.B)
-  // data
-  val s1_tlbFireOH = RegEnable(s0_tlbFireOH, 0.U.asTypeOf(s0_tlbFireOH), s0_tlbFire)
-  val s2_tlbFireOH = RegEnable(s1_tlbFireOH, 0.U.asTypeOf(s0_tlbFireOH), s1_tlbFire)
-  val s3_tlbFireOH = RegEnable(s2_tlbFireOH, 0.U.asTypeOf(s0_tlbFireOH), s2_tlbFire)
-  val s0_notSelectOH = sizeMap(TotalSize)(i => !s1_tlbFireOH(i) && !s2_tlbFireOH(i) && !s3_tlbFireOH(i))
+  val s0_tlbFire = tlbReqArb.io.out.fire
+  val s0_tlbIdx = tlbReqArb.io.chosen
+  val s1_tlbIdx = RegNext(s0_tlbIdx, 0.U(IndexWidth(TotalSize).W))
+  val s2_tlbIdx = RegNext(s1_tlbIdx, 0.U(IndexWidth(TotalSize).W))
+  val s3_tlbIdx = RegNext(s2_tlbIdx, 0.U(IndexWidth(TotalSize).W))
 
   for (i <- 0 until TotalSize) {
-    tlbReqArb.io.in(i).valid := valids(i) && !entries(i).pvalid && s0_notSelectOH(i)
+    tlbReqArb.io.in(i).valid := valids(i) && !entries(i).pvalid && !entries(i).tlbPending
     tlbReqArb.io.in(i).bits.vaddr := entries(i).getPrefetchVA
     tlbReqArb.io.in(i).bits.cmd := TlbCmd.read
     tlbReqArb.io.in(i).bits.isPrefetch := true.B
@@ -924,10 +918,13 @@ extends DCacheModule {
   }
   tlbReqArb.io.out.ready := true.B
 
+  when(s0_tlbFire){
+    entries(s0_tlbIdx).updateTlbReq()
+  }
   // tlb req
   val s1_tlbReqValid = RegNext(tlbReqArb.io.out.valid, false.B)
-  val s1_tlbReqBits = RegEnable(tlbReqArb.io.out.bits, tlbReqArb.io.out.valid)
-  val s1_vaddr = RegEnable(tlbReqArb.io.out.bits.vaddr, tlbReqArb.io.out.valid)
+  val s1_tlbReqBits = RegEnable(tlbReqArb.io.out.bits, s0_tlbFire)
+  val s1_vaddr = RegEnable(tlbReqArb.io.out.bits.vaddr, s0_tlbFire)
   io.tlbReq.req.valid := s1_tlbReqValid
   io.tlbReq.req.bits := s1_tlbReqBits
   io.tlbReq.req_kill := false.B
@@ -942,7 +939,7 @@ extends DCacheModule {
   val s3_vaddr = RegEnable(s2_vaddr, s2_tlbRespValid)
   val s3_pmpResp = io.pmpResp
   val s3_updateValid = s3_tlbRespValid && !s3_tlbRespBits.miss
-  val s3_updateIndex = OHToUInt(s3_tlbFireOH.asUInt)
+  val s3_updateIndex = s3_tlbIdx
   val s3_drop1 = s3_tlbRespValid && s3_tlbRespBits.miss
   val s3_drop2 = s3_updateValid && (
     // is region addr in pmem ranges
