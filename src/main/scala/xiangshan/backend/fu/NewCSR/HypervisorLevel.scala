@@ -80,6 +80,11 @@ trait HypervisorLevel { self: NewCSR =>
     when(!menvcfg.DTE) {
       regOut.DTE := 0.U
     }
+    when(wen) {
+      reg.STCE  := Mux(menvcfg.STCE.asBool, wdata.STCE, reg.STCE)
+      reg.PBMTE := Mux(menvcfg.PBMTE.asBool, wdata.PBMTE, reg.PBMTE)
+      reg.DTE   := Mux(menvcfg.DTE.asBool, wdata.DTE, reg.DTE)
+    }
   }).setAddr(CSRs.henvcfg)
 
   val htval = Module(new CSRModule("Htval", new XtvalBundle) with TrapEntryHSEventSinkBundle)
