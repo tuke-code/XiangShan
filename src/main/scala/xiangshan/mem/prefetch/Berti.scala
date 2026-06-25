@@ -84,8 +84,6 @@ trait HasBertiHelper extends HasCircularQueuePtrHelper with HasDCacheParameters 
 
   def DIR_REGION: Int = 256 // 256 lines -> a dcache way
   def DIR_REGION_BITS: Int = log2Up(DIR_REGION)
-  def DELTA_MAX: Int = (1 << (DeltaWidth - 1)) - 1
-  def DELTA_MIN: Int = -(DELTA_MAX)
   def DELTA_THRESHOLD: Int = if (useByteAddr) blockBytes else 1 // 64 Bytes = 1 line
 
   def _getLineVAddr(vaddr: UInt): UInt = {
@@ -201,10 +199,9 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   def getDelta(lineVA1: UInt, lineVA2: UInt): (Bool, SInt) = {
     // here should handle the overflow
     val diffFull = (lineVA1.zext - lineVA2.zext).asSInt
-    val deltaMin = DELTA_MIN.S(diffFull.getWidth.W)
-    val deltaMax = DELTA_MAX.S(diffFull.getWidth.W)
-    val overflow = diffFull < deltaMin || diffFull > deltaMax
     val delta = diffFull(DeltaWidth - 1, 0).asSInt
+    // by checking whether delta can be symbol extended correctly
+    val overflow = diffFull =/= delta.asSInt.pad(diffFull.getWidth)
     val dissatisfy = checkDissatisfy(delta)
     s1_stat_overflow := overflow
     s1_stat_dissatisfy := dissatisfy
@@ -299,6 +296,7 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val a0_way = Mux(a0_wayPrevMatch, a1_way, Mux(a0_pcMatch, a0_hitWay, a0_replaceWay))
 
   val a0_listIdx = accessPtrs(a0_set)(a0_way).value
+  val a0_lastListIdx = (accessPtrs(a0_set)(a0_way) - 1.U).value
   val a0_vaMatchVec = listMap(idx => valids(a0_set)(a0_way)(idx) && entries(a0_set)(a0_way)(idx).baseVAddr === a0_baseVAddr)
   val a0_vaMatch = a0_vaMatchVec.orR
   val a0_doInsert = a0_pcMatch && !a0_vaMatch
@@ -380,18 +378,26 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val s1_originValid = s1_pair._1
   val s1_originDelta = s1_pair._2
   val s1_isTimely = checkTimeliness(currTsp, s1_latency, s1_histTsp)
-  val s1_result = WireInit(0.U.asTypeOf(new LearnDeltasLiteIO))
-  s1_result.pc := s1_pc
   s1_stat_find_delta := s1_valid && s1_entryValid
   s1_stat_late := !s1_isTimely
-  s1_result.valid := s1_valid & s1_entryValid && s1_originValid && s1_isTimely
-  s1_result.delta := s1_originDelta
 
   val s2_valid = GatedValidRegNext(s1_valid, false.B)
-  val s2_result = RegEnable(s1_result, s1_valid)
+  val s2_pc = RegEnable(s1_pc, s1_valid)
+  val s2_entryValid = RegEnable(s1_entryValid, s1_valid)
+  val s2_originValid = RegEnable(s1_originValid, s1_valid)
+  val s2_originDelta = RegEnable(s1_originDelta, s1_valid)
+  val s2_isTimely = RegEnable(s1_isTimely, s1_valid)
 
-  io.search.resp := s2_result
-  io.search.resp.valid := s2_valid && s2_result.valid
+  val s2_result = WireInit(0.U.asTypeOf(new LearnDeltasLiteIO))
+  s2_result.pc := s2_pc
+  s2_result.valid := s2_valid && s2_entryValid && s2_originValid && s2_isTimely
+  s2_result.delta := s2_originDelta
+
+  val s3_valid = GatedValidRegNext(s2_valid, false.B)
+  val s3_result = RegEnable(s2_result, s2_valid)
+
+  io.search.resp := s3_result
+  io.search.resp.valid := s3_valid && s3_result.valid
 
   /*** performance counter */
   XSPerfAccumulate("access_req", a1_valid)
@@ -431,12 +437,12 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
     val calDelta = UInt(DeltaWidth.W)
   }
   val searchLog = Wire(new SearchLogDb())
-  searchLog.histLineVA := s1_stat_histLineVA
-  searchLog.currLineVA := s1_stat_currLineVA
-  searchLog.calDelta := s1_result.delta.asUInt
-  searchLog.pc := s1_result.pc
+  searchLog.histLineVA := RegNext(s1_stat_histLineVA)
+  searchLog.currLineVA := RegNext(s1_stat_currLineVA)
+  searchLog.calDelta := s2_result.delta.asUInt
+  searchLog.pc := s2_result.pc
   val searchLogDb = ChiselDB.createTable(s"${_name}_searchLog${p(XSCoreParamsKey).HartId}", new SearchLogDb, basicDB = false)
-  searchLogDb.log(data = searchLog, en = s1_result.valid, clock = clock, reset = reset)
+  searchLogDb.log(data = searchLog, en = s2_result.valid, clock = clock, reset = reset)
 }
 
 class DeltaTable()(implicit p: Parameters) extends BertiModule {
