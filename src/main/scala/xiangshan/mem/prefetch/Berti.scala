@@ -164,11 +164,8 @@ class LearnDeltasIO(implicit p: Parameters) extends BertiBundle {
 class HistoryTable()(implicit p: Parameters) extends BertiModule {
   /*** static variable ***/
   val stat_access_pcHysteresis = WireInit(false.B)
-  val stat_access_dirHysteresis = WireInit(false.B)
   val stat_access_replace = WireInit(false.B)
   val stat_access_update = WireInit(false.B)
-  val stat_access_dirChange = WireInit(false.B)
-  val stat_access_dirNotSameRegion = WireInit(false.B)
   val stat_access_currVA = WireInit(0.U(HtLineVAddrWidth.W))
   val stat_access_lastVA = WireInit(0.U(HtLineVAddrWidth.W))
   val stat_find_delta = WireInit(false.B)
@@ -176,10 +173,6 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val stat_overflow = WireInit(false.B)
   val stat_satisfy = WireInit(false.B)
   val stat_dissatisfy = WireInit(false.B)
-  val stat_dirDiff = WireInit(false.B)
-  val stat_dirDiffCorrect = WireInit(false.B)
-  val stat_dirDiffNotValid = WireInit(false.B)
-  val stat_dirDiffNotSameRegion = WireInit(false.B)
   val stat_histLineVA = WireInit(0.U(HtLineVAddrWidth.W))
   val stat_currLineVA = WireInit(0.U(HtLineVAddrWidth.W))
   /*** built-in function */
@@ -252,12 +245,9 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   })
 
   /*** data structure */
-  val enableDecrMode = Constantin.createRecord(_name+"_enableDecrMode", 0)
   // TODO lyq: refractor
   val entries = Reg(Vec(HtSetSize, Vec(HtWaySize, Vec(HtListSize, new Entry))))
   val valids = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, Vec(HtListSize, Bool())))))
-  val decrModes = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, Bool()))))
-  val decrModeValids = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, Bool()))))
   val hysteresis = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, Bool()))))
   val pcTags = RegInit(0.U.asTypeOf(Vec(HtSetSize, Vec(HtWaySize, UInt(HtPcTagWidth.W)))))
   val wayReplacer = ReplacementPolicy.fromString("setplru", HtWaySize, HtSetSize)
@@ -311,9 +301,6 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val a0_listIdx = accessPtrs(a0_set)(a0_way).value
   val a0_vaMatchVec = listMap(idx => valids(a0_set)(a0_way)(idx) && entries(a0_set)(a0_way)(idx).baseVAddr === a0_baseVAddr)
   val a0_vaMatch = a0_vaMatchVec.orR
-  val a0_lastListIdx = (accessPtrs(a0_set)(a0_way) - (HtListSize >> 1).U).value
-  val a0_lastValid = valids(a0_set)(a0_way)(a0_lastListIdx)
-  val a0_lastBaseVAddr = entries(a0_set)(a0_way)(a0_lastListIdx).baseVAddr
   val a0_doInsert = a0_pcMatch && !a0_vaMatch
   assert(PopCount(a0_wayMatchVec) <= 1.U, s"HistoryTable access way match should be unique in ${this.getClass.getSimpleName}")
 
@@ -329,30 +316,19 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val a1_listIdx = RegEnable(a0_listIdx, a0_valid)
   val a1_pcMatch = RegEnable(a0_pcMatch, a0_valid)
   val a1_vaMatch = RegEnable(a0_vaMatch, a0_valid)
-  val a1_lastListIdx = RegEnable(a0_lastListIdx, a0_valid)
-  val a1_lastValid = RegEnable(a0_lastValid, a0_valid)
-  val a1_lastBaseVAddr = RegEnable(a0_lastBaseVAddr, a0_valid)
   val a1_pc = RegEnable(accessReq.pc, a0_valid)
 
   when(a1_valid) {
     when(a1_pcMatch) {
       wayReplacer.access(a1_set, a1_way)
       when(!a1_vaMatch) {
-        when(a1_lastValid) {
-          val isDecr = a1_baseVAddr < a1_lastBaseVAddr
-          val isSameRegion = getDirRegionAddr(a1_baseVAddr) === getDirRegionAddr(a1_lastBaseVAddr)
-          decrModes(a1_set)(a1_way) := isDecr
-          decrModeValids(a1_set)(a1_way) := isSameRegion
-          stat_access_dirChange := decrModes(a1_set)(a1_way) ^ isDecr
-          stat_access_dirNotSameRegion := !isSameRegion
-        }
         hysteresis(a1_set)(a1_way) := true.B
         valids(a1_set)(a1_way)(a1_listIdx) := true.B
         entries(a1_set)(a1_way)(a1_listIdx).alloc(a1_baseVAddr, currTsp)
 
         stat_access_update := valids(a1_set)(a1_way)(a1_listIdx)
         stat_access_currVA := a1_baseVAddr
-        stat_access_lastVA := a1_lastBaseVAddr
+        stat_access_lastVA := entries(a1_set)(a1_way)(a1_listIdx - 1.U).baseVAddr
       }
     }/* .elsewhen(hysteresis(a1_set)(a1_way)) {
       hysteresis(a1_set)(a1_way) := false.B
@@ -364,8 +340,6 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
       entries(a1_set)(a1_way)(repListIdx).alloc(a1_baseVAddr, currTsp)
       valids(a1_set)(a1_way).map(_ := false.B)
       valids(a1_set)(a1_way)(repListIdx) := true.B
-      decrModes(a1_set)(a1_way) := false.B
-      decrModeValids(a1_set)(a1_way) := false.B
       hysteresis(a1_set)(a1_way) := true.B
       pcTags(a1_set)(a1_way) := a1_tag
       accessPtrs(a1_set)(a1_way) := 0.U.asTypeOf(new HtListPointer)
@@ -386,8 +360,6 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val s0_listIdx = learnPtrs(s0_set)(s0_way).value
   val s0_histEntry = entries(s0_set)(s0_way)(s0_listIdx)
   val s0_entryValid = s0_hit && valids(s0_set)(s0_way)(s0_listIdx)
-  val s0_decrMode = decrModes(s0_set)(s0_way)
-  val s0_decrModeValid = s0_hit && decrModeValids(s0_set)(s0_way)
   assert(PopCount(s0_wayMatchVec) <= 1.U, s"HistoryTable search way match should be unique in ${this.getClass.getSimpleName}")
 
   when(s0_valid && s0_hit) {
@@ -402,29 +374,17 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val s1_histBaseVAddr = RegEnable(s0_histEntry.baseVAddr, s0_valid)
   val s1_histTsp = RegEnable(s0_histEntry.tsp, s0_valid)
   val s1_entryValid = RegEnable(s0_entryValid, s0_valid)
-  val s1_decrMode = RegEnable(s0_decrMode, s0_valid)
-  val s1_decrModeValid = RegEnable(s0_decrModeValid, s0_valid)
 
   val s1_pair = getDelta(s1_baseVAddr, s1_histBaseVAddr)
   val s1_originValid = s1_pair._1
   val s1_originDelta = s1_pair._2
   val s1_isTimely = checkTimeliness(currTsp, s1_latency, s1_histTsp)
   val s1_result = WireInit(0.U.asTypeOf(new LearnDeltasLiteIO))
-  val s1_delta = Wire(SInt(DeltaWidth.W))
   s1_result.pc := s1_pc
   stat_find_delta := s1_valid && s1_entryValid
-  stat_dirDiff := s1_decrMode ^ s1_originDelta(s1_originDelta.getWidth - 1)
-  stat_dirDiffNotValid := (s1_decrMode ^ s1_originDelta(s1_originDelta.getWidth - 1)) && !s1_decrModeValid
-  stat_dirDiffNotSameRegion := (s1_decrMode ^ s1_originDelta(s1_originDelta.getWidth - 1)) && s1_decrModeValid && !checkDirSameRegion(s1_originDelta)
   stat_late := !s1_isTimely
   s1_result.valid := s1_valid & s1_entryValid && s1_originValid && s1_isTimely
-  when(enableDecrMode.orR && s1_decrModeValid && checkDirSameRegion(s1_originDelta) && (s1_decrMode ^ s1_originDelta(s1_originDelta.getWidth - 1))) {
-    stat_dirDiffCorrect := true.B
-    s1_delta := -s1_originDelta
-  }.otherwise {
-    s1_delta := s1_originDelta
-  }
-  s1_result.delta := s1_delta
+  s1_result.delta := s1_originDelta
 
   val s2_valid = GatedValidRegNext(s1_valid, false.B)
   val s2_result = RegEnable(s1_result, s1_valid)
@@ -437,9 +397,6 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   XSPerfAccumulate("access_replace", io.access.valid && stat_access_replace)
   XSPerfAccumulate("access_update", io.access.valid && stat_access_update)
   XSPerfAccumulate("access_pcHysteresis", io.access.valid && stat_access_pcHysteresis)
-  XSPerfAccumulate("access_dirHysteresis", io.access.valid && stat_access_dirHysteresis)
-  XSPerfAccumulate("access_dirChange", io.access.valid && stat_access_dirChange)
-  XSPerfAccumulate("access_dirNotSameRegion", io.access.valid && stat_access_dirNotSameRegion)
   XSPerfAccumulate("search_req", io.search.req.valid)
   XSPerfAccumulate("search_resp_valid", io.search.resp.valid)
   XSPerfAccumulate("search_resp_find_total", stat_find_delta)
@@ -447,29 +404,19 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   XSPerfAccumulate("search_resp_find_dissatisfy", stat_find_delta && !stat_overflow && stat_dissatisfy)
   XSPerfAccumulate("search_resp_find_late", stat_find_delta && !stat_overflow && !stat_dissatisfy && stat_late)
   XSPerfAccumulate("search_resp_find_satisfy", stat_find_delta && !stat_overflow && !stat_dissatisfy && !stat_late)
-  XSPerfAccumulate("search_resp_find_directCorrect", s1_result.valid && stat_dirDiffCorrect)
-  XSPerfAccumulate("search_resp_find_dirDiff", s1_result.valid && stat_dirDiff)
-  XSPerfAccumulate("search_resp_find_dirDiffNotValid", s1_result.valid && stat_dirDiffNotValid)
-  XSPerfAccumulate("search_resp_find_dirDiffNotSameRegion", s1_result.valid && stat_dirDiffNotSameRegion)
 
   class AccessLogDb extends Bundle {
     val pcHysteresis = Bool()
-    val dirHysteresis = Bool()
     val isReplace = Bool() // to avoid SQLite keywords
     val isUpdate = Bool() // to avoid SQLite keywords
-    val dirChange = Bool()
-    val dirNotSameRegion = Bool()
     val currVA = UInt(HtLineVAddrWidth.W)
     val lastVA = UInt(HtLineVAddrWidth.W)
     val pc = UInt(VAddrBits.W)
   }
   val accessLog = Wire(new AccessLogDb())
   accessLog.pcHysteresis := stat_access_pcHysteresis
-  accessLog.dirHysteresis := stat_access_dirHysteresis
   accessLog.isReplace := stat_access_replace
   accessLog.isUpdate := stat_access_update
-  accessLog.dirChange := stat_access_dirChange
-  accessLog.dirNotSameRegion := stat_access_dirNotSameRegion
   accessLog.currVA := stat_access_currVA
   accessLog.lastVA := stat_access_lastVA
   accessLog.pc := a1_pc
