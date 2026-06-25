@@ -314,6 +314,7 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   a1_way := RegEnable(a0_way, a0_valid)
   val a1_baseVAddr = RegEnable(a0_baseVAddr, a0_valid)
   val a1_listIdx = RegEnable(a0_listIdx, a0_valid)
+  val a1_lastListIdx = RegEnable(a0_lastListIdx, a0_valid)
   val a1_pcMatch = RegEnable(a0_pcMatch, a0_valid)
   val a1_vaMatch = RegEnable(a0_vaMatch, a0_valid)
   val a1_pc = RegEnable(a0_req.pc, a0_valid)
@@ -328,7 +329,7 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
 
         a1_stat_access_update := valids(a1_set)(a1_way)(a1_listIdx)
         a1_stat_access_currVA := a1_baseVAddr
-        a1_stat_access_lastVA := entries(a1_set)(a1_way)(a1_listIdx - 1.U).baseVAddr
+        a1_stat_access_lastVA := entries(a1_set)(a1_way)(a1_lastListIdx).baseVAddr
       }
     }/* .elsewhen(hysteresis(a1_set)(a1_way)) {
       hysteresis(a1_set)(a1_way) := false.B
