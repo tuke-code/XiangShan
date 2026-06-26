@@ -212,13 +212,13 @@ case class XSCoreParameters
     name = "itlb",
     fetchi = true,
     useDmode = false,
-    NWays = 128,
+    NWays = 64,
   ),
   itlbPortNum: Int = 1, // ICache does not support cross-page fetch in V3, we need only 1 port
   ipmpPortNum: Int = 2, // ICache(PrefetchPipe + MainPipe)
   ldtlbParameters: TLBParameters = TLBParameters(
     name = "ldtlb",
-    NWays = 128,
+    NWays = 64,
     outReplace = false,
     partialStaticPMP = true,
     outsideRecvFlush = true,
@@ -227,7 +227,7 @@ case class XSCoreParameters
   ),
   sttlbParameters: TLBParameters = TLBParameters(
     name = "sttlb",
-    NWays = 128,
+    NWays = 64,
     outReplace = false,
     partialStaticPMP = true,
     outsideRecvFlush = true,
@@ -236,7 +236,7 @@ case class XSCoreParameters
   ),
   hytlbParameters: TLBParameters = TLBParameters(
     name = "hytlb",
-    NWays = 128,
+    NWays = 64,
     outReplace = false,
     partialStaticPMP = true,
     outsideRecvFlush = true,
@@ -245,7 +245,7 @@ case class XSCoreParameters
   ),
   pftlbParameters: TLBParameters = TLBParameters(
     name = "pftlb",
-    NWays = 128,
+    NWays = 64,
     outReplace = false,
     partialStaticPMP = true,
     outsideRecvFlush = true,
@@ -254,7 +254,7 @@ case class XSCoreParameters
   ),
   l2ToL1tlbParameters: TLBParameters = TLBParameters(
     name = "l2tlb",
-    NWays = 128,
+    NWays = 64,
     outReplace = false,
     partialStaticPMP = true,
     outsideRecvFlush = true,
@@ -263,7 +263,7 @@ case class XSCoreParameters
   refillBothTlb: Boolean = false,
   btlbParameters: TLBParameters = TLBParameters(
     name = "btlb",
-    NWays = 128,
+    NWays = 64,
   ),
   l2tlbParameters: L2TLBParameters = L2TLBParameters(),
   NumPerfCounters: Int = 16,
