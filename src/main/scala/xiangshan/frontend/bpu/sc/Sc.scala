@@ -493,11 +493,23 @@ class Sc(implicit p: Parameters) extends BasePredictor with HasScParameters with
     VecInit(Seq.fill(ResolveEntryBranchNumber)(VecInit(Seq.fill(NumWays)(false.B))))
   t1_writeValidVec.zip(t1_writeTakenVec).zip(t1_branchesWayIdxVec).zip(t1_branchesScIdxVec).zipWithIndex.foreach {
     case ((((valid, taken), writeIdx), oldIdx), i) =>
-      val scWrong = taken =/= t1_meta.scPred(oldIdx)
-      val needUpdate = valid && t1_meta.tagePredValid(oldIdx) &&
-        (scWrong || !t1_meta.sumAboveThres(oldIdx))
-      thresholdWayMask(i)(writeIdx) := needUpdate
-      thresholdDirMask(i)(writeIdx) := scWrong
+      val scWrong   = taken =/= t1_meta.scPred(oldIdx)
+      val tageWrong = taken =/= t1_meta.tagePred(oldIdx)
+      val scUseful  = !scWrong && tageWrong
+      val scHarmful = scWrong && !tageWrong
+      // SC outperforms TAGE this time, but its confidence is currently too low. The threshold should be lowered to allow SC to override TAGE more easily in the future
+      val thresDec = valid && t1_meta.tagePredValid(oldIdx) &&
+        scUseful && !t1_meta.sumAboveThres(oldIdx)
+      // SC hurts the final prediction this time; raise the threshold to prevent it from easily overriding TAGE in the future
+      val thresInc = valid && t1_meta.tagePredValid(oldIdx) &&
+        scHarmful && t1_meta.useScPred(oldIdx)
+
+      thresholdWayMask(i)(writeIdx) := thresInc || thresDec
+      thresholdDirMask(i)(writeIdx) := thresInc
+    // val needUpdate = valid && t1_meta.tagePredValid(oldIdx) &&
+    //   (scWrong || !t1_meta.sumAboveThres(oldIdx))
+    // thresholdWayMask(i)(writeIdx) := needUpdate
+    // thresholdDirMask(i)(writeIdx) := scWrong
   }
   scThreshold.zip(t1_writeThresVec).zipWithIndex.foreach { case ((oldEntry, newEntry), i) =>
     val writeHit = thresholdWayMask.map(_(i))
