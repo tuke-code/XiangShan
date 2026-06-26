@@ -19,6 +19,7 @@ import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import utility.HasCircularQueuePtrHelper
+import utils.EnumUInt
 import xiangshan.frontend.FtqFetchRequest
 import xiangshan.frontend.PrunedAddr
 import xiangshan.frontend.TwoFetchInfo
@@ -41,12 +42,19 @@ class MetaEntry(implicit p: Parameters) extends FtqBundle {
   val paddingBits = if (meta.getWidth % 4 != 0) Some(UInt((4 - meta.getWidth % 4).W)) else None
 }
 
+object ResolveSource extends EnumUInt(2) {
+  def Backend: UInt = 0.U(width.W)
+  def Ifu:     UInt = 1.U(width.W)
+}
+
 class ResolveEntry(implicit p: Parameters) extends FtqBundle {
   val ftqIdx:  FtqPtr     = new FtqPtr
   val flushed: Bool       = Bool()
   val startPc: PrunedAddr = PrunedAddr(VAddrBits)
   // TODO: Reconsider branch number
   val branches: Vec[Valid[BranchInfo]] = Vec(ResolveEntryBranchNumber, Valid(new BranchInfo))
+  // used for bptrace & other debug proposes
+  val debug_source: UInt = ResolveSource()
 }
 
 class FtqRead[T <: Data](private val gen: T)(implicit p: Parameters) extends FtqBundle {

@@ -391,9 +391,10 @@ class Ftq(implicit p: Parameters) extends FtqModule
           startPc := getAlignedPc(resolveQueue.io.bpuTrain.bits.startPc + (i << FetchBlockAlignWidth).U)
       }
     }
-    trainCache.bits.branches := resolveQueue.io.bpuTrain.bits.branches
-    trainCache.bits.perfMeta := perfQueue(resolveQueue.io.bpuTrain.bits.ftqIdx.value).bpuPerf
-    trainIndexCache          := resolveQueue.io.bpuTrain.bits.ftqIdx
+    trainCache.bits.branches     := resolveQueue.io.bpuTrain.bits.branches
+    trainCache.bits.perfMeta     := perfQueue(resolveQueue.io.bpuTrain.bits.ftqIdx.value).bpuPerf
+    trainCache.bits.debug_source := resolveQueue.io.bpuTrain.bits.debug_source
+    trainIndexCache              := resolveQueue.io.bpuTrain.bits.ftqIdx
   }.elsewhen(io.toBpu.train.fire) {
     trainCache.valid := false.B
   }
