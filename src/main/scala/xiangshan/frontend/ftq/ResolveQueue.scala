@@ -66,16 +66,33 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
     "Backend resolves branches that should have been flushed\n"
   )
 
+  private class ResolveWithSource(implicit p: Parameters) extends Resolve {
+    val debug_source: UInt = ResolveSource()
+
+    def fromResolve(source: UInt, resolve: Resolve): ResolveWithSource = {
+      this.ftqIdx       := resolve.ftqIdx
+      this.ftqOffset    := resolve.ftqOffset
+      this.pc           := resolve.pc
+      this.target       := resolve.target
+      this.taken        := resolve.taken
+      this.mispredict   := resolve.mispredict
+      this.attribute    := resolve.attribute
+      this.debug_isRVC.foreach(_ := resolve.debug_isRVC.get)
+      this.debug_source := source
+      this
+    }
+  }
+
   private val backendFilteredResolve = io.backendResolve.map { backendResolve =>
-    val filteredResolve = Wire(Valid(new Resolve))
+    val filteredResolve = Wire(Valid(new ResolveWithSource))
     filteredResolve.valid := backendResolve.valid && !(backendResolve.bits.attribute.isDirect || backendResolve.bits.attribute.isReturn) &&
       !(backendRedirect.reduce(_ || _) && backendResolve.bits.ftqIdx > backendRedirectPtr)
-    filteredResolve.bits := backendResolve.bits
+    filteredResolve.bits.fromResolve(ResolveSource.Backend, backendResolve.bits)
     filteredResolve
   }
-  private val ifuFilteredResolve = Wire(Valid(new Resolve))
+  private val ifuFilteredResolve = Wire(Valid(new ResolveWithSource))
   ifuFilteredResolve.valid := io.ifuResolve.valid && !backendRedirect.reduce(_ || _)
-  ifuFilteredResolve.bits  := io.ifuResolve.bits
+  ifuFilteredResolve.bits.fromResolve(ResolveSource.Ifu, io.ifuResolve.bits)
 
   private val filteredResolve = backendFilteredResolve ++ Seq(ifuFilteredResolve)
 
@@ -105,7 +122,7 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
     val isDirect      = filteredResolve.bits.attribute.isDirect
     val shouldDrop    = !hasMispredict && (dropResolveCounter.isSaturatePositive || isDirect)
 
-    val resolve = Wire(Valid(new Resolve))
+    val resolve = Wire(Valid(new ResolveWithSource))
     resolve.valid := filteredResolve.valid && !shouldDrop
     resolve.bits  := filteredResolve.bits
     resolve
@@ -144,9 +161,10 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
 
   resolve.zipWithIndex.foreach { case (branch, i) =>
     when(branch.valid && !full) {
-      mem(enqIndex(i)).valid        := true.B
-      mem(enqIndex(i)).bits.ftqIdx  := branch.bits.ftqIdx
-      mem(enqIndex(i)).bits.startPc := branch.bits.pc
+      mem(enqIndex(i)).valid             := true.B
+      mem(enqIndex(i)).bits.ftqIdx       := branch.bits.ftqIdx
+      mem(enqIndex(i)).bits.startPc      := branch.bits.pc
+      mem(enqIndex(i)).bits.debug_source := branch.bits.debug_source
 
       val firstEmpty = mem(enqIndex(i)).bits.branches.indexWhere(!_.valid)
       val branchSlot = mem(enqIndex(i)).bits.branches(firstEmpty + PopCount(hitPrevious(i)))
