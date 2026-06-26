@@ -36,6 +36,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.rename.redef(i).valid.poke(false.B)
       dut.io.rename.redef(i).bits.oldPdest.poke(0.U)
       setRobPtr(dut.io.rename.redef(i).bits.robIdx, 0)
+      dut.io.rename.redefFallback(i).poke(false.B)
       for (s <- dut.io.rename.source(i).indices) {
         dut.io.rename.source(i)(s).valid.poke(false.B)
         dut.io.rename.source(i)(s).psrc.poke(0.U)
@@ -126,11 +127,35 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
     setRobPtr(dut.io.producerReady(lane).bits.robIdx, robIdx)
   }
 
-  private def guardDec(dut: IntSparseUCA, trackId: Int = 0, gen: Int = 1, lane: Int = 0): Unit = {
+  private def guardDec(
+    dut: IntSparseUCA,
+    trackId: Int = 0,
+    gen: Int = 1,
+    oldPdest: Int = 5,
+    robIdx: Int = 7,
+    lane: Int = 0
+  ): Unit = {
     dut.io.stGuardDec(lane).valid.poke(true.B)
     dut.io.stGuardDec(lane).bits.valid.poke(true.B)
     dut.io.stGuardDec(lane).bits.trackId.poke(trackId.U)
     dut.io.stGuardDec(lane).bits.trackGen.poke(gen.U)
+    dut.io.stGuardDec(lane).bits.oldPdest.poke(oldPdest.U)
+    setRobPtr(dut.io.stGuardDec(lane).bits.robIdx, robIdx)
+  }
+
+  private def releaseOpportunity(
+    dut: IntSparseUCA,
+    pdest: Int = 5,
+    producerRobIdx: Int = 1,
+    redefinerRobIdx: Int = 7,
+    trackId: Int = 0,
+    gen: Int = 1
+  ): Unit = {
+    redef(dut, oldPdest = pdest, robIdx = redefinerRobIdx)
+    dut.clock.step()
+    clearInputs(dut)
+    producerReady(dut, pdest = pdest, robIdx = producerRobIdx)
+    guardDec(dut, trackId = trackId, gen = gen, oldPdest = pdest, robIdx = redefinerRobIdx)
   }
 
   private def readDone(dut: IntSparseUCA, trackId: Int = 0, gen: Int = 1, srcSlot: Int = 0): Unit = {
@@ -371,9 +396,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.clock.step()
       clearInputs(dut)
 
-      redef(dut, oldPdest = 5, robIdx = 7)
-      producerReady(dut, pdest = 5, robIdx = 1)
-      guardDec(dut)
+      releaseOpportunity(dut)
       dut.io.earlyFree(0).valid.expect(false.B)
       dut.clock.step()
       clearInputs(dut)
@@ -395,9 +418,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.clock.step()
       clearInputs(dut)
 
-      redef(dut, oldPdest = 5, robIdx = 7)
-      producerReady(dut, pdest = 5, robIdx = 1)
-      guardDec(dut)
+      releaseOpportunity(dut)
       dut.io.earlyFree(0).valid.expect(true.B)
       dut.io.earlyFree(0).bits.pdest.expect(5.U)
       dut.io.earlyFree(0).bits.trackId.expect(0.U)
@@ -422,6 +443,31 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
     }
   }
 
+  it should "not early free from a guard decrement before the redefiner is recorded" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 2, observeOnly = false))
+    simulate(new IntSparseUCA()(config)) { dut =>
+      resetDut(dut)
+
+      allocate(dut, pdest = 5, robIdx = 1)
+      dut.clock.step()
+      clearInputs(dut)
+
+      producerReady(dut, pdest = 5, robIdx = 1)
+      guardDec(dut)
+      dut.io.earlyFree(0).valid.expect(false.B)
+      dut.clock.step()
+      clearInputs(dut)
+
+      dut.io.debug.entries(0).state.expect(IntEREntryState.counting)
+      dut.io.debug.entries(0).userCounter.expect(1.U)
+      dut.io.debug.entries(0).redefinerSeen.expect(false.B)
+      dut.io.debug.entries(0).redefinerNS.expect(false.B)
+      dut.io.debug.entries(0).earlyFreeIssued.expect(false.B)
+      dut.io.debug.earlyFreeCount.expect(0.U)
+      dut.io.debug.guardDecCount.expect(0.U)
+    }
+  }
+
   it should "suppress only the commit lane with exact released allocation identity" in {
     val config = configWith(IntEarlyReleaseParams(trackEntries = 2, observeOnly = false))
     simulate(new IntSparseUCA()(config)) { dut =>
@@ -430,9 +476,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       allocate(dut, pdest = 5, robIdx = 1)
       dut.clock.step()
       clearInputs(dut)
-      redef(dut, oldPdest = 5, robIdx = 7)
-      producerReady(dut, pdest = 5, robIdx = 1)
-      guardDec(dut)
+      releaseOpportunity(dut)
       dut.clock.step()
       clearInputs(dut)
       dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
@@ -470,9 +514,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
         allocate(dut, pdest = 5, robIdx = 1)
         dut.clock.step()
         clearInputs(dut)
-        redef(dut, oldPdest = 5, robIdx = 7)
-        producerReady(dut, pdest = 5, robIdx = 1)
-        guardDec(dut)
+        releaseOpportunity(dut)
         dut.clock.step()
         clearInputs(dut)
         dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
@@ -499,9 +541,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
         allocate(dut, pdest = 5, robIdx = 1)
         dut.clock.step()
         clearInputs(dut)
-        redef(dut, oldPdest = 5, robIdx = 7)
-        producerReady(dut, pdest = 5, robIdx = 1)
-        guardDec(dut)
+        releaseOpportunity(dut)
         dut.clock.step()
         clearInputs(dut)
         dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
@@ -519,7 +559,33 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
     }
   }
 
-  it should "ignore pdest-only commit free and fail fast on wrong released identity" in {
+  it should "ignore a same track generation commit redef when the released identity is different" in {
+    val config = configWith(IntEarlyReleaseParams(trackEntries = 2, observeOnly = false))
+    noException should be thrownBy {
+      simulate(new IntSparseUCA()(config)) { dut =>
+        resetDut(dut)
+
+        allocate(dut, pdest = 0x5a, robIdx = 143)
+        dut.clock.step()
+        clearInputs(dut)
+        releaseOpportunity(dut, pdest = 0x5a, producerRobIdx = 143, redefinerRobIdx = 143)
+        dut.clock.step()
+        clearInputs(dut)
+        dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
+
+        commitRedef(dut, lane = 0, oldPdest = 0x9d, trackId = 0, gen = 1, redefinerRobIdx = 171)
+        dut.io.commitSuppress(0).suppress.expect(false.B)
+        dut.clock.step()
+        clearInputs(dut)
+
+        dut.io.debug.activeCount.expect(1.U)
+        dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
+        dut.io.debug.commitIdentityMismatchCount.expect(1.U)
+      }
+    }
+  }
+
+  it should "ignore pdest-only commit free and wrong released identity" in {
     val config = configWith(IntEarlyReleaseParams(trackEntries = 2, observeOnly = false))
     simulate(new IntSparseUCA()(config)) { dut =>
       resetDut(dut)
@@ -527,9 +593,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       allocate(dut, pdest = 5, robIdx = 1)
       dut.clock.step()
       clearInputs(dut)
-      redef(dut, oldPdest = 5, robIdx = 7)
-      producerReady(dut, pdest = 5, robIdx = 1)
-      guardDec(dut)
+      releaseOpportunity(dut)
       dut.clock.step()
       clearInputs(dut)
       dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
@@ -542,21 +606,25 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.debug.activeCount.expect(1.U)
     }
 
-    assertThrows[Exception] {
+    noException should be thrownBy {
       simulate(new IntSparseUCA()(config)) { dut =>
         resetDut(dut)
 
         allocate(dut, pdest = 5, robIdx = 1)
         dut.clock.step()
         clearInputs(dut)
-        redef(dut, oldPdest = 5, robIdx = 7)
-        producerReady(dut, pdest = 5, robIdx = 1)
-        guardDec(dut)
+        releaseOpportunity(dut)
         dut.clock.step()
         clearInputs(dut)
 
         commitRedef(dut, lane = 0, oldPdest = 5, trackId = 0, gen = 1, redefinerRobIdx = 8)
+        dut.io.commitSuppress(0).suppress.expect(false.B)
         dut.clock.step()
+        clearInputs(dut)
+
+        dut.io.debug.activeCount.expect(1.U)
+        dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
+        dut.io.debug.commitIdentityMismatchCount.expect(1.U)
       }
     }
   }
@@ -612,9 +680,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       allocate(dut, pdest = 5, robIdx = 1)
       dut.clock.step()
       clearInputs(dut)
-      redef(dut, oldPdest = 5, robIdx = 7)
-      producerReady(dut, pdest = 5, robIdx = 1)
-      guardDec(dut)
+      releaseOpportunity(dut)
       dut.clock.step()
       clearInputs(dut)
 
@@ -638,7 +704,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
         clearInputs(dut)
 
         readDone(dut)
-        guardDec(dut)
+        squash(dut)
         dut.clock.step()
       }
     }

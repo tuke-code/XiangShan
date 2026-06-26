@@ -171,6 +171,7 @@ class IntERRobMultiUopRejectProbe(implicit p: Parameters) extends XSModule {
     val destValid = Input(Bool())
     val redefValid = Input(Bool())
     val entrySrcValid = Output(Bool())
+    val entryRedefValid = Output(Bool())
   })
 
   private val enq = Wire(new EnqRobUop)
@@ -199,6 +200,7 @@ class IntERRobMultiUopRejectProbe(implicit p: Parameters) extends XSModule {
 
   RobBundles.connectEnq(entry, enq)
   io.entrySrcValid := entry.intER.get.src(0).valid
+  io.entryRedefValid := entry.intER.get.redef.valid
 }
 
 class IntERRobDirectDiffShadowProbe(implicit p: Parameters) extends XSModule {
@@ -318,25 +320,30 @@ class IntERRobDirectDiffWriteDataShadowProbe(implicit p: Parameters) extends XSM
 
   val io = IO(new Bundle {
     val rfWb = Input(Vec(ports, Valid(new IntCommitWriteback)))
+    val commitRobFlag = Input(Bool())
     val commitRobIdx = Input(UInt(log2Ceil(RobSize).W))
     val commitPdest = Input(UInt(PhyRegIdxWidth.W))
     val clearValid = Input(Bool())
+    val clearRobFlag = Input(Bool())
     val clearRobIdx = Input(UInt(log2Ceil(RobSize).W))
+    val clearMatchFlag = Input(Bool())
     val commitData = Output(UInt(XLEN.W))
   })
 
   private val shadowValid = RegInit(VecInit.fill(RobSize, ports)(false.B))
+  private val shadowFlag = RegInit(VecInit.fill(RobSize, ports)(false.B))
   private val shadowPdest = RegInit(VecInit.fill(RobSize, ports)(0.U(PhyRegIdxWidth.W)))
   private val shadowData = RegInit(VecInit.fill(RobSize, ports)(0.U(XLEN.W)))
   private val commitPtr = Wire(new RobPtr)
-  commitPtr.flag := false.B
+  commitPtr.flag := io.commitRobFlag
   commitPtr.value := io.commitRobIdx
   private val clearPtr = Wire(new RobPtr)
-  clearPtr.flag := false.B
+  clearPtr.flag := io.clearRobFlag
   clearPtr.value := io.clearRobIdx
 
   RobIntDiffOps.updateWriteDataShadow(
     shadowValid = shadowValid,
+    shadowFlag = shadowFlag,
     shadowPdest = shadowPdest,
     shadowData = shadowData,
     writebackValid = io.rfWb.map(_.valid),
@@ -346,15 +353,26 @@ class IntERRobDirectDiffWriteDataShadowProbe(implicit p: Parameters) extends XSM
   )
   RobIntDiffOps.clearWriteDataShadow(
     shadowValid = shadowValid,
-    clearValid = Seq(io.clearValid),
-    clearRobIdx = Seq(clearPtr)
+    shadowFlag = shadowFlag,
+    clearValid = Seq(io.clearValid && io.clearMatchFlag),
+    clearRobIdx = Seq(clearPtr),
+    matchFlag = true
+  )
+  RobIntDiffOps.clearWriteDataShadow(
+    shadowValid = shadowValid,
+    shadowFlag = shadowFlag,
+    clearValid = Seq(io.clearValid && !io.clearMatchFlag),
+    clearRobIdx = Seq(clearPtr),
+    matchFlag = false
   )
 
   io.commitData := RobIntDiffOps.selectCommitWriteData(
     stored = RobIntDiffOps.selectStoredWriteData(
       storedValid = shadowValid(commitPtr.value),
+      storedFlag = shadowFlag(commitPtr.value),
       storedPdest = shadowPdest(commitPtr.value),
       storedData = shadowData(commitPtr.value),
+      commitRobIdx = commitPtr,
       commitPdest = io.commitPdest
     ),
     commitRobIdx = commitPtr,
@@ -388,6 +406,7 @@ class IntERRobDirectDiffExpandedCommitProbe(implicit p: Parameters) extends XSMo
 
   private val shadow = RegInit(VecInit.fill(IntLogicRegs)(0.U(XLEN.W)))
   private val writeValid = RegInit(VecInit.fill(RobSize, ports)(false.B))
+  private val writeFlag = RegInit(VecInit.fill(RobSize, ports)(false.B))
   private val writePdest = RegInit(VecInit.fill(RobSize, ports)(0.U(PhyRegIdxWidth.W)))
   private val writeData = RegInit(VecInit.fill(RobSize, ports)(0.U(XLEN.W)))
 
@@ -399,6 +418,7 @@ class IntERRobDirectDiffExpandedCommitProbe(implicit p: Parameters) extends XSMo
 
   RobIntDiffOps.updateWriteDataShadow(
     shadowValid = writeValid,
+    shadowFlag = writeFlag,
     shadowPdest = writePdest,
     shadowData = writeData,
     writebackValid = io.rfWb.map(_.valid),
@@ -409,6 +429,7 @@ class IntERRobDirectDiffExpandedCommitProbe(implicit p: Parameters) extends XSMo
 
   val expandedWriteData = RobIntDiffOps.selectExpandedCommitWriteData(
     shadowValid = writeValid,
+    shadowFlag = writeFlag,
     shadowPdest = writePdest,
     shadowData = writeData,
     commitRobIdx = commitRobPtrs,
@@ -914,18 +935,21 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     gateIdx should be >= 0
   }
 
-  it should "clear direct integer diff writeback shadow on walk and ROB index reuse" in {
+  it should "clear direct integer diff writeback shadow on commit and ROB index reuse but not walk" in {
     val robSource = sourceText("src/main/scala/xiangshan/backend/rob/Rob.scala")
 
     Seq(
-      "dtWriteShadowWalkClearValid",
       "dtWriteShadowEnqClearValid",
-      "dtWriteShadowClearValid",
-      "dtWriteShadowClearRobIdx"
+      "clearValid = dtCommitValid",
+      "clearRobIdx = deqPtrVec",
+      "clearValid = dtWriteShadowEnqClearValid",
+      "clearRobIdx = allocatePtrVec",
+      "matchFlag = false"
     ).foreach(fragment => robSource should include(fragment))
+    robSource should not include "dtWriteShadowWalkClearValid"
   }
 
-  it should "reject tracked ER metadata on multi-uop ROB entries" in {
+  it should "reject ROB-local tracked ER metadata on multi-uop ROB entries" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
 
     def driveEntry(
@@ -967,26 +991,29 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
       numUops: Int,
       srcValid: Boolean,
       destValid: Boolean,
-      redefValid: Boolean
+      redefValid: Boolean,
+      storedSrcValid: Boolean,
+      storedRedefValid: Boolean
     ): Unit = {
       noException should be thrownBy {
         simulate(new IntERRobMultiUopRejectProbe()(config)) { dut =>
           driveEntry(dut, firstUop, lastUop, numUops, srcValid, destValid, redefValid)
           dut.clock.step()
-          dut.io.entrySrcValid.expect(srcValid.B)
+          dut.io.entrySrcValid.expect(storedSrcValid.B)
+          dut.io.entryRedefValid.expect(storedRedefValid.B)
         }
       }
     }
 
     expectReject(firstUop = true, lastUop = false, numUops = 2, srcValid = true, destValid = false, redefValid = false)
     expectReject(firstUop = true, lastUop = false, numUops = 2, srcValid = false, destValid = true, redefValid = false)
-    expectReject(firstUop = true, lastUop = false, numUops = 2, srcValid = false, destValid = false, redefValid = true)
+    expectPass(firstUop = true, lastUop = false, numUops = 2, srcValid = false, destValid = false, redefValid = true, storedSrcValid = false, storedRedefValid = false)
     expectReject(firstUop = true, lastUop = false, numUops = 2, srcValid = true, destValid = true, redefValid = true)
     expectReject(firstUop = false, lastUop = true, numUops = 2, srcValid = true, destValid = true, redefValid = true)
     expectReject(firstUop = true, lastUop = true, numUops = 2, srcValid = true, destValid = true, redefValid = true)
 
-    expectPass(firstUop = true, lastUop = false, numUops = 2, srcValid = false, destValid = false, redefValid = false)
-    expectPass(firstUop = true, lastUop = true, numUops = 1, srcValid = true, destValid = true, redefValid = true)
+    expectPass(firstUop = true, lastUop = false, numUops = 2, srcValid = false, destValid = false, redefValid = false, storedSrcValid = false, storedRedefValid = false)
+    expectPass(firstUop = true, lastUop = true, numUops = 1, srcValid = true, destValid = true, redefValid = true, storedSrcValid = true, storedRedefValid = true)
   }
 
   it should "update direct integer diff shadow in commit-lane order with move source value and x0 zeroed" in {
@@ -1182,10 +1209,13 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
         dut.io.rfWb(port).bits.pdest.poke(0.U)
         dut.io.rfWb(port).bits.data.poke(0.U)
       }
+      dut.io.commitRobFlag.poke(false.B)
       dut.io.commitRobIdx.poke(0x23.U)
       dut.io.commitPdest.poke(11.U)
       dut.io.clearValid.poke(false.B)
+      dut.io.clearRobFlag.poke(false.B)
       dut.io.clearRobIdx.poke(0.U)
+      dut.io.clearMatchFlag.poke(true.B)
       dut.io.commitData.expect(0.U)
 
       dut.io.rfWb(1).valid.poke(true.B)
@@ -1216,7 +1246,10 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
           dut.io.rfWb(port).bits.data.poke(0.U)
         }
         dut.io.clearValid.poke(false.B)
+        dut.io.commitRobFlag.poke(false.B)
+        dut.io.clearRobFlag.poke(false.B)
         dut.io.clearRobIdx.poke(0.U)
+        dut.io.clearMatchFlag.poke(true.B)
       }
 
       clearWb()
@@ -1255,6 +1288,123 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.commitPdest.poke(10.U)
       dut.io.commitData.expect(0.U)
       dut.io.commitPdest.poke(20.U)
+      dut.io.commitData.expect(0.U)
+    }
+  }
+
+  it should "not clear direct integer diff write data for a different ROB pointer generation" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new IntERRobDirectDiffWriteDataShadowProbe()(config)) { dut =>
+      def clearWb(): Unit = {
+        for (port <- 0 until dut.io.rfWb.length) {
+          dut.io.rfWb(port).valid.poke(false.B)
+          dut.io.rfWb(port).bits.robIdx.flag.poke(false.B)
+          dut.io.rfWb(port).bits.robIdx.value.poke(0.U)
+          dut.io.rfWb(port).bits.pdest.poke(0.U)
+          dut.io.rfWb(port).bits.data.poke(0.U)
+        }
+        dut.io.clearValid.poke(false.B)
+        dut.io.clearRobFlag.poke(false.B)
+        dut.io.clearRobIdx.poke(0.U)
+        dut.io.clearMatchFlag.poke(true.B)
+      }
+
+      clearWb()
+      dut.io.commitRobFlag.poke(true.B)
+      dut.io.commitRobIdx.poke(0xdd.U)
+      dut.io.commitPdest.poke(160.U)
+      dut.io.commitData.expect(0.U)
+
+      dut.io.rfWb(2).valid.poke(true.B)
+      dut.io.rfWb(2).bits.robIdx.flag.poke(true.B)
+      dut.io.rfWb(2).bits.robIdx.value.poke(0xdd.U)
+      dut.io.rfWb(2).bits.pdest.poke(160.U)
+      dut.io.rfWb(2).bits.data.poke(BigInt("40600000", 16).U)
+      dut.io.commitData.expect(BigInt("40600000", 16).U)
+      dut.clock.step()
+
+      clearWb()
+      dut.io.commitRobFlag.poke(true.B)
+      dut.io.commitRobIdx.poke(0xdd.U)
+      dut.io.commitPdest.poke(160.U)
+      dut.io.commitData.expect(BigInt("40600000", 16).U)
+
+      dut.io.clearValid.poke(true.B)
+      dut.io.clearMatchFlag.poke(true.B)
+      dut.io.clearRobFlag.poke(false.B)
+      dut.io.clearRobIdx.poke(0xdd.U)
+      dut.clock.step()
+
+      clearWb()
+      dut.io.commitRobFlag.poke(true.B)
+      dut.io.commitRobIdx.poke(0xdd.U)
+      dut.io.commitPdest.poke(160.U)
+      dut.io.commitData.expect(BigInt("40600000", 16).U)
+
+      dut.io.clearValid.poke(true.B)
+      dut.io.clearMatchFlag.poke(true.B)
+      dut.io.clearRobFlag.poke(true.B)
+      dut.io.clearRobIdx.poke(0xdd.U)
+      dut.clock.step()
+
+      clearWb()
+      dut.io.commitRobFlag.poke(true.B)
+      dut.io.commitRobIdx.poke(0xdd.U)
+      dut.io.commitPdest.poke(160.U)
+      dut.io.commitData.expect(0.U)
+    }
+  }
+
+  it should "clear direct integer diff write data for all generations on ROB index reuse" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new IntERRobDirectDiffWriteDataShadowProbe()(config)) { dut =>
+      def clearWb(): Unit = {
+        for (port <- 0 until dut.io.rfWb.length) {
+          dut.io.rfWb(port).valid.poke(false.B)
+          dut.io.rfWb(port).bits.robIdx.flag.poke(false.B)
+          dut.io.rfWb(port).bits.robIdx.value.poke(0.U)
+          dut.io.rfWb(port).bits.pdest.poke(0.U)
+          dut.io.rfWb(port).bits.data.poke(0.U)
+        }
+        dut.io.clearValid.poke(false.B)
+        dut.io.clearRobFlag.poke(false.B)
+        dut.io.clearRobIdx.poke(0.U)
+        dut.io.clearMatchFlag.poke(false.B)
+      }
+
+      clearWb()
+      dut.io.commitRobFlag.poke(true.B)
+      dut.io.commitRobIdx.poke(0x35.U)
+      dut.io.commitPdest.poke(171.U)
+      dut.io.commitData.expect(0.U)
+
+      dut.io.rfWb(1).valid.poke(true.B)
+      dut.io.rfWb(1).bits.robIdx.flag.poke(true.B)
+      dut.io.rfWb(1).bits.robIdx.value.poke(0x35.U)
+      dut.io.rfWb(1).bits.pdest.poke(171.U)
+      dut.io.rfWb(1).bits.data.poke(BigInt("12345678", 16).U)
+      dut.clock.step()
+
+      clearWb()
+      dut.io.commitRobFlag.poke(true.B)
+      dut.io.commitRobIdx.poke(0x35.U)
+      dut.io.commitPdest.poke(171.U)
+      dut.io.commitData.expect(BigInt("12345678", 16).U)
+
+      // Reusing the same ROB value for another generation must invalidate any
+      // retained write data from the killed old generation before new writes arrive.
+      dut.io.clearValid.poke(true.B)
+      dut.io.clearMatchFlag.poke(false.B)
+      dut.io.clearRobFlag.poke(false.B)
+      dut.io.clearRobIdx.poke(0x35.U)
+      dut.clock.step()
+
+      clearWb()
+      dut.io.commitRobFlag.poke(true.B)
+      dut.io.commitRobIdx.poke(0x35.U)
+      dut.io.commitPdest.poke(171.U)
       dut.io.commitData.expect(0.U)
     }
   }

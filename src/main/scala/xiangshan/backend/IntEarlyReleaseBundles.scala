@@ -258,6 +258,7 @@ class IntERDebugBundle(implicit p: Parameters) extends XSBundle {
   val earlyFreeOpportunityCount = UInt(32.W)
   val earlyFreeCount = UInt(32.W)
   val commitSuppressCount = UInt(32.W)
+  val commitIdentityMismatchCount = UInt(32.W)
   val genMismatchCount = UInt(32.W)
   val redirectKillCount = UInt(32.W)
 }

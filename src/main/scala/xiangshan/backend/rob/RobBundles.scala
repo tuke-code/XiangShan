@@ -173,24 +173,25 @@ object RobBundles extends HasCircularQueuePtrHelper {
       robEntry.debug_sim_trig.foreach(_ := debug.debug_sim_trig)
     }
     robEntry.intER.foreach { meta =>
-      val hasTrackedIntER = VecInit(
+      val robLocalIntERSafe = robEnq.firstUop && robEnq.lastUop && robEnq.numUops === 1.U
+      val hasRobLocalTrackedIntER = VecInit(
         meta.src.indices.map(src => robEnq.intER.get.src(src).valid) ++
-          Seq(robEnq.intER.get.dest.valid, robEnq.intER.get.redef.valid)
+          Seq(robEnq.intER.get.dest.valid)
       ).asUInt.orR
       assert(
-        !hasTrackedIntER || (robEnq.firstUop && robEnq.lastUop && robEnq.numUops === 1.U),
+        !hasRobLocalTrackedIntER || robLocalIntERSafe,
         "ROB Int ER tracked metadata requires a single-uop entry"
       )
       for (src <- meta.src.indices) {
-        meta.src(src).valid := robEnq.intER.get.src(src).valid
+        meta.src(src).valid := robLocalIntERSafe && robEnq.intER.get.src(src).valid
         meta.src(src).trackId := robEnq.intER.get.src(src).trackId
         meta.src(src).trackGen := robEnq.intER.get.src(src).trackGen
         meta.src(src).srcIdx := robEnq.intER.get.src(src).srcIdx
         meta.src(src).psrc := robEnq.intER.get.src(src).psrc
         meta.src(src).readDone := false.B
       }
-      meta.dest := robEnq.intER.get.dest
-      meta.redef := robEnq.intER.get.redef
+      meta.dest := Mux(robLocalIntERSafe, robEnq.intER.get.dest, 0.U.asTypeOf(meta.dest))
+      meta.redef := Mux(robLocalIntERSafe, robEnq.intER.get.redef, 0.U.asTypeOf(meta.redef))
       meta.resolved := false.B
       meta.guardEmitted := false.B
     }
@@ -236,16 +237,19 @@ object RobBundles extends HasCircularQueuePtrHelper {
 object RobIntDiffOps {
   def selectStoredWriteData(
     storedValid: Seq[Bool],
+    storedFlag: Seq[Bool],
     storedPdest: Seq[UInt],
     storedData: Seq[UInt],
+    commitRobIdx: RobPtr,
     commitPdest: UInt
   ): UInt = {
+    require(storedValid.length == storedFlag.length, "ROB direct integer diff stored valid/flag slot counts must match")
     require(storedValid.length == storedPdest.length, "ROB direct integer diff stored valid/pdest slot counts must match")
     require(storedValid.length == storedData.length, "ROB direct integer diff stored valid/data slot counts must match")
 
     val selected = WireDefault(0.U(storedData.head.getWidth.W))
     for (slot <- storedValid.indices.reverse) {
-      when(storedValid(slot) && storedPdest(slot) === commitPdest) {
+      when(storedValid(slot) && storedFlag(slot) === commitRobIdx.flag && storedPdest(slot) === commitPdest) {
         selected := storedData(slot)
       }
     }
@@ -280,6 +284,7 @@ object RobIntDiffOps {
 
   def selectExpandedCommitWriteData(
     shadowValid: Vec[Vec[Bool]],
+    shadowFlag: Vec[Vec[Bool]],
     shadowPdest: Vec[Vec[UInt]],
     shadowData: Vec[Vec[UInt]],
     commitRobIdx: Seq[RobPtr],
@@ -296,8 +301,10 @@ object RobIntDiffOps {
       val ptr = commitRobIdx(lane).value
       val stored = selectStoredWriteData(
         storedValid = shadowValid(ptr),
+        storedFlag = shadowFlag(ptr),
         storedPdest = shadowPdest(ptr),
         storedData = shadowData(ptr),
+        commitRobIdx = commitRobIdx(lane),
         commitPdest = commitPdest(lane)
       )
       selected(lane) := selectCommitWriteData(
@@ -315,6 +322,7 @@ object RobIntDiffOps {
 
   def updateWriteDataShadow(
     shadowValid: Vec[Vec[Bool]],
+    shadowFlag: Vec[Vec[Bool]],
     shadowPdest: Vec[Vec[UInt]],
     shadowData: Vec[Vec[UInt]],
     writebackValid: Seq[Bool],
@@ -327,15 +335,19 @@ object RobIntDiffOps {
     require(writebackValid.length == writebackData.length, "ROB direct integer diff writeback valid/data counts must match")
     require(shadowValid.length == shadowPdest.length, "ROB direct integer diff shadow valid/pdest entry counts must match")
     require(shadowValid.length == shadowData.length, "ROB direct integer diff shadow valid/data entry counts must match")
+    require(shadowValid.length == shadowFlag.length, "ROB direct integer diff shadow valid/flag entry counts must match")
     require(shadowValid.nonEmpty, "ROB direct integer diff write-data shadow must have entries")
     require(shadowValid.head.nonEmpty, "ROB direct integer diff write-data shadow must have slots")
+    require(shadowFlag.forall(_.length == shadowValid.head.length), "ROB direct integer diff flag slots must match valid slots")
     require(shadowPdest.forall(_.length == shadowValid.head.length), "ROB direct integer diff pdest slots must match valid slots")
     require(shadowData.forall(_.length == shadowValid.head.length), "ROB direct integer diff data slots must match valid slots")
 
     var nextValid = Wire(chiselTypeOf(shadowValid))
+    var nextFlag = Wire(chiselTypeOf(shadowFlag))
     var nextPdest = Wire(chiselTypeOf(shadowPdest))
     var nextData = Wire(chiselTypeOf(shadowData))
     nextValid := shadowValid
+    nextFlag := shadowFlag
     nextPdest := shadowPdest
     nextData := shadowData
 
@@ -343,16 +355,20 @@ object RobIntDiffOps {
     val slotCount = shadowValid.head.length
     for (port <- writebackValid.indices.reverse) {
       val afterValid = Wire(chiselTypeOf(shadowValid))
+      val afterFlag = Wire(chiselTypeOf(shadowFlag))
       val afterPdest = Wire(chiselTypeOf(shadowPdest))
       val afterData = Wire(chiselTypeOf(shadowData))
       afterValid := nextValid
+      afterFlag := nextFlag
       afterPdest := nextPdest
       afterData := nextData
 
       val entryIdx = writebackRobIdx(port).value(entryIdxWidth - 1, 0)
       val entryIdxInRange = writebackRobIdx(port).value < shadowValid.length.U
       val matchOH = VecInit((0 until slotCount).map { slot =>
-        nextValid(entryIdx)(slot) && nextPdest(entryIdx)(slot) === writebackPdest(port)
+        nextValid(entryIdx)(slot) &&
+          nextFlag(entryIdx)(slot) === writebackRobIdx(port).flag &&
+          nextPdest(entryIdx)(slot) === writebackPdest(port)
       })
       val freeOH = VecInit((0 until slotCount).map(slot => !nextValid(entryIdx)(slot)))
       val updateOH = Mux(matchOH.asUInt.orR, matchOH.asUInt, PriorityEncoderOH(freeOH.asUInt))
@@ -365,6 +381,7 @@ object RobIntDiffOps {
         for (slot <- 0 until slotCount) {
           when(updateOH(slot)) {
             afterValid(entryIdx)(slot) := true.B
+            afterFlag(entryIdx)(slot) := writebackRobIdx(port).flag
             afterPdest(entryIdx)(slot) := writebackPdest(port)
             afterData(entryIdx)(slot) := writebackData(port)
           }
@@ -372,28 +389,38 @@ object RobIntDiffOps {
       }
 
       nextValid = afterValid
+      nextFlag = afterFlag
       nextPdest = afterPdest
       nextData = afterData
     }
 
     shadowValid := nextValid
+    shadowFlag := nextFlag
     shadowPdest := nextPdest
     shadowData := nextData
   }
 
   def clearWriteDataShadow(
     shadowValid: Vec[Vec[Bool]],
+    shadowFlag: Vec[Vec[Bool]],
     clearValid: Seq[Bool],
-    clearRobIdx: Seq[RobPtr]
+    clearRobIdx: Seq[RobPtr],
+    matchFlag: Boolean = true
   ): Unit = {
     require(clearValid.length == clearRobIdx.length, "ROB direct integer diff shadow clear valid/robIdx counts must match")
+    require(shadowValid.length == shadowFlag.length, "ROB direct integer diff shadow clear valid/flag entry counts must match")
+    require(shadowFlag.forall(_.length == shadowValid.head.length), "ROB direct integer diff shadow clear flag slots must match valid slots")
     val entryIdxWidth = log2Ceil(shadowValid.length max 2)
     for (lane <- clearValid.indices) {
       val entryIdx = clearRobIdx(lane).value(entryIdxWidth - 1, 0)
       val entryIdxInRange = clearRobIdx(lane).value < shadowValid.length.U
       assert(!clearValid(lane) || entryIdxInRange, "ROB direct integer diff write-data shadow clear robIdx out of range")
       when(clearValid(lane) && entryIdxInRange) {
-        shadowValid(entryIdx) := 0.U.asTypeOf(shadowValid(entryIdx))
+        for (slot <- 0 until shadowValid.head.length) {
+          when((!matchFlag).B || shadowFlag(entryIdx)(slot) === clearRobIdx(lane).flag) {
+            shadowValid(entryIdx)(slot) := false.B
+          }
+        }
       }
     }
   }

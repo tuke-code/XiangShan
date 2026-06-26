@@ -1454,34 +1454,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
   private val deqHeadInfoFuType = robEntries(deqPtr.value).debug_fuType.getOrElse(0.U.asTypeOf(FuType()))
   val deqUopCommitType = robEntries(deqPtr.value).debug_commitType.getOrElse(0.U)
 
-  XSPerfAccumulate("waitAluCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.alu.U)
-  XSPerfAccumulate("waitMulCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.mul.U)
-  XSPerfAccumulate("waitDivCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.div.U)
-  XSPerfAccumulate("waitBrhCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.brh.U)
-  XSPerfAccumulate("waitJmpCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.jmp.U)
-  XSPerfAccumulate("waitCsrCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.csr.U)
-  XSPerfAccumulate("waitFenCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.fence.U)
-  XSPerfAccumulate("waitBkuCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.bku.U)
-  XSPerfAccumulate("waitLduCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.ldu.U)
-  XSPerfAccumulate("waitStuCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.stu.U)
-  XSPerfAccumulate("waitAtmCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.mou.U)
-
-  XSPerfAccumulate("waitVfaluCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.vfalu.U)
-  XSPerfAccumulate("waitVfmaCycle" , deqNotWritebacked && deqHeadInfoFuType === FuType.vfma.U)
-  XSPerfAccumulate("waitVfdivCycle", deqNotWritebacked && deqHeadInfoFuType === FuType.vfdiv.U)
-
-  val vfalufuop = Seq(VfaluType.vfadd, VfaluType.vfwadd, VfaluType.vfwadd_w, VfaluType.vfsub, VfaluType.vfwsub, VfaluType.vfwsub_w, VfaluType.vfmin, VfaluType.vfmax,
-    VfaluType.vfmerge, VfaluType.vfmv, VfaluType.vfsgnj, VfaluType.vfsgnjn, VfaluType.vfsgnjx, VfaluType.vfeq, VfaluType.vfne, VfaluType.vflt, VfaluType.vfle, VfaluType.vfgt,
-    VfaluType.vfge, VfaluType.vfclass, VfaluType.vfmv_f_s, VfaluType.vfmv_s_f, VfaluType.vfredusum, VfaluType.vfredmax, VfaluType.vfredmin, VfaluType.vfredosum, VfaluType.vfwredosum)
-
-  vfalufuop.zipWithIndex.map{
-    case(fuoptype,i) =>  XSPerfAccumulate(s"waitVfalu_${i}Cycle", deqNotWritebacked && deqHeadInfoFuType === fuoptype && deqHeadInfoFuType === FuType.vfalu.U)
-  }
-
-  XSPerfAccumulate("waitNormalCycle", deqNotWritebacked && deqUopCommitType === CommitType.NORMAL)
-  XSPerfAccumulate("waitBranchCycle", deqNotWritebacked && Itype.isBranch(debug_deqUop.traceBlockInPipe.itype))
-  XSPerfAccumulate("waitLoadCycle", deqNotWritebacked   && deqUopCommitType === CommitType.LOAD)
-  XSPerfAccumulate("waitStoreCycle", deqNotWritebacked  && deqUopCommitType === CommitType.STORE)
+  RobPerfDebugHelper.addRobHeadWaitCounters(deqNotWritebacked, deqHeadInfoFuType, deqUopCommitType, debug_deqUop)
   XSPerfReference("robHeadPC",
     RegEnable(io.commits.info(0).debug_pc.getOrElse(0.U),
               0.U,
@@ -1491,34 +1464,27 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     XSPerfAccumulate(s"commitCompressCnt${i}", PopCount(io.commits.commitValid.zip(instrSizeCommit).map { case (valid, instrSize) => io.commits.isCommit && valid && instrSize === i.U }))
   )
   XSPerfAccumulate("compressSize", io.commits.commitValid.zip(instrSizeCommit).map { case (valid, instrSize) => Mux(io.commits.isCommit && valid && instrSize > 1.U, instrSize, 0.U) }.reduce(_ +& _))
-  def getPerfDebugInfo(uop: RobEntryBundle): PerfDebugInfo = {
-    uop.perfDebugInfo.getOrElse(0.U.asTypeOf(new PerfDebugInfo))
-  }
-  val dispatchLatency = commitDebugUop.map(uop => getPerfDebugInfo(uop).dispatchTime - getPerfDebugInfo(uop).renameTime)
-  val enqRsLatency = commitDebugUop.map(uop => getPerfDebugInfo(uop).enqRsTime - getPerfDebugInfo(uop).dispatchTime)
-  val selectLatency = commitDebugUop.map(uop => getPerfDebugInfo(uop).selectTime - getPerfDebugInfo(uop).enqRsTime)
-  val issueLatency = commitDebugUop.map(uop => getPerfDebugInfo(uop).issueTime - getPerfDebugInfo(uop).selectTime)
-  val executeLatency = commitDebugUop.map(uop => getPerfDebugInfo(uop).writebackTime - getPerfDebugInfo(uop).issueTime)
-  val rsFuLatency = commitDebugUop.map(uop => getPerfDebugInfo(uop).writebackTime - getPerfDebugInfo(uop).enqRsTime)
-  val commitLatency = commitDebugUop.map(uop => timer - getPerfDebugInfo(uop).writebackTime)
-  val tlbLatency = commitDebugUop.map(uop => getPerfDebugInfo(uop).tlbRespTime - getPerfDebugInfo(uop).tlbFirstReqTime)
-
-  def latencySum(cond: Seq[Bool], latency: Seq[UInt]): UInt = {
-    cond.zip(latency).map(x => Mux(x._1, x._2, 0.U)).reduce(_ +& _)
-  }
+  val dispatchLatency = commitDebugUop.map(uop => RobPerfDebugHelper.getPerfDebugInfo(uop).dispatchTime - RobPerfDebugHelper.getPerfDebugInfo(uop).renameTime)
+  val enqRsLatency = commitDebugUop.map(uop => RobPerfDebugHelper.getPerfDebugInfo(uop).enqRsTime - RobPerfDebugHelper.getPerfDebugInfo(uop).dispatchTime)
+  val selectLatency = commitDebugUop.map(uop => RobPerfDebugHelper.getPerfDebugInfo(uop).selectTime - RobPerfDebugHelper.getPerfDebugInfo(uop).enqRsTime)
+  val issueLatency = commitDebugUop.map(uop => RobPerfDebugHelper.getPerfDebugInfo(uop).issueTime - RobPerfDebugHelper.getPerfDebugInfo(uop).selectTime)
+  val executeLatency = commitDebugUop.map(uop => RobPerfDebugHelper.getPerfDebugInfo(uop).writebackTime - RobPerfDebugHelper.getPerfDebugInfo(uop).issueTime)
+  val rsFuLatency = commitDebugUop.map(uop => RobPerfDebugHelper.getPerfDebugInfo(uop).writebackTime - RobPerfDebugHelper.getPerfDebugInfo(uop).enqRsTime)
+  val commitLatency = commitDebugUop.map(uop => timer - RobPerfDebugHelper.getPerfDebugInfo(uop).writebackTime)
+  val tlbLatency = commitDebugUop.map(uop => RobPerfDebugHelper.getPerfDebugInfo(uop).tlbRespTime - RobPerfDebugHelper.getPerfDebugInfo(uop).tlbFirstReqTime)
 
   for (fuType <- FuType.functionNameMap.keys) {
     val fuName = FuType.functionNameMap(fuType)
     val commitIsFuType = io.commits.commitValid.zip(commitDebugUop).map(x => x._1 && x._2.debug_fuType.getOrElse(0.U) === fuType.U)
     XSPerfRolling(s"ipc_futype_${fuName}", ifCommit(PopCount(commitIsFuType)), 1000, clock, reset)
     XSPerfAccumulate(s"${fuName}_instr_cnt", ifCommit(PopCount(commitIsFuType)))
-    XSPerfAccumulate(s"${fuName}_latency_dispatch", ifCommit(latencySum(commitIsFuType, dispatchLatency)))
-    XSPerfAccumulate(s"${fuName}_latency_enq_rs", ifCommit(latencySum(commitIsFuType, enqRsLatency)))
-    XSPerfAccumulate(s"${fuName}_latency_select", ifCommit(latencySum(commitIsFuType, selectLatency)))
-    XSPerfAccumulate(s"${fuName}_latency_issue", ifCommit(latencySum(commitIsFuType, issueLatency)))
-    XSPerfAccumulate(s"${fuName}_latency_execute", ifCommit(latencySum(commitIsFuType, executeLatency)))
-    XSPerfAccumulate(s"${fuName}_latency_enq_rs_execute", ifCommit(latencySum(commitIsFuType, rsFuLatency)))
-    XSPerfAccumulate(s"${fuName}_latency_commit", ifCommit(latencySum(commitIsFuType, commitLatency)))
+    XSPerfAccumulate(s"${fuName}_latency_dispatch", ifCommit(RobPerfDebugHelper.latencySum(commitIsFuType, dispatchLatency)))
+    XSPerfAccumulate(s"${fuName}_latency_enq_rs", ifCommit(RobPerfDebugHelper.latencySum(commitIsFuType, enqRsLatency)))
+    XSPerfAccumulate(s"${fuName}_latency_select", ifCommit(RobPerfDebugHelper.latencySum(commitIsFuType, selectLatency)))
+    XSPerfAccumulate(s"${fuName}_latency_issue", ifCommit(RobPerfDebugHelper.latencySum(commitIsFuType, issueLatency)))
+    XSPerfAccumulate(s"${fuName}_latency_execute", ifCommit(RobPerfDebugHelper.latencySum(commitIsFuType, executeLatency)))
+    XSPerfAccumulate(s"${fuName}_latency_enq_rs_execute", ifCommit(RobPerfDebugHelper.latencySum(commitIsFuType, rsFuLatency)))
+    XSPerfAccumulate(s"${fuName}_latency_commit", ifCommit(RobPerfDebugHelper.latencySum(commitIsFuType, commitLatency)))
   }
   XSPerfAccumulate(s"redirect_use_snapshot", io.redirect.valid && io.snpt.useSnpt)
 
@@ -1692,6 +1658,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     }
     val dtIntWriteShadowSlots = backendParams.numPregWb(xiangshan.backend.datapath.DataConfig.IntData())
     val dtIntWriteValidShadow = RegInit(VecInit.fill(RobSize, dtIntWriteShadowSlots)(false.B))
+    val dtIntWriteFlagShadow = RegInit(VecInit.fill(RobSize, dtIntWriteShadowSlots)(false.B))
     val dtIntWritePdestShadow = RegInit(VecInit.fill(RobSize, dtIntWriteShadowSlots)(0.U(PhyRegIdxWidth.W)))
     val dtIntWriteDataShadow = RegInit(VecInit.fill(RobSize, dtIntWriteShadowSlots)(0.U(XLEN.W)))
     val dtArchIntShadow = RegInit(VecInit.fill(IntLogicRegs)(0.U(XLEN.W)))
@@ -1725,8 +1692,10 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       dtCommitPdest(i) := io.commits.info(i).debug_pdest.get
       val storedWdata = RobIntDiffOps.selectStoredWriteData(
         storedValid = dtIntWriteValidShadow(ptr),
+        storedFlag = dtIntWriteFlagShadow(ptr),
         storedPdest = dtIntWritePdestShadow(ptr),
         storedData = dtIntWriteDataShadow(ptr),
+        commitRobIdx = deqPtrVec(i),
         commitPdest = dtCommitPdest(i)
       )
       dtCommitWdata(i) := RobIntDiffOps.selectCommitWriteData(
@@ -1752,6 +1721,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
     }
     dtExpandedCommitWdata := RobIntDiffOps.selectExpandedCommitWriteData(
       shadowValid = dtIntWriteValidShadow,
+      shadowFlag = dtIntWriteFlagShadow,
       shadowPdest = dtIntWritePdestShadow,
       shadowData = dtIntWriteDataShadow,
       commitRobIdx = dtExpandedCommitRobIdx,
@@ -1764,6 +1734,7 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
 
     RobIntDiffOps.updateWriteDataShadow(
       shadowValid = dtIntWriteValidShadow,
+      shadowFlag = dtIntWriteFlagShadow,
       shadowPdest = dtIntWritePdestShadow,
       shadowData = dtIntWriteDataShadow,
       writebackValid = io.intCommitWriteback.map(_.valid),
@@ -1771,14 +1742,19 @@ class RobImp(override val wrapper: Rob)(implicit p: Parameters, params: BackendP
       writebackPdest = io.intCommitWriteback.map(_.bits.pdest),
       writebackData = io.intCommitWriteback.map(_.bits.data)
     )
-    val dtWriteShadowWalkClearValid = (0 until CommitWidth).map(i => io.commits.isWalk && io.commits.walkValid(i))
     val dtWriteShadowEnqClearValid = canEnqueue.map(_ && !io.redirect.valid)
-    val dtWriteShadowClearValid = dtCommitValid ++ dtWriteShadowWalkClearValid ++ dtWriteShadowEnqClearValid
-    val dtWriteShadowClearRobIdx = deqPtrVec ++ walkPtrVec ++ allocatePtrVec
     RobIntDiffOps.clearWriteDataShadow(
       shadowValid = dtIntWriteValidShadow,
-      clearValid = dtWriteShadowClearValid,
-      clearRobIdx = dtWriteShadowClearRobIdx
+      shadowFlag = dtIntWriteFlagShadow,
+      clearValid = dtCommitValid,
+      clearRobIdx = deqPtrVec
+    )
+    RobIntDiffOps.clearWriteDataShadow(
+      shadowValid = dtIntWriteValidShadow,
+      shadowFlag = dtIntWriteFlagShadow,
+      clearValid = dtWriteShadowEnqClearValid,
+      clearRobIdx = allocatePtrVec,
+      matchFlag = false
     )
 
     val dtRobLaneShadowNext = Wire(Vec(IntLogicRegs, UInt(XLEN.W)))

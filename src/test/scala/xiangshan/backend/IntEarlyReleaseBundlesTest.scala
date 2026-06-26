@@ -64,33 +64,6 @@ class IntEarlyReleaseBundleProbe(
   require(RobSize == expectedRobSize, "IntER trackEntries must not change ROB size")
 }
 
-class DecodeOldDestRatPortShapeProbe(
-  expectedOldDestPort: Boolean
-)(implicit p: Parameters) extends XSModule {
-  val decode = IO(new DecodeStageIO)
-
-  require(decode.intRat.length == RenameWidth, "decode int RAT lane count must follow RenameWidth")
-  require(decode.intRat.head.length == backendParams.numIntRegSrc, "decode int RAT source ports must follow backend topology")
-
-  val oldDestPort = decode.elements.get("intOldDestRat")
-  require(oldDestPort.isDefined == expectedOldDestPort, "decode old-dest RAT port presence must follow Int ER enable")
-  oldDestPort.foreach { port =>
-    require(port.asInstanceOf[Vec[RatReadPort]].length == RenameWidth, "decode old-dest RAT port must have one entry per rename lane")
-  }
-}
-
-class IntRatReadPortCountProbe(
-  expectedPortsPerLane: Int
-)(implicit p: Parameters) extends RenameTable(
-  Reg_I,
-  p(XSCoreParamsKey).RabCommitWidth * p(XSCoreParamsKey).MaxUopSize
-) {
-  require(
-    io.readPorts.length == RenameWidth * expectedPortsPerLane,
-    "integer RAT read-port count must follow source plus old-dest topology"
-  )
-}
-
 class RenameTableWrapperOldDestPortShapeProbe(
   expectedOldDestPort: Boolean
 )(implicit p: Parameters) extends RenameTableWrapper {
@@ -626,6 +599,7 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
     val redirect = Input(Bool())
     val rabWalk = Input(Bool())
     val singleUop = Input(Bool())
+    val numUops = Input(UInt(log2Ceil(MaxUopSize).W))
     val hasException = Input(Bool())
     val flushPipe = Input(Bool())
     val singleStep = Input(Bool())
@@ -655,10 +629,11 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
   val uca = Module(new IntSparseUCA)
   val blocked = RenameIntEROps.redirectBlocked(io.redirect, io.rabWalk)
   val sourceProbeAllowed = RenameIntEROps.sourceProbeAllowed(io.renameFire, blocked)
+  val robSingleUop = RenameIntEROps.singleRobEntryUop(io.singleUop, io.numUops)
   val sourceFallback = RenameIntEROps.sourceFallback(
     renameFire = io.renameFire,
     isMove = io.isMove,
-    singleUop = io.singleUop,
+    singleUop = robSingleUop,
     hasException = io.hasException,
     flushPipe = io.flushPipe,
     singleStep = io.singleStep,
@@ -669,7 +644,7 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
     needIntDest = io.needIntDest,
     isMove = io.isMove,
     logicLdest = io.ldest,
-    singleUop = io.singleUop,
+    singleUop = robSingleUop,
     hasException = io.hasException,
     flushPipe = io.flushPipe,
     singleStep = io.singleStep,
@@ -694,6 +669,7 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
   uca.io.rename.sourceFallback := 0.U.asTypeOf(uca.io.rename.sourceFallback)
   uca.io.rename.alloc := 0.U.asTypeOf(uca.io.rename.alloc)
   uca.io.rename.redef := 0.U.asTypeOf(uca.io.rename.redef)
+  uca.io.rename.redefFallback := 0.U.asTypeOf(uca.io.rename.redefFallback)
 
   uca.io.rename.sourceFallback(0) := sourceFallback
   uca.io.rename.alloc(0).valid := producerEligible
@@ -702,6 +678,16 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
   uca.io.rename.redef(0).valid := redefProbeValid
   uca.io.rename.redef(0).bits.oldPdest := io.oldPdest
   uca.io.rename.redef(0).bits.robIdx := io.robIdx
+  uca.io.rename.redefFallback(0) := RenameIntEROps.redefinitionFallback(
+    renameFire = io.renameFire,
+    needIntDest = io.needIntDest,
+    logicLdest = io.ldest,
+    singleUop = robSingleUop,
+    hasException = io.hasException,
+    flushPipe = io.flushPipe,
+    singleStep = io.singleStep,
+    blocked = blocked
+  )
   uca.io.rename.source(0)(0).valid := sourceProbeAllowed && io.sourceValid && io.sourcePsrc =/= 0.U
   uca.io.rename.source(0)(0).psrc := io.sourcePsrc
   uca.io.rename.source(0)(0).srcIdx := 0.U
@@ -718,6 +704,70 @@ class RenameERPolicyProbe(implicit p: Parameters) extends XSModule {
   io.debugActiveCount := uca.io.debug.activeCount
   io.debugFallbackCount := uca.io.debug.fallbackCount
   io.debugRedirectKillCount := uca.io.debug.redirectKillCount
+}
+
+class RenameERStoreDataPolicyProbe(implicit p: Parameters) extends XSModule {
+  require(EnableIntEarlyRegRelease, "probe requires Int ER metadata")
+  require(IntERLogicalSrcWidth > 1, "store-data policy probe requires source slot 1")
+
+  val io = IO(new Bundle {
+    val renameFire = Input(Bool())
+    val allocProducer = Input(Bool())
+    val singleUop = Input(Bool())
+    val isScalarStore = Input(Bool())
+    val source1Valid = Input(Bool())
+    val source1Psrc = Input(UInt(PhyRegIdxWidth.W))
+    val pdest = Input(UInt(PhyRegIdxWidth.W))
+    val robIdx = Input(new xiangshan.backend.rob.RobPtr)
+
+    val sourceFallback = Output(Bool())
+    val src1Valid = Output(Bool())
+    val fallbackMark = Output(Bool())
+    val destValid = Output(Bool())
+    val debugFallbackCount = Output(UInt(32.W))
+  })
+
+  val uca = Module(new IntSparseUCA)
+  val sourceProbeAllowed = RenameIntEROps.sourceProbeAllowed(io.renameFire, blocked = false.B)
+  val robSingleUop = RenameIntEROps.singleRobEntryUop(io.singleUop, 1.U)
+  val sourceFallback = RenameIntEROps.sourceFallback(
+    renameFire = io.renameFire,
+    isMove = false.B,
+    singleUop = robSingleUop,
+    hasException = false.B,
+    flushPipe = false.B,
+    singleStep = false.B,
+    blocked = false.B,
+    conservativeStoreDataConsumer = io.isScalarStore && io.source1Valid && io.source1Psrc =/= 0.U
+  )
+
+  uca.io.redirectKill := false.B
+  uca.io.producerReady := 0.U.asTypeOf(uca.io.producerReady)
+  uca.io.readDone := 0.U.asTypeOf(uca.io.readDone)
+  uca.io.squash := 0.U.asTypeOf(uca.io.squash)
+  uca.io.stGuardDec := 0.U.asTypeOf(uca.io.stGuardDec)
+  uca.io.commitOldPdest := 0.U.asTypeOf(uca.io.commitOldPdest)
+  uca.io.commitNeedFree := 0.U.asTypeOf(uca.io.commitNeedFree)
+  uca.io.commitRedef := 0.U.asTypeOf(uca.io.commitRedef)
+  uca.io.rename.source := 0.U.asTypeOf(uca.io.rename.source)
+  uca.io.rename.sourceFallback := 0.U.asTypeOf(uca.io.rename.sourceFallback)
+  uca.io.rename.alloc := 0.U.asTypeOf(uca.io.rename.alloc)
+  uca.io.rename.redef := 0.U.asTypeOf(uca.io.rename.redef)
+  uca.io.rename.redefFallback := 0.U.asTypeOf(uca.io.rename.redefFallback)
+
+  uca.io.rename.sourceFallback(0) := sourceFallback
+  uca.io.rename.alloc(0).valid := io.allocProducer
+  uca.io.rename.alloc(0).bits.pdest := io.pdest
+  uca.io.rename.alloc(0).bits.robIdx := io.robIdx
+  uca.io.rename.source(0)(1).valid := sourceProbeAllowed && io.source1Valid && io.source1Psrc =/= 0.U
+  uca.io.rename.source(0)(1).psrc := io.source1Psrc
+  uca.io.rename.source(0)(1).srcIdx := 1.U
+
+  io.sourceFallback := sourceFallback
+  io.src1Valid := uca.io.rename.srcMatch(0)(1).valid
+  io.fallbackMark := uca.io.rename.fallbackMark(0)
+  io.destValid := uca.io.rename.destTrack(0).valid
+  io.debugFallbackCount := uca.io.debug.fallbackCount
 }
 
 class RenameERFullPathProbe(implicit p: Parameters) extends XSModule {
@@ -901,74 +951,6 @@ class RenameERFullPathProbe(implicit p: Parameters) extends XSModule {
   io.debugEarlyFreeCount := rename.io.intERDebug.get.earlyFreeCount
 }
 
-class DecodeOldDestHoldProbe(implicit p: Parameters) extends XSModule {
-  private val intLogicWidth = log2Ceil(IntLogicRegs)
-
-  val io = IO(new Bundle {
-    val inValid = Input(Bool())
-    val outReady = Input(Bool())
-    val instr = Input(UInt(32.W))
-    val writeValid = Input(Bool())
-    val writeAddr = Input(UInt(intLogicWidth.W))
-    val writeData = Input(UInt(PhyRegIdxWidth.W))
-    val oldDestAddr = Output(UInt(intLogicWidth.W))
-    val oldDestHold = Output(Bool())
-    val oldDestData = Output(UInt(PhyRegIdxWidth.W))
-    val outValid = Output(Bool())
-    val outLdest = Output(UInt(LogicRegsWidth.W))
-    val inReady = Output(Bool())
-  })
-
-  val decode = Module(new DecodeStage)
-  val intRat = Module(new RenameTable(Reg_I, 0))
-
-  decode.io.redirect.valid := false.B
-  decode.io.redirect.bits := 0.U.asTypeOf(new Redirect)
-  decode.io.csrCtrl := 0.U.asTypeOf(decode.io.csrCtrl)
-  decode.io.fromCSR := 0.U.asTypeOf(decode.io.fromCSR)
-  decode.io.fusion := 0.U.asTypeOf(decode.io.fusion)
-  decode.io.fromRob := 0.U.asTypeOf(decode.io.fromRob)
-  decode.io.vsetvlVType := 0.U.asTypeOf(decode.io.vsetvlVType)
-  decode.io.vstart := 0.U.asTypeOf(decode.io.vstart)
-  decode.io.stallReason.in.reason.foreach(_ := NoStall.id.U)
-  decode.io.debugOutValid.foreach(_ := 0.U.asTypeOf(decode.io.debugOutValid.get))
-
-  for (i <- 0 until DecodeWidth) {
-    decode.io.in(i).valid := io.inValid && i.U === 0.U
-    decode.io.in(i).bits := 0.U.asTypeOf(decode.io.in(i).bits)
-    decode.io.in(i).bits.instr := io.instr
-    decode.io.in(i).bits.isLastInFtqEntry := true.B
-    decode.io.out(i).ready := io.outReady
-
-    decode.io.fpRat(i).foreach(_.data := 0.U)
-    decode.io.vecRat(i).foreach(_.data := 0.U)
-    decode.io.v0Rat(i).data := 0.U
-    decode.io.vlRat(i).data := 0.U
-  }
-
-  intRat.io.redirect := false.B
-  intRat.io.snpt := 0.U.asTypeOf(intRat.io.snpt)
-  intRat.io.specWritePorts.foreach(_ := 0.U.asTypeOf(intRat.io.specWritePorts.head))
-  intRat.io.archWritePorts.foreach(_ := 0.U.asTypeOf(intRat.io.archWritePorts.head))
-  intRat.io.specWritePorts(0).wen := io.writeValid
-  intRat.io.specWritePorts(0).addr := io.writeAddr
-  intRat.io.specWritePorts(0).data := io.writeData
-  intRat.io.diffWritePorts.foreach(_ := 0.U.asTypeOf(intRat.io.diffWritePorts.get))
-
-  val readPorts = decode.io.intRat.flatten ++ decode.io.intOldDestRat.get
-  require(readPorts.length == intRat.io.readPorts.length, "decode old-dest hold probe must cover all integer RAT reads")
-  for ((decodePort, ratPort) <- readPorts.zip(intRat.io.readPorts)) {
-    decodePort <> ratPort
-  }
-
-  io.oldDestAddr := decode.io.intOldDestRat.get(0).addr
-  io.oldDestHold := decode.io.intOldDestRat.get(0).hold
-  io.oldDestData := decode.io.intOldDestRat.get(0).data
-  io.outValid := decode.io.out(0).valid
-  io.outLdest := decode.io.out(0).bits.ldest
-  io.inReady := decode.io.in(0).ready
-}
-
 class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSim {
   behavior of "IntEarlyReleaseParams and IntEarlyReleaseBundles"
 
@@ -1133,6 +1115,7 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     dut.io.redirect.poke(false.B)
     dut.io.rabWalk.poke(false.B)
     dut.io.singleUop.poke(true.B)
+    dut.io.numUops.poke(1.U)
     dut.io.hasException.poke(false.B)
     dut.io.flushPipe.poke(false.B)
     dut.io.singleStep.poke(false.B)
@@ -1158,6 +1141,7 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
   private def allocatePolicyProbe(dut: RenameERPolicyProbe, pdest: Int): Unit = {
     dut.io.renameFire.poke(true.B)
     dut.io.singleUop.poke(true.B)
+    dut.io.numUops.poke(1.U)
     dut.io.needIntDest.poke(true.B)
     dut.io.ldest.poke(5.U)
     dut.io.pdest.poke(pdest.U)
@@ -1586,6 +1570,7 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       "int_er_uc_early_free_opportunity" -> "earlyFreeOpportunityCount",
       "int_er_uc_early_free" -> "earlyFreeCount",
       "int_er_uc_commit_suppress" -> "commitSuppressCount",
+      "int_er_uc_commit_identity_mismatch" -> "commitIdentityMismatchCount",
       "int_er_uc_gen_mismatch" -> "genMismatchCount",
       "int_er_uc_redirect_kill" -> "redirectKillCount",
       "int_er_uc_full_untracked" -> "fullUntrackedCount",
@@ -1605,6 +1590,7 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
 
     renameSource should include("XSPerfAccumulate(\"int_er_rename_fallback_move\"")
     renameSource should include("XSPerfAccumulate(\"int_er_rename_fallback_unsupported_consumer\"")
+    renameSource should include("XSPerfAccumulate(\"int_er_rename_fallback_store_data_consumer\"")
   }
 
   it should "select same-group old destination from older final integer RAT writes" in {
@@ -1662,6 +1648,43 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       clearPolicyProbe(dut)
 
       dut.io.debugActiveCount.expect(1.U)
+      dut.io.debugFallbackCount.expect(1.U)
+    }
+  }
+
+  it should "treat first-and-last uops with numUops greater than one as unsupported for ER tracking" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new RenameERPolicyProbe()(config)) { dut =>
+      resetPolicyProbe(dut)
+
+      allocatePolicyProbe(dut, pdest = 7)
+      dut.clock.step()
+      clearPolicyProbe(dut)
+      dut.io.debugActiveCount.expect(1.U)
+
+      dut.io.renameFire.poke(true.B)
+      dut.io.singleUop.poke(true.B)
+      dut.io.numUops.poke(2.U)
+      dut.io.needIntDest.poke(true.B)
+      dut.io.ldest.poke(6.U)
+      dut.io.sourceValid.poke(true.B)
+      dut.io.sourcePsrc.poke(7.U)
+      dut.io.pdest.poke(8.U)
+      dut.io.oldPdest.poke(7.U)
+      setRobPtr(dut.io.robIdx, 2)
+
+      dut.io.sourceProbeValid.expect(true.B)
+      dut.io.sourceFallback.expect(true.B)
+      dut.io.producerEligible.expect(false.B)
+      dut.io.srcValid.expect(false.B)
+      dut.io.destValid.expect(false.B)
+      dut.io.redefValid.expect(true.B)
+      dut.io.redefOldPdest.expect(7.U)
+      dut.io.fallbackMark.expect(true.B)
+      dut.clock.step()
+      clearPolicyProbe(dut)
+
       dut.io.debugFallbackCount.expect(1.U)
     }
   }
@@ -1740,7 +1763,53 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     }
   }
 
-  it should "mark redef for ineligible integer writers without tracking a new destination" in {
+  it should "fallback scalar store-data consumers instead of tracking them through STD" in {
+    val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
+
+    simulate(new RenameERStoreDataPolicyProbe()(config)) { dut =>
+      def clear(): Unit = {
+        dut.io.renameFire.poke(false.B)
+        dut.io.allocProducer.poke(false.B)
+        dut.io.singleUop.poke(true.B)
+        dut.io.isScalarStore.poke(false.B)
+        dut.io.source1Valid.poke(false.B)
+        dut.io.source1Psrc.poke(0.U)
+        dut.io.pdest.poke(0.U)
+        setRobPtr(dut.io.robIdx, 0)
+      }
+
+      clear()
+      dut.reset.poke(true.B)
+      dut.clock.step()
+      dut.reset.poke(false.B)
+      dut.clock.step()
+      clear()
+
+      dut.io.allocProducer.poke(true.B)
+      dut.io.pdest.poke(7.U)
+      setRobPtr(dut.io.robIdx, 1)
+      dut.io.destValid.expect(true.B)
+      dut.clock.step()
+      clear()
+
+      dut.io.renameFire.poke(true.B)
+      dut.io.singleUop.poke(true.B)
+      dut.io.isScalarStore.poke(true.B)
+      dut.io.source1Valid.poke(true.B)
+      dut.io.source1Psrc.poke(7.U)
+      setRobPtr(dut.io.robIdx, 2)
+
+      dut.io.sourceFallback.expect(true.B)
+      dut.io.src1Valid.expect(false.B)
+      dut.io.fallbackMark.expect(true.B)
+      dut.clock.step()
+      clear()
+
+      dut.io.debugFallbackCount.expect(1.U)
+    }
+  }
+
+  it should "mark redef for ineligible integer writers and fallback the tracked old destination" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, trackEntries = 2))
 
     simulate(new RenameERPolicyProbe()(config)) { dut =>
@@ -1766,6 +1835,9 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
       dut.io.redefOldPdest.expect(7.U)
       dut.clock.step()
       clearPolicyProbe(dut)
+
+      dut.io.debugActiveCount.expect(1.U)
+      dut.io.debugFallbackCount.expect(1.U)
     }
   }
 

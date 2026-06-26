@@ -132,6 +132,8 @@ class IntERUCAFreeListProbe(size: Int)(implicit p: Parameters) extends XSModule 
     val guardDecValid = Input(Bool())
     val guardDecTrackId = Input(UInt(IntERTrackIdWidth.W))
     val guardDecTrackGen = Input(UInt(IntERTrackGenBits.W))
+    val guardDecOldPdest = Input(UInt(PhyRegIdxWidth.W))
+    val guardDecRobIdxValue = Input(UInt(log2Ceil(RobSize).W))
 
     val commitNeedFree = Input(Bool())
     val commitOldPdest = Input(UInt(PhyRegIdxWidth.W))
@@ -164,6 +166,7 @@ class IntERUCAFreeListProbe(size: Int)(implicit p: Parameters) extends XSModule 
   uca.io.rename.sourceFallback := 0.U.asTypeOf(uca.io.rename.sourceFallback)
   uca.io.rename.alloc := 0.U.asTypeOf(uca.io.rename.alloc)
   uca.io.rename.redef := 0.U.asTypeOf(uca.io.rename.redef)
+  uca.io.rename.redefFallback := 0.U.asTypeOf(uca.io.rename.redefFallback)
   uca.io.producerReady := 0.U.asTypeOf(uca.io.producerReady)
   uca.io.readDone := 0.U.asTypeOf(uca.io.readDone)
   uca.io.squash := 0.U.asTypeOf(uca.io.squash)
@@ -188,6 +191,8 @@ class IntERUCAFreeListProbe(size: Int)(implicit p: Parameters) extends XSModule 
   uca.io.stGuardDec(0).bits.valid := io.guardDecValid
   uca.io.stGuardDec(0).bits.trackId := io.guardDecTrackId
   uca.io.stGuardDec(0).bits.trackGen := io.guardDecTrackGen
+  uca.io.stGuardDec(0).bits.oldPdest := io.guardDecOldPdest
+  setRobPtr(uca.io.stGuardDec(0).bits.robIdx, io.guardDecRobIdxValue)
 
   uca.io.commitNeedFree(0) := io.commitNeedFree
   uca.io.commitOldPdest(0) := io.commitOldPdest
@@ -320,6 +325,8 @@ class IntEarlyReleaseFreeListTest extends AnyFlatSpec with Matchers with ChiselS
     dut.io.guardDecValid.poke(false.B)
     dut.io.guardDecTrackId.poke(0.U)
     dut.io.guardDecTrackGen.poke(0.U)
+    dut.io.guardDecOldPdest.poke(0.U)
+    dut.io.guardDecRobIdxValue.poke(0.U)
     dut.io.commitNeedFree.poke(false.B)
     dut.io.commitOldPdest.poke(0.U)
     dut.io.commitRedefValid.poke(false.B)
@@ -440,12 +447,17 @@ class IntEarlyReleaseFreeListTest extends AnyFlatSpec with Matchers with ChiselS
       dut.io.redefValid.poke(true.B)
       dut.io.redefOldPdest.poke(55.U)
       dut.io.redefRobIdxValue.poke(7.U)
+      dut.clock.step()
+      clearCombinedInputs(dut)
+
       dut.io.producerReadyValid.poke(true.B)
       dut.io.producerReadyPdest.poke(55.U)
       dut.io.producerReadyRobIdxValue.poke(1.U)
       dut.io.guardDecValid.poke(true.B)
       dut.io.guardDecTrackId.poke(0.U)
       dut.io.guardDecTrackGen.poke(1.U)
+      dut.io.guardDecOldPdest.poke(55.U)
+      dut.io.guardDecRobIdxValue.poke(7.U)
       dut.io.earlyFreeValid.expect(true.B)
       dut.io.earlyFreePdest.expect(55.U)
       dut.clock.step()

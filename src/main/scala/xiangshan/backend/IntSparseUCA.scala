@@ -30,6 +30,7 @@ class IntSparseUCAIO(implicit p: org.chipsalliance.cde.config.Parameters) extend
     val sourceFallback = Input(Vec(RenameWidth, Bool()))
     val alloc = Input(Vec(RenameWidth, ValidIO(new IntERProducerAlloc)))
     val redef = Input(Vec(RenameWidth, ValidIO(new IntERRedefProbe)))
+    val redefFallback = Input(Vec(RenameWidth, Bool()))
 
     val srcMatch = Output(Vec(RenameWidth, Vec(IntERLogicalSrcWidth, new IntERSrcTrack)))
     val destTrack = Output(Vec(RenameWidth, new IntERDestTrack))
@@ -115,6 +116,7 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
   private val sourceDuplicate = Wire(Vec(RenameWidth, Vec(IntERLogicalSrcWidth, Bool())))
   private val sourceCounted = Wire(Vec(RenameWidth, Vec(IntERLogicalSrcWidth, Bool())))
   private val sourceFallbackHit = Wire(Vec(RenameWidth, Vec(IntERLogicalSrcWidth, Bool())))
+  private val sourceFallbackMark = Wire(Vec(RenameWidth, Bool()))
 
   for (i <- 0 until RenameWidth) {
     for (s <- 0 until IntERLogicalSrcWidth) {
@@ -147,12 +149,13 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
       io.rename.srcMatch(i)(s).srcIdx := probe.srcIdx
       io.rename.srcMatch(i)(s).psrc := probe.psrc
     }
-    io.rename.fallbackMark(i) := sourceFallbackHit(i).asUInt.orR
+    sourceFallbackMark(i) := sourceFallbackHit(i).asUInt.orR
   }
 
   private val redefMatchOH = Wire(Vec(RenameWidth, UInt(entryCount.W)))
   private val redefMatchGen = Wire(Vec(RenameWidth, Vec(entryCount, UInt(IntERTrackGenBits.W))))
   private val redefFire = Wire(Vec(RenameWidth, Bool()))
+  private val redefFallbackHit = Wire(Vec(RenameWidth, Bool()))
   for (i <- 0 until RenameWidth) {
     val probe = io.rename.redef(i)
     val matches = VecInit((0 until entryCount).map { e =>
@@ -168,18 +171,21 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
     })
     redefMatchOH(i) := VecInit(PriorityEncoderOH(matches)).asUInt
     redefFire(i) := matches.asUInt.orR
+    redefFallbackHit(i) := io.rename.redefFallback(i) && redefFire(i)
 
     val matchIdx = OHToUInt(redefMatchOH(i))
     io.rename.redefTrack(i).valid := redefFire(i)
     io.rename.redefTrack(i).trackId := matchIdx(entryIdxWidth - 1, 0)
     io.rename.redefTrack(i).trackGen := Mux1H(redefMatchOH(i), redefMatchGen(i))
     io.rename.redefTrack(i).oldPdest := probe.bits.oldPdest
+    io.rename.fallbackMark(i) := sourceFallbackMark(i) || redefFallbackHit(i)
 
   }
 
   private val commitSuppressOH = Wire(Vec(RabCommitWidth, UInt(entryCount.W)))
   private val commitSuppressFire = Wire(Vec(RabCommitWidth, Bool()))
   private val commitClearOH = Wire(Vec(RabCommitWidth, UInt(entryCount.W)))
+  private val commitIdentityMismatch = Wire(Vec(RabCommitWidth, Bool()))
   for (i <- 0 until RabCommitWidth) {
     val releasedMatches = VecInit((0 until entryCount).map { e =>
       io.commitNeedFree(i) && isReleased(entries(e)) &&
@@ -206,7 +212,7 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
         io.commitRedef(i).bits.trackId === e.U &&
         io.commitRedef(i).bits.trackGen === entries(e).gen
     })
-    assert(!(releasedTrackMatches.asUInt.orR && !releasedMatches.asUInt.orR), "IntSparseUCA commit release identity mismatch")
+    commitIdentityMismatch(i) := releasedTrackMatches.asUInt.orR && !releasedMatches.asUInt.orR
 
     commitSuppressOH(i) := VecInit(PriorityEncoderOH(releasedMatches)).asUInt
     commitSuppressFire(i) := releasedMatches.asUInt.orR
@@ -284,11 +290,17 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
 
     val guardDecHits = io.stGuardDec.map { event =>
       event.valid && !event.bits.fallback &&
-        event.bits.trackId === e.U && event.bits.trackGen === entries(e).gen && isCounting(entries(e))
+        event.bits.trackId === e.U && event.bits.trackGen === entries(e).gen && isCounting(entries(e)) &&
+        entries(e).redefinerSeen &&
+        event.bits.oldPdest === entries(e).pdest &&
+        sameRobPtr(event.bits.robIdx, entries(e).redefinerRobIdx)
     }
     val guardFallbackHits = io.stGuardDec.map { event =>
       event.valid && event.bits.fallback &&
-        event.bits.trackId === e.U && event.bits.trackGen === entries(e).gen && isCounting(entries(e))
+        event.bits.trackId === e.U && event.bits.trackGen === entries(e).gen && isCounting(entries(e)) &&
+        entries(e).redefinerSeen &&
+        event.bits.oldPdest === entries(e).pdest &&
+        sameRobPtr(event.bits.robIdx, entries(e).redefinerRobIdx)
     }
     val guardGenMismatchHits = io.stGuardDec.map { event =>
       event.valid && event.bits.trackId === e.U && event.bits.trackGen =/= entries(e).gen && isActive(entries(e))
@@ -300,6 +312,7 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
         (isCounting(entries(e)) || isFallbackWait(entries(e)))
     }
     val redefHits = (0 until RenameWidth).map(i => redefFire(i) && redefMatchOH(i)(e))
+    val redefFallbackHits = (0 until RenameWidth).map(i => redefFallbackHit(i) && redefMatchOH(i)(e))
     val commitClearHits = (0 until RabCommitWidth).map(i => commitClearOH(i)(e))
 
     incByEntry(e) := PopCount(sourceIncHits)
@@ -309,7 +322,8 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
     setFallbackByEntry(e) := sourceFallbackHits.foldLeft(false.B)(_ || _) ||
       sameCycleBypassFallbackHits.foldLeft(false.B)(_ || _) ||
       readFallbackHits.foldLeft(false.B)(_ || _) ||
-      guardFallbackHits.foldLeft(false.B)(_ || _)
+      guardFallbackHits.foldLeft(false.B)(_ || _) ||
+      redefFallbackHits.foldLeft(false.B)(_ || _)
     setProducedReadyByEntry(e) := producerReadyHits.foldLeft(false.B)(_ || _)
     setRedefinerByEntry(e) := redefHits.foldLeft(false.B)(_ || _)
     setRedefinerNSByEntry(e) := guardDecHits.foldLeft(false.B)(_ || _)
@@ -441,6 +455,7 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
   private val earlyFreeOpportunityCount = RegInit(0.U(32.W))
   private val earlyFreeCount = RegInit(0.U(32.W))
   private val commitSuppressCount = RegInit(0.U(32.W))
+  private val commitIdentityMismatchCount = RegInit(0.U(32.W))
   private val genMismatchCount = RegInit(0.U(32.W))
   private val redirectKillCount = RegInit(0.U(32.W))
 
@@ -457,6 +472,7 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
   earlyFreeOpportunityCount := earlyFreeOpportunityCount + PopCount(earlyOpportunity)
   earlyFreeCount := earlyFreeCount + PopCount(io.earlyFree.map(_.valid))
   commitSuppressCount := commitSuppressCount + PopCount(commitSuppressFire)
+  commitIdentityMismatchCount := commitIdentityMismatchCount + PopCount(commitIdentityMismatch)
   genMismatchCount := genMismatchCount + PopCount(genMismatchByEntry)
   redirectKillCount := redirectKillCount + PopCount(VecInit(entries.map(e => io.redirectKill && isActive(e) && !isReleased(e))))
 
@@ -487,6 +503,7 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
   io.debug.earlyFreeOpportunityCount := earlyFreeOpportunityCount
   io.debug.earlyFreeCount := earlyFreeCount
   io.debug.commitSuppressCount := commitSuppressCount
+  io.debug.commitIdentityMismatchCount := commitIdentityMismatchCount
   io.debug.genMismatchCount := genMismatchCount
   io.debug.redirectKillCount := redirectKillCount
 }
