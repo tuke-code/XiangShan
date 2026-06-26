@@ -213,6 +213,7 @@ class IntSparseUCA(implicit p: org.chipsalliance.cde.config.Parameters) extends 
         io.commitRedef(i).bits.trackGen === entries(e).gen
     })
     commitIdentityMismatch(i) := releasedTrackMatches.asUInt.orR && !releasedMatches.asUInt.orR
+    assert(!commitIdentityMismatch(i), "IntSparseUCA released commit identity mismatch")
 
     commitSuppressOH(i) := VecInit(PriorityEncoderOH(releasedMatches)).asUInt
     commitSuppressFire(i) := releasedMatches.asUInt.orR

@@ -559,9 +559,9 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
     }
   }
 
-  it should "ignore a same track generation commit redef when the released identity is different" in {
+  it should "fail fast when a same track generation commit redef has a different released identity" in {
     val config = configWith(IntEarlyReleaseParams(trackEntries = 2, observeOnly = false))
-    noException should be thrownBy {
+    assertThrows[Exception] {
       simulate(new IntSparseUCA()(config)) { dut =>
         resetDut(dut)
 
@@ -576,11 +576,6 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
         commitRedef(dut, lane = 0, oldPdest = 0x9d, trackId = 0, gen = 1, redefinerRobIdx = 171)
         dut.io.commitSuppress(0).suppress.expect(false.B)
         dut.clock.step()
-        clearInputs(dut)
-
-        dut.io.debug.activeCount.expect(1.U)
-        dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
-        dut.io.debug.commitIdentityMismatchCount.expect(1.U)
       }
     }
   }
@@ -606,7 +601,7 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
       dut.io.debug.activeCount.expect(1.U)
     }
 
-    noException should be thrownBy {
+    assertThrows[Exception] {
       simulate(new IntSparseUCA()(config)) { dut =>
         resetDut(dut)
 
@@ -620,11 +615,6 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
         commitRedef(dut, lane = 0, oldPdest = 5, trackId = 0, gen = 1, redefinerRobIdx = 8)
         dut.io.commitSuppress(0).suppress.expect(false.B)
         dut.clock.step()
-        clearInputs(dut)
-
-        dut.io.debug.activeCount.expect(1.U)
-        dut.io.debug.entries(0).state.expect(IntEREntryState.releasedWaitCommit)
-        dut.io.debug.commitIdentityMismatchCount.expect(1.U)
       }
     }
   }
