@@ -950,13 +950,21 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     dontTouch(io.deqDelay)
     dontTouch(deqBeforeDly)
   }
-  // sta wake up LRQ in og1
+  // sta wake up LRQ in og1, std wake up LRQ in og0.
   io.wakeupToLRQ.foreach { case wakeupOption =>
     wakeupOption.zipWithIndex.foreach { case (wakeup, i) =>
-      val wakeupCancel = LoadShouldCancel(io.deqDelay(i).bits.loadDependency, io.ldCancel)
-      val wakeupValid = io.deqDelay(i).fire && !wakeupCancel
-      wakeup.valid := RegNext(wakeupValid) // next cycle is og1
-      wakeup.bits.sqIdx := RegNext(entries.io.deqOg1Payload(i).sqIdx.get)
+      if (param.isStAddrIQ) { // sta iq
+        val wakeupCancel = LoadShouldCancel(io.deqDelay(i).bits.loadDependency, io.ldCancel)
+        val wakeupValid = io.deqDelay(i).fire && !wakeupCancel
+        wakeup.valid := RegNext(wakeupValid) // next cycle is og1
+        wakeup.bits.sqIdx := RegNext(entries.io.deqOg1Payload(i).sqIdx.get)
+      }
+      else { // std iq
+        val wakeupValid = deqBeforeDly(i).fire
+        wakeup.valid := RegNext(wakeupValid) // next cycle is og0
+        wakeup.bits.sqIdx := entries.io.deqOg1Payload(i).sqIdx.get
+      }
+
     }
   }
 
