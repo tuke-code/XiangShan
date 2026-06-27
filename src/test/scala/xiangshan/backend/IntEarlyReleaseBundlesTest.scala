@@ -9,7 +9,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import java.nio.file.{Files, Path, Paths}
 import scala.io.Source
-import top.{DefaultConfig, IntERFunctionalConfig, IntERFunctionalMinimalConfig}
+import top.{DefaultConfig, IntERFunctionalConfig, IntERFunctionalMinimalConfig, MediumConfig}
 import utility.{LogUtilsOptions, LogUtilsOptionsKey, PerfCounterOptions, PerfCounterOptionsKey, XSPerfLevel}
 import xiangshan._
 import xiangshan.TopDownCounters._
@@ -1399,15 +1399,24 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     elaborateProbe(IntEarlyReleaseParams(), localSrc = 1, expectedTrackIdWidth = 4)
   }
 
-  it should "enable functional Int ER in DefaultConfig" in {
+  it should "keep baseline configs disabled and enable functional Int ER only in explicit configs" in {
     val defaultParams = (new DefaultConfig)(XSTileKey).head.intEarlyRelease
+    val mediumParams = (new MediumConfig)(XSTileKey).head.intEarlyRelease
     val functionalParams = (new IntERFunctionalConfig)(XSTileKey).head.intEarlyRelease
+    val minimalFunctionalParams = (new IntERFunctionalMinimalConfig)(XSTileKey).head.intEarlyRelease
 
-    defaultParams.enable shouldBe true
-    defaultParams.observeOnly shouldBe false
-    defaultParams.trackEntries shouldBe 64
-    defaultParams.earlyFreeWidth shouldBe 8
-    functionalParams shouldBe defaultParams
+    defaultParams.enable shouldBe false
+    mediumParams.enable shouldBe false
+
+    functionalParams.enable shouldBe true
+    functionalParams.observeOnly shouldBe false
+    functionalParams.trackEntries shouldBe 64
+    functionalParams.earlyFreeWidth shouldBe 8
+
+    minimalFunctionalParams.enable shouldBe true
+    minimalFunctionalParams.observeOnly shouldBe false
+    minimalFunctionalParams.trackEntries shouldBe 64
+    minimalFunctionalParams.earlyFreeWidth shouldBe 8
   }
 
   it should "not expose unimplemented Int ER configuration knobs" in {
