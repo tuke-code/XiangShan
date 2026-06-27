@@ -9,7 +9,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import java.nio.file.{Files, Path, Paths}
 import scala.io.Source
-import top.{DefaultConfig, IntERFunctionalMinimalConfig}
+import top.{DefaultConfig, IntERFunctionalConfig, IntERFunctionalMinimalConfig}
 import utility.{LogUtilsOptions, LogUtilsOptionsKey, PerfCounterOptions, PerfCounterOptionsKey, XSPerfLevel}
 import xiangshan._
 import xiangshan.TopDownCounters._
@@ -27,7 +27,9 @@ class IntEarlyReleaseBundleProbe(
   expectedRenameWidth: Int,
   expectedCommitWidth: Int,
   expectedIntPhyRegs: Int,
-  expectedRobSize: Int
+  expectedRobSize: Int,
+  expectedEnable: Boolean,
+  expectedObserveOnly: Boolean
 )(implicit p: Parameters) extends XSModule {
   require(localSrc > 0, "localSrc must be positive")
 
@@ -51,8 +53,8 @@ class IntEarlyReleaseBundleProbe(
   suppress := 0.U.asTypeOf(suppress)
   src := 0.U.asTypeOf(src)
 
-  require(!EnableIntEarlyRegRelease, "default round-0 Int ER config must stay disabled")
-  require(IntERObserveOnly, "round-0 Int ER defaults to observe-only when later enabled")
+  require(EnableIntEarlyRegRelease == expectedEnable, "Int ER feature enable must follow the selected config")
+  require(IntERObserveOnly == expectedObserveOnly, "Int ER observe-only mode must follow the selected config")
   require(IntERTrackIdWidth == expectedTrackIdWidth, "track id width must follow trackEntries")
   require(logical.length == expectedLogicalSrcWidth, "logical helper must use full backend source width")
   require(local.length == localSrc, "local helper must use caller-provided local source width")
@@ -1061,7 +1063,9 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
         expectedRenameWidth = coreParams.RenameWidth,
         expectedCommitWidth = coreParams.CommitWidth,
         expectedIntPhyRegs = coreParams.intPreg.numEntries,
-        expectedRobSize = coreParams.RobSize
+        expectedRobSize = coreParams.RobSize,
+        expectedEnable = params.enable,
+        expectedObserveOnly = params.observeOnly
       )(config)
     )
   }
@@ -1390,8 +1394,19 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     }
   }
 
-  it should "keep default feature config disabled" in {
+  it should "keep IntEarlyReleaseParams default disabled when explicitly selected" in {
     elaborateProbe(IntEarlyReleaseParams(), localSrc = 1, expectedTrackIdWidth = 4)
+  }
+
+  it should "enable functional Int ER in DefaultConfig" in {
+    val defaultParams = (new DefaultConfig)(XSTileKey).head.intEarlyRelease
+    val functionalParams = (new IntERFunctionalConfig)(XSTileKey).head.intEarlyRelease
+
+    defaultParams.enable shouldBe true
+    defaultParams.observeOnly shouldBe false
+    defaultParams.trackEntries shouldBe 16
+    defaultParams.earlyFreeWidth shouldBe 1
+    functionalParams shouldBe defaultParams
   }
 
   it should "not expose unimplemented Int ER configuration knobs" in {
