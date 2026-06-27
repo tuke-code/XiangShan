@@ -401,6 +401,79 @@ class IntSparseUCATest extends AnyFlatSpec with Matchers with ChiselSim {
     }
   }
 
+  it should "emit all eight early-free lanes with sixty-four tracked entries" in {
+    val config = configWith(IntEarlyReleaseParams(
+      enable = true,
+      observeOnly = false,
+      trackEntries = 64,
+      earlyFreeWidth = 8,
+      stWalkWidth = 8
+    ))
+    simulate(new IntSparseUCA()(config)) { dut =>
+      resetDut(dut)
+
+      dut.io.debug.entries.length shouldBe 64
+      dut.io.earlyFree.length shouldBe 8
+      dut.io.stGuardDec.length shouldBe 8
+
+      val pdests = Seq.tabulate(8)(i => 40 + i)
+      val producerRobIdxs = Seq.tabulate(8)(i => 10 + i)
+      val redefinerRobIdxs = Seq.tabulate(8)(i => 100 + i)
+
+      for (i <- pdests.indices) {
+        allocate(dut, pdest = pdests(i), robIdx = producerRobIdxs(i), lane = i)
+        dut.io.rename.destTrack(i).valid.expect(true.B)
+        dut.io.rename.destTrack(i).trackId.expect(i.U)
+        dut.io.rename.destTrack(i).trackGen.expect(1.U)
+      }
+      stepAndClear(dut)
+      dut.io.debug.activeCount.expect(8.U)
+
+      for (i <- pdests.indices) {
+        dut.io.debug.entries(i).pdest.expect(pdests(i).U)
+        dut.io.debug.entries(i).userCounter.expect(1.U)
+        redef(dut, oldPdest = pdests(i), robIdx = redefinerRobIdxs(i), lane = i)
+        dut.io.rename.redefTrack(i).valid.expect(true.B)
+        dut.io.rename.redefTrack(i).trackId.expect(i.U)
+        dut.io.rename.redefTrack(i).trackGen.expect(1.U)
+      }
+      stepAndClear(dut)
+
+      val producerReadyWidth = dut.io.producerReady.length
+      pdests.indices.grouped(producerReadyWidth).foreach { group =>
+        group.zipWithIndex.foreach { case (entryIdx, lane) =>
+          producerReady(dut, pdest = pdests(entryIdx), robIdx = producerRobIdxs(entryIdx), lane = lane)
+        }
+        stepAndClear(dut)
+      }
+
+      for (i <- pdests.indices) {
+        guardDec(
+          dut,
+          trackId = i,
+          gen = 1,
+          oldPdest = pdests(i),
+          robIdx = redefinerRobIdxs(i),
+          lane = i
+        )
+      }
+      for (i <- pdests.indices) {
+        dut.io.earlyFree(i).valid.expect(true.B)
+        dut.io.earlyFree(i).bits.valid.expect(true.B)
+        dut.io.earlyFree(i).bits.pdest.expect(pdests(i).U)
+        dut.io.earlyFree(i).bits.trackId.expect(i.U)
+        dut.io.earlyFree(i).bits.trackGen.expect(1.U)
+      }
+      stepAndClear(dut)
+
+      dut.io.debug.earlyFreeOpportunityCount.expect(8.U)
+      dut.io.debug.earlyFreeCount.expect(8.U)
+      for (i <- pdests.indices) {
+        expectReleasedWaitCommit(dut, entryIdx = i)
+      }
+    }
+  }
+
   it should "record observe-only opportunity without issuing early free" in {
     val config = configWith(IntEarlyReleaseParams(trackEntries = 2, observeOnly = true))
     simulate(new IntSparseUCA()(config)) { dut =>
