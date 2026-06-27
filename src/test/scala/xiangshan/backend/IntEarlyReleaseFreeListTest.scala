@@ -399,6 +399,43 @@ class IntEarlyReleaseFreeListTest extends AnyFlatSpec with Matchers with ChiselS
     }
   }
 
+  it should "merge eight early-free lanes into later integer allocations" in {
+    val config = configWith(IntEarlyReleaseParams(
+      enable = true,
+      observeOnly = false,
+      trackEntries = 64,
+      earlyFreeWidth = 8
+    ))
+
+    simulate(new IntERMEFreeListProbe(size = 16)(config)) { dut =>
+      resetDut(dut)
+
+      val releasedRegs = Seq(40, 41, 42, 43, 44, 45, 46, 47)
+      releasedRegs.zipWithIndex.foreach { case (preg, lane) =>
+        dut.io.earlyFreeReq(lane).poke(true.B)
+        dut.io.earlyFreePhyReg(lane).poke(preg.U)
+      }
+      dut.clock.step()
+      clearInputs(dut)
+
+      var seen = Set.empty[BigInt]
+      for (_ <- 0 until 32) {
+        dut.io.allocateReq(0).poke(true.B)
+        dut.io.doAllocate.poke(true.B)
+        val allocated = dut.io.allocatePhyReg(0).peek().litValue
+        if (dut.io.canAllocate.peek().litToBoolean) {
+          seen += allocated
+        }
+        dut.clock.step()
+        clearInputs(dut)
+      }
+
+      releasedRegs.foreach { preg =>
+        seen should contain(BigInt(preg))
+      }
+    }
+  }
+
   it should "fail fast on same-cycle conventional and early release of one integer preg" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, observeOnly = false, trackEntries = 2))
 

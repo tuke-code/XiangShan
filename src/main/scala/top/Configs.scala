@@ -586,7 +586,8 @@ private class WithIntEarlyReleaseFunctional extends Config((site, here, up) => {
     intEarlyRelease = IntEarlyReleaseParams(
       enable = true,
       observeOnly = false,
-      earlyFreeWidth = 1
+      trackEntries = 64,
+      earlyFreeWidth = 8
     )
   ))
 })

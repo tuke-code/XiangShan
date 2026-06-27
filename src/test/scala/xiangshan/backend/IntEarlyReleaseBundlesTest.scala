@@ -1380,7 +1380,8 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     Seq(
       IntEarlyReleaseParams(trackEntries = 1) -> 1,
       IntEarlyReleaseParams(trackEntries = 2) -> 1,
-      IntEarlyReleaseParams(trackEntries = 16) -> 4
+      IntEarlyReleaseParams(trackEntries = 16) -> 4,
+      IntEarlyReleaseParams(trackEntries = 64) -> 6
     ).foreach { case (params, expectedTrackIdWidth) =>
       elaborateProbe(params, localSrc = 1, expectedTrackIdWidth)
     }
@@ -1404,8 +1405,8 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
 
     defaultParams.enable shouldBe true
     defaultParams.observeOnly shouldBe false
-    defaultParams.trackEntries shouldBe 16
-    defaultParams.earlyFreeWidth shouldBe 1
+    defaultParams.trackEntries shouldBe 64
+    defaultParams.earlyFreeWidth shouldBe 8
     functionalParams shouldBe defaultParams
   }
 
@@ -1431,7 +1432,8 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
 
     params.enable shouldBe true
     params.observeOnly shouldBe false
-    params.earlyFreeWidth shouldBe 1
+    params.trackEntries shouldBe 64
+    params.earlyFreeWidth shouldBe 8
   }
 
   it should "gate old-destination integer RAT read ports with feature enable" in {
