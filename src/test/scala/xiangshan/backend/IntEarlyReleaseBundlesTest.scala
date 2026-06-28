@@ -1611,12 +1611,50 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     renameSource should include("intUCA.io.debug.genMismatchCount")
   }
 
+  it should "expose stable UCA occupancy perf counter names" in {
+    val renameSource = sourceText("src/main/scala/xiangshan/backend/rename/Rename.scala")
+
+    Seq(
+      "int_er_uc_active_count_sum",
+      "int_er_uc_full_cycle",
+      "int_er_uc_high_occupancy_cycle",
+      "int_er_uc_counting_count_sum",
+      "int_er_uc_fallback_wait_count_sum",
+      "int_er_uc_released_wait_count_sum"
+    ).foreach { counterName =>
+      renameSource should include(s"""XSPerfAccumulate("$counterName"""")
+    }
+    renameSource should include("IntEREntryState.counting")
+    renameSource should include("IntEREntryState.fallbackWaitCommit")
+    renameSource should include("IntEREntryState.releasedWaitCommit")
+  }
+
   it should "expose Rename fallback reason perf counters with stable names" in {
     val renameSource = sourceText("src/main/scala/xiangshan/backend/rename/Rename.scala")
 
     renameSource should include("XSPerfAccumulate(\"int_er_rename_fallback_move\"")
     renameSource should include("XSPerfAccumulate(\"int_er_rename_fallback_unsupported_consumer\"")
     renameSource should include("XSPerfAccumulate(\"int_er_rename_fallback_store_data_consumer\"")
+  }
+
+  it should "expose stable Rename integer free-list pressure perf counter names outside the IntER block" in {
+    val renameSource = sourceText("src/main/scala/xiangshan/backend/rename/Rename.scala")
+
+    Seq(
+      "int_er_rename_int_alloc_req",
+      "int_er_rename_int_alloc_fire",
+      "int_er_rename_int_freelist_stall_cycle",
+      "int_er_rename_int_freelist_stall_uops",
+      "int_er_rename_int_freelist_not_can_allocate",
+      "int_er_rename_int_alloc_pressure"
+    ).foreach { counterName =>
+      renameSource should include(s"""XSPerfAccumulate("$counterName"""")
+    }
+
+    val stallDefinition = renameSource.indexOf("private val stallForIntFL")
+    val pressureCounter = renameSource.indexOf("XSPerfAccumulate(\"int_er_rename_int_freelist_stall_cycle\"")
+    stallDefinition should be >= 0
+    pressureCounter should be > stallDefinition
   }
 
   it should "select same-group old destination from older final integer RAT writes" in {

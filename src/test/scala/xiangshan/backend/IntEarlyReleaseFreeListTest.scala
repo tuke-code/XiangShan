@@ -374,6 +374,21 @@ class IntEarlyReleaseFreeListTest extends AnyFlatSpec with Matchers with ChiselS
     source should include("XSPerfAccumulate(\"int_er_me_freelist_early_free_merged\"")
   }
 
+  it should "expose stable MEFreeList capacity perf counter names" in {
+    val source = sourceText("src/main/scala/xiangshan/backend/rename/freelist/MEFreeList.scala")
+
+    Seq(
+      "int_er_me_freelist_free_reg_sum",
+      "int_er_me_freelist_low_rename_width_cycle",
+      "int_er_me_freelist_low_2rename_width_cycle",
+      "int_er_me_freelist_empty_cycle",
+      "int_er_me_freelist_free_reg_count"
+    ).foreach { counterName =>
+      source should include(counterName)
+    }
+    source should include("XSPerfHistogram(\"int_er_me_freelist_free_reg_count\"")
+  }
+
   it should "merge early-free lanes into later integer allocations" in {
     val config = configWith(IntEarlyReleaseParams(enable = true, observeOnly = false, trackEntries = 2))
 

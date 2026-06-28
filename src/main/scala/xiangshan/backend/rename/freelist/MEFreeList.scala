@@ -140,6 +140,11 @@ class MEFreeList(size: Int, commitWidth: Int)(implicit p: Parameters) extends Ba
   XSPerfAccumulate("can_alloc_wrong", !io.canAllocate && freeRegCnt >= RenameWidth.U)
   XSPerfAccumulate("int_er_me_freelist_early_free_req", earlyFreeReqCount)
   XSPerfAccumulate("int_er_me_freelist_early_free_merged", earlyFreeMergedCount)
+  XSPerfAccumulate("int_er_me_freelist_free_reg_sum", freeRegCntReg)
+  XSPerfAccumulate("int_er_me_freelist_low_rename_width_cycle", freeRegCntReg < RenameWidth.U)
+  XSPerfAccumulate("int_er_me_freelist_low_2rename_width_cycle", freeRegCntReg < (2 * RenameWidth).U)
+  XSPerfAccumulate("int_er_me_freelist_empty_cycle", freeRegCntReg === 0.U)
+  XSPerfHistogram("int_er_me_freelist_free_reg_count", freeRegCntReg, true.B, 0, size + 1, 1)
 
   val perfEvents = Seq(
     ("me_freelist_1_4_valid", freeRegCntReg <  (size / 4).U                                     ),

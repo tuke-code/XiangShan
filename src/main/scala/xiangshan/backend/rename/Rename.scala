@@ -31,6 +31,7 @@ import xiangshan.backend.{
   IntERCommitRedef,
   IntERCommitSuppress,
   IntERDebugBundle,
+  IntEREntryState,
   IntERUopMeta,
   RenameIntERIO,
   IntSparseUCA,
@@ -1021,6 +1022,17 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     XSPerfAccumulate("int_er_uc_commit_identity_mismatch", intERDebugDelta(intUCA.io.debug.commitIdentityMismatchCount))
     XSPerfAccumulate("int_er_uc_gen_mismatch", intERDebugDelta(intUCA.io.debug.genMismatchCount))
     XSPerfAccumulate("int_er_uc_redirect_kill", intERDebugDelta(intUCA.io.debug.redirectKillCount))
+
+    val intERActiveCount = intUCA.io.debug.activeCount
+    val intERCountingCount = PopCount(intUCA.io.debug.entries.map(_.state === IntEREntryState.counting))
+    val intERFallbackWaitCount = PopCount(intUCA.io.debug.entries.map(_.state === IntEREntryState.fallbackWaitCommit))
+    val intERReleasedWaitCount = PopCount(intUCA.io.debug.entries.map(_.state === IntEREntryState.releasedWaitCommit))
+    XSPerfAccumulate("int_er_uc_active_count_sum", intERActiveCount)
+    XSPerfAccumulate("int_er_uc_full_cycle", intERActiveCount === IntERTrackEntries.U)
+    XSPerfAccumulate("int_er_uc_high_occupancy_cycle", intERActiveCount >= ((IntERTrackEntries * 3 + 3) / 4).U)
+    XSPerfAccumulate("int_er_uc_counting_count_sum", intERCountingCount)
+    XSPerfAccumulate("int_er_uc_fallback_wait_count_sum", intERFallbackWaitCount)
+    XSPerfAccumulate("int_er_uc_released_wait_count_sum", intERReleasedWaitCount)
   }
 
   val genSnapshot = Cat(io.out.map(out => out.fire && out.bits.snapshot)).orR
@@ -1311,6 +1323,9 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   private val stallForVecFL     = inHeadValid && !io.rabCommits.isWalk && dispatchCanAcc && intFreeList.io.canAllocate && fpFreeList.io.canAllocate && v0FreeList.io.canAllocate && vlFreeList.io.canAllocate && !vecFreeList.io.canAllocate
   private val stallForV0FL      = inHeadValid && !io.rabCommits.isWalk && dispatchCanAcc && intFreeList.io.canAllocate && fpFreeList.io.canAllocate && vecFreeList.io.canAllocate && vlFreeList.io.canAllocate && !v0FreeList.io.canAllocate
   private val stallForVlFL      = inHeadValid && !io.rabCommits.isWalk && dispatchCanAcc && intFreeList.io.canAllocate && fpFreeList.io.canAllocate && vecFreeList.io.canAllocate && v0FreeList.io.canAllocate && !vlFreeList.io.canAllocate
+  private val intAllocReqCount = PopCount(intFreeList.io.allocateReq)
+  private val intAllocFireCount = PopCount((0 until RenameWidth).map(i => intFreeList.io.allocateReq(i) && io.out(i).fire))
+  private val intValidUopCount = PopCount(io.in.map(_.valid))
   XSPerfAccumulate("stall_cycle",          inHeadStall)
   XSPerfAccumulate("stall_cycle_walk",     stallForWalk)
   XSPerfAccumulate("stall_cycle_dispatch", stallForDispatch)
@@ -1319,6 +1334,12 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   XSPerfAccumulate("stall_cycle_vec",      stallForVecFL)
   XSPerfAccumulate("stall_cycle_vec",      stallForV0FL)
   XSPerfAccumulate("stall_cycle_vec",      stallForVlFL)
+  XSPerfAccumulate("int_er_rename_int_alloc_req", intAllocReqCount)
+  XSPerfAccumulate("int_er_rename_int_alloc_fire", intAllocFireCount)
+  XSPerfAccumulate("int_er_rename_int_freelist_stall_cycle", stallForIntFL)
+  XSPerfAccumulate("int_er_rename_int_freelist_stall_uops", Mux(stallForIntFL, intValidUopCount, 0.U))
+  XSPerfAccumulate("int_er_rename_int_freelist_not_can_allocate", !intFreeList.io.canAllocate)
+  XSPerfAccumulate("int_er_rename_int_alloc_pressure", Mux(!intFreeList.io.canAllocate, intAllocReqCount, 0.U))
 
   XSPerfHistogram("in_valid_range",  PopCount(io.in.map(_.valid)),  true.B, 0, DecodeWidth + 1, 1)
   XSPerfHistogram("in_fire_range",   PopCount(io.in.map(_.fire)),   true.B, 0, DecodeWidth + 1, 1)
