@@ -338,7 +338,7 @@ case class L2CacheConfig
         prefetch = Seq(BOPParameters()) ++
           (if (tp) Seq(TPParameters()) else Nil) ++
           (if (nl) Seq(NLParameters()) else Nil) ++
-          (if (cdp) Seq(CDPParameters(UseFilterTable = false)) else Nil) ++
+          (if (cdp) Seq(CDPParameters()) else Nil) ++
           (if (p.prefetcher.nonEmpty) Seq(PrefetchReceiverParams()) else Nil),
         enableL2Flush = enableFlush,
         enablePerf = !site(DebugOptionsKey).FPGAPlatform && site(DebugOptionsKey).EnablePerfDebug,
