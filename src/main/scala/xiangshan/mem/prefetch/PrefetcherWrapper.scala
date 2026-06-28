@@ -157,10 +157,11 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
   val IdxStreamStride = prefetcherSeq.indexWhere(_.isInstanceOf[StreamStrideParams])
   val HasBerti = prefetcherSeq.exists(_.isInstanceOf[BertiParams])
   val IdxBerti = prefetcherSeq.indexWhere(_.isInstanceOf[BertiParams])
+  val modeStrideBertiDefault = coreParams.modeStrideBerti // default is strideOnBertiOff
 
   private val Seq(bothOff, strideOnBertiOff, strideOffBertiOn, bothOn) = Seq(0, 1, 2, 3)
   // strideOffBertiOn: if you enable Berti, Stride will be closed by default.
-  val modeStrideBerti = Constantin.createRecord(s"pf_modeStrideBerti$hartId", initValue = strideOffBertiOn)
+  val modeStrideBerti = Constantin.createRecord(s"pf_modeStrideBerti$hartId", initValue = modeStrideBertiDefault)
   val strideModeEnable = modeStrideBerti =/= bothOff.U && !(modeStrideBerti === strideOffBertiOn.U && HasBerti.B)
   val bertiModeEnable = modeStrideBerti =/= bothOff.U && !(modeStrideBerti === strideOnBertiOff.U && HasStreamStride.B)
 
