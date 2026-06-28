@@ -166,13 +166,13 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val a1_stat_access_update = WireInit(false.B)
   val a1_stat_access_currVA = WireInit(0.U(HtLineVAddrWidth.W))
   val a1_stat_access_lastVA = WireInit(0.U(HtLineVAddrWidth.W))
-  val s1_stat_find_delta = WireInit(false.B)
-  val s1_stat_late = WireInit(false.B)
-  val s1_stat_overflow = WireInit(false.B)
-  val s1_stat_satisfy = WireInit(false.B)
-  val s1_stat_dissatisfy = WireInit(false.B)
-  val s1_stat_histLineVA = WireInit(0.U(HtLineVAddrWidth.W))
-  val s1_stat_currLineVA = WireInit(0.U(HtLineVAddrWidth.W))
+  val s2_stat_find_delta = WireInit(false.B)
+  val s2_stat_late = WireInit(false.B)
+  val s2_stat_overflow = WireInit(false.B)
+  val s2_stat_satisfy = WireInit(false.B)
+  val s2_stat_dissatisfy = WireInit(false.B)
+  val s2_stat_histLineVA = WireInit(0.U(HtLineVAddrWidth.W))
+  val s2_stat_currLineVA = WireInit(0.U(HtLineVAddrWidth.W))
   /*** built-in function */
   def wayMap[T <: Data](f: Int => T) = VecInit((0 until HtWaySize).map(f))
   def listMap[T <: Data](f: Int => T) = VecInit((0 until HtListSize).map(f))
@@ -195,20 +195,6 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   }
   def checkDissatisfy(delta: SInt): Bool = {
     delta < (DELTA_THRESHOLD).S(DeltaWidth.W) && delta > (-DELTA_THRESHOLD).S(DeltaWidth.W)
-  }
-  def getDelta(lineVA1: UInt, lineVA2: UInt): (Bool, SInt) = {
-    // here should handle the overflow
-    val diffFull = (lineVA1.zext - lineVA2.zext).asSInt
-    val delta = diffFull(DeltaWidth - 1, 0).asSInt
-    // by checking whether delta can be symbol extended correctly
-    val overflow = diffFull =/= delta.asSInt.pad(diffFull.getWidth)
-    val dissatisfy = checkDissatisfy(delta)
-    s1_stat_overflow := overflow
-    s1_stat_dissatisfy := dissatisfy
-    s1_stat_satisfy := !overflow && !dissatisfy
-    s1_stat_currLineVA := lineVA1
-    s1_stat_histLineVA := lineVA2
-    (s1_stat_satisfy, delta)
   }
 
   /*** built-in class */
@@ -367,24 +353,31 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   val s1_histTsp = RegEnable(s0_histEntry.tsp, s0_valid)
   val s1_entryValid = RegEnable(s0_entryValid, s0_valid)
 
-  val s1_pair = getDelta(s1_baseVAddr, s1_histBaseVAddr)
-  val s1_originValid = s1_pair._1
-  val s1_originDelta = s1_pair._2
+  val s1_diffFull = (s1_baseVAddr.zext - s1_histBaseVAddr.zext).asSInt
+  val s1_originDelta = s1_diffFull(DeltaWidth - 1, 0).asSInt
   val s1_isTimely = checkTimeliness(currTsp, s1_latency, s1_histTsp)
-  s1_stat_find_delta := s1_valid && s1_entryValid
-  s1_stat_late := !s1_isTimely
 
   val s2_valid = GatedValidRegNext(s1_valid, false.B)
   val s2_pc = RegEnable(s1_pc, s1_valid)
   val s2_entryValid = RegEnable(s1_entryValid, s1_valid)
-  val s2_originValid = RegEnable(s1_originValid, s1_valid)
+  val s2_diffFull = RegEnable(s1_diffFull, s1_valid)
   val s2_originDelta = RegEnable(s1_originDelta, s1_valid)
   val s2_isTimely = RegEnable(s1_isTimely, s1_valid)
-
+  // by checking whether delta can be symbol extended correctly
+  val s2_overflow = s2_diffFull =/= s2_originDelta.asSInt.pad(s2_diffFull.getWidth)
+  val s2_dissatisfy = checkDissatisfy(s2_originDelta)
   val s2_result = WireInit(0.U.asTypeOf(new LearnDeltasLiteIO))
   s2_result.pc := s2_pc
-  s2_result.valid := s2_valid && s2_entryValid && s2_originValid && s2_isTimely
+  s2_result.valid := s2_valid && s2_entryValid && !s2_overflow && !s2_dissatisfy && s2_isTimely
   s2_result.delta := s2_originDelta
+
+  s2_stat_find_delta := s2_valid && s2_entryValid
+  s2_stat_late := !s2_isTimely
+  s2_stat_overflow := s2_overflow
+  s2_stat_dissatisfy := s2_dissatisfy
+  s2_stat_satisfy := !s2_overflow && !s2_dissatisfy
+  s2_stat_histLineVA := RegNext(s1_baseVAddr)
+  s2_stat_currLineVA := RegNext(s1_histBaseVAddr)
 
   val s3_valid = GatedValidRegNext(s2_valid, false.B)
   val s3_result = RegEnable(s2_result, s2_valid)
@@ -399,11 +392,11 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
   XSPerfAccumulate("access_pcHysteresis", a1_valid && a1_stat_access_pcHysteresis)
   XSPerfAccumulate("search_req", io.search.req.valid)
   XSPerfAccumulate("search_resp_valid", io.search.resp.valid)
-  XSPerfAccumulate("search_resp_find_total", s1_stat_find_delta)
-  XSPerfAccumulate("search_resp_find_overflow", s1_stat_find_delta && s1_stat_overflow)
-  XSPerfAccumulate("search_resp_find_dissatisfy", s1_stat_find_delta && !s1_stat_overflow && s1_stat_dissatisfy)
-  XSPerfAccumulate("search_resp_find_late", s1_stat_find_delta && !s1_stat_overflow && !s1_stat_dissatisfy && s1_stat_late)
-  XSPerfAccumulate("search_resp_find_satisfy", s1_stat_find_delta && !s1_stat_overflow && !s1_stat_dissatisfy && !s1_stat_late)
+  XSPerfAccumulate("search_resp_find_total", s2_stat_find_delta)
+  XSPerfAccumulate("search_resp_find_overflow", s2_stat_find_delta && s2_stat_overflow)
+  XSPerfAccumulate("search_resp_find_dissatisfy", s2_stat_find_delta && !s2_stat_overflow && s2_stat_dissatisfy)
+  XSPerfAccumulate("search_resp_find_late", s2_stat_find_delta && !s2_stat_overflow && !s2_stat_dissatisfy && s2_stat_late)
+  XSPerfAccumulate("search_resp_find_satisfy", s2_stat_find_delta && !s2_stat_overflow && !s2_stat_dissatisfy && !s2_stat_late)
 
   class AccessLogDb extends Bundle {
     val pcHysteresis = Bool()
@@ -430,8 +423,8 @@ class HistoryTable()(implicit p: Parameters) extends BertiModule {
     val calDelta = UInt(DeltaWidth.W)
   }
   val searchLog = Wire(new SearchLogDb())
-  searchLog.histLineVA := RegNext(s1_stat_histLineVA)
-  searchLog.currLineVA := RegNext(s1_stat_currLineVA)
+  searchLog.histLineVA := s2_stat_histLineVA
+  searchLog.currLineVA := s2_stat_currLineVA
   searchLog.calDelta := s2_result.delta.asUInt
   searchLog.pc := s2_result.pc
   val searchLogDb = ChiselDB.createTable(s"${_name}_searchLog${p(XSCoreParamsKey).HartId}", new SearchLogDb, basicDB = false)
@@ -813,7 +806,7 @@ extends DCacheModule {
   /*** data structure */
   val entries = Reg(Vec(TotalSize, new Entry()))
   val valids = RegInit(VecInit(Seq.fill(TotalSize)(false.B)))
-  val tlbReqArb = Module(new RRArbiterInit(new TlbReq, TotalSize))
+  val tlbReqArb = Module(new FastArbiter(new TlbReq, TotalSize)) // for timing
   val l1PfIdxArb = Module(new RRArbiterInit(UInt(IndexWidth(TotalSize).W), L1Size))
   val l2PfIdxArb = Module(new RRArbiterInit(UInt(IndexWidth(TotalSize).W), L2Size))
 
