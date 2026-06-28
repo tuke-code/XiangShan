@@ -1655,6 +1655,9 @@ class IntEarlyReleaseBundlesTest extends AnyFlatSpec with Matchers with ChiselSi
     val pressureCounter = renameSource.indexOf("XSPerfAccumulate(\"int_er_rename_int_freelist_stall_cycle\"")
     stallDefinition should be >= 0
     pressureCounter should be > stallDefinition
+    renameSource should include("private val noRedirectOrWalk = !io.redirect.valid && !io.rabCommits.isWalk")
+    renameSource should include("private val stallForIntFL     = inHeadValid && noRedirectOrWalk")
+    renameSource should include("noRedirectOrWalk && intFreeList.io.allocateReq(i) && io.out(i).fire")
   }
 
   it should "select same-group old destination from older final integer RAT writes" in {

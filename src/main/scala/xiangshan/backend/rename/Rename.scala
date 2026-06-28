@@ -1316,15 +1316,16 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
   // These stall reasons could overlap each other, but we configure the priority as fellows.
   // walk stall > dispatch stall > int freelist stall > fp freelist stall
   private val inHeadStall = io.in.head match { case x => x.valid && !x.ready }
+  private val noRedirectOrWalk = !io.redirect.valid && !io.rabCommits.isWalk
   private val stallForWalk      = inHeadValid &&  io.rabCommits.isWalk
   private val stallForDispatch  = inHeadValid && !io.rabCommits.isWalk && !dispatchCanAcc
-  private val stallForIntFL     = inHeadValid && !io.rabCommits.isWalk && dispatchCanAcc && fpFreeList.io.canAllocate && vecFreeList.io.canAllocate && v0FreeList.io.canAllocate && vlFreeList.io.canAllocate && !intFreeList.io.canAllocate
+  private val stallForIntFL     = inHeadValid && noRedirectOrWalk && dispatchCanAcc && fpFreeList.io.canAllocate && vecFreeList.io.canAllocate && v0FreeList.io.canAllocate && vlFreeList.io.canAllocate && !intFreeList.io.canAllocate
   private val stallForFpFL      = inHeadValid && !io.rabCommits.isWalk && dispatchCanAcc && intFreeList.io.canAllocate && vecFreeList.io.canAllocate && v0FreeList.io.canAllocate && vlFreeList.io.canAllocate && !fpFreeList.io.canAllocate
   private val stallForVecFL     = inHeadValid && !io.rabCommits.isWalk && dispatchCanAcc && intFreeList.io.canAllocate && fpFreeList.io.canAllocate && v0FreeList.io.canAllocate && vlFreeList.io.canAllocate && !vecFreeList.io.canAllocate
   private val stallForV0FL      = inHeadValid && !io.rabCommits.isWalk && dispatchCanAcc && intFreeList.io.canAllocate && fpFreeList.io.canAllocate && vecFreeList.io.canAllocate && vlFreeList.io.canAllocate && !v0FreeList.io.canAllocate
   private val stallForVlFL      = inHeadValid && !io.rabCommits.isWalk && dispatchCanAcc && intFreeList.io.canAllocate && fpFreeList.io.canAllocate && vecFreeList.io.canAllocate && v0FreeList.io.canAllocate && !vlFreeList.io.canAllocate
   private val intAllocReqCount = PopCount(intFreeList.io.allocateReq)
-  private val intAllocFireCount = PopCount((0 until RenameWidth).map(i => intFreeList.io.allocateReq(i) && io.out(i).fire))
+  private val intAllocFireCount = PopCount((0 until RenameWidth).map(i => noRedirectOrWalk && intFreeList.io.allocateReq(i) && io.out(i).fire))
   private val intValidUopCount = PopCount(io.in.map(_.valid))
   XSPerfAccumulate("stall_cycle",          inHeadStall)
   XSPerfAccumulate("stall_cycle_walk",     stallForWalk)
