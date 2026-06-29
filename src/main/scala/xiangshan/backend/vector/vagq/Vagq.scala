@@ -3,11 +3,13 @@ package xiangshan.backend.vector.vagq
 import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
+import top.{ArgParser, Generator}
 import utility._
 import xiangshan._
 import xiangshan.backend.Bundles._
 import xiangshan.backend.fu.NewCSR.CSRConfig
 import xiangshan.backend.rob.RobPtr
+import xiangshan.backend.vector.{XSVectorParamKey, XSVectorParameters}
 import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.mem.{LqPtr, SqPtr}
 
@@ -224,4 +226,24 @@ class VAGQ(implicit p: Parameters) extends VAGQModule {
   io.vrfReadReq   <> mergeCtrl.io.vrfReadReq
   io.vrfWriteReq  <> mergeCtrl.io.vrfWriteReq
   io.robWriteback <> mergeCtrl.io.robWriteback
+}
+
+object VAGQMain extends App {
+  val (config, firrtlOpts, firtoolOpts) = ArgParser.parse(
+    args :+ "--disable-always-basic-diff" :+ "--dump-fir" :+ "--fpga-platform" :+ "--target" :+ "verilog")
+
+  val defaultConfig = config.alterPartial({
+    // Get XSCoreParams and vector params for compiling VAGQ independently.
+    case XSCoreParamsKey => config(XSTileKey).head
+    case XSVectorParamKey => XSVectorParameters(128)
+  })
+
+  Generator.execute(
+    firrtlOpts :+ "--full-stacktrace" :+ "--target-dir" :+ "vagq",
+    new VAGQ()(defaultConfig),
+    firtoolOpts :+ "-O=release" :+ "--disable-annotation-unknown" :+
+      "--lowering-options=explicitBitcast,disallowLocalVariables,disallowPortDeclSharing,locationInfoStyle=none"
+  )
+
+  println("done")
 }
