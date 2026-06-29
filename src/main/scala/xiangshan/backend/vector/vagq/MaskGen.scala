@@ -50,3 +50,8 @@ class MaskGenInput(implicit p: Parameters) extends VAGQBundle {
   val vma       = Bool()
   val vta       = Bool()
 }
+
+class VAGQMaskInfo(implicit p: Parameters) extends VAGQBundle {
+  val elemActiveMask   = UInt(vagqFlowBytes.W)
+  val elemAgnosticMask = UInt(vagqFlowBytes.W)
+}

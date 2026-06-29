@@ -137,10 +137,8 @@ class VAGQVRFReadResp(implicit p: Parameters) extends VAGQBundle {
 
 class VAGQVRFWriteReq(implicit p: Parameters) extends VAGQBundle {
   val entryIdx = UInt(vagqEntryIdxWidth.W)
-  val robIdx = new RobPtr
   val pdest = UInt(VfPhyRegIdxWidth.W)
   val data = UInt(VLEN.W)
-  val mask = UInt(vagqFlowBytes.W)
 }
 
 class VAGQWritebackReq(implicit p: Parameters) extends VAGQBundle {
@@ -181,24 +179,12 @@ class VAGQIO(implicit p: Parameters) extends VAGQBundle {
 class VAGQ(implicit p: Parameters) extends VAGQModule {
   val io = IO(new VAGQIO)
 
-  private val addrMaskGen = Module(new MaskGen)
-  addrMaskGen.in.uopIdx    := io.addrUop.bits.uopIdx
-  addrMaskGen.in.useVstart := io.addrUop.bits.useVstart
-  addrMaskGen.in.vstart    := io.addrUop.bits.vstart
-  addrMaskGen.in.uvlByte   := io.addrUop.bits.uvlByte
-  addrMaskGen.in.vm        := io.addrUop.bits.vm
-  addrMaskGen.in.v0Mask    := io.addrUop.bits.v0Mask
-  addrMaskGen.in.deew      := io.addrUop.bits.deew
-  addrMaskGen.in.vma       := io.addrUop.bits.vma
-  addrMaskGen.in.vta       := io.addrUop.bits.vta
-
   private val entryTable = Module(new VAGQEntryTable)
   private val splitCtrl = Module(new SplitCtrl(vagqSize))
   private val mergeCtrl = Module(new MergeCtrl(vagqSize))
 
   entryTable.io.addrUop          <> io.addrUop
   entryTable.io.dataUop          <> io.dataUop
-  entryTable.io.maskInfo         := addrMaskGen.out
   entryTable.io.mergeReqUpdate   := mergeCtrl.io.reqUpdate
   entryTable.io.mergeStateUpdate := mergeCtrl.io.stateUpdate
   entryTable.io.redirect         := io.redirect

@@ -14,6 +14,17 @@ import VAGQConstants._
 class VAGQEntryTable(implicit p: Parameters) extends VAGQModule {
   val io = IO(new VAGQEntryTableIO)
 
+  private val addrMaskGen = Module(new MaskGen)
+  addrMaskGen.in.uopIdx    := io.addrUop.bits.uopIdx
+  addrMaskGen.in.useVstart := io.addrUop.bits.useVstart
+  addrMaskGen.in.vstart    := io.addrUop.bits.vstart
+  addrMaskGen.in.uvlByte   := io.addrUop.bits.uvlByte
+  addrMaskGen.in.vm        := io.addrUop.bits.vm
+  addrMaskGen.in.v0Mask    := io.addrUop.bits.v0Mask
+  addrMaskGen.in.deew      := io.addrUop.bits.deew
+  addrMaskGen.in.vma       := io.addrUop.bits.vma
+  addrMaskGen.in.vta       := io.addrUop.bits.vta
+
   private val emptyEntry = 0.U.asTypeOf(new VAGQEntry)
   private val entries = RegInit(VecInit(Seq.fill(vagqSize)(emptyEntry)))
 
@@ -76,7 +87,7 @@ class VAGQEntryTable(implicit p: Parameters) extends VAGQModule {
 
     when(addrFireThis) {
       connectSamePort(entriesNext(i), io.addrUop.bits)
-      connectSamePort(entriesNext(i), io.maskInfo)
+      connectSamePort(entriesNext(i), addrMaskGen.out)
     }
     when(dataFireThis) {
       connectSamePort(entriesNext(i), io.dataUop.bits)
@@ -110,17 +121,11 @@ class VAGQEntryTable(implicit p: Parameters) extends VAGQModule {
 class VAGQEntryTableIO(implicit p: Parameters) extends VAGQBundle {
   val addrUop          = Flipped(Decoupled(new VAGQAddrSideUop))
   val dataUop          = Flipped(Decoupled(new VAGQDataSideUop))
-  val maskInfo         = Input(new VAGQMaskInfo)
   val entries          = Output(Vec(vagqSize, new VAGQEntry))
   val splitUpdate      = Input(Valid(new VAGQReqBitmapUpdate))
   val mergeReqUpdate   = Flipped(Vec(VAGQConstants.MergeRespWidth, Valid(new VAGQReqBitmapUpdate)))
   val mergeStateUpdate = Flipped(Valid(new VAGQEntryStateUpdate))
   val redirect         = Flipped(Valid(new Redirect))
-}
-
-class VAGQMaskInfo(implicit p: Parameters) extends VAGQBundle {
-  val elemActiveMask   = UInt(vagqFlowBytes.W)
-  val elemAgnosticMask = UInt(vagqFlowBytes.W)
 }
 
 class VAGQEntryMeta(implicit p: Parameters) extends VAGQBundle {

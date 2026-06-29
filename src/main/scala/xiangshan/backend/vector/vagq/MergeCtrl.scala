@@ -115,7 +115,6 @@ class MergeCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
   io.vrfWriteReq.valid := mergeRespValid && mergeRespAlive && !hasSplitDone
   io.vrfWriteReq.bits  := 0.U.asTypeOf(io.vrfWriteReq.bits)
   io.vrfWriteReq.bits.entryIdx := mergeRespEntryIdx
-  io.vrfWriteReq.bits.robIdx   := mergeRespEntry.entry.robIdx
   io.vrfWriteReq.bits.pdest    := mergeRespEntry.entry.pdest
   io.vrfWriteReq.bits.data     := mergeWriteData
   io.vrfWriteReq.bits.mask     := nonActiveMask
