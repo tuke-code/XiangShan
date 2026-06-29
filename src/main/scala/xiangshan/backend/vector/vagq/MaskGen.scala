@@ -33,10 +33,10 @@ class MaskGen(implicit p: Parameters) extends VAGQModule {
   private val inactiveAgnosticMask = inactiveBits.asUInt & Fill(vagqFlowBytes, in.vma)
   private val tailAgnosticMask = tailBits.asUInt & Fill(vagqFlowBytes, in.vta)
   private val elemActiveMask = activeBits.asUInt
-  private val agnosticMask = inactiveAgnosticMask | tailAgnosticMask
+  private val elemAgnosticMask = inactiveAgnosticMask | tailAgnosticMask
 
   out.elemActiveMask := elemActiveMask
-  out.agnosticMask := agnosticMask
+  out.elemAgnosticMask := elemAgnosticMask
 }
 
 class MaskGenInput(implicit p: Parameters) extends VAGQBundle {

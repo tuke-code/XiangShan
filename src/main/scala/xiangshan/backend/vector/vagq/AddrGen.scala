@@ -12,14 +12,7 @@ class AddrGen(implicit p: Parameters) extends VAGQModule {
   private val elemBytes = (1.U(vagqUvlByteWidth.W) << in.deew)(vagqUvlByteWidth - 1, 0)
   private val elemIdx = (in.byteOffset >> in.deew)(vagqFlowByteWidth - 1, 0)
 
-  private val elemNum = MuxLookup(in.deew, 4.U(3.W))(Seq(
-    0.U -> 4.U(3.W),
-    1.U -> 3.U(3.W),
-    2.U -> 2.U(3.W),
-    3.U -> 1.U(3.W),
-  ))
-
-  private val elemOrdFromInst = (in.uopIdx << elemNum) + elemIdx  // element ordinal from inst
+  private val elemOrdFromInst = (in.uopIdx << elemNum(in.deew)) | elemIdx  // element ordinal from inst
   private val strideElemOrd = elemOrdFromInst
   private val strideOffsetWide = in.op2Data(XLEN - 1, 0).asSInt * strideElemOrd.asSInt
   private val strideOffset = strideOffsetWide.asUInt(XLEN - 1, 0)

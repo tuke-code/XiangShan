@@ -23,17 +23,19 @@ class VAGQEntryTable(implicit p: Parameters) extends VAGQModule {
 }
 
 class VAGQEntryTableIO(implicit p: Parameters) extends VAGQBundle {
-  val addrUop     = Flipped(Decoupled(new VAGQAddrSideUop))
-  val dataUop     = Flipped(Decoupled(new VAGQDataSideUop))
-  val maskInfo    = Input(new VAGQMaskInfo)
-  val entries     = Output(Vec(vagqSize, new VAGQEntry))
-  val splitUpdate = Input(Valid(new VAGQReqBitmapUpdate))
-  val redirect    = Flipped(Valid(new Redirect))
+  val addrUop          = Flipped(Decoupled(new VAGQAddrSideUop))
+  val dataUop          = Flipped(Decoupled(new VAGQDataSideUop))
+  val maskInfo         = Input(new VAGQMaskInfo)
+  val entries          = Output(Vec(vagqSize, new VAGQEntry))
+  val splitUpdate      = Input(Valid(new VAGQReqBitmapUpdate))
+  val mergeReqUpdate   = Flipped(Vec(VAGQConstants.MergeRespWidth, Valid(new VAGQReqBitmapUpdate)))
+  val mergeStateUpdate = Flipped(Valid(new VAGQEntryStateUpdate))
+  val redirect         = Flipped(Valid(new Redirect))
 }
 
 class VAGQMaskInfo(implicit p: Parameters) extends VAGQBundle {
-  val elemActiveMask = UInt(vagqFlowBytes.W)
-  val agnosticMask = UInt(vagqFlowBytes.W)
+  val elemActiveMask   = UInt(vagqFlowBytes.W)
+  val elemAgnosticMask = UInt(vagqFlowBytes.W)
 }
 
 class VAGQEntryMeta(implicit p: Parameters) extends VAGQBundle {
@@ -54,7 +56,7 @@ class VAGQEntryMeta(implicit p: Parameters) extends VAGQBundle {
   val vta = Bool()
   val uopIdx = UInt(UopIdxWidth.W)
   val elemActiveMask = UInt(vagqFlowBytes.W)
-  val agnosticMask = UInt(vagqFlowBytes.W)
+  val elemAgnosticMask = UInt(vagqFlowBytes.W)
 
   val nf = UInt(NfWidth.W)
 
@@ -73,6 +75,12 @@ class VAGQEntryMeta(implicit p: Parameters) extends VAGQBundle {
 }
 
 class VAGQEntry(implicit p: Parameters) extends VAGQEntryMeta
+
+class VAGQEntryStateUpdate(implicit p: Parameters) extends VAGQBundle {
+  val entryIdx   = UInt(vagqEntryIdxWidth.W)
+  val stateNext  = UInt(3.W)
+  val clearValid = Bool()
+}
 
 object VAGQEntryState {
   val waitA  = "b001".U(3.W)

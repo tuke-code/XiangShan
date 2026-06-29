@@ -151,6 +151,11 @@ class VAGQWritebackReq(implicit p: Parameters) extends VAGQBundle {
   val faultVstart = UInt(VAGQConstants.FaultVstartWidth.W)
 }
 
+class CtrlInput(implicit p: Parameters) extends VAGQBundle {
+  val entryIdx = UInt(vagqEntryIdxWidth.W)
+  val entry = new VAGQEntryMeta
+}
+
 class VAGQIO(implicit p: Parameters) extends VAGQBundle {
   // from iq
   val addrUop = Flipped(Decoupled(new VAGQAddrSideUop))
@@ -186,18 +191,25 @@ class VAGQ(implicit p: Parameters) extends VAGQModule {
   addrMaskGen.in.vta       := io.addrUop.bits.vta
 
   private val entryTable = Module(new VAGQEntryTable)
-  entryTable.io.addrUop <> io.addrUop
-  entryTable.io.dataUop <> io.dataUop
-  entryTable.io.maskInfo := addrMaskGen.out
-  entryTable.io.redirect := io.redirect
-
-  val entries = entryTable.io.entries
-
   private val splitCtrl = Module(new SplitCtrl(vagqSize))
+  private val mergeCtrl = Module(new MergeCtrl(vagqSize))
+
+  entryTable.io.addrUop          <> io.addrUop
+  entryTable.io.dataUop          <> io.dataUop
+  entryTable.io.maskInfo         := addrMaskGen.out
+  entryTable.io.mergeReqUpdate   := mergeCtrl.io.reqUpdate
+  entryTable.io.mergeStateUpdate := mergeCtrl.io.stateUpdate
+  entryTable.io.redirect         := io.redirect
+
   splitCtrl.io.redirect := io.redirect
+  mergeCtrl.io.redirect := io.redirect
+
   for (i <- 0 until vagqSize) {
     splitCtrl.io.in(i).entryIdx := i.U(vagqEntryIdxWidth.W)
-    splitCtrl.io.in(i).entry := entries(i)
+    splitCtrl.io.in(i).entry := entryTable.io.entries(i)
+
+    mergeCtrl.io.entry(i).entryIdx := i.U(vagqEntryIdxWidth.W)
+    mergeCtrl.io.entry(i).entry := entryTable.io.entries(i)
   }
 
   io.lsuReq <> splitCtrl.io.lsuReq
@@ -205,5 +217,11 @@ class VAGQ(implicit p: Parameters) extends VAGQModule {
 
   entryTable.io.splitUpdate := splitCtrl.io.update
 
+  mergeCtrl.io.lsuResp := io.lsuResp
+  mergeCtrl.io.lsqEmptyResp := io.lsqEmptyResp
+  mergeCtrl.io.vrfReadResp := io.vrfReadResp
 
+  io.vrfReadReq   <> mergeCtrl.io.vrfReadReq
+  io.vrfWriteReq  <> mergeCtrl.io.vrfWriteReq
+  io.robWriteback <> mergeCtrl.io.robWriteback
 }

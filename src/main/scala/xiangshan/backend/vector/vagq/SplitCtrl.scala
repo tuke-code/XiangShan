@@ -97,16 +97,11 @@ class SplitCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
 }
 
 class SplitCtrlIO(numEntries: Int)(implicit p: Parameters) extends VAGQBundle {
-  val in          = Input(Vec(numEntries, new SplitCtrlInput))
+  val in          = Input(Vec(numEntries, new CtrlInput))
   val redirect    = Flipped(Valid(new Redirect))
   val lsuReq      = Decoupled(new VAGQLsuReq)
   val lsqEmptyReq = Decoupled(new VAGQLsqEmptyReq)
   val update      = Valid(new VAGQReqBitmapUpdate)
-}
-
-class SplitCtrlInput(implicit p: Parameters) extends VAGQBundle {
-  val entryIdx = UInt(vagqEntryIdxWidth.W)
-  val entry = new VAGQEntryMeta
 }
 
 class VAGQReqBitmapUpdate(implicit p: Parameters) extends VAGQBundle {
