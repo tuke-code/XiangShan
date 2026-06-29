@@ -100,6 +100,8 @@ class LoadPipeBundle(
   val forwardDChannel = Option.when(param.replayFromLRQ)(Bool())
   val uncacheReplay = Option.when(param.replayFromLRQ)(Bool())
   val ncReplay = Option.when(param.replayFromLRQ)(Bool())
+  val perfReplayStoreAddrWakeupDelay3Fire = Option.when(param.replayFromLRQ)(Bool())
+  val perfReplayStoreDataWakeupDelay3Fire = Option.when(param.replayFromLRQ)(Bool())
   def isNCReplay(): Bool = uncacheReplay.getOrElse(false.B) && ncReplay.getOrElse(false.B)
   def isMMIOReplay(): Bool = uncacheReplay.getOrElse(false.B) && !ncReplay.getOrElse(false.B)
   def isUncacheReplay(): Bool = uncacheReplay.getOrElse(false.B)
@@ -151,6 +153,8 @@ class LoadPipeBundle(
     forwardDChannel.get := false.B
     uncacheReplay.get := false.B
     ncReplay.get := false.B
+    perfReplayStoreAddrWakeupDelay3Fire.get := false.B
+    perfReplayStoreDataWakeupDelay3Fire.get := false.B
   }
   def DontCareVectorFields(): Unit = {
     elemIdx.get := 0.U

@@ -689,6 +689,10 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     replay_req(i).bits.forwardDChannel.get := s2_replayCauses(LoadReplayCauses.C_DM)
     replay_req(i).bits.uncacheReplay.get := s2_replayCauses(LoadReplayCauses.C_UNCACHE)
     replay_req(i).bits.ncReplay.get := s2_replayCauses(LoadReplayCauses.C_UNCACHE) && s2_nc
+    replay_req(i).bits.perfReplayStoreAddrWakeupDelay3Fire.get :=
+      s2_replayCauses(LoadReplayCauses.C_MA) && storeIssueScoreBoardDelay3(s2_oldestSel(i).bits)
+    replay_req(i).bits.perfReplayStoreDataWakeupDelay3Fire.get :=
+      s2_replayCauses(LoadReplayCauses.C_FF) && storeIssueScoreBoardDelay3(s2_oldestSel(i).bits)
     replay_req(i).bits.elemIdx.get := s2_vecReplay.elemIdx
     replay_req(i).bits.mbIndex.get := s2_vecReplay.mbIndex
     replay_req(i).bits.regOffset.get := s2_vecReplay.reg_offset
@@ -948,11 +952,11 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
       VecInit(scoreBoard.map(_(2))).asUInt.orR
     ))(idx)
   }
-  val replayStoreAddrWakeupDelay3FireCount = PopCount(io.replay.map(r =>
+  val perfReplayStoreAddrWakeupDelay3FireCount = PopCount(io.replay.map(r =>
     r.fire && r.bits.cause.get(LoadReplayCauses.C_MA) &&
       storeIssueScoreBoardDelay3(r.bits.replayQueueIdx.get)
   ))
-  val replayStoreDataWakeupDelay3FireCount = PopCount(io.replay.map(r =>
+  val perfReplayStoreDataWakeupDelay3FireCount = PopCount(io.replay.map(r =>
     r.fire && r.bits.cause.get(LoadReplayCauses.C_FF) &&
       storeIssueScoreBoardDelay3(r.bits.replayQueueIdx.get)
   ))
@@ -976,8 +980,8 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   XSPerfAccumulate("replay_store_data_wakeup", storeDataWakeupCount)
   XSPerfAccumulate("replay_store_addr_wakeup_cancel", replayStoreAddrWakeupCancelCount)
   XSPerfAccumulate("replay_store_data_wakeup_cancel", replayStoreDataWakeupCancelCount)
-  XSPerfAccumulate("replay_store_addr_wakeup_delay3_fire", replayStoreAddrWakeupDelay3FireCount)
-  XSPerfAccumulate("replay_store_data_wakeup_delay3_fire", replayStoreDataWakeupDelay3FireCount)
+  XSPerfAccumulate("replay_store_addr_wakeup_delay3_fire", perfReplayStoreAddrWakeupDelay3FireCount)
+  XSPerfAccumulate("replay_store_data_wakeup_delay3_fire", perfReplayStoreDataWakeupDelay3FireCount)
 
   // replay counter
   val perfReplayCounter = RegInit(VecInit(Seq.fill(LoadQueueReplaySize)(0.U(8.W))))
