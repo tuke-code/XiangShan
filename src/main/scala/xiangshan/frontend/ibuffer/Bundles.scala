@@ -93,7 +93,7 @@ class IBufEntry(implicit p: Parameters) extends IBufferBundle {
     result.triggered          := triggered
     result.isLastInFtqEntry   := isLastInFtqEntry
     result.vtype              := DontCare // assign outside
-    result.specvtype          := DontCare // assign outside
+    result.oldVType           := DontCare // assign outside
     result.debug_seqNum       := debug_seqNum
     result.instrEndOffset     := instrEndOffset
     result
@@ -131,7 +131,7 @@ class IBufOutEntry(implicit p: Parameters) extends IBufferBundle {
   val isLastInFtqEntry:   Bool          = Bool()
   val instrEndOffset:     UInt          = UInt(FetchBlockInstOffsetWidth.W)
   val vtype:              VType         = VType()
-  val specvtype:          VType         = VType()
+  val oldVType:           VType         = VType()
 
   val debug_seqNum:       InstSeqNum    = InstSeqNum()
 
@@ -161,7 +161,7 @@ class IBufOutEntry(implicit p: Parameters) extends IBufferBundle {
     cf.ftqOffset                                     := instrEndOffset
     cf.isLastInFtqEntry                              := isLastInFtqEntry
     cf.vtype                                         := vtype
-    cf.specvtype                                     := specvtype
+    cf.oldVType                                      := oldVType
     cf.debug_seqNum                                  := debug_seqNum
     cf
   }
