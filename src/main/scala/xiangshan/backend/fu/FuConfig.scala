@@ -409,6 +409,7 @@ object FuConfig {
     latency = CertainLatency(0),
     immType = Set(Imm_VSETVLI(), Imm_VSETIVLI()),
     readVl = true,
+    readOldVtype = true,
   )
 
   val VSetRvfWvfCfg: FuConfig = FuConfig(
