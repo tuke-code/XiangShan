@@ -12,7 +12,7 @@ class MaskGen(implicit p: Parameters) extends VAGQModule {
 
   private val zeroVstart = 0.U(in.vstart.getWidth.W)
   private val effectiveVstart = Mux(in.useVstart, in.vstart, zeroVstart)
-  private val uvlByte = uopByteRangeLen(in.vl, in.deew, in.uopIdx)
+  private val uvlByte = in.uvlByte
   private val uvstartByte = uopByteRangeLen(effectiveVstart, in.deew, in.uopIdx)
 
   private val tailBits     = Wire(Vec(vagqFlowBytes, Bool()))
@@ -43,7 +43,7 @@ class MaskGenInput(implicit p: Parameters) extends VAGQBundle {
   val uopIdx    = UInt(vagqUopIdxWidth.W)
   val useVstart = Bool()
   val vstart    = UInt((CSRConfig.VlWidth-1).W)
-  val vl        = UInt(CSRConfig.VlWidth.W)
+  val uvlByte   = UInt(5.W)
   val vm        = Bool()
   val v0Mask    = UInt(vagqFlowBytes.W)
   val deew      = UInt(VAGQConstants.EewWidth.W)

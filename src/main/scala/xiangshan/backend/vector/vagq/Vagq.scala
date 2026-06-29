@@ -71,7 +71,7 @@ class VAGQAddrSideUop(implicit p: Parameters) extends VAGQBundle {
   val pdest = UInt(VfPhyRegIdxWidth.W)
   val baseAddr = UInt(XLEN.W)
   val op2Data = UInt(VLEN.W)
-  val vl = UInt(CSRConfig.VlWidth.W)
+  val uvlByte = UInt(5.W)
   val vstart = UInt((CSRConfig.VlWidth-1).W)
   val useVstart = Bool()
   val vm = Bool()
@@ -185,7 +185,7 @@ class VAGQ(implicit p: Parameters) extends VAGQModule {
   addrMaskGen.in.uopIdx    := io.addrUop.bits.uopIdx
   addrMaskGen.in.useVstart := io.addrUop.bits.useVstart
   addrMaskGen.in.vstart    := io.addrUop.bits.vstart
-  addrMaskGen.in.vl        := io.addrUop.bits.vl
+  addrMaskGen.in.uvlByte   := io.addrUop.bits.uvlByte
   addrMaskGen.in.vm        := io.addrUop.bits.vm
   addrMaskGen.in.v0Mask    := io.addrUop.bits.v0Mask
   addrMaskGen.in.deew      := io.addrUop.bits.deew

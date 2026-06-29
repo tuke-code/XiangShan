@@ -22,7 +22,7 @@ class SplitCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
     orderedBlocked(i) := entry.isOrdered && ((entry.reqSent & ~entry.reqAck & entry.elemActiveMask).orR)
     activePending(i) := Mux(
       canSplit(i) && !orderedBlocked(i),
-      ~entry.reqSent & ~entry.reqAck & entry.elemActiveMask,
+      ~entry.reqSent & entry.elemActiveMask,
       0.U(vagqFlowBytes.W)
     )
     emptyPending(i) := Mux(
