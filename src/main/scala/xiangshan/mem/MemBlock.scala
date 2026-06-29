@@ -1564,11 +1564,19 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   val ldDeqCount = PopCount(issueLda.map(_.valid))
   val stDeqCount = PopCount(issueSta.take(StaCnt).map(_.valid))
   val iqDeqCount = ldDeqCount +& stDeqCount
+  val perfReplayStoreAddrWakeupDelay3ExecuteSuccessCount = PopCount(
+    newLoadUnits.map(_.io.perfReplayStoreAddrWakeupDelay3ExecuteSuccess)
+  )
+  val perfReplayStoreDataWakeupDelay3ExecuteSuccessCount = PopCount(
+    newLoadUnits.map(_.io.perfReplayStoreDataWakeupDelay3ExecuteSuccess)
+  )
   XSPerfAccumulate("load_iq_deq_count", ldDeqCount)
   XSPerfHistogram("load_iq_deq_count", ldDeqCount, true.B, 0, LdExuCnt + 1)
   XSPerfAccumulate("store_iq_deq_count", stDeqCount)
   XSPerfHistogram("store_iq_deq_count", stDeqCount, true.B, 0, StAddrCnt + 1)
   XSPerfAccumulate("ls_iq_deq_count", iqDeqCount)
+  XSPerfAccumulate("loadunit_replay_store_addr_wakeup_delay3_execute_success", perfReplayStoreAddrWakeupDelay3ExecuteSuccessCount)
+  XSPerfAccumulate("loadunit_replay_store_data_wakeup_delay3_execute_success", perfReplayStoreDataWakeupDelay3ExecuteSuccessCount)
 
   val pfevent = Module(new PFEvent)
   pfevent.io.distribute_csr := csrCtrl.distribute_csr

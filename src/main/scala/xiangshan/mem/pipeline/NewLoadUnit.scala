@@ -1278,6 +1278,10 @@ class LoadUnitS3(param: ExeUnitParams)(
       val replayCnt = UInt(XLEN.W)
       val robIdx = UInt(log2Ceil(RobSize).W)
     })
+
+    // Perf
+    val perfReplayStoreAddrWakeupDelay3ExecuteSuccess = Output(Bool())
+    val perfReplayStoreDataWakeupDelay3ExecuteSuccess = Output(Bool())
   })
 
   val pipeIn = io_pipeIn.get
@@ -1618,6 +1622,13 @@ class LoadUnitS3(param: ExeUnitParams)(
   XSPerfAccumulate("nc_exception", io.ldout.toRob.fire && (in.isNCReplay() || in.nc.get) && exception)
   XSPerfAccumulate("nc_rar_violation", pipeIn.valid && in.isNCReplay() && rarViolation)
 
+  val perfReplayStoreAddrWakeupDelay3ExecuteSuccess = ldoutValid && in.perfReplayStoreAddrWakeupDelay3Fire.get
+  val perfReplayStoreDataWakeupDelay3ExecuteSuccess = ldoutValid && in.perfReplayStoreDataWakeupDelay3Fire.get
+  io.perfReplayStoreAddrWakeupDelay3ExecuteSuccess := perfReplayStoreAddrWakeupDelay3ExecuteSuccess
+  io.perfReplayStoreDataWakeupDelay3ExecuteSuccess := perfReplayStoreDataWakeupDelay3ExecuteSuccess
+  XSPerfAccumulate("replay_store_addr_wakeup_delay3_execute_success", perfReplayStoreAddrWakeupDelay3ExecuteSuccess)
+  XSPerfAccumulate("replay_store_data_wakeup_delay3_execute_success", perfReplayStoreDataWakeupDelay3ExecuteSuccess)
+
   // source occupy others but fail perf counter
   val executeFail = lqWriteValid && lqWriteCause.asUInt.orR || pipeIn.valid && shouldFastReplay
   for (i <- 0 until LoadEntrance.num) {
@@ -1845,6 +1856,8 @@ class LoadUnitIO(val param: ExeUnitParams)(implicit p: Parameters) extends XSBun
   // Debug info and top-down info
   val debugInfo = Output(new DebugLsInfoBundle)
   val topDownInfo = Output(new LsTopdownInfo)
+  val perfReplayStoreAddrWakeupDelay3ExecuteSuccess = Output(Bool())
+  val perfReplayStoreDataWakeupDelay3ExecuteSuccess = Output(Bool())
 }
 
 class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSModule with HasPerfEvents {
@@ -1953,6 +1966,8 @@ class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   io.cancel := s3.io.cancel
   io.exceptionInfo := s3.io.exceptionInfo
   s3.io.csrCtrl := io.csrCtrl
+  io.perfReplayStoreAddrWakeupDelay3ExecuteSuccess := s3.io.perfReplayStoreAddrWakeupDelay3ExecuteSuccess
+  io.perfReplayStoreDataWakeupDelay3ExecuteSuccess := s3.io.perfReplayStoreDataWakeupDelay3ExecuteSuccess
 
   // Data path
   dataPath.io.s2SqForwardResp := io.sqForward.s2Resp
