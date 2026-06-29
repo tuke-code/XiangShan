@@ -806,7 +806,7 @@ class CtrlBlockImp(
   io.diff_vl_rat .foreach(_ := rename.io.diff_vl_rat.get)
 
   rob.io.debug_ls := io.robio.debug_ls
-  rob.io.debugHeadLsIssue := io.robio.robHeadLsIssue
+  rob.io.debugMemIssueFire.foreach(_ := io.robio.debugMemIssueFire.get)
   rob.io.lsTopdownInfo := io.robio.lsTopdownInfo
   rob.io.csr.criticalErrorState := io.robio.csr.criticalErrorState
   rob.io.debugEnqLsq := io.debugEnqLsq
@@ -835,7 +835,7 @@ class CtrlBlockImp(
   io.debugTopDown.fromRob := rob.io.debugTopDown.toCore
   io.debugRolling := rob.io.debugRolling
   // mem topdown reason collect
-  val notIssue = !rob.io.debugTopDown.toDispatch.robHeadLsIssue
+  val notIssue = !rob.io.debugTopDown.toDispatch.robHeadLsIssued
   val tlbReplay = io.debugTopDown.fromCore.fromMem.robHeadTlbReplay
   val tlbMiss = io.debugTopDown.fromCore.fromMem.robHeadTlbMiss
   val vioReplay = io.debugTopDown.fromCore.fromMem.robHeadLoadVio
@@ -964,7 +964,7 @@ class CtrlBlockIO()(implicit p: Parameters, params: BackendParams) extends XSBun
     val lsq = new RobLsqIO
     val lsTopdownInfo = Vec(params.LduCnt + params.HyuCnt, Input(new LsTopdownInfo))
     val debug_ls = Input(new DebugLSIO())
-    val robHeadLsIssue = Input(Bool())
+    val debugMemIssueFire = Option.when(backendParams.debugEn)(Vec(params.memIssuePortNum, Flipped(ValidIO(new RobPtr()))))
     val robDeqPtr = Output(new RobPtr)
     val commitVType = new Bundle {
       val vtype = Output(ValidIO(VType()))
