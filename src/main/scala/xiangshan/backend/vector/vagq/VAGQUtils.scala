@@ -73,4 +73,21 @@ trait HasVAGQHelper { this: HasVAGQParameters =>
     val elemIdx = entry.faultElemIdx >> entry.deew
     ((entry.uopIdx << elemNum(entry.deew)) + elemIdx)(VAGQConstants.FaultVstartWidth - 1, 0)
   }
+
+  protected def enterSplit(entry: VAGQEntryMeta): Unit = {
+    entry.state   := VAGQEntryState.split
+    entry.reqSent := 0.U
+    entry.reqAck  := 0.U
+    entry.exceptionNumber := 0.U
+    entry.faultElemIdx    := 0.U
+  }
+
+  protected def initPending(entry: VAGQEntryMeta, stateNext: UInt): Unit = {
+    entry.valid := true.B
+    entry.state := stateNext
+    entry.reqSent := 0.U
+    entry.reqAck  := 0.U
+    entry.exceptionNumber := 0.U
+    entry.faultElemIdx    := 0.U
+  }
 }

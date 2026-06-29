@@ -4,6 +4,7 @@ import chisel3._
 import chisel3.util._
 import org.chipsalliance.cde.config.Parameters
 import xiangshan._
+import xiangshan.backend.Bundles._
 import xiangshan.backend.rob.RobPtr
 import xiangshan.frontend.ftq.FtqPtr
 import xiangshan.mem.{LqPtr, SqPtr}
@@ -17,6 +18,90 @@ class VAGQEntryTable(implicit p: Parameters) extends VAGQModule {
   private val entries = RegInit(VecInit(Seq.fill(vagqSize)(emptyEntry)))
 
   private val entriesNext = WireInit(entries)
+
+  private val addrEntry = entryAt(entries, io.addrUop.bits.entryIdx)
+  private val dataEntry = entryAt(entries, io.dataUop.bits.entryIdx)
+  private val addrIdxValid = idxValid(io.addrUop.bits.entryIdx)
+  private val dataIdxValid = idxValid(io.dataUop.bits.entryIdx)
+  private val addrEntryFlush = addrEntry.valid && addrEntry.robIdx.needFlush(io.redirect)
+  private val dataEntryFlush = dataEntry.valid && dataEntry.robIdx.needFlush(io.redirect)
+  private val addrCanAccept = !addrEntry.valid || addrEntry.state === VAGQEntryState.waitA
+  private val dataCanAccept = !dataEntry.valid || dataEntry.state === VAGQEntryState.waitSI
+
+  io.addrUop.ready := addrIdxValid && addrCanAccept && !addrEntryFlush
+  io.dataUop.ready := dataIdxValid && dataCanAccept && !dataEntryFlush
+
+  private val addrFire = io.addrUop.fire && !io.addrUop.bits.robIdx.needFlush(io.redirect)
+  private val dataFire = io.dataUop.fire && !io.dataUop.bits.robIdx.needFlush(io.redirect)
+
+  for (i <- 0 until vagqSize) {
+    val idx = i.U(vagqEntryIdxWidth.W)
+    val updateVec = Seq(io.splitUpdate) ++ io.mergeReqUpdate.toSeq
+    val updateHits = updateVec.map(update => update.valid && update.bits.entryIdx === idx)
+    val setReqSent = updateVec.zip(updateHits).map { case (update, hit) =>
+      Mux(hit, update.bits.setReqSent, 0.U)
+    }.reduce(_ | _)
+    val clearReqSent = updateVec.zip(updateHits).map { case (update, hit) =>
+      Mux(hit, update.bits.clearReqSent, 0.U)
+    }.reduce(_ | _)
+    val setReqAck = updateVec.zip(updateHits).map { case (update, hit) =>
+      Mux(hit, update.bits.setReqAck, 0.U)
+    }.reduce(_ | _)
+    val exceptionHits = updateVec.zip(updateHits).map { case (update, hit) =>
+      hit && update.bits.exception
+    }
+    val hasExceptionUpdate = exceptionHits.reduce(_ || _)
+    val exceptionUpdate = Mux1H(exceptionHits, updateVec.map(_.bits))
+
+    when(updateHits.reduce(_ || _)) {
+      entriesNext(i).reqSent := (entries(i).reqSent | setReqSent) & ~clearReqSent
+      entriesNext(i).reqAck  := entries(i).reqAck | setReqAck
+    }
+    when(hasExceptionUpdate) {
+      entriesNext(i).exceptionNumber := exceptionUpdate.exceptionNumber
+      entriesNext(i).faultElemIdx    := exceptionUpdate.faultElemIdx
+      entriesNext(i).state           := VAGQEntryState.excp
+    }
+
+    when(io.mergeStateUpdate.valid && io.mergeStateUpdate.bits.entryIdx === idx) {
+      when(io.mergeStateUpdate.bits.clearValid) {
+        entriesNext(i).valid := false.B
+      }.otherwise {
+        entriesNext(i).state := io.mergeStateUpdate.bits.stateNext
+      }
+    }
+
+    val addrFireThis = addrFire && io.addrUop.bits.entryIdx === idx
+    val dataFireThis = dataFire && io.dataUop.bits.entryIdx === idx
+
+    when(addrFireThis) {
+      connectSamePort(entriesNext(i), io.addrUop.bits)
+      connectSamePort(entriesNext(i), io.maskInfo)
+    }
+    when(dataFireThis) {
+      connectSamePort(entriesNext(i), io.dataUop.bits)
+    }
+
+    when(addrFireThis && dataFireThis) {
+      enterSplit(entriesNext(i))
+    }.elsewhen(addrFireThis) {
+      when(entries(i).valid && entries(i).state === VAGQEntryState.waitA) {
+        enterSplit(entriesNext(i))
+      }.otherwise {
+        initPending(entriesNext(i), VAGQEntryState.waitSI)
+      }
+    }.elsewhen(dataFireThis) {
+      when(entries(i).valid && entries(i).state === VAGQEntryState.waitSI) {
+        enterSplit(entriesNext(i))
+      }.otherwise {
+        initPending(entriesNext(i), VAGQEntryState.waitA)
+      }
+    }
+
+    when(entries(i).valid && entries(i).robIdx.needFlush(io.redirect)) {
+      entriesNext(i) := emptyEntry
+    }
+  }
 
   entries := entriesNext
   io.entries := entries
