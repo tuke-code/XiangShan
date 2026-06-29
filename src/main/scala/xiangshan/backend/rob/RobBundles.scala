@@ -446,24 +446,25 @@ object RobIntDiffOps {
     require(valid.length == writeData.length, "ROB direct integer diff valid/writeData lane counts must match")
     require(commitData.length == valid.length, "ROB direct integer diff commit data lane count must match")
 
-    val staged = Wire(Vec(valid.length + 1, Vec(numRegs, UInt(current.head.getWidth.W))))
-    staged(0) := current
+    var shadow = current
 
     for (lane <- valid.indices) {
       val srcIdx = moveSrc(lane)(log2Ceil(numRegs) - 1, 0)
       val dstIdx = ldest(lane)(log2Ceil(numRegs) - 1, 0)
-      val laneData = Mux(isMove(lane), staged(lane)(srcIdx), writeData(lane))
+      val moveData = Mux1H(UIntToOH(srcIdx, numRegs), shadow)
+      val laneData = Mux(isMove(lane), moveData, writeData(lane))
       val write = valid(lane) && rfWen(lane) && dstIdx =/= 0.U
+      val nextShadow = Wire(Vec(numRegs, UInt(current.head.getWidth.W)))
 
       commitData(lane) := laneData
-      staged(lane + 1) := staged(lane)
-      when(write) {
-        staged(lane + 1)(dstIdx) := laneData
+      for (reg <- 0 until numRegs) {
+        nextShadow(reg) := Mux(write && dstIdx === reg.U, laneData, shadow(reg))
       }
-      staged(lane + 1)(0) := 0.U
+      nextShadow(0) := 0.U
+      shadow = nextShadow
     }
 
-    next := staged.last
+    next := shadow
     next(0) := 0.U
   }
 }

@@ -935,6 +935,13 @@ class IntEarlyReleaseRobTest extends AnyFlatSpec with Matchers with ChiselSim {
     gateIdx should be >= 0
   }
 
+  it should "keep direct integer diff shadow update free of a staged Vec chain" in {
+    val robBundlesSource = sourceText("src/main/scala/xiangshan/backend/rob/RobBundles.scala")
+
+    robBundlesSource should not include "Wire(Vec(valid.length + 1, Vec(numRegs"
+    robBundlesSource should not include "staged(lane + 1) := staged(lane)"
+  }
+
   it should "clear direct integer diff writeback shadow on commit and ROB index reuse but not walk" in {
     val robSource = sourceText("src/main/scala/xiangshan/backend/rob/Rob.scala")
 
