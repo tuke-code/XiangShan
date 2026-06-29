@@ -57,7 +57,7 @@ class ExuParam(
   val readFrm: Boolean = fuConfigs.exists(_.needSrcFrm)
   val readVxrm: Boolean = fuConfigs.exists(_.needSrcVxrm)
   val readVType: Boolean = fuConfigs.exists(_.readVType)
-  val readOldVType: Boolean = fuConfigs.exists(_.writeVType)
+  val readOldVType: Boolean = fuConfigs.exists(_.readOldVType)
 
   val needVM: Boolean = this.readV0Rf
 

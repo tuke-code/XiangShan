@@ -26,7 +26,7 @@ class VSetFuncUnit(
   private val vsetvli = in.vsetvliVType.valid
   private val vsetivli = in.vsetivliVType.valid
 
-  private val normalStripmining = (vsetvl || vsetvli || vsetivli) && !in.rs1IsZero
+  private val normalStripmining = (vsetvl || vsetvli) && !in.rs1IsZero || vsetivli
   private val setVlVlmax = (vsetvl || vsetvli) && in.rs1IsZero && !in.rdIsZero
   private val keepVl = (vsetvl || vsetvli) && in.rs1IsZero && in.rdIsZero
 
@@ -58,7 +58,7 @@ class VSetFuncUnit(
   private val villFromVTypeImm = newVTypeDecodeBundle(villField)
 
   // vlmax is OH, use |(a&b) will be cheaper than =/=
-  private val vlmaxCannotKeep = !((vlmax & oldVlmax).orR) || !oldVType.valid
+  private val vlmaxCannotKeep = !((vlmax & oldVlmax).orR) || !oldVType.valid || oldVType.bits.illegal
 
   private val vill = in.vill || vtype.illegal || villFromVTypeImm || in.rdIsZero && in.rs1IsZero && vlmaxCannotKeep
 

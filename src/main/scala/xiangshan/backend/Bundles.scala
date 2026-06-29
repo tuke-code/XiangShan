@@ -518,6 +518,7 @@ object Bundles {
     val frm      = Option.when(params.needSrcFrm)(Frm())
     val vpu      = Option.when(params.issueBlockParam.inVfSchd)(new VPUCtrlSignals)
     val fflagsWen = Option.when(params.writeFflags)(Bool())
+    val oldVType = Option.when(params.writeVType)(VType())
     val uopIdx   = Option.when(params.issueBlockParam.inVfSchd)(UopIdx())
     val lastUop  = Option.when(params.issueBlockParam.inVfSchd)(Bool())
     // from rename
@@ -1095,6 +1096,7 @@ object Bundles {
       this.frm.foreach(_ := source.frm.get)
       this.vpu.foreach(_ := source.vpu.get)
       this.fflagsWen.foreach(_ := source.fflagsWen.get)
+      this.oldVType.foreach(_ := source.oldVType.get)
 
       this.numLsElem.foreach(_ := source.numLsElem.get)
       this.rasAction.foreach(_ := source.rasAction.get)
