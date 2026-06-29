@@ -1052,7 +1052,7 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
   decodedInst.vpu.vta   := io.enq.decodeInUop.vtype.vta
   decodedInst.vpu.vsew  := io.enq.decodeInUop.vtype.vsew
   decodedInst.vpu.vlmul := io.enq.decodeInUop.vtype.vlmul
-  decodedInst.oldVType := io.enq.decodeInUop.specvtype
+  decodedInst.oldVType := io.enq.decodeInUop.oldVType
   decodedInst.vpu.vm := inst.VM
   decodedInst.vpu.nf := inst.NF
   decodedInst.vpu.veew := inst.WIDTH

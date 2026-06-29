@@ -117,7 +117,7 @@ object Bundles {
     val ftqOffset = UInt(FetchBlockInstOffsetWidth.W)
     val isLastInFtqEntry = Bool()
     val vtype            = new VType()
-    val specvtype        = new VType()
+    val oldVType         = new VType()
     val instr = UInt(32.W)
     val debug = OptionWrapper(backendParams.debugEn, new DecodeInUopDebug())
 
@@ -126,7 +126,7 @@ object Bundles {
       this.isRVC := source.isRvc
       this.isFetchMalAddr := source.backendException
       this.vtype            := source.vtype
-      this.specvtype        := source.specvtype
+      this.oldVType         := source.oldVType
       this.debug.foreach(_.pc := source.pc)
       this.debug.foreach(_.debug_seqNum := source.debug_seqNum)
     }

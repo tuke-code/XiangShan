@@ -352,14 +352,14 @@ class IBuffer(implicit p: Parameters) extends IBufferModule with HasCircularQueu
     when (decodeCanAccept && !resumingVType) {
       // vtype can not be from bypass
       outputEntriesNext(i).bits.vtype := vtypeGen.out.vtype(i)
-      outputEntriesNext(i).bits.specvtype := vtypeGen.out.specvtype(i)
+      outputEntriesNext(i).bits.oldVType := vtypeGen.out.oldVType(i)
     }.elsewhen (outputEntriesIsNotFull && !resumingVType) {
       when (i.U < outputEntriesValidNum) {
         outputEntriesNext(i).bits.vtype := outputEntries(i).bits.vtype
-        outputEntriesNext(i).bits.specvtype := outputEntries(i).bits.specvtype
+        outputEntriesNext(i).bits.oldVType := outputEntries(i).bits.oldVType
       }.otherwise {
         outputEntriesNext(i).bits.vtype := vtypeGen.out.vtype(i)
-        outputEntriesNext(i).bits.specvtype := vtypeGen.out.specvtype(i)
+        outputEntriesNext(i).bits.oldVType := vtypeGen.out.oldVType(i)
       }
     }
   }

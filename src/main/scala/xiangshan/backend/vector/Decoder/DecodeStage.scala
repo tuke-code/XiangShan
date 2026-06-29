@@ -106,7 +106,7 @@ class DecodeStageImp(
         ctrl.ftqOffset        := inMopBits.ftqOffset
         ctrl.isLastInFtqEntry := inMopBits.isLastInFtqEntry
         ctrl.vtype            := inMopBits.vtype
-        ctrl.oldVType         := inMopBits.specvtype
+        ctrl.oldVType         := inMopBits.oldVType
         ctrl.rawInst          := inMopBits.instr
         ctrl.debug.foreach(_  := inMopBits.debug.get)
     }

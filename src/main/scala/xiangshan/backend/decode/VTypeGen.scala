@@ -63,8 +63,8 @@ class VTypeGen(implicit p: Parameters) extends XSModule {
 
   private val vtypeNewVec = vsetModuleVec.map(_.out.vtype)
 
-  private val specvtype = vtypeSpec +: out.vtype
-  out.specvtype := specvtype.take(out.specvtype.length)
+  private val oldVType = vtypeSpec +: out.vtype
+  out.oldVType := oldVType.take(out.oldVType.length)
   // Break the oldVType chain: all VSetFuncUnits use vtypeSpec in parallel
   oldVTypeVec := VecInit(Seq.fill(DecodeWidth)(vtypeSpec))
 
@@ -180,10 +180,6 @@ object VTypeGen {
 
   class Out()(implicit p: Parameters) extends XSBundle {
     val vtype = Output(Vec(DecodeWidth, new VType))
-    /**
-     *  Speculated vtype, for snapshot, different from vtype when the instruction is vset.
-     *  However, there's no need for every instruction to take a specvtype. Should be modified in the future.
-     */
-    val specvtype = Output(Vec(DecodeWidth, new VType))
+    val oldVType = Output(Vec(DecodeWidth, new VType))
   }
 }
