@@ -155,7 +155,6 @@ class LoadQueueTopDownIO(implicit p: Parameters) extends XSBundle {
   val robHeadBankConflictReplay = Output(Bool())
   val robHeadNukeQueryReplay = Output(Bool())
   val robHeadMissInDTlb = Input(Bool())
-  val robHeadOtherReplay = Output(Bool())
 }
 
 class LoadQueue(implicit p: Parameters) extends XSModule

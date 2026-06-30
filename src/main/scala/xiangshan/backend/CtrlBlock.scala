@@ -834,24 +834,27 @@ class CtrlBlockImp(
 
   io.debugTopDown.fromRob := rob.io.debugTopDown.toCore
   io.debugRolling := rob.io.debugRolling
+
   // mem topdown reason collect
-  val notIssue = !rob.io.debugTopDown.toDispatch.robHeadLsIssued
   val tlbReplay = io.debugTopDown.fromCore.fromMem.robHeadTlbReplay
   val tlbMiss = io.debugTopDown.fromCore.fromMem.robHeadTlbMiss
   val vioReplay = io.debugTopDown.fromCore.fromMem.robHeadLoadVio
   val mshrReplay = io.debugTopDown.fromCore.fromMem.robHeadLoadMSHR
-  val ldReplay = io.debugTopDown.fromCore.fromMem.robHeadLdReplay
   val uncacheReplay = io.debugTopDown.fromCore.fromMem.robHeadUncacheReplay
   val forwardFailReplay = io.debugTopDown.fromCore.fromMem.robHeadForwardFailReplay
   val dcacheMissReplay = io.debugTopDown.fromCore.fromMem.robHeadDCacheMissReplay
   val bankConflictReplay = io.debugTopDown.fromCore.fromMem.robHeadBankConflictReplay
   val nukeQueryReplay = io.debugTopDown.fromCore.fromMem.robHeadNukeQueryReplay
-  val classifiedReplay = tlbMiss || tlbReplay || mshrReplay || vioReplay ||
-    uncacheReplay || forwardFailReplay || dcacheMissReplay || bankConflictReplay || nukeQueryReplay
+  val classifiedReplay = tlbMiss || tlbReplay || mshrReplay || vioReplay || uncacheReplay ||
+                         forwardFailReplay || dcacheMissReplay || bankConflictReplay || nukeQueryReplay
+  val ldReplay = io.debugTopDown.fromCore.fromMem.robHeadLdReplay
   val otherReplay = ldReplay && !classifiedReplay
-  val l1Miss = io.debugTopDown.fromCore.fromMem.robHeadMissInDCache
-  val l2Miss = io.debugTopDown.fromCore.l2MissMatch
+  
   val l3Miss = io.debugTopDown.fromCore.l3MissMatch
+  val l2Miss = io.debugTopDown.fromCore.l2MissMatch
+  val l1Miss = io.debugTopDown.fromCore.fromMem.robHeadMissInDCache
+  val notIssue = !rob.io.debugTopDown.toDispatch.robHeadLsIssued
+
   val ldReason = Mux(l3Miss, LoadMemStall.id.U,
     Mux(l2Miss, LoadL3Stall.id.U,
       Mux(l1Miss, LoadL2Stall.id.U,
@@ -866,6 +869,7 @@ class CtrlBlockImp(
                         Mux(nukeQueryReplay, LoadNukeQueryReplayStall.id.U,
                           Mux(otherReplay, LoadOtherReplayStall.id.U,
                               LoadL1Stall.id.U)))))))))))))
+  
   dispatch.io.debugLoadReason.foreach(_ := ldReason)
   dispatch.io.debugRobTrueCommit.foreach(_ := rob.io.debugTopDown.toDispatch.robTrueCommit)
   rename.io.debugLoadReason.foreach(_ := ldReason)
