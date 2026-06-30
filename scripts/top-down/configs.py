@@ -152,6 +152,12 @@ xs_mem_rename_map = {
 
     'LoadMSHRReplayStall': 'MergeMSHRReplayStall',
     'LoadVioReplayStall': 'MergeLoadVioReplay',
+    'LoadUncacheReplayStall': 'MergeUncacheReplayStall',
+    'LoadForwardFailReplayStall': 'MergeForwardFailReplayStall',
+    'LoadDCacheMissReplayStall': 'MergeDCacheMissReplayStall',
+    'LoadBankConflictReplayStall': 'MergeBankConflictReplayStall',
+    'LoadNukeQueryReplayStall': 'MergeNukeQueryReplayStall',
+    'LoadOtherReplayStall': 'MergeOtherReplayStall',
 
     'MemVioRedirectStall': 'MergeMemVioRedirect',
     'MemVioRedirectBubble': 'MergeMemVioRedirect',
@@ -234,6 +240,12 @@ xs_coarse_rename_map = {
     'LoadVioReplayStall': 'MergeBadSpec',
 
     'LoadMSHRReplayStall': 'MergeLoad',
+    'LoadUncacheReplayStall': 'MergeLoad',
+    'LoadForwardFailReplayStall': 'MergeLoad',
+    'LoadDCacheMissReplayStall': 'MergeLoad',
+    'LoadBankConflictReplayStall': 'MergeLoad',
+    'LoadNukeQueryReplayStall': 'MergeLoad',
+    'LoadOtherReplayStall': 'MergeLoad',
 
     'ControlRedirectStall': 'MergeBadSpec',
     'MemVioRedirectStall': 'MergeBadSpec',
@@ -290,6 +302,12 @@ xs_fine_grain_rename_map = {
     'LoadVioReplayStall': None,
 
     'LoadMSHRReplayStall': None,
+    'LoadUncacheReplayStall': None,
+    'LoadForwardFailReplayStall': None,
+    'LoadDCacheMissReplayStall': None,
+    'LoadBankConflictReplayStall': None,
+    'LoadNukeQueryReplayStall': None,
+    'LoadOtherReplayStall': None,
 
     'ControlRecoveryStall': 'MergeBadSpecWalking',
     'MemVioRecoveryStall': 'MergeBadSpecWalking',
@@ -378,6 +396,12 @@ targets = {
 
     'LoadVioReplayStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadVioReplayStall,\s+(\d+)',
     'LoadMSHRReplayStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadMSHRReplayStall,\s+(\d+)',
+    'LoadUncacheReplayStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadUncacheReplayStall,\s+(\d+)',
+    'LoadForwardFailReplayStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadForwardFailReplayStall,\s+(\d+)',
+    'LoadDCacheMissReplayStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadDCacheMissReplayStall,\s+(\d+)',
+    'LoadBankConflictReplayStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadBankConflictReplayStall,\s+(\d+)',
+    'LoadNukeQueryReplayStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadNukeQueryReplayStall,\s+(\d+)',
+    'LoadOtherReplayStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: LoadOtherReplayStall,\s+(\d+)',
 
 
     'ControlRedirectStall': fr'{XS_CORE_PREFIX}.backend.*?ctrlBlock\.dispatch: ControlRedirectStall,\s+(\d+)',
