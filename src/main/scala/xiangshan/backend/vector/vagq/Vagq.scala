@@ -99,6 +99,8 @@ class VAGQReqBase(implicit p: Parameters) extends VAGQBundle {
   val elemIdx     = UInt(vagqFlowByteWidth.W)
   val mask        = UInt(vagqFlowBytes.W)
   val alignedType = UInt(AlignedTypeWidth.W)  // deew
+  val lqIdx       = new LqPtr
+  val sqIdx       = new SqPtr
 }
 
 class VAGQLsuReq(implicit p: Parameters) extends VAGQReqBase {

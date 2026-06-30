@@ -137,6 +137,8 @@ class SplitCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
   io.lsuReq.bits.pdest       := selectedInput.entry.pdest
   io.lsuReq.bits.alignedType := selectedAlignedType
   io.lsuReq.bits.nf          := selectedInput.entry.nf
+  io.lsuReq.bits.lqIdx       := selectedInput.entry.meta.lqIdx
+  io.lsuReq.bits.sqIdx       := selectedInput.entry.meta.sqIdx
 
   io.lsqEmptyReq.valid            := hasReq && !issueActive
   io.lsqEmptyReq.bits             := 0.U.asTypeOf(io.lsqEmptyReq.bits)
@@ -148,6 +150,8 @@ class SplitCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
   io.lsqEmptyReq.bits.elemIdx     := addrGen.out.elemIdx
   io.lsqEmptyReq.bits.mask        := issueMask
   io.lsqEmptyReq.bits.alignedType := selectedAlignedType
+  io.lsqEmptyReq.bits.lqIdx       := selectedInput.entry.meta.lqIdx
+  io.lsqEmptyReq.bits.sqIdx       := selectedInput.entry.meta.sqIdx
 
   io.update.valid           := io.lsuReq.fire || io.lsqEmptyReq.fire
   io.update.bits            := 0.U.asTypeOf(io.update.bits)
