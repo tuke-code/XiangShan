@@ -139,6 +139,7 @@ class VAGQVRFWriteReq(implicit p: Parameters) extends VAGQBundle {
   val entryIdx = UInt(vagqEntryIdxWidth.W)
   val pdest = UInt(VfPhyRegIdxWidth.W)
   val data = UInt(VLEN.W)
+  val mask = UInt(vagqFlowBytes.W)
 }
 
 class VAGQWritebackReq(implicit p: Parameters) extends VAGQBundle {
@@ -208,8 +209,23 @@ class VAGQ(implicit p: Parameters) extends VAGQModule {
   mergeCtrl.io.lsuResp := io.lsuResp
   mergeCtrl.io.lsqEmptyResp := io.lsqEmptyResp
   mergeCtrl.io.vrfReadResp := io.vrfReadResp
+  splitCtrl.io.vrfReadResp := io.vrfReadResp
 
-  io.vrfReadReq   <> mergeCtrl.io.vrfReadReq
+  private val lastVrfReadGrantSplit = RegInit(false.B)
+  private val splitVrfReadValid = splitCtrl.io.vrfReadReq.valid
+  private val mergeVrfReadValid = mergeCtrl.io.vrfReadReq.valid
+  private val grantSplitVrfRead = splitVrfReadValid && (!mergeVrfReadValid || !lastVrfReadGrantSplit)
+  private val grantMergeVrfRead = mergeVrfReadValid && (!splitVrfReadValid || lastVrfReadGrantSplit)
+
+  io.vrfReadReq.valid := grantSplitVrfRead || grantMergeVrfRead
+  io.vrfReadReq.bits := Mux(grantSplitVrfRead, splitCtrl.io.vrfReadReq.bits, mergeCtrl.io.vrfReadReq.bits)
+  splitCtrl.io.vrfReadReq.ready := io.vrfReadReq.ready && grantSplitVrfRead
+  mergeCtrl.io.vrfReadReq.ready := io.vrfReadReq.ready && grantMergeVrfRead
+
+  when(io.vrfReadReq.fire) {
+    lastVrfReadGrantSplit := grantSplitVrfRead
+  }
+
   io.vrfWriteReq  <> mergeCtrl.io.vrfWriteReq
   io.robWriteback <> mergeCtrl.io.robWriteback
 }

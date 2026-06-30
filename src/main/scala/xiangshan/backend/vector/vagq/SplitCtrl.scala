@@ -64,7 +64,66 @@ class SplitCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
   private val issueMask = addrGen.out.elemMask & selectedPending
   private val selectedAlignedType = selectedInput.entry.deew
 
-  io.lsuReq.valid            := hasReq && issueActive
+  private val storeReadValid    = RegInit(false.B)
+  private val storeReadEntryIdx = RegInit(0.U(vagqEntryIdxWidth.W))
+  private val storeReadRobIdx   = RegInit(0.U.asTypeOf(new RobPtr))
+  private val storeReadEntry    = io.in(storeReadEntryIdx)
+  private val storeReadAlive    = storeReadValid &&
+                                  storeReadEntry.entry.state === VAGQEntryState.split &&
+                                  storeReadEntry.entry.isStore &&
+                                  storeReadEntry.entry.robIdx === storeReadRobIdx &&
+                                  entryAlive(storeReadEntry.entry, io.redirect)
+
+  private val storeDataValid    = RegInit(false.B)
+  private val storeDataEntryIdx = RegInit(0.U(vagqEntryIdxWidth.W))
+  private val storeDataRobIdx   = RegInit(0.U.asTypeOf(new RobPtr))
+  private val storeData         = Reg(UInt(VLEN.W))
+  private val storeDataEntry    = io.in(storeDataEntryIdx)
+  private val storeDataAlive    = storeDataValid &&
+                                  storeDataEntry.entry.state === VAGQEntryState.split &&
+                                  storeDataEntry.entry.isStore &&
+                                  storeDataEntry.entry.robIdx === storeDataRobIdx &&
+                                  entryAlive(storeDataEntry.entry, io.redirect)
+  private val selectedStoreDataReady = storeDataAlive &&
+                                      storeDataEntryIdx === selectedInput.entryIdx &&
+                                      storeDataRobIdx === selectedInput.entry.robIdx
+
+  private val selectedNeedsStoreData = hasReq && issueActive && selectedInput.entry.isStore && !selectedStoreDataReady
+  private val activeReqDataReady = !selectedInput.entry.isStore || selectedStoreDataReady
+
+  io.vrfReadReq.valid         := selectedNeedsStoreData && !storeReadValid
+  io.vrfReadReq.bits          := 0.U.asTypeOf(io.vrfReadReq.bits)
+  io.vrfReadReq.bits.entryIdx := selectedInput.entryIdx
+  io.vrfReadReq.bits.robIdx   := selectedInput.entry.robIdx
+  io.vrfReadReq.bits.psrc     := selectedInput.entry.psrc2
+
+  private val storeReadRespAlive = io.vrfReadResp.valid &&
+    storeReadAlive &&
+    io.vrfReadResp.bits.entryIdx === storeReadEntryIdx &&
+    io.vrfReadResp.bits.robIdx === storeReadRobIdx
+
+  when(storeReadValid) {
+    when(!storeReadAlive || storeReadRespAlive) {
+      storeReadValid := false.B
+    }
+  }.elsewhen(io.vrfReadReq.fire) {
+    storeReadValid    := true.B
+    storeReadEntryIdx := io.vrfReadReq.bits.entryIdx
+    storeReadRobIdx   := io.vrfReadReq.bits.robIdx
+  }
+
+  when(storeDataValid && !storeDataAlive) {
+    storeDataValid := false.B
+  }
+
+  when(storeReadRespAlive) {
+    storeDataValid    := true.B
+    storeDataEntryIdx := io.vrfReadResp.bits.entryIdx
+    storeDataRobIdx   := io.vrfReadResp.bits.robIdx
+    storeData         := io.vrfReadResp.bits.data
+  }
+
+  io.lsuReq.valid            := hasReq && issueActive && activeReqDataReady
   io.lsuReq.bits             := 0.U.asTypeOf(io.lsuReq.bits)
   io.lsuReq.bits.entryIdx    := selectedInput.entryIdx
   io.lsuReq.bits.robIdx      := selectedInput.entry.robIdx
@@ -74,7 +133,7 @@ class SplitCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
   io.lsuReq.bits.elemIdx     := addrGen.out.elemIdx
   io.lsuReq.bits.vaddr       := addrGen.out.vaddr
   io.lsuReq.bits.mask        := issueMask
-  io.lsuReq.bits.data        := 0.U // todo: storeData
+  io.lsuReq.bits.data        := Mux(selectedStoreDataReady, storeData, 0.U(VLEN.W))
   io.lsuReq.bits.pdest       := selectedInput.entry.pdest
   io.lsuReq.bits.alignedType := selectedAlignedType
   io.lsuReq.bits.nf          := selectedInput.entry.nf
@@ -101,6 +160,8 @@ class SplitCtrlIO(numEntries: Int)(implicit p: Parameters) extends VAGQBundle {
   val redirect    = Flipped(Valid(new Redirect))
   val lsuReq      = Decoupled(new VAGQLsuReq)
   val lsqEmptyReq = Decoupled(new VAGQLsqEmptyReq)
+  val vrfReadReq  = Decoupled(new VAGQVRFReadReq)
+  val vrfReadResp = Flipped(Valid(new VAGQVRFReadResp))
   val update      = Valid(new VAGQReqBitmapUpdate)
 }
 
