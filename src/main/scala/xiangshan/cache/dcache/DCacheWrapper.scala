@@ -248,7 +248,7 @@ trait HasDCacheParameters
       case 1 => Cat(
                  hashBitPairs(addr, PAddrBits - 1, pgIdxBits),
                  addr(DCacheAboveIndexOffset- 1 - (untagBits-pgUntagBits), DCacheSetOffset + DCacheSetDivBits)
-                )
+                )(idxBits - DCacheSetDivBits - 1, 0)
       case 2 => addr(DCacheAboveIndexOffset - 1, DCacheSetOffset + DCacheSetDivBits)
       case _ => throw new IllegalArgumentException(s"Invalid L1DCache index modeId: $modeId")
     }
@@ -260,7 +260,7 @@ trait HasDCacheParameters
       case 1 => Cat(
                  hashBitPairs(addr, PAddrBits - 1, pgIdxBits),
                  addr(DCacheAboveIndexOffset- 1 - (untagBits-pgUntagBits), DCacheSetOffset)
-                )
+                )(DCacheAboveIndexOffset - DCacheSetOffset - 1, 0)
       case 2 => addr(DCacheAboveIndexOffset - 1, DCacheSetOffset)
       case _ => throw new IllegalArgumentException(s"Invalid L1DCache index modeId: $modeId")
     }
@@ -280,7 +280,7 @@ trait HasDCacheParameters
     // require(blockOffBits + idxBits > pgIdxBits)
     if(blockOffBits + idxBits > pgIdxBits){
       modeId match {
-        case 1 => hashBitPairs(vaddr, PAddrBits - 1, pgIdxBits)
+        case 1 => hashBitPairs(vaddr, PAddrBits - 1, pgIdxBits)(blockOffBits + idxBits - pgIdxBits - 1, 0)
         case 2 => vaddr(blockOffBits + idxBits - 1, pgIdxBits)
         case _ => throw new IllegalArgumentException(s"Invalid L1DCache alias modeId: $modeId")
       }

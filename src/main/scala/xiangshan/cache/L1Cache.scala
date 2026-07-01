@@ -80,8 +80,15 @@ trait HasL1CacheParameters extends HasXSParameter
   def refillWords = refillBytes / wordBytes
   def modeId = 1 //DCache index & alias mode: 1 for hash vaddr, 2 for direct extract vaddr[13:6]
   def hashBitPairs(addr: UInt, hi: Int = PAddrBits - 1, lo: Int = pgIdxBits, step: Int = 2): UInt = {
-    require(hi > lo && (hi - lo + 1) % step == 0, "Invalid bit range or step")
-    (lo to hi by step).map(i => addr(i + step - 1, i)).reduce(_ ^ _)
+    require(hi >= lo)
+    require(step > 0)
+    if ((hi - lo + 1) <= step){
+      addr(hi, lo)
+    } else{
+      val remain = (hi - lo + 1) % step
+      val xortmp = (lo to (hi - remain) by step).map(i => addr(i + step - 1, i)).reduce(_ ^ _)
+      if (remain == 0) xortmp else Cat(xortmp(step - 1, remain), xortmp(remain - 1, 0) ^ addr(hi, hi - remain + 1))
+    }
   }
   def get_phy_tag(paddr: UInt) = (paddr >> pgUntagBits).asUInt
   def get_phy_tag(paddr: PrunedAddr): UInt = (paddr >> pgUntagBits).asUInt
@@ -92,7 +99,7 @@ trait HasL1CacheParameters extends HasXSParameter
       case 1 => Cat(
                  hashBitPairs(addr, PAddrBits - 1, pgIdxBits),               // hash vaddr[47:12]
                  addr(untagBits - 1 - (untagBits-pgUntagBits), blockOffBits) // vaddr[11:6]
-                )
+                )(idxBits - 1, 0)
       case 2 => addr(untagBits - 1, blockOffBits) // vaddr[13:6]
       case _ => throw new IllegalArgumentException(s"Invalid L1DCache index modeId: $modeId")
     }
