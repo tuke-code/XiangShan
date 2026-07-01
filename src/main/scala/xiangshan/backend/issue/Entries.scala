@@ -106,6 +106,7 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
   val perfOg0CancelVec       = OptionWrapper(params.hasIQWakeUp, Wire(Vec(params.numEntries, Vec(params.numRegSrc, Bool()))))
   val perfWakeupByWBVec      = Wire(Vec(params.numEntries, Vec(params.numRegSrc, Bool())))
   val perfWakeupByIQVec      = OptionWrapper(params.hasIQWakeUp, Wire(Vec(params.numEntries, Vec(params.numRegSrc, Vec(params.numWakeupFromIQ, Bool())))))
+  val perfWakeupHitByIQVec   = OptionWrapper(params.hasIQWakeUp, Wire(Vec(params.numEntries, Vec(params.numWakeupFromIQ, Bool()))))
   //cancel bypass
   val cancelBypassVec        = Wire(Vec(params.numEntries, Bool()))
 
@@ -416,6 +417,7 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
   io.compEntryEnqSelVec.foreach(_   := finalCompTransSelVec.get.zip(compEnqVec.get).map(x => x._1 & Fill(CompEntryNum, x._2.valid)))
   io.othersEntryEnqSelVec.foreach(_ := finalOthersTransSelVec.get.zip(enqEntryTransVec).map(x => x._1 & Fill(OthersEntryNum, x._2.valid)))
   io.robIdx.foreach(_               := robIdxVec)
+  io.wakeupHitByIQ.foreach(_        := perfWakeupHitByIQVec.get)
   io.validRegNext                   := validVecRegNext.asUInt
   io.issuedRegNext                  := issuedVecRegNext.asUInt
 
@@ -459,6 +461,9 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
       perfLdCancelVec.get(entryIdx)   := out.perfLdCancel.get
       perfOg0CancelVec.get(entryIdx)  := out.perfOg0Cancel.get
       perfWakeupByIQVec.get(entryIdx) := out.perfWakeupByIQ.get
+      perfWakeupHitByIQVec.get(entryIdx) := VecInit((0 until params.numWakeupFromIQ).map { iqIdx =>
+        out.perfWakeupByIQ.get.map(_(iqIdx)).reduce(_ || _)
+      })
     }
     validVecRegNext(entryIdx)   := out.validRegNext
     issuedVecRegNext(entryIdx)  := out.issuedRegNext
@@ -574,6 +579,7 @@ class EntriesIO(implicit p: Parameters, params: IssueBlockParams) extends XSBund
   val fuType              = Vec(params.numEntries, Output(FuType()))
   val loadDependency      = Vec(params.numEntries, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
   val exuSources          = OptionWrapper(params.hasIQWakeUp, Vec(params.numEntries, Vec(params.numRegSrc, Output(ExuSource()))))
+  val wakeupHitByIQ       = OptionWrapper(params.hasIQWakeUp, Vec(params.numEntries, Vec(params.numWakeupFromIQ, Output(Bool()))))
   // for enq.ready timing
   val validRegNext        = Output(UInt(params.numEntries.W))
   val issuedRegNext       = Output(UInt(params.numEntries.W))

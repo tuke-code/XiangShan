@@ -1088,6 +1088,54 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
   XSPerfAccumulate("issue_instr_count", PopCount(io.deqDelay.map(_.valid)))
   XSPerfHistogram("issue_instr_count_hist", PopCount(io.deqDelay.map(_.valid)), true.B, 0, params.numDeq + 1, 1)
 
+  if (params.hasIQWakeUp) {
+    for (iqIdx <- 0 until params.numWakeupFromIQ) {
+      if (wakeupFromIQ(iqIdx).bits.params.hasLoadExu) {
+        val wakeupRecvValid = io.wakeupFromIQ(iqIdx).valid
+        val wakeupValid = wakeupFromIQ(iqIdx).valid
+        val wakeupSourceExuIdx = params.wakeUpSourceExuIdx(iqIdx)
+        val wakeupHitVec = VecInit(entries.io.wakeupHitByIQ.get.map(_(iqIdx)))
+        val wakeupHitLoadVec = VecInit(wakeupHitVec.zip(fuTypeVec).map { case (hit, fu) =>
+          hit && FuType.isLoadVload(fu)
+        })
+        val wakeupHitStoreVec = VecInit(wakeupHitVec.zip(fuTypeVec).map { case (hit, fu) =>
+          hit && FuType.isStoreVstore(fu)
+        })
+        val wakeupHitLoadStoreVec = VecInit(wakeupHitLoadVec.zip(wakeupHitStoreVec).map { case (ld, st) => ld || st })
+        val wakeupHitLoadDeqVec = VecInit((0 until params.numDeq).map { deqIdx =>
+          deqBeforeDly(deqIdx).fire &&
+            Mux1H(finalDeqSelOHVec(deqIdx), wakeupHitVec) &&
+            FuType.isLoadVload(deqBeforeDly(deqIdx).bits.fuType)
+        })
+        val wakeupHitStoreDeqVec = VecInit((0 until params.numDeq).map { deqIdx =>
+          deqBeforeDly(deqIdx).fire &&
+            Mux1H(finalDeqSelOHVec(deqIdx), wakeupHitVec) &&
+            FuType.isStoreVstore(deqBeforeDly(deqIdx).bits.fuType)
+        })
+        val wakeupHitLoadStoreDeqVec = VecInit(wakeupHitLoadDeqVec.zip(wakeupHitStoreDeqVec).map { case (ld, st) => ld || st })
+
+        XSPerfAccumulate(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_recv_cnt", wakeupRecvValid)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_instr_cnt_hist",
+          PopCount(wakeupHitVec), wakeupValid, 0, params.numEntries + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_load_instr_cnt_hist",
+          PopCount(wakeupHitLoadVec), wakeupValid, 0, params.numEntries + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_store_instr_cnt_hist",
+          PopCount(wakeupHitStoreVec), wakeupValid, 0, params.numEntries + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_loadstore_instr_cnt_hist",
+          PopCount(wakeupHitLoadStoreVec), wakeupValid, 0, params.numEntries + 1, 1)
+        XSPerfAccumulate(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_load_deq_cnt", PopCount(wakeupHitLoadDeqVec))
+        XSPerfAccumulate(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_store_deq_cnt", PopCount(wakeupHitStoreDeqVec))
+        XSPerfAccumulate(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_loadstore_deq_cnt", PopCount(wakeupHitLoadStoreDeqVec))
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_load_deq_cnt_hist",
+          PopCount(wakeupHitLoadDeqVec), wakeupValid, 0, params.numDeq + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_store_deq_cnt_hist",
+          PopCount(wakeupHitStoreDeqVec), wakeupValid, 0, params.numDeq + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_loadstore_deq_cnt_hist",
+          PopCount(wakeupHitLoadStoreDeqVec), wakeupValid, 0, params.numDeq + 1, 1)
+      }
+    }
+  }
+
   // deq instr data source count
   XSPerfAccumulate("issue_datasource_reg", deqBeforeDly.map{ deq =>
     PopCount(deq.bits.dataSources.zipWithIndex.map{ case (ds, j) => deq.valid && ds.value === DataSource.reg })
