@@ -131,12 +131,12 @@ class Ifu(implicit p: Parameters) extends IfuModule
   fromICache.ready := s1_ready || s0_flush
 
   private val s0_fetchBlock = VecInit(
-    Wire(new FetchBlock).fromICacheReq(io.fromICache.req.bits(0)),
-    Wire(new FetchBlock).fromICacheReq(io.fromICache.req.bits(1))
+    Wire(new FetchBlock).fromICacheReq(io.fromICache.req.bits.info(0)),
+    Wire(new FetchBlock).fromICacheReq(io.fromICache.req.bits.info(1))
   )
 
   private val s0_icacheData = Wire(new IfuData).fromICacheReq(io.fromICache.req.bits)
-  private val s0_icacheMeta = VecInit(io.fromICache.req.bits.map(_.icacheMeta))
+  private val s0_icacheMeta = VecInit(io.fromICache.req.bits.info.map(_.icacheMeta))
 
   s0_flushFromBpu := fromFtq.flushFromBpu.shouldFlushByStage3(s0_fetchBlock(0).ftqIdx, s0_valid)
 
