@@ -77,7 +77,7 @@ class IBufEntry(implicit p: Parameters) extends IBufferBundle {
   }
 
   def toIBufOutEntry(
-    exception: IBufExceptionEntry,
+    exception: IBufExceptionEntry, vtype: VType, oldVType: VType
   ): IBufOutEntry = {
     val result = Wire(new IBufOutEntry)
     result.inst               := inst
@@ -92,8 +92,8 @@ class IBufEntry(implicit p: Parameters) extends IBufferBundle {
     result.isBackendException := exception.isBackendException
     result.triggered          := triggered
     result.isLastInFtqEntry   := isLastInFtqEntry
-    result.vtype              := DontCare // assign outside
-    result.oldVType           := DontCare // assign outside
+    result.vtype              := vtype
+    result.oldVType           := oldVType
     result.debug_seqNum       := debug_seqNum
     result.instrEndOffset     := instrEndOffset
     result
