@@ -47,7 +47,7 @@ class VAGQEntryTable(implicit p: Parameters) extends VAGQModule {
 
   for (i <- 0 until vagqSize) {
     val idx = i.U(vagqEntryIdxWidth.W)
-    val updateVec = Seq(io.splitUpdate) ++ io.mergeReqUpdate.toSeq
+    val updateVec = io.splitUpdate.toSeq ++ io.mergeReqUpdate.toSeq
     val updateHits = updateVec.map(update => update.valid && update.bits.entryIdx === idx)
     val setReqSent = updateVec.zip(updateHits).map { case (update, hit) =>
       Mux(hit, update.bits.setReqSent, 0.U)
@@ -122,7 +122,7 @@ class VAGQEntryTableIO(implicit p: Parameters) extends VAGQBundle {
   val addrUop          = Flipped(Decoupled(new VAGQAddrSideUop))
   val dataUop          = Flipped(Decoupled(new VAGQDataSideUop))
   val entries          = Output(Vec(vagqSize, new VAGQEntry))
-  val splitUpdate      = Input(Valid(new VAGQReqBitmapUpdate))
+  val splitUpdate      = Input(Vec(VAGQConstants.SplitUpdateWidth, Valid(new VAGQReqBitmapUpdate)))
   val mergeReqUpdate   = Flipped(Vec(VAGQConstants.MergeRespWidth, Valid(new VAGQReqBitmapUpdate)))
   val mergeStateUpdate = Flipped(Valid(new VAGQEntryStateUpdate))
   val redirect         = Flipped(Valid(new Redirect))

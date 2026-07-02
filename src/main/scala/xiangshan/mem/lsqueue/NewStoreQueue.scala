@@ -1435,6 +1435,7 @@ abstract class NewStoreQueueBase(implicit p: Parameters) extends LSQModule {
   // entries define
   val dataEntries        = Reg(Vec(StoreQueueSize, new SQDataEntryBundle())) // no need to reset
   val ctrlEntries        = RegInit(VecInit(Seq.fill(StoreQueueSize)(0.U.asTypeOf(new SQCtrlEntryBundle)))) // need to reset
+  val sqBaseIdx          = Reg(Vec(StoreQueueSize, new SqPtr))
 
   // ptr define
   val enqPtrExt          = RegInit(VecInit((0 until io.enq.req.length).map(_.U.asTypeOf(new SqPtr))))
@@ -1562,6 +1563,22 @@ class NewStoreQueue(implicit p: Parameters) extends NewStoreQueueBase with HasPe
   val vecCommittmp = Wire(Vec(StoreQueueSize, Vec(VecStorePipelineWidth, Bool())))
   val vecCommit = Wire(Vec(StoreQueueSize, Bool()))
 
+  val emptyMarkHitVec = VecInit((0 until VLEN / 8).map { k =>
+    val target = io.emptyMark.bits.sqIdx + k.U
+    val targetDeqCancel = VecInit(deqPtrExt.zipWithIndex.map { case (ptr, j) =>
+      ptr.value === target.value && sqDeqCnt > j.U
+    }).asUInt.orR
+    !io.emptyMark.bits.entryMask(k) || (
+      ctrlEntries(target.value).allocated &&
+      ctrlEntries(target.value).isVec &&
+      dataEntries(target.value).uop.robIdx === io.emptyMark.bits.robIdx &&
+      sqBaseIdx(target.value) === io.emptyMark.bits.sqIdx &&
+      !needCancel(target.value) &&
+      !targetDeqCancel
+    )
+  })
+  io.emptyMarkSuccess := io.emptyMark.bits.entryMask.orR && emptyMarkHitVec.asUInt.andR
+
   for(i <- 0 until StoreQueueSize) {
 
     /*================================================================================================================*/
@@ -1589,6 +1606,7 @@ class NewStoreQueue(implicit p: Parameters) extends NewStoreQueueBase with HasPe
 
     when (entryCanEnq) {
       connectSamePort(dataEntries(i).uop, selectBits.uop) //TODO: will be remove in the future.
+      sqBaseIdx(i) := selectBits.uop.sqIdx
     }.elsewhen(deqCancel || needCancel(i)) {
 
     }
@@ -1815,7 +1833,22 @@ class NewStoreQueue(implicit p: Parameters) extends NewStoreQueueBase with HasPe
       ctrlEntries(i).vecMbCommit := false.B
     }
 
-    ctrlEntries(i).vecInactive := false.B //TODO: will be use in the future
+    val emptyHit = (0 until VLEN / 8).map { k =>
+      val target = io.emptyMark.bits.sqIdx + k.U
+      io.emptyMark.fire &&
+      io.emptyMark.bits.entryMask(k) &&
+      target.value === i.U
+    }.reduce(_ || _)
+
+    val successMark = emptyHit && io.emptyMarkSuccess
+
+    when(entryCanEnq) {
+      ctrlEntries(i).vecInactive := false.B
+    }.elsewhen(successMark) {
+      ctrlEntries(i).vecInactive := true.B
+    }.elsewhen(deqCancel || needCancel(i)) {
+      ctrlEntries(i).vecInactive := false.B
+    }
 
     /*================================================================================================================*/
     /*============================================== cancel ctrl =====================================================*/
@@ -1892,7 +1925,7 @@ class NewStoreQueue(implicit p: Parameters) extends NewStoreQueueBase with HasPe
   val dataReadyLookup = dataReadyLookupVec.map(ptr =>
       (ctrlEntries(ptr.value).addrValid && !ctrlEntries(ptr.value).waitStoreS2 && //TODO: remove waitStoreS2 in the future
         (isMmio(dataEntries(ptr.value).memoryType) || ctrlEntries(ptr.value).dataValid) ||
-        ctrlEntries(ptr.value).vecMbCommit) && //TODO: vecMbCommit will be remove in the future, entry maybe inactive, so we nned to or vecMbCommit.
+        ctrlEntries(ptr.value).vecMbCommit || ctrlEntries(ptr.value).vecInactive) && //TODO: vecMbCommit will be remove in the future, entry maybe inactive, so we nned to or vecMbCommit.
       ctrlEntries(ptr.value).allocated &&
       ptr =/= enqPtrExt(0)
   )
@@ -1903,7 +1936,7 @@ class NewStoreQueue(implicit p: Parameters) extends NewStoreQueueBase with HasPe
   (0 until StoreQueueSize).map(i => {
     stDataReadyVecReg(i) := (ctrlEntries(i).addrValid && !ctrlEntries(i).waitStoreS2 && // ctrl memoryType is ready.
         (isMmio(dataEntries(i).memoryType) || ctrlEntries(i).dataValid) ||
-      ctrlEntries(i).vecMbCommit) &&
+      ctrlEntries(i).vecMbCommit || ctrlEntries(i).vecInactive) &&
       ctrlEntries(i).allocated
   })
 
@@ -2049,6 +2082,7 @@ class NewStoreQueue(implicit p: Parameters) extends NewStoreQueueBase with HasPe
   io.sqEmpty     := deqPtrExt(0) === enqPtrExt(0)
   io.sqCancelCnt := redirectCancelCount
   io.sqDeq       := RegNext(sqDeqCnt)
+  io.emptyMark.ready := !io.redirect.valid
 
   /*=============================================== debug ============================================================*/
   if(debugEn) {

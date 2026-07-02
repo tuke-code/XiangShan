@@ -189,6 +189,9 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     val l2_hint = Input(Valid(new L2ToL1Hint()))
     val tlb_hint = Flipped(new TlbHintIO)
     val lqEmpty = Output(Bool())
+    // for unactive req
+    val emptyMark = Flipped(DecoupledIO(new LqEmptyMarkReq))
+    val emptyMarkSuccess = Output(Bool())
 
     // mdp train io
     val mdpTrain        = ValidIO(new Redirect)
@@ -237,6 +240,8 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   virtualLoadQueue.io.lqCancelCnt   <> io.lqCancelCnt
   virtualLoadQueue.io.lqEmpty       <> io.lqEmpty
   virtualLoadQueue.io.ldWbPtr       <> io.lqDeqPtr
+  virtualLoadQueue.io.emptyMark     <> io.emptyMark
+  io.emptyMarkSuccess               := virtualLoadQueue.io.emptyMarkSuccess
 
   /**
    * Load uncache buffer

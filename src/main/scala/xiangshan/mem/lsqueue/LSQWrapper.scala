@@ -26,6 +26,7 @@ import xiangshan.backend.Bundles.{DynInst, ExuOutput, MemExuOutput, MemToRob, Uo
 import xiangshan.backend._
 import xiangshan.backend.rob.{RobLsqIO, RobPtr}
 import xiangshan.backend.fu.FuType
+import xiangshan.backend.vector.vagq._
 import xiangshan.mem.Bundles._
 import xiangshan.cache._
 import xiangshan.cache.{DCacheLineIO, DCacheWordIO, MemoryOpConstants}
@@ -126,6 +127,8 @@ class LsqWrapper(implicit p: Parameters) extends XSModule
     val wfi = Flipped(new WfiReqBundle)
     val stExceptionInfo = ValidIO(new MemExceptionInfo)
     val ldExceptionInfo = ValidIO(new MemExceptionInfo)
+    val lsqEmptyReq = Flipped(DecoupledIO(new VAGQLsqEmptyReq))
+    val lsqEmptyResp = ValidIO(new VAGQLsqEmptyResp)
     // top-down
     val debugTopDown = new LoadQueueTopDownIO
     val noUopsIssued = Input(Bool())
@@ -143,6 +146,50 @@ class LsqWrapper(implicit p: Parameters) extends XSModule
   // Todo: imm
   val tlbReplayDelayCycleCtrl = WireInit(VecInit(Seq(14.U(ReSelectLen.W), 0.U(ReSelectLen.W), 125.U(ReSelectLen.W), 0.U(ReSelectLen.W))))
   loadQueue.io.tlbReplayDelayCycleCtrl := tlbReplayDelayCycleCtrl
+
+  private val vagqEmptyToLq = io.lsqEmptyReq.valid && io.lsqEmptyReq.bits.isLoad
+  private val vagqEmptyToSq = io.lsqEmptyReq.valid && io.lsqEmptyReq.bits.isStore
+  XSError(
+    io.lsqEmptyReq.valid && (io.lsqEmptyReq.bits.isLoad === io.lsqEmptyReq.bits.isStore),
+    "VAGQ LSQ empty request must target exactly one of LQ/SQ\n"
+  )
+
+  private val lqEmptyMarkFromVagq = Wire(new LqEmptyMarkReq)
+  lqEmptyMarkFromVagq.robIdx    := io.lsqEmptyReq.bits.robIdx
+  lqEmptyMarkFromVagq.lqIdx     := io.lsqEmptyReq.bits.lqIdx
+  lqEmptyMarkFromVagq.entryMask := io.lsqEmptyReq.bits.entryMask
+
+  private val sqEmptyMarkFromVagq = Wire(new SqEmptyMarkReq)
+  sqEmptyMarkFromVagq.robIdx    := io.lsqEmptyReq.bits.robIdx
+  sqEmptyMarkFromVagq.sqIdx     := io.lsqEmptyReq.bits.sqIdx
+  sqEmptyMarkFromVagq.entryMask := io.lsqEmptyReq.bits.entryMask
+
+  loadQueue.io.emptyMark.valid := vagqEmptyToLq
+  loadQueue.io.emptyMark.bits  := lqEmptyMarkFromVagq
+
+  storeQueue.io.emptyMark.valid := vagqEmptyToSq
+  storeQueue.io.emptyMark.bits  := sqEmptyMarkFromVagq
+
+  io.lsqEmptyReq.ready := Mux1H(Seq(
+    io.lsqEmptyReq.bits.isLoad  -> loadQueue.io.emptyMark.ready,
+    io.lsqEmptyReq.bits.isStore -> storeQueue.io.emptyMark.ready,
+  ))
+
+  private val lsqEmptyMarkSuccess = Mux1H(Seq(
+    io.lsqEmptyReq.bits.isLoad  -> loadQueue.io.emptyMarkSuccess,
+    io.lsqEmptyReq.bits.isStore -> storeQueue.io.emptyMarkSuccess,
+  ))
+
+  io.lsqEmptyResp.valid                := io.lsqEmptyReq.fire
+  io.lsqEmptyResp.bits                 := 0.U.asTypeOf(io.lsqEmptyResp.bits)
+  io.lsqEmptyResp.bits.entryIdx        := io.lsqEmptyReq.bits.entryIdx
+  io.lsqEmptyResp.bits.robIdx          := io.lsqEmptyReq.bits.robIdx
+  io.lsqEmptyResp.bits.isLoad          := io.lsqEmptyReq.bits.isLoad
+  io.lsqEmptyResp.bits.isStore         := io.lsqEmptyReq.bits.isStore
+  io.lsqEmptyResp.bits.mask            := io.lsqEmptyReq.bits.emptyMask
+  io.lsqEmptyResp.bits.isNACK          := !lsqEmptyMarkSuccess
+  io.lsqEmptyResp.bits.exception       := false.B
+  io.lsqEmptyResp.bits.exceptionNumber := 0.U
 
   // io.enq logic
   // LSQ: send out canAccept when both load queue and store queue are ready

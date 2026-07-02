@@ -112,7 +112,7 @@ class StoreAddrIO(implicit p: Parameters) extends MemBlockBundle {
   * means this write request need to write whole cacheline.
   * */
   val wlineflag          = Bool() // store write the whole cache line.
-  
+
   // misalign
   val isUnalign   = Bool()
   val cross16Byte = Bool()
@@ -218,6 +218,21 @@ class StoreQueueIO(val param: ExeUnitParams)(implicit p: Parameters) extends Mem
   val sqDeq              = Output(UInt(log2Ceil(EnsbufferWidth + 1).W))
   // to store unit
   val sqDeqPtr           = Output(new SqPtr)
+  // for empty mark
+  val emptyMark          = Flipped(Decoupled(new SqEmptyMarkReq))
+  val emptyMarkSuccess   = Output(Bool())
   // for store difftest
   val diffStore          = Option.when(debugEn)(Flipped(new DiffStoreIO))
+}
+
+class LqEmptyMarkReq(implicit p: Parameters) extends MemBlockBundle {
+  val robIdx = new RobPtr
+  val lqIdx  = new LqPtr
+  val entryMask = UInt((VLEN / 8).W)
+}
+
+class SqEmptyMarkReq(implicit p: Parameters) extends MemBlockBundle {
+  val robIdx = new RobPtr
+  val sqIdx  = new SqPtr
+  val entryMask = UInt((VLEN / 8).W)
 }

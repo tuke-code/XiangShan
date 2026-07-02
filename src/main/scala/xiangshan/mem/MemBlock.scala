@@ -993,6 +993,10 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   //  lsq.io.rob            <> io.lsqio.rob
   lsq.io.enq            <> io.ooo_to_mem.enqLsq
   lsq.io.brqRedirect    <> redirect
+  // VAGQ downstream integration is not wired in this tree yet. Keep the LSQ
+  // empty-mark ports idle so the normal LSQ path is unchanged.
+  lsq.io.lsqEmptyReq.valid := false.B
+  lsq.io.lsqEmptyReq.bits  := 0.U.asTypeOf(lsq.io.lsqEmptyReq.bits)
 
   //  violation rollback
   val allRedirect = newLoadUnits.map(_.io.rollback) ++ lsq.io.nack_rollback ++ lsq.io.nuke_rollback

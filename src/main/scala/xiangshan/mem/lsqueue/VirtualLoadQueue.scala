@@ -50,6 +50,8 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
     // global
     val lqFull      = Output(Bool())
     val lqEmpty     = Output(Bool())
+    val emptyMark   = Flipped(DecoupledIO(new LqEmptyMarkReq))
+    val emptyMarkSuccess = Output(Bool())
     // to dispatch
     val lqDeq       = Output(UInt(log2Up(CommitWidth + 1).W))
     val lqCancelCnt = Output(UInt(log2Up(VirtualLoadQueueSize+1).W))
@@ -67,6 +69,7 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
   //  Flags       : load flags
   val allocated = RegInit(VecInit(List.fill(VirtualLoadQueueSize)(false.B))) // The control signals need to explicitly indicate the initial value
   val robIdx = Reg(Vec(VirtualLoadQueueSize, new RobPtr))
+  val lqBaseIdx = Reg(Vec(VirtualLoadQueueSize, new LqPtr))
   val isvec = RegInit(VecInit(List.fill(VirtualLoadQueueSize)(false.B))) // vector load flow
   val committed = Reg(Vec(VirtualLoadQueueSize, Bool()))
 
@@ -178,6 +181,7 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
     when (entryCanEnq) {
       allocated(i) := true.B
       robIdx(i) := selectBits.robIdx
+      lqBaseIdx(i) := selectBits.lqIdx
       isvec(i) :=  FuType.isVLoad(selectBits.fuType)
       committed(i) := false.B
 
@@ -251,6 +255,26 @@ class VirtualLoadQueue(implicit p: Parameters) extends XSModule
       io.ldin(i).bits.isvec
     )
   }
+
+  val emptyMarkHitVec = VecInit((0 until (VLEN / 8)).map { i =>
+    val target = io.emptyMark.bits.lqIdx + i.U
+    !io.emptyMark.bits.entryMask(i) || (
+      allocated(target.value) &&
+      isvec(target.value) &&
+      robIdx(target.value) === io.emptyMark.bits.robIdx &&
+      lqBaseIdx(target.value) === io.emptyMark.bits.lqIdx &&
+      !needCancel(target.value)
+    )
+  })
+  io.emptyMarkSuccess := io.emptyMark.bits.entryMask.orR && emptyMarkHitVec.asUInt.andR
+
+  for (i <- 0 until (VLEN / 8)) {
+    val target = io.emptyMark.bits.lqIdx + i.U
+    when(io.emptyMark.fire && io.emptyMarkSuccess && io.emptyMark.bits.entryMask(i)) {
+      committed(target.value) := true.B
+    }
+  }
+  io.emptyMark.ready := !io.redirect.valid
 
   //  perf counter
   QueuePerf(VirtualLoadQueueSize, validCount, !allowEnqueue)

@@ -35,34 +35,51 @@ class SplitCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
   private val activeEntryHasReq = VecInit(activePending.map(_.orR))
   private val emptyEntryHasReq  = VecInit(emptyPending.map(_.orR))
 
-  val activeHasReq = activeEntryHasReq.asUInt
-  val emptyHasReq  = emptyEntryHasReq.asUInt
-  val hasActiveReq = activeHasReq.orR
-  val hasEmptyReq  = emptyHasReq.orR
-  val issueActive  = hasActiveReq
-  val activeSel    = PriorityEncoder(activeHasReq)
-  val emptySel     = PriorityEncoder(emptyHasReq)
-  val selectedIdx  = Mux(issueActive, activeSel, emptySel)
-  val hasReq       = hasActiveReq | hasEmptyReq
+  private val hasActiveReq = activeEntryHasReq.asUInt.orR
+  private val hasEmptyReq  = emptyEntryHasReq.asUInt.orR
+  private val activeSel    = PriorityEncoder(activeEntryHasReq)
+  private val emptySel     = PriorityEncoder(emptyEntryHasReq)
+  private val activeInput  = io.in(activeSel)
+  private val emptyInput   = io.in(emptySel)
+  private val activeMask   = activePending(activeSel)
+  private val emptyMask    = emptyPending(emptySel)
 
-  private val selectedValid       = hasReq
-  private val selectedIssueActive = issueActive
-  private val selectedOH          = UIntToOH(selectedIdx, numEntries) & Fill(numEntries, hasReq)
-  private val selectedInput       = Mux(issueActive, io.in(activeSel), io.in(emptySel))
-  private val selectedPending     = Mux(issueActive, activePending(activeSel), emptyPending(emptySel))
-  private val selectedByteOffset  = PriorityEncoder(selectedPending)
+  private def lowBit(mask: UInt): UInt = PriorityEncoder(mask)
+  private def highBit(mask: UInt): UInt = (vagqFlowBytes - 1).U - PriorityEncoder(Reverse(mask))
+  private def bitMask(idx: UInt): UInt = UIntToOH(idx, vagqFlowBytes)
+  private def byteMaskToEntryMask(mask: UInt, deew: UInt): UInt = {
+    VecInit((0 until vagqFlowBytes).map { elem =>
+      VecInit((0 until vagqFlowBytes).map { byte =>
+        mask(byte) && ((byte.U(vagqFlowByteWidth.W) >> deew) === elem.U(vagqFlowByteWidth.W))
+      }).asUInt.orR
+    }).asUInt
+  }
 
-  private val addrGen = Module(new AddrGen)
-  addrGen.in.uopType    := selectedInput.entry.uopType
-  addrGen.in.baseAddr   := selectedInput.entry.baseAddr
-  addrGen.in.op2Data    := selectedInput.entry.op2Data
-  addrGen.in.uopIdx     := selectedInput.entry.uopIdx
-  addrGen.in.byteOffset := selectedByteOffset
-  addrGen.in.deew       := selectedInput.entry.deew
-  addrGen.in.ieew       := selectedInput.entry.ieew
+  private val activeLowOffset = lowBit(activeMask)
 
-  private val issueMask = addrGen.out.elemMask & selectedPending
-  private val selectedAlignedType = selectedInput.entry.deew
+  private val activeAddrGen = Seq.fill(VAGQConstants.LsuRespWidth)(Module(new AddrGen))
+  activeAddrGen(0).in.uopType    := activeInput.entry.uopType
+  activeAddrGen(0).in.baseAddr   := activeInput.entry.baseAddr
+  activeAddrGen(0).in.op2Data    := activeInput.entry.op2Data
+  activeAddrGen(0).in.uopIdx     := activeInput.entry.uopIdx
+  activeAddrGen(0).in.byteOffset := activeLowOffset
+  activeAddrGen(0).in.deew       := activeInput.entry.deew
+  activeAddrGen(0).in.ieew       := activeInput.entry.ieew
+
+  private val activeLowIssueMask = activeAddrGen(0).out.elemMask & activeMask
+  private val activeRemaining    = activeMask & ~activeLowIssueMask
+  private val activeHighOffset   = highBit(activeRemaining)
+  private val activeHasTwoReq    = activeRemaining.orR
+  activeAddrGen(1).in.uopType    := activeInput.entry.uopType
+  activeAddrGen(1).in.baseAddr   := activeInput.entry.baseAddr
+  activeAddrGen(1).in.op2Data    := activeInput.entry.op2Data
+  activeAddrGen(1).in.uopIdx     := activeInput.entry.uopIdx
+  activeAddrGen(1).in.byteOffset := activeHighOffset
+  activeAddrGen(1).in.deew       := activeInput.entry.deew
+  activeAddrGen(1).in.ieew       := activeInput.entry.ieew
+
+  private val activeOffsets = Seq(activeLowOffset, activeHighOffset)
+
 
   private val storeReadValid    = RegInit(false.B)
   private val storeReadEntryIdx = RegInit(0.U(vagqEntryIdxWidth.W))
@@ -85,17 +102,17 @@ class SplitCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
                                   storeDataEntry.entry.robIdx === storeDataRobIdx &&
                                   entryAlive(storeDataEntry.entry, io.redirect)
   private val selectedStoreDataReady = storeDataAlive &&
-                                      storeDataEntryIdx === selectedInput.entryIdx &&
-                                      storeDataRobIdx === selectedInput.entry.robIdx
+                                      storeDataEntryIdx === activeInput.entryIdx &&
+                                      storeDataRobIdx === activeInput.entry.robIdx
 
-  private val selectedNeedsStoreData = hasReq && issueActive && selectedInput.entry.isStore && !selectedStoreDataReady
-  private val activeReqDataReady = !selectedInput.entry.isStore || selectedStoreDataReady
+  private val activeNeedsStoreData = hasActiveReq && activeInput.entry.isStore && !selectedStoreDataReady
+  private val activeReqDataReady = !activeInput.entry.isStore || selectedStoreDataReady
 
-  io.vrfReadReq.valid         := selectedNeedsStoreData && !storeReadValid
+  io.vrfReadReq.valid         := activeNeedsStoreData && !storeReadValid
   io.vrfReadReq.bits          := 0.U.asTypeOf(io.vrfReadReq.bits)
-  io.vrfReadReq.bits.entryIdx := selectedInput.entryIdx
-  io.vrfReadReq.bits.robIdx   := selectedInput.entry.robIdx
-  io.vrfReadReq.bits.psrc     := selectedInput.entry.psrc2
+  io.vrfReadReq.bits.entryIdx := activeInput.entryIdx
+  io.vrfReadReq.bits.robIdx   := activeInput.entry.robIdx
+  io.vrfReadReq.bits.psrc     := activeInput.entry.psrc2
 
   private val storeReadRespAlive = io.vrfReadResp.valid &&
     storeReadAlive &&
@@ -123,50 +140,75 @@ class SplitCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
     storeData         := io.vrfReadResp.bits.data
   }
 
-  io.lsuReq.valid            := hasReq && issueActive && activeReqDataReady
-  io.lsuReq.bits             := 0.U.asTypeOf(io.lsuReq.bits)
-  io.lsuReq.bits.entryIdx    := selectedInput.entryIdx
-  io.lsuReq.bits.robIdx      := selectedInput.entry.robIdx
-  io.lsuReq.bits.isLoad      := selectedInput.entry.isLoad
-  io.lsuReq.bits.isStore     := selectedInput.entry.isStore
-  io.lsuReq.bits.byteOffset  := selectedByteOffset
-  io.lsuReq.bits.elemIdx     := addrGen.out.elemIdx
-  io.lsuReq.bits.vaddr       := addrGen.out.vaddr
-  io.lsuReq.bits.mask        := issueMask
-  io.lsuReq.bits.data        := Mux(selectedStoreDataReady, storeData, 0.U(VLEN.W))
-  io.lsuReq.bits.pdest       := selectedInput.entry.pdest
-  io.lsuReq.bits.alignedType := selectedAlignedType
-  io.lsuReq.bits.nf          := selectedInput.entry.nf
-  io.lsuReq.bits.lqIdx       := selectedInput.entry.meta.lqIdx
-  io.lsuReq.bits.sqIdx       := selectedInput.entry.meta.sqIdx
+  private val activeIssueMasks = Wire(Vec(VAGQConstants.LsuRespWidth, UInt(vagqFlowBytes.W)))
+  activeIssueMasks(0) := activeLowIssueMask
+  activeIssueMasks(1) := Mux(
+    activeHasTwoReq,
+    activeAddrGen(1).out.elemMask & activeRemaining,
+    0.U(vagqFlowBytes.W)
+  )
 
-  io.lsqEmptyReq.valid            := hasReq && !issueActive
-  io.lsqEmptyReq.bits             := 0.U.asTypeOf(io.lsqEmptyReq.bits)
-  io.lsqEmptyReq.bits.entryIdx    := selectedInput.entryIdx
-  io.lsqEmptyReq.bits.robIdx      := selectedInput.entry.robIdx
-  io.lsqEmptyReq.bits.isLoad      := selectedInput.entry.isLoad
-  io.lsqEmptyReq.bits.isStore     := selectedInput.entry.isStore
-  io.lsqEmptyReq.bits.byteOffset  := selectedByteOffset
-  io.lsqEmptyReq.bits.elemIdx     := addrGen.out.elemIdx
-  io.lsqEmptyReq.bits.mask        := issueMask
-  io.lsqEmptyReq.bits.alignedType := selectedAlignedType
-  io.lsqEmptyReq.bits.lqIdx       := selectedInput.entry.meta.lqIdx
-  io.lsqEmptyReq.bits.sqIdx       := selectedInput.entry.meta.sqIdx
+  private val activeLaneValids = Seq(
+    hasActiveReq && activeReqDataReady,
+    hasActiveReq && activeHasTwoReq && activeReqDataReady
+  )
 
-  io.update.valid           := io.lsuReq.fire || io.lsqEmptyReq.fire
-  io.update.bits            := 0.U.asTypeOf(io.update.bits)
-  io.update.bits.entryIdx   := selectedInput.entryIdx
-  io.update.bits.setReqSent := issueMask
+  for (lane <- 0 until VAGQConstants.LsuRespWidth) {
+    io.lsuReq(lane).valid := activeLaneValids(lane)
+    io.lsuReq(lane).bits  := 0.U.asTypeOf(io.lsuReq(lane).bits)
+    io.lsuReq(lane).bits.entryIdx    := activeInput.entryIdx
+    io.lsuReq(lane).bits.robIdx      := activeInput.entry.robIdx
+    io.lsuReq(lane).bits.isLoad      := activeInput.entry.isLoad
+    io.lsuReq(lane).bits.isStore     := activeInput.entry.isStore
+    io.lsuReq(lane).bits.byteOffset  := activeOffsets(lane)
+    io.lsuReq(lane).bits.elemIdx     := activeAddrGen(lane).out.elemIdx
+    io.lsuReq(lane).bits.mask        := activeIssueMasks(lane)
+    io.lsuReq(lane).bits.alignedType := activeInput.entry.deew
+    io.lsuReq(lane).bits.lqIdx       := activeInput.entry.meta.lqIdx
+    io.lsuReq(lane).bits.sqIdx       := activeInput.entry.meta.sqIdx
+    io.lsuReq(lane).bits.vaddr := activeAddrGen(lane).out.vaddr
+    io.lsuReq(lane).bits.data  := Mux(selectedStoreDataReady, storeData, 0.U(VLEN.W))
+    io.lsuReq(lane).bits.pdest := activeInput.entry.pdest
+    io.lsuReq(lane).bits.nf    := activeInput.entry.nf
+  }
+
+  private val emptyEntryMask = byteMaskToEntryMask(emptyMask, emptyInput.entry.deew)
+  io.lsqEmptyReq.valid := hasEmptyReq
+  io.lsqEmptyReq.bits := 0.U.asTypeOf(io.lsqEmptyReq.bits)
+  io.lsqEmptyReq.bits.entryIdx := emptyInput.entryIdx
+  io.lsqEmptyReq.bits.robIdx := emptyInput.entry.robIdx
+  io.lsqEmptyReq.bits.isLoad := emptyInput.entry.isLoad
+  io.lsqEmptyReq.bits.isStore := emptyInput.entry.isStore
+  io.lsqEmptyReq.bits.lqIdx := emptyInput.entry.meta.lqIdx
+  io.lsqEmptyReq.bits.sqIdx := emptyInput.entry.meta.sqIdx
+  io.lsqEmptyReq.bits.emptyMask := emptyMask
+  io.lsqEmptyReq.bits.entryMask := emptyEntryMask
+
+  for (lane <- 0 until VAGQConstants.SplitUpdateWidth) {
+    io.update(lane).valid := false.B
+    io.update(lane).bits  := 0.U.asTypeOf(io.update(lane).bits)
+  }
+
+  private val activeFireMask = (0 until VAGQConstants.LsuRespWidth).map { lane =>
+    Mux(io.lsuReq(lane).fire, activeIssueMasks(lane), 0.U(vagqFlowBytes.W))
+  }.reduce(_ | _)
+  io.update(0).valid           := io.lsuReq.map(_.fire).reduce(_ || _)
+  io.update(0).bits.entryIdx   := activeInput.entryIdx
+  io.update(0).bits.setReqSent := activeFireMask
+
+  io.update(1).valid           := io.lsqEmptyReq.fire
+  io.update(1).bits.entryIdx   := emptyInput.entryIdx
+  io.update(1).bits.setReqSent := emptyMask
 }
 
 class SplitCtrlIO(numEntries: Int)(implicit p: Parameters) extends VAGQBundle {
   val in          = Input(Vec(numEntries, new CtrlInput))
   val redirect    = Flipped(Valid(new Redirect))
-  val lsuReq      = Decoupled(new VAGQLsuReq)
+  val lsuReq      = Vec(VAGQConstants.LsuRespWidth, Decoupled(new VAGQLsuReq))
   val lsqEmptyReq = Decoupled(new VAGQLsqEmptyReq)
   val vrfReadReq  = Decoupled(new VAGQVRFReadReq)
   val vrfReadResp = Flipped(Valid(new VAGQVRFReadResp))
-  val update      = Valid(new VAGQReqBitmapUpdate)
+  val update      = Vec(VAGQConstants.SplitUpdateWidth, Valid(new VAGQReqBitmapUpdate))
 }
 
 class VAGQReqBitmapUpdate(implicit p: Parameters) extends VAGQBundle {
