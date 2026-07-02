@@ -395,11 +395,11 @@ class FrontendInlinedImp(outer: FrontendInlined) extends FrontendInlinedImpBase(
   XSPerfAccumulate(
     "squashCycles",
     io.backend.toFtq.redirect.valid ||
-      ifu.io.toFtq.wbRedirect.valid
+      ifu.io.toFtq.redirect.valid
   )
   XSPerfAccumulate(
     "squashCycles_bpWrong_preDecode",
-    ifu.io.toFtq.wbRedirect.valid
+    ifu.io.toFtq.redirect.valid
   )
   XSPerfAccumulate(
     "squashCycles_bpWrong_redirect",

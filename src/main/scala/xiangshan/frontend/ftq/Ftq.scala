@@ -122,9 +122,10 @@ class Ftq(implicit p: Parameters) extends FtqModule
 
   private val (backendRedirectFtqIdxInAdvance, backendRedirect) = receiveBackendRedirect(io.fromBackend)
 
-  private val specTopAddr = metaQueueRedirect(io.fromIfu.wbRedirect.bits.ftqIdx.value).ras.topRetAddr.toUInt
+  private val specTopAddr = metaQueueRedirect(io.fromIfu.redirect.bits.ftqIdx.value).ras.topRetAddr.toUInt
   private val (ifuRedirectFtqIdxInAdvance, ifuRedirect, ifuResolve) = receiveIfuRedirect(
-    io.fromIfu.wbRedirect,
+    io.fromIfu.redirect,
+    io.fromIfu.resolve,
     specTopAddr,
     backendRedirect.valid
   )
@@ -366,8 +367,8 @@ class Ftq(implicit p: Parameters) extends FtqModule
   // Resolve and train BPU
   // --------------------------------------------------------------------------------
 
-  resolveQueue.io.backendResolve := io.fromBackend.resolve
-  resolveQueue.io.ifuResolve     := ifuResolve
+  // NOTE: do not change this order, ifuResolve must be io.resolve.last
+  resolveQueue.io.resolve := io.fromBackend.resolve :+ ifuResolve
 
   private val trainCache      = RegInit(0.U.asTypeOf(Valid(new BpuTrain)))
   private val trainIndexCache = RegInit(0.U.asTypeOf(new FtqPtr))

@@ -22,6 +22,7 @@ import utility.DataHoldBypass
 import utility.HasCircularQueuePtrHelper
 import utility.XSError
 import utility.XSPerfAccumulate
+import utils.PartialConnect
 import xiangshan.Resolve
 import xiangshan.frontend.bpu.HalfAlignHelper
 import xiangshan.frontend.bpu.SaturateCounter
@@ -29,9 +30,9 @@ import xiangshan.frontend.bpu.SaturateCounter
 class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelper with HasCircularQueuePtrHelper {
 
   class ResolveQueueIO extends Bundle {
-    val backendResolve: Vec[Valid[Resolve]]       = Input(Vec(backendParams.BrhCnt, Valid(new Resolve)))
-    val ifuResolve:     Valid[Resolve]            = Input(Valid(new Resolve))
-    val bpuTrain:       DecoupledIO[ResolveEntry] = Decoupled(new ResolveEntry)
+    // magic "+1": init brhCnt is from branchUnit, last 1 is from Ifu
+    val resolve:  Vec[Valid[Resolve]]       = Input(Vec(backendParams.BrhCnt + 1, Valid(new Resolve)))
+    val bpuTrain: DecoupledIO[ResolveEntry] = Decoupled(new ResolveEntry)
 
     val backendRedirect:    Bool   = Input(Bool())
     val backendRedirectPtr: FtqPtr = Input(new FtqPtr)
@@ -60,7 +61,7 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
   ))
   private val backendRedirectPtr = DataHoldBypass(io.backendRedirectPtr, FtqPtr(false.B, 0.U), io.backendRedirect)
   XSError(
-    RegNext(backendRedirect(RedirectDelay - 1)) && !backendRedirect.reduce(_ || _) && io.backendResolve.map(branch =>
+    RegNext(backendRedirect.last) && !backendRedirect.reduce(_ || _) && io.resolve.map(branch =>
       branch.valid && branch.bits.ftqIdx > backendRedirectPtr
     ).reduce(_ || _),
     "Backend resolves branches that should have been flushed\n"
@@ -68,33 +69,24 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
 
   private class ResolveWithSource(implicit p: Parameters) extends Resolve {
     val debug_source: UInt = ResolveSource()
-
-    def fromResolve(source: UInt, resolve: Resolve): ResolveWithSource = {
-      this.ftqIdx     := resolve.ftqIdx
-      this.ftqOffset  := resolve.ftqOffset
-      this.pc         := resolve.pc
-      this.target     := resolve.target
-      this.taken      := resolve.taken
-      this.mispredict := resolve.mispredict
-      this.attribute  := resolve.attribute
-      this.debug_isRVC.foreach(_ := resolve.debug_isRVC.get)
-      this.debug_source := source
-      this
-    }
   }
 
-  private val backendFilteredResolve = io.backendResolve.map { backendResolve =>
+  private val filteredResolve = io.resolve.zipWithIndex.map { case (resolve, i) =>
     val filteredResolve = Wire(Valid(new ResolveWithSource))
-    filteredResolve.valid := backendResolve.valid && !(backendResolve.bits.attribute.isDirect || backendResolve.bits.attribute.isReturn) &&
-      !(backendRedirect.reduce(_ || _) && backendResolve.bits.ftqIdx > backendRedirectPtr)
-    filteredResolve.bits.fromResolve(ResolveSource.Backend, backendResolve.bits)
+    PartialConnect(filteredResolve.bits, resolve.bits)
+    // init is from Backend, last is from Ifu, they have different filter condition
+    if (i < io.resolve.length - 1) {
+      filteredResolve.valid := resolve.valid &&
+        !(resolve.bits.attribute.isDirect || resolve.bits.attribute.isReturn) && // TODO: remove this when backend does not send these types of resolves
+        !(backendRedirect.reduce(_ || _) && resolve.bits.ftqIdx > backendRedirectPtr)
+      filteredResolve.bits.debug_source := ResolveSource.Backend
+    } else {
+      // Ifu must have higher ftqIdx, no need for resolve.bits.ftqIdx > backendRedirectPtr
+      filteredResolve.valid             := resolve.valid && !backendRedirect.reduce(_ || _)
+      filteredResolve.bits.debug_source := ResolveSource.Ifu
+    }
     filteredResolve
   }
-  private val ifuFilteredResolve = Wire(Valid(new ResolveWithSource))
-  ifuFilteredResolve.valid := io.ifuResolve.valid && !backendRedirect.reduce(_ || _)
-  ifuFilteredResolve.bits.fromResolve(ResolveSource.Ifu, io.ifuResolve.bits)
-
-  private val filteredResolve = backendFilteredResolve ++ Seq(ifuFilteredResolve)
 
   /*
    * When dropResolveCounter saturates,
@@ -147,9 +139,9 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
     branch.valid && !hit(i) && !hitPrevious(i).fold(false.B)(_ || _)
   }
 
-  // Reslove consists of resolves fromt the backend andd the ifu.
-  private val enqIndex = WireDefault(VecInit.fill(backendParams.BrhCnt + 1)(0.U(log2Ceil(ResolveQueueSize).W)))
-  enqIndex := VecInit((0 until backendParams.BrhCnt + 1).map { i =>
+  // Resolve consists of resolves from the backend and the ifu.
+  private val enqIndex = WireDefault(VecInit.fill(resolve.length)(0.U(log2Ceil(ResolveQueueSize).W)))
+  enqIndex := VecInit(enqIndex.indices.map { i =>
     val newIndex = MuxCase(
       (enqPtr + PopCount(needNewEntry.take(i))).value,
       hitPrevious(i).zipWithIndex.map { case (hit, j) => (hit, enqIndex(j)) }
@@ -214,7 +206,7 @@ class ResolveQueue(implicit p: Parameters) extends FtqModule with HalfAlignHelpe
   // entries from being enqueued. More sophisticated designs should be considered.
   XSPerfAccumulate("resolveQueueFull", full)
   XSPerfAccumulate("resolveQueueFullDropResolve", PopCount(resolve.map(_.valid && full)))
-  XSPerfAccumulate("originResolve", PopCount(io.backendResolve.map(_.valid && !full)))
+  XSPerfAccumulate("originResolve", PopCount(io.resolve.map(_.valid && !full)))
   XSPerfAccumulate("filteredResolve", PopCount(filteredResolve.map(_.valid && !full)))
   XSPerfAccumulate("finalResolve", PopCount(resolve.map(_.valid && !full)))
 }

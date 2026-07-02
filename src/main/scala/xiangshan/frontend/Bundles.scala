@@ -26,6 +26,7 @@ import utility.InstSeqNum
 import utility.XSError
 import utils.EnumUInt
 import xiangshan.Redirect
+import xiangshan.Resolve
 import xiangshan.TopDownCounters
 import xiangshan.TriggerAction
 import xiangshan.backend.GPAMemEntry
@@ -145,10 +146,8 @@ class FtqToIfuIO(implicit p: Parameters) extends FrontendBundle {
 
 class FrontendRedirect(implicit p: Parameters) extends FrontendBundle {
   val ftqIdx: FtqPtr = new FtqPtr
-  //
-  val canTrain: Bool = Bool()
-  val pc:       UInt = UInt(VAddrBits.W)
-  val taken:    Bool = Bool()
+  val pc:     UInt   = UInt(VAddrBits.W)
+  val taken:  Bool   = Bool()
   // The early end position may not always be a branch instruction.
   val ftqOffset: UInt            = UInt(FetchBlockInstOffsetWidth.W) // maybe use later
   val isRVC:     Bool            = Bool()                            // seems unused for now, keep it.
@@ -157,7 +156,8 @@ class FrontendRedirect(implicit p: Parameters) extends FrontendBundle {
 }
 
 class IfuToFtqIO(implicit p: Parameters) extends FrontendBundle {
-  val wbRedirect: Valid[FrontendRedirect] = Valid(new FrontendRedirect)
+  val redirect: Valid[FrontendRedirect] = Valid(new FrontendRedirect)
+  val resolve:  Valid[Resolve]          = Valid(new Resolve)
 }
 
 class ExceptionType extends Bundle {

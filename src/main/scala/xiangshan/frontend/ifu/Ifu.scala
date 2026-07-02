@@ -694,7 +694,6 @@ class Ifu(implicit p: Parameters) extends IfuModule
   // Due to the presence of uncache requests, s3_valid && io.toIBuffer.ready is not equivalent to s3_fire.
   uncacheFlushWb.valid :=
     s3_valid && io.toIBuffer.ready && s3_reqIsUncache && !backendRedirect && (s3_uncacheCanGo || uncacheNeedResend)
-  uncacheFlushWb.bits.canTrain  := false.B
   uncacheFlushWb.bits.ftqIdx    := s3_alignFetchBlock(0).ftqIdx
   uncacheFlushWb.bits.pc        := s3_alignFetchBlock(0).startVAddr.toUInt
   uncacheFlushWb.bits.taken     := false.B
@@ -775,10 +774,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
     val missIdx   = checkerRedirect.bits.misIdx.bits
     val ftqIdx    = VecInit(wbAlignFetchBlock.map(_.ftqIdx))
     val startAddr = VecInit(wbAlignFetchBlock.map(_.startVAddr.toUInt))
-    val attribute = checkerRedirect.bits.attribute
-    val canTrain  = attribute.isDirect || attribute.isReturn
     b.valid          := wbValid && checkerRedirect.valid
-    b.bits.canTrain  := canTrain
     b.bits.ftqIdx    := Mux(checkerRedirect.bits.selectBlock, ftqIdx(1), ftqIdx(0))
     b.bits.pc        := Mux(checkerRedirect.bits.selectBlock, startAddr(1), startAddr(0))
     b.bits.taken     := checkerRedirect.bits.taken
@@ -789,8 +785,22 @@ class Ifu(implicit p: Parameters) extends IfuModule
     b
   }
 
-  toFtq.wbRedirect := Mux(wbValid, checkFlushWb, uncacheFlushWb)
+  toFtq.redirect := Mux(wbValid, checkFlushWb, uncacheFlushWb)
 
+  // resolve only on checkFlushWb and ifu can train bpu (isDirect or isReturn)
+  toFtq.resolve.valid := checkFlushWb.valid &&
+    (checkFlushWb.bits.attribute.isDirect || checkFlushWb.bits.attribute.isReturn)
+  // and reuse fields in checkFlushWb to prevent dup code, also does not reuse toFtq.redirect for better timing
+  toFtq.resolve.bits.ftqIdx     := checkFlushWb.bits.ftqIdx
+  toFtq.resolve.bits.ftqOffset  := checkFlushWb.bits.ftqOffset
+  toFtq.resolve.bits.pc         := checkFlushWb.bits.pc
+  toFtq.resolve.bits.target     := checkFlushWb.bits.target // if isReturn, real target is from Ftq specTopAddr
+  toFtq.resolve.bits.taken      := checkFlushWb.bits.taken
+  toFtq.resolve.bits.mispredict := true.B
+  toFtq.resolve.bits.attribute  := checkFlushWb.bits.attribute
+  toFtq.resolve.bits.debug_isRVC.foreach(_ := checkFlushWb.bits.isRVC)
+
+  // internal redirect
   wbRedirect.valid          := checkFlushWb.valid
   wbRedirect.isHalfInstr    := wbCurrentLastRvi && checkerRedirect.bits.invalidTaken
   wbRedirect.instrCount     := wbInstrCount
