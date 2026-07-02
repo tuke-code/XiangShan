@@ -512,7 +512,6 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
       val hit_prefetch = Vec(reqNum, Output(Bool()))
       val hit_pf_source = UInt(L1PfSourceBits.W)
     }
-    val nMaxPrefetchEntry = Input(UInt(64.W))
     val matched = Output(Bool())
     val l1Miss = Output(Bool())
 
@@ -879,13 +878,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
   }
 
   // req_valid will be updated 1 cycle after primary_fire, so next cycle, this entry cannot accept a new req
-  when(GatedValidRegNext(io.id >= ((cfg.nMissEntries).U - io.nMaxPrefetchEntry))) {
-    // can accept prefetch req
-    io.primary_ready := !req_valid && !GatedValidRegNext(primary_fire)
-  }.otherwise {
-    // cannot accept prefetch req except when a memset patten is detected
-    io.primary_ready := !req_valid && (!io.queryME.map(_.req.bits.isFromPrefetch).reduce(_&&_) || io.memSetPattenDetected) && !GatedValidRegNext(primary_fire)
-  }
+  io.primary_ready := !req_valid && !GatedValidRegNext(primary_fire)
 
   // Generate vectorized secondary_ready and secondary_reject for parallel enqueue
   // Each queryMQ request gets independent judgment
@@ -901,12 +894,8 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   // generate primary_ready & secondary_(ready | reject) for each miss request
   for (i <- 0 until reqNum) {
-    when(GatedValidRegNext(io.id >= ((cfg.nMissEntries).U - io.nMaxPrefetchEntry))) {
-      io.queryME(i).primary_ready := !req_valid && !GatedValidRegNext(primary_fire)
-    }.otherwise {
-      io.queryME(i).primary_ready := !req_valid && !GatedValidRegNext(primary_fire) &&
-                                    (!io.queryME(i).req.bits.isFromPrefetch || io.memSetPattenDetected)
-    }
+    io.queryME(i).primary_ready := !req_valid && !GatedValidRegNext(primary_fire)
+    
     val _signals = computeMatchSignals(req, io.queryME(i).req.bits)
     io.queryME(i).secondary_ready  := should_merge(_signals, io.queryME(i).req.bits)
     io.queryME(i).secondary_reject := should_reject(_signals, io.queryME(i).req.bits)
@@ -1198,6 +1187,9 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
     val debugTopDown = new DCacheTopDownIO
     val l1Miss = Output(Bool())
+
+    // for L1PrefetchReq limit. ture: free, false: busy
+    val missEntryFree = Output(Vec(cfg.nMissEntries, Bool()))
   })
 
   // 128KBL1: FIXME: provide vaddr for l2
@@ -1531,6 +1523,19 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     query_fire(i) := io.queryMQ(i).req.valid && io.queryMQ(i).ready
   }
 
+  val miss_entry_allocated_this_cycle = WireInit(VecInit(Seq.fill(cfg.nMissEntries)(false.B)))
+  for (e <- 0 until cfg.nMissEntries) {
+    miss_entry_allocated_this_cycle(e) := (0 until reqNum).map { i =>
+      query_fire(i) &&
+      ((analysis.strategy(i) & 1.U) =/= 0.U) &&
+      (analysis.compress_group(i) === i.U) &&
+      (analysis.target_mshr(i) === e.U)
+    }.reduce(_ || _)
+  }
+  io.missEntryFree := VecInit((0 until cfg.nMissEntries).map { e =>
+    primary_ready_vec(e) && !miss_entry_allocated_this_cycle(e)
+  })
+
   /*  MissQueue enq logic is now splitted into 2 cycles
    *
    */
@@ -1670,7 +1675,6 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   io.mem_grant.ready := false.B
 
-  val nMaxPrefetchEntry = Constantin.createRecord(s"nMaxPrefetchEntry${p(XSCoreParamsKey).HartId}", initValue = cfg.nMissEntries - 2)
   entries.zipWithIndex.foreach {
     case (e, i) =>
       val former_primary_ready = if(i == 0)
@@ -1720,7 +1724,6 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
       e.io.main_pipe_refill_resp := io.mainpipe_info.s3_valid && io.mainpipe_info.s3_refill_resp && io.mainpipe_info.s3_miss_id === i.U
 
       e.io.memSetPattenDetected := memSetPattenDetected
-      e.io.nMaxPrefetchEntry := nMaxPrefetchEntry
 
       e.io.main_pipe_req.ready := io.main_pipe_req.ready
 
