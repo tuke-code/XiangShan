@@ -980,6 +980,9 @@ for(i <- 0 until reqNum) {
   io.mem_acquire.bits.user.lift(MemBackTypeMM).foreach(_ := true.B)
   io.mem_acquire.bits.user.lift(MemPageTypeNC).foreach(_ := false.B)
   require(nSets <= 256)
+  
+  XSPerfAccumulate("miss_entry_" + io.id + "_store", io.mem_acquire.fire && miss_req_pipe_reg_bits.isFromStore)
+  XSPerfAccumulate("miss_entry_" + io.id + "_full_overwrite", io.mem_acquire.fire && miss_req_pipe_reg_bits.isFromStore && full_overwrite)
 
   // io.mem_grant.ready := !w_grantlast && s_acquire
   io.mem_grant.ready := true.B
