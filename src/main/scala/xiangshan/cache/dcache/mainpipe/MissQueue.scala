@@ -410,7 +410,7 @@ class CMOUnit(edge: TLEdgeOut)(implicit p: Parameters) extends DCacheModule {
   assert(!(state =/= s_wresp && io.resp_chanD.valid))
 }
 
-class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DCacheModule
+class MissEntry(edge: TLEdgeOut, reqNum: Int, entryIdx: Int)(implicit p: Parameters) extends DCacheModule
   with HasCircularQueuePtrHelper
   with HasMissReqFunction
  {
@@ -981,8 +981,8 @@ for(i <- 0 until reqNum) {
   io.mem_acquire.bits.user.lift(MemPageTypeNC).foreach(_ := false.B)
   require(nSets <= 256)
   
-  XSPerfAccumulate("miss_entry_" + io.id + "_store", io.mem_acquire.fire && miss_req_pipe_reg_bits.isFromStore)
-  XSPerfAccumulate("miss_entry_" + io.id + "_full_overwrite", io.mem_acquire.fire && miss_req_pipe_reg_bits.isFromStore && full_overwrite)
+  XSPerfAccumulate(s"miss_entry_${entryIdx}_store", io.mem_acquire.fire && miss_req_pipe_reg_bits.isFromStore)
+  XSPerfAccumulate(s"miss_entry_${entryIdx}_full_overwrite", io.mem_acquire.fire && miss_req_pipe_reg_bits.isFromStore && full_overwrite)
 
   // io.mem_grant.ready := !w_grantlast && s_acquire
   io.mem_grant.ready := true.B
@@ -1205,7 +1205,7 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   // 128KBL1: FIXME: provide vaddr for l2
 
-  val entries = Seq.fill(cfg.nMissEntries)(Module(new MissEntry(edge, reqNum)))
+  val entries = Seq.tabulate(cfg.nMissEntries)(i => Module(new MissEntry(edge, reqNum, i)))
   val cmo_unit = Module(new CMOUnit(edge))
 
   // Parallel pipeline registers for queryMQ path (reqNum ports)
