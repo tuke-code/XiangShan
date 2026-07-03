@@ -9,7 +9,7 @@ import xiangshan._
 import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.cache.HasDCacheParameters
 import xiangshan.cache.mmu._
-import xiangshan.mem.{L1PrefetchReq, L1PrefetchSource}
+import xiangshan.mem.{L1PrefetchNack, L1PrefetchReq, L1PrefetchSource}
 
 case class StreamStrideParams() extends PrefetcherParams{
   override def name = "StreamStride"
@@ -324,6 +324,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
     val l1_req = DecoupledIO(new L1PrefetchReq())
     val l2_pf_addr = DecoupledIO(new L2PrefetchReq())
     val l3_pf_addr = DecoupledIO(new L3PrefetchReq())
+    val l1_nack = Flipped(ValidIO(new L1PrefetchNack()))
     val l2PfqBusy = Input(Bool())
   })
 
@@ -373,6 +374,12 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
     val debug_vaddr = UInt(VAddrBits.W)
   }, MLP_L2L3_SIZE))
   val l3_pf_req_arb = Module(new RRArbiterInit(new L3PrefetchReq, MLP_L2L3_SIZE))
+
+  val l1_nack_tag = region_hash_tag(get_region_tag(io.l1_nack.bits.vaddr))
+  val l1_nack_bit = UIntToOH(get_region_bits(io.l1_nack.bits.vaddr), BIT_VEC_WITDH)
+  val l1_nack_match_vec = VecInit(l1_array.zip(l1_valids).map { case (e, v) =>
+    io.l1_nack.valid && e.tag_match(v, true.B, l1_nack_tag)
+  })
 
   val l1_opt_replace_vec = VecInit(l1_array.zip(l1_valids).map{case (e, v) => e.may_be_replace(v)})
   val l2_opt_replace_vec = VecInit(l2_array.zip(l2_valids).map{case (e, v) => e.may_be_replace(v)})
@@ -669,6 +676,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
     val evict = s1_l1_alloc && (s1_l1_index === i.U)
     l1_pf_req_arb.io.in(i).valid := l1_array(i).can_send_pf(l1_valids(i)) && l1_array(i).sink === SINK_L1 && !evict
     l1_pf_req_arb.io.in(i).bits.req.paddr := l1_array(i).get_pf_addr()
+    l1_pf_req_arb.io.in(i).bits.req.vaddr := l1_array(i).get_pf_debug_vaddr()
     l1_pf_req_arb.io.in(i).bits.req.alias := l1_array(i).alias
     l1_pf_req_arb.io.in(i).bits.req.confidence := l1_array(i).confidence
     l1_pf_req_arb.io.in(i).bits.req.is_store := false.B
@@ -676,8 +684,12 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
     l1_pf_req_arb.io.in(i).bits.debug_vaddr := l1_array(i).get_pf_debug_vaddr()
   }
 
-  when(s0_pf_fire) {
-    l1_array(s0_pf_index).sent_vec := l1_array(s0_pf_index).sent_vec | s0_pf_candidate_oh
+  for (i <- 0 until MLP_L1_SIZE) {
+    val set_sent_vec = Mux(s0_pf_fire && s0_pf_index === i.U, s0_pf_candidate_oh, 0.U(BIT_VEC_WITDH.W))
+    val retry_bit_vec = Mux(l1_nack_match_vec(i), l1_nack_bit, 0.U(BIT_VEC_WITDH.W))
+    when(set_sent_vec.orR || retry_bit_vec.orR) {
+      l1_array(i).sent_vec := (l1_array(i).sent_vec | set_sent_vec) & ~retry_bit_vec
+    }
   }
 
   assert(PopCount(s0_pf_fire_vec) <= 1.U, "s0_pf_fire_vec should be one-hot or empty")
@@ -865,6 +877,7 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   io.l1_req.bits := pf_queue_filter.io.l1_req.bits
 
   pf_queue_filter.io.l1_req.ready := io.l1_req.ready
+  pf_queue_filter.io.l1_nack <> io.l1_nack
   pf_queue_filter.io.tlb_req <> io.tlb_req
   pf_queue_filter.io.pmp_resp := io.pmp_resp
   pf_queue_filter.io.enable := enable

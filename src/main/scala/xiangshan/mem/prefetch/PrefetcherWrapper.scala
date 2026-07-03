@@ -98,6 +98,7 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
     // prefetch req sender
     val l1_pf_to_l1 = DecoupledIO(new L1PrefetchReq())
     val l1_pf_to_l2 = Output(new xscache.coupledL2.PrefetchRecv())
+    val l1_pf_nack = Flipped(ValidIO(new L1PrefetchNack()))
   })
 
   def isLoadAccess(uop: DynInst): Bool = FuType.isLoad(uop.fuType) || FuType.isVLoad(uop.fuType)
@@ -207,6 +208,8 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
 
     io.tlb_req(IdxSMS) <> pf.io.tlb_req
     pf.io.pmp_resp := io.pmp_resp(IdxSMS)
+    pf.io.l1_nack.valid := false.B
+    pf.io.l1_nack.bits := DontCare
 
     l2_pf_arb.io.in(IdxSMS) <> pf.io.l2_req
     pf.io.l1_req.ready := false.B
@@ -248,6 +251,10 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
 
     io.tlb_req(IdxStreamStride) <> pf.io.tlb_req
     pf.io.pmp_resp := io.pmp_resp(IdxStreamStride)
+    pf.io.l1_nack.valid := io.l1_pf_nack.valid && (
+      isFromStream(io.l1_pf_nack.bits.pfsource) || isFromStride(io.l1_pf_nack.bits.pfsource)
+    )
+    pf.io.l1_nack.bits := io.l1_pf_nack.bits
 
     l1_pf_arb.io.in(IdxStreamStride) <> pf.io.l1_req
     l2_pf_arb.io.in(IdxStreamStride) <> pf.io.l2_req
@@ -290,6 +297,8 @@ class PrefetcherWrapper(implicit p: Parameters) extends PrefetchModule {
 
     io.tlb_req(IdxBerti) <> pf.io.tlb_req
     pf.io.pmp_resp := io.pmp_resp(IdxBerti)
+    pf.io.l1_nack.valid := io.l1_pf_nack.valid && isFromBerti(io.l1_pf_nack.bits.pfsource)
+    pf.io.l1_nack.bits := io.l1_pf_nack.bits
 
     l1_pf_arb.io.in(IdxBerti) <> pf.io.l1_req
     l2_pf_arb.io.in(IdxBerti) <> pf.io.l2_req

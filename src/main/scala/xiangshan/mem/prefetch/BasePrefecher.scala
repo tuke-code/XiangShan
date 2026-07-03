@@ -26,7 +26,7 @@ import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.backend.rob.RobPtr
 import xiangshan.cache._
 import xiangshan.cache.mmu.TlbRequestIO
-import xiangshan.mem.L1PrefetchReq
+import xiangshan.mem.{L1PrefetchNack, L1PrefetchReq}
 
 object PrefetchTarget extends Enumeration{
   val L1 = Value("toL1")
@@ -102,6 +102,7 @@ class PrefetcherIO()(implicit p: Parameters) extends XSBundle {
   val l1_req = DecoupledIO(new L1PrefetchReq())
   val l2_req = DecoupledIO(new L2PrefetchReq())
   val l3_req = DecoupledIO(new L3PrefetchReq())
+  val l1_nack = Flipped(ValidIO(new L1PrefetchNack()))
 }
 
 class BertiPrefetcherIO()(implicit p: Parameters) extends PrefetcherIO {
