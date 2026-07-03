@@ -425,6 +425,7 @@ object CSRs {
   val mnepc = 0x741
   val mncause = 0x742
   val mnstatus = 0x744
+  val msdcfg = 0x74e
   val mseccfgh = 0x757
   val mcycleh = 0xb80
   val minstreth = 0xb82
@@ -749,6 +750,7 @@ object CSRs {
     res += mhpmcounter29
     res += mhpmcounter30
     res += mhpmcounter31
+    res += msdcfg
     res += mcyclecfg
     res += minstretcfg
     res += mhpmevent3

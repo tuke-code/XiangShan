@@ -7,7 +7,7 @@ import org.chipsalliance.cde.config.Parameters
 import utility.{SignExt, PerfEvent}
 import xiangshan.backend.fu.NewCSR.CSRBundles._
 import xiangshan.backend.fu.NewCSR.CSRDefines._
-import xiangshan.backend.fu.NewCSR.CSRDefines.{CSRROField => RO, CSRRWField => RW, _}
+import xiangshan.backend.fu.NewCSR.CSRDefines.{CSRROField => RO, CSRRWField => RW, CSRWARLField => WARL, _}
 import xiangshan.backend.fu.NewCSR.CSREvents._
 import xiangshan.backend.fu.NewCSR.CSREnumTypeImplicitCast._
 import xiangshan.backend.fu.NewCSR.ChiselRecordForField._
@@ -367,6 +367,10 @@ trait MachineLevel { self: NewCSR =>
     val MML   = RO( 0).withDescription("Machine-mode lock-down control from the Smepmp extension.")
   })).setAddr(CSRs.mseccfg)
 
+  val msdcfg = if (HasMsdCfg) Some(Module(new CSRModule("Msdcfg", new MsdCfgBundle))
+    .setAddr(CSRs.msdcfg)) else None
+  val msdcfgMods: Seq[CSRModule[_]] = msdcfg.toSeq
+
   val mcycle = Module(new CSRModule("Mcycle", new CounterValueBundle("Machine cycle counter value.")) with HasMachineCounterControlBundle with SmcntrpmfBundle with HasSiregCounterBundle {
     toSireg := regOut.asUInt
     when(w.wen) {
@@ -542,7 +546,11 @@ trait MachineLevel { self: NewCSR =>
     mcyclecfg,
     minstretcfg,
     mcontext,
-  ) ++ mhpmevents ++ mhpmcounters ++ (if (HasBitmapCheck) Seq(mbmc.get) else if (HasMptCheck) Seq(mmpt.get) else Seq())
+  ) ++
+    msdcfgMods ++
+    mhpmevents ++
+    mhpmcounters ++
+    (if (HasBitmapCheck) Seq(mbmc.get) else if (HasMptCheck) Seq(mmpt.get) else Seq())
 
   val machineLevelCSRMap: SeqMap[Int, (CSRAddrWriteBundle[_], UInt)] = SeqMap.from(
     machineLevelCSRMods.map(csr => (csr.addr -> (csr.w -> csr.rdata))).iterator
@@ -569,6 +577,53 @@ class MmptBundle extends CSRBundle { //HasMptCheck
   val optOutInNode = RW(59).withReset(0.U).withDescription("Skip non-leaf node check")
   val SDID = RW(52 - 1 + SDIDLEN, 52).withReset(0.U).withDescription("ID for security domain")
   val PPN = RW(PPNLengthMpt-1, 0).withReset(0.U).withDescription("Mpt level3 talble adress.")
+}
+
+class MsdCfgBundle extends CSRBundle {
+  // Bits 31:28: Supervisor QoS register ID.
+  val SQRID = WARL(31, 28, wNoFilter)
+    .withReset(0.U)
+    .withDescription("Supervisor QoS register ID.")
+
+  // Bits 27:24: Supervisor MCID length.
+  val SML = WARL(27, 24, wNoFilter)
+    .withReset(0.U)
+    .withDescription("Supervisor MCID length.")
+
+  // Bits 23:20: Supervisor RCID length.
+  val SRL = WARL(23, 20, wNoFilter)
+    .withReset(0.U)
+    .withDescription("Supervisor RCID length.")
+
+  // Bits 19:16: Write-preserved reserved field.
+  val WPRI = RW(19, 16)
+    .withReset(0.U)
+    .withDescription("Write-preserved reserved field.")
+
+  // Bits 15:9: Write-preserved reserved field.
+  val WPI = RW(15, 9)
+    .withReset(0.U)
+    .withDescription("Write-preserved reserved field.")
+
+  // Bit 8: Supervisor domain external trace allowed.
+  val SDETRCALW = WARL(8, wNoFilter)
+    .withReset(0.U)
+    .withDescription("Supervisor domain external trace allowed.")
+
+  // Bit 7: Supervisor domain external debug allowed.
+  val SDEDBGALW = WARL(7, wNoFilter)
+    .withReset(0.U)
+    .withDescription("Supervisor domain external debug allowed.")
+
+  // Bit 6: Supervisor srmcfg mode.
+  val SSM = WARL(6, wNoFilter)
+    .withReset(0.U)
+    .withDescription("Supervisor srmcfg mode.")
+
+  // Bits 5:0: Supervisor domain interrupt controller number.
+  val SDICN = WARL(5, 0, wNoFilter)
+    .withReset(0.U)
+    .withDescription("Supervisor domain interrupt controller number.")
 }
 
 class MstatusBundle extends CSRBundle {
