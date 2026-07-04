@@ -441,6 +441,8 @@ class StreamBitVectorArray(implicit p: Parameters) extends XSModule with HasStre
   io.l2_l3_prefetch_req.bits := Mux(s4_pf_l2_valid, s4_pf_l2_bits, s5_pf_l3_bits)
 
   XSPerfAccumulate("s4_pf_sent", s4_pf_l2_valid)
+  XSPerfAccumulate("stream_l3_candidate", s5_pf_l3_valid)
+  XSPerfAccumulate("stream_l3_block_by_l2", s5_pf_l3_valid && s4_pf_l2_valid)
   XSPerfAccumulate("s5_pf_sent", !s4_pf_l2_valid && s5_pf_l3_valid)
   XSPerfAccumulate("pf_sent", PopCount(Seq(io.l1_prefetch_req.valid, io.l2_l3_prefetch_req.valid)))
 
