@@ -25,8 +25,10 @@ import xiangshan.backend.Bundles.{DynInst, ExuInput, MemWriteBack, StoreUnitToLF
 import xiangshan.backend.ctrlblock.DebugLsInfoBundle
 import xiangshan.backend.exu.ExeUnitParams
 import xiangshan.backend.fu.FuConfig._
+import xiangshan.backend.fu.FuType
 import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.backend.fu.NewCSR._
+import xiangshan.backend.vector.vagq.VAGQResp
 import xiangshan.cache._
 import xiangshan.cache.mmu._
 import xiangshan.ExceptionNO._
@@ -46,6 +48,7 @@ class StoreUnitS0(param: ExeUnitParams)(
     val unalignTail = Flipped(DecoupledIO(new StoreStageIO))
     val stin = Flipped(Decoupled(new ExuInput(param)))
     val prefetchReq = Flipped(DecoupledIO(new StorePrefetchReq))
+    val vagqReqMeta = Input(new VAGQMemPipelineMeta)
 
     // Tlb request
     val tlbReq = DecoupledIO(new TlbReq)
@@ -82,9 +85,10 @@ class StoreUnitS0(param: ExeUnitParams)(
   val stinVAddr = stin.src(0) + SignExt(stin.imm(11,0), VAddrBits)
   val stinFullva = stin.src(0) + SignExt(stin.imm(11,0), XLEN)
   val stinSize = Cat(0.U, LSUOpType.size(stinUop.fuOpType))
+  val stinIsVStore = FuType.isVStore(stinUop.fuType)
   scalarIssue.valid := io.stin.valid
-  scalarIssue.bits.entrance := StoreEntrance.scalarIssue.U
-  scalarIssue.bits.accessType.instrType := InstrType.scalar.U
+  scalarIssue.bits.entrance := Mux(stinIsVStore, StoreEntrance.vectorIssue.U, StoreEntrance.scalarIssue.U)
+  scalarIssue.bits.accessType.instrType := Mux(stinIsVStore, InstrType.vector.U, InstrType.scalar.U)
   scalarIssue.bits.accessType.isCbo := LSUOpType.isCboAll(stinUop.fuOpType)
   scalarIssue.bits.accessType.isCboNoZero := LSUOpType.isCbo(stinUop.fuOpType)
   scalarIssue.bits.uop := stinUop
@@ -100,6 +104,7 @@ class StoreUnitS0(param: ExeUnitParams)(
   scalarIssue.bits.ssid.get := stinUop.ssid
   scalarIssue.bits.storeSetHit.get := stinUop.storeSetHit
   scalarIssue.bits.DontCareUnalign()
+  scalarIssue.bits.vagq := io.vagqReqMeta
 
   // 2. hardware prefetch requests
   prefetchReq.valid := io.prefetchReq.valid && io.dcacheReq.ready
@@ -115,6 +120,7 @@ class StoreUnitS0(param: ExeUnitParams)(
   prefetchReq.bits.size := MemorySize.QB.U
   prefetchReq.bits.mask := Fill(VLEN/8, 1.U(1.W))
   prefetchReq.bits.isFirstIssue := true.B
+  prefetchReq.bits.DontCareVAGQFields()
 
   // sources arbitration
   arbiter(sources, sink, Some("RequestSources"))
@@ -173,6 +179,11 @@ class StoreUnitS0(param: ExeUnitParams)(
     isCbo || isHwPrefetch,
     false.B,
     Mux(isUnalignTail, unalignTail.bits.cross4KPage.get, cross4KPage)
+  )
+
+  XSError(
+    sink.valid && sink.bits.vagq.valid && cross16Byte,
+    "VAGQ active store request should not be split by StoreUnit unaligned handling\n"
   )
 
   def alignCheck(vaddr: UInt, size: UInt, valid: Bool): (Bool, Bool, Bool) = {
@@ -683,6 +694,7 @@ class StoreUnitS3(param: ExeUnitParams)(
     // Writeback
     val stout = new MemWriteBack(param)
     val exceptionInfo = ValidIO(new MemExceptionInfo)
+    val vagqResp = ValidIO(new VAGQResp)
   })
 
   val pipeIn = io_pipeIn.get
@@ -702,6 +714,7 @@ class StoreUnitS3(param: ExeUnitParams)(
   val isMMIO = in.mmio.get
   val hasException = in.hasException.get
   val isUnalignHead = in.unalignHead.get
+  val isVAGQ = in.vagq.valid
 
   val kill = robIdx.needFlush(io.redirect)
   val fire = pipeIn.fire && !kill
@@ -752,6 +765,30 @@ class StoreUnitS3(param: ExeUnitParams)(
   val sxData = delayPipe.io.out.bits
   val sxVector = sxData.accessType.isVector()
 
+  val vagqExceptionVec = in.uop.exceptionVec.selectByFu(StaCfg)
+  val vagqException = vagqExceptionVec.orR
+  val vagqResp = Wire(ValidIO(new VAGQResp))
+  vagqResp.valid := pipeIn.valid && isVAGQ && endPipe && !kill
+  vagqResp.bits := 0.U.asTypeOf(vagqResp.bits)
+  vagqResp.bits.entryIdx        := in.vagq.entryIdx
+  vagqResp.bits.robIdx          := in.vagq.robIdx
+  vagqResp.bits.isLoad          := in.vagq.isLoad
+  vagqResp.bits.isStore         := in.vagq.isStore
+  vagqResp.bits.byteOffset      := in.vagq.byteOffset
+  vagqResp.bits.mask            := in.vagq.mask
+  vagqResp.bits.isNACK          := !vagqException && (!in.tlbHit.get || in.needRSReplay.get)
+  vagqResp.bits.exception       := vagqException
+  vagqResp.bits.exceptionNumber := VAGQMemPipeline.exceptionNumber(vagqExceptionVec)
+
+  XSError(
+    pipeIn.valid && isVAGQ && isUnalignHead,
+    "VAGQ active store request should not enter StoreUnit unaligned-head path\n"
+  )
+  XSError(
+    io.unalignConcat.valid && io.unalignConcat.bits.vagq.valid,
+    "VAGQ active store request should not enter StoreUnit unaligned-concat path\n"
+  )
+
   // Pipeline connect
   val pipeOutValid = RegInit(false.B)
   val pipeOutBits = Reg(new StoreStageIO)
@@ -795,6 +832,8 @@ class StoreUnitS3(param: ExeUnitParams)(
   io.exceptionInfo.bits.uopIdx := 0.U.asTypeOf(io.exceptionInfo.bits.uopIdx)
   io.exceptionInfo.bits.vl := 0.U.asTypeOf(io.exceptionInfo.bits.vl)
   io.exceptionInfo.bits.vstart := 0.U.asTypeOf(io.exceptionInfo.bits.vstart)
+
+  io.vagqResp := vagqResp
 }
 
 class StoreUnitS4(param: ExeUnitParams)(
@@ -819,6 +858,7 @@ class StoreUnitIO(val param: ExeUnitParams)(implicit p: Parameters) extends XSBu
   // Request sources
   val stin = Flipped(Decoupled(new ExuInput(param)))
   val prefetchReq = Flipped(DecoupledIO(new StorePrefetchReq))
+  val vagqReqMeta = Input(new VAGQMemPipelineMeta)
   // TLB / PMA / PMP
   val tlb = new TlbRequestIO
   val pmp = Flipped(new PMPRespBundle)
@@ -843,6 +883,7 @@ class StoreUnitIO(val param: ExeUnitParams)(implicit p: Parameters) extends XSBu
   // Writeback
   val stout = new MemWriteBack(param)
   val exceptionInfo = ValidIO(new MemExceptionInfo)
+  val vagqResp = ValidIO(new VAGQResp)
 
   val debugInfo = Output(new DebugLsInfoBundle)
 }
@@ -870,6 +911,7 @@ class NewStoreUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSM
   s0.io.redirect := io.redirect
   s0.io.stin <> io.stin
   s0.io.prefetchReq <> io.prefetchReq
+  s0.io.vagqReqMeta := io.vagqReqMeta
   io.tlb.req <> s0.io.tlbReq
   io.tlb.req_kill := s0.io.tlbReqKill
   io.dcache.req <> s0.io.dcacheReq
@@ -901,6 +943,7 @@ class NewStoreUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSM
   s3.io.redirect := io.redirect
   io.stout := s3.io.stout
   io.exceptionInfo := s3.io.exceptionInfo
+  io.vagqResp := s3.io.vagqResp
 }
 
 class DelayPipeline[T <: Data](gen: T, numDelays: Int, killFn: (T, ValidIO[Redirect]) => Bool)(implicit p: Parameters) extends XSModule {

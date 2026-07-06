@@ -28,9 +28,13 @@ object VAGQConstants {
   val NfWidth = 3
   val ExceptionNumberWidth = 6
 
-  val LsuRespWidth = 2
+  val ActiveIssueWidth = 2
+  val LduRespWidth = 3
+  val StaRespWidth = 2
+  val ActiveRespWidth = LduRespWidth + StaRespWidth
+  val VrfWriteWidth = 1
   val SplitUpdateWidth = 2
-  val MergeRespWidth = LsuRespWidth + 1
+  val MergeRespWidth = ActiveRespWidth + 1
 }
 
 trait HasVAGQParameters extends HasXSParameter {
@@ -71,7 +75,6 @@ class VAGQAddrSideUop(implicit p: Parameters) extends VAGQBundle {
   val robIdx = new RobPtr
   val pdest = UInt(VfPhyRegIdxWidth.W)
   val baseAddr = UInt(XLEN.W)
-  val op2Data = UInt(VLEN.W)
   val uvlByte = UInt(5.W)
   val vstart = UInt((CSRConfig.VlWidth-1).W)
   val useVstart = Bool()
@@ -88,19 +91,17 @@ class VAGQAddrSideUop(implicit p: Parameters) extends VAGQBundle {
 class VAGQDataSideUop(implicit p: Parameters) extends VAGQBundle {
   val entryIdx = UInt(vagqEntryIdxWidth.W)
   val robIdx = new RobPtr
+  val op2Data = UInt(VLEN.W)
   val psrc2 = UInt(VfPhyRegIdxWidth.W)
 }
 
-class VAGQReqBase(implicit p: Parameters) extends VAGQBundle {
+class VAGQLsuReq(implicit p: Parameters) extends VAGQBundle {
   val entryIdx    = UInt(vagqEntryIdxWidth.W)
   val robIdx      = new RobPtr
-  val lqIdx       = new LqPtr
-  val sqIdx       = new SqPtr
-}
-
-class VAGQLsuReq(implicit p: Parameters) extends VAGQReqBase {
   val isLoad      = Bool()
   val isStore     = Bool()
+  val lqIdx       = new LqPtr
+  val sqIdx       = new SqPtr
   val byteOffset  = UInt(vagqFlowByteWidth.W)
   val elemIdx     = UInt(vagqFlowByteWidth.W)
   val mask        = UInt(vagqFlowBytes.W)
@@ -185,8 +186,9 @@ class VAGQIO(implicit p: Parameters) extends VAGQBundle {
   val addrUop = Flipped(Decoupled(new VAGQAddrSideUop))
   val dataUop = Flipped(Decoupled(new VAGQDataSideUop))
   // active req to ldu
-  val lsuReq = Vec(VAGQConstants.LsuRespWidth, Decoupled(new VAGQLsuReq))
-  val lsuResp = Flipped(Vec(VAGQConstants.LsuRespWidth, Valid(new VAGQResp)))
+  val lsuReq = Vec(VAGQConstants.ActiveIssueWidth, Decoupled(new VAGQLsuReq))
+  val lduResp = Flipped(Vec(VAGQConstants.LduRespWidth, Valid(new VAGQResp)))
+  val staResp = Flipped(Vec(VAGQConstants.StaRespWidth, Valid(new VAGQResp)))
   // unactive req to lsq
   val lsqEmptyReq = Decoupled(new VAGQLsqEmptyReq)
   val lsqEmptyResp = Flipped(Valid(new VAGQLsqEmptyResp))
@@ -194,7 +196,7 @@ class VAGQIO(implicit p: Parameters) extends VAGQBundle {
   val vrfReadReq = Decoupled(new VAGQVRFReadReq)
   val vrfReadResp = Flipped(Valid(new VAGQVRFReadResp))
   // write vrf with mask
-  val vrfWriteReq = Decoupled(new VAGQVRFWriteReq)
+  val vrfWriteReq = ValidIO(new VAGQVRFWriteReq)
   // to rob
   val robWriteback = Decoupled(new VAGQWritebackReq)
   val redirect = Flipped(Valid(new Redirect))
@@ -229,7 +231,8 @@ class VAGQ(implicit p: Parameters) extends VAGQModule {
 
   entryTable.io.splitUpdate := splitCtrl.io.update
 
-  mergeCtrl.io.lsuResp := io.lsuResp
+  mergeCtrl.io.lduResp := io.lduResp
+  mergeCtrl.io.staResp := io.staResp
   val lsqEmptyResp = Wire(Valid(new VAGQResp))
   lsqEmptyResp.valid := io.lsqEmptyResp.valid
   lsqEmptyResp.bits  := 0.U.asTypeOf(lsqEmptyResp.bits)
@@ -262,7 +265,7 @@ class VAGQ(implicit p: Parameters) extends VAGQModule {
     lastVrfReadGrantSplit := grantSplitVrfRead
   }
 
-  io.vrfWriteReq  <> mergeCtrl.io.vrfWriteReq
+  io.vrfWriteReq  := mergeCtrl.io.vrfWriteReq
   io.robWriteback <> mergeCtrl.io.robWriteback
 }
 

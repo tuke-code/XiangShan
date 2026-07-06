@@ -24,10 +24,30 @@ import xiangshan._
 import xiangshan.backend.fu.FuConfig.LduCfg
 import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.backend.Bundles.DynInst
+import xiangshan.backend.rob.RobPtr
+import xiangshan.backend.vector.vagq._
 import xiangshan.cache._
 import xiangshan.cache.mmu._
 import xiangshan.mem.LoadStage._
 import xiangshan.mem.StoreStage._
+
+class VAGQMemPipelineMeta(implicit p: Parameters) extends XSBundle with HasXSParameter {
+  val valid = Bool()
+  val entryIdx = UInt(VAGQConstants.VAGQEntryIdxWidth.W)
+  val robIdx = new RobPtr
+  val isLoad = Bool()
+  val isStore = Bool()
+  val byteOffset = UInt(VAGQConstants.FlowByteWidth.W)
+  val mask = UInt(VAGQConstants.FlowBytes.W)
+}
+
+object VAGQMemPipeline {
+  def exceptionNumber(exceptionVec: ExceptSparseVec): UInt = {
+    ExceptionNO.priorities.foldRight(0.U(VAGQConstants.ExceptionNumberWidth.W)) {
+      case (num, selected) => Mux(exceptionVec(num), num.U(VAGQConstants.ExceptionNumberWidth.W), selected)
+    }
+  }
+}
 
 sealed trait HasLoadPipeBundleParam {
   def hasPAddr: Boolean = false
@@ -62,6 +82,7 @@ class LoadPipeBundle(
   val entrance = LoadEntrance()
   val accessType = LoadAccessType()
   val uop = new DynInst
+  val vagq = new VAGQMemPipelineMeta
   val vaddr = UInt(VAddrBits.W)
   val fullva = UInt(XLEN.W)
   val size = UInt(MemorySize.Size.width.W)
@@ -160,6 +181,9 @@ class LoadPipeBundle(
     vecVaddrOffset.get := 0.U
     vecTriggerMask.get := 0.U
   }
+  def DontCareVAGQFields(): Unit = {
+    vagq := 0.U.asTypeOf(vagq)
+  }
   def isFirstIssue(): Bool = {
     LoadEntrance.isScalarIssue(entrance) || LoadEntrance.isVectorIssue(entrance)
   }
@@ -232,6 +256,7 @@ class StorePipeBundle(
   val entrance = StoreEntrance()
   val accessType = StoreAccessType()
   val uop = new DynInst
+  val vagq = new VAGQMemPipelineMeta
   val vaddr = UInt(VAddrBits.W)
   val fullva = UInt(XLEN.W)
   val size = UInt(MemorySize.Size.width.W)
@@ -241,7 +266,7 @@ class StorePipeBundle(
   // StoreSet
   val ssid = Option.when(param.hasStoreSet)(UInt(SSIDWidth.W))
   val storeSetHit = Option.when(param.hasStoreSet)(Bool())
-  
+
   // Unalign handling
   val align = Option.when(param.hasUnalignHandling)(Bool())
   val unalignHead = Option.when(param.hasUnalignHandling)(Bool())
@@ -260,7 +285,7 @@ class StorePipeBundle(
   val nc = Option.when(param.hasPAddrChecked)(Bool())
   val mmio = Option.when(param.hasPAddrChecked)(Bool())
   val memBackTypeMM = Option.when(param.hasPAddrChecked)(Bool())
-  
+
   def DontCareUnalign(): Unit = {
     align.get := DontCare
     unalignHead.get := DontCare
@@ -270,6 +295,9 @@ class StorePipeBundle(
   def DontCareStoreSet(): Unit = {
     ssid.get := 0.U
     storeSetHit.get := false.B
+  }
+  def DontCareVAGQFields(): Unit = {
+    vagq := 0.U.asTypeOf(vagq)
   }
 }
 

@@ -42,6 +42,7 @@ import xiangshan.backend.trace.{Itype, TraceCoreInterface}
 import xiangshan.backend.{BackendToTopBundle, TopToBackendBundle}
 import xiangshan.backend.Bundles._
 import xiangshan.backend.vector.VecIssueQueue
+import xiangshan.backend.vector.vagq.VAGQ
 import xiangshan.cache._
 import xiangshan.cache.mmu._
 import xiangshan.frontend.instruncache.HasInstrUncacheConst
@@ -510,6 +511,8 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   val storeUnits = Seq.tabulate(StaCnt)(i => Module(new NewStoreUnit(staParams(i))))
   val stdExeUnits = Seq.tabulate(StdCnt)(i => Module(new StdExeUnit(stdParams(i))))
   val atomicsUnit = Module(new AtomicsUnit(mouParam))
+  val vagq = Module(new VAGQ)
+  val vagqDownstream = Module(new VAGQDownstreamAdapter)
 
   // exceptionInfoGen
   val exceptionInfoGen = Module(new ExceptionInfoGen)
@@ -517,6 +520,21 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   newLoadUnits.zipWithIndex.map(x => x._1.suggestName("LoadUnit_"+x._2))
   storeUnits.zipWithIndex.map(x => x._1.suggestName("StoreUnit_"+x._2))
 
+  vagq.io.redirect := redirect
+  vagq.io.addrUop.valid := false.B
+  vagq.io.addrUop.bits  := 0.U.asTypeOf(vagq.io.addrUop.bits)
+  vagq.io.dataUop.valid := false.B
+  vagq.io.dataUop.bits  := 0.U.asTypeOf(vagq.io.dataUop.bits)
+  vagq.io.vrfReadReq.ready := false.B
+  vagq.io.vrfReadResp.valid := false.B
+  vagq.io.vrfReadResp.bits  := 0.U.asTypeOf(vagq.io.vrfReadResp.bits)
+  vagq.io.robWriteback.ready := false.B
+
+  vagqDownstream.io.vagqLsuReq <> vagq.io.lsuReq
+  vagq.io.lduResp := vagqDownstream.io.vagqLduResp
+  vagq.io.staResp := vagqDownstream.io.vagqStaResp
+  vagqDownstream.io.vagqLsqEmptyReq <> vagq.io.lsqEmptyReq
+  vagq.io.lsqEmptyResp := vagqDownstream.io.vagqLsqEmptyResp
 
   writebackLda.zipWithIndex.foreach { case (wb, i) =>
     if (i == AtomicWBPort) {
@@ -835,9 +853,8 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   // LoadUnit
   for (i <- 0 until LduCnt) {
     newLoadUnits(i).io.redirect <> redirect
-
-    // get input form dispatch
     newLoadUnits(i).io.ldin <> issueLda(i)
+    newLoadUnits(i).io.vagqReqMeta := 0.U.asTypeOf(newLoadUnits(i).io.vagqReqMeta)
     io.mem_to_ooo.ldCancel(i).ld1Cancel := false.B
     io.mem_to_ooo.ldCancel(i).ld2Cancel := newLoadUnits(i).io.cancel
     io.mem_to_ooo.wakeup(i) := newLoadUnits(i).io.wakeup
@@ -938,6 +955,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
     stu.io.dcache        <> dcache.io.lsu.sta(i)
     stu.io.feedBackSlow  <> io.mem_to_ooo.staIqFeedback(i).feedbackSlow
     stu.io.stin          <> issueSta(i)
+    stu.io.vagqReqMeta   := 0.U.asTypeOf(stu.io.vagqReqMeta)
     stu.io.toSqAddr      <> lsq.io.sta.storeAddrIn(i)
     stu.io.toSqAddrRe    <> lsq.io.sta.storeAddrInRe(i)
     stu.io.toUnalignQueue <> lsq.io.sta.unalignQueueReq(i)
@@ -993,10 +1011,8 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   //  lsq.io.rob            <> io.lsqio.rob
   lsq.io.enq            <> io.ooo_to_mem.enqLsq
   lsq.io.brqRedirect    <> redirect
-  // VAGQ downstream integration is not wired in this tree yet. Keep the LSQ
-  // empty-mark ports idle so the normal LSQ path is unchanged.
-  lsq.io.lsqEmptyReq.valid := false.B
-  lsq.io.lsqEmptyReq.bits  := 0.U.asTypeOf(lsq.io.lsqEmptyReq.bits)
+  lsq.io.lsqEmptyReq    <> vagqDownstream.io.lsqEmptyReq
+  vagqDownstream.io.lsqEmptyResp := lsq.io.lsqEmptyResp
 
   //  violation rollback
   val allRedirect = newLoadUnits.map(_.io.rollback) ++ lsq.io.nack_rollback ++ lsq.io.nuke_rollback
