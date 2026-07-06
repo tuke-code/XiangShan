@@ -512,7 +512,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   val stdExeUnits = Seq.tabulate(StdCnt)(i => Module(new StdExeUnit(stdParams(i))))
   val atomicsUnit = Module(new AtomicsUnit(mouParam))
   val vagq = Module(new VAGQ)
-  val vagqDownstream = Module(new VAGQDownstreamAdapter)
+  val vagqDownstream = Module(new VAGQDownstreamAdapter(ldaParams))
 
   // exceptionInfoGen
   val exceptionInfoGen = Module(new ExceptionInfoGen)
@@ -853,8 +853,10 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   // LoadUnit
   for (i <- 0 until LduCnt) {
     newLoadUnits(i).io.redirect <> redirect
-    newLoadUnits(i).io.ldin <> issueLda(i)
-    newLoadUnits(i).io.vagqReqMeta := 0.U.asTypeOf(newLoadUnits(i).io.vagqReqMeta)
+    vagqDownstream.io.issueLda(i) <> issueLda(i)
+    newLoadUnits(i).io.ldin <> vagqDownstream.io.lduReq(i)
+    newLoadUnits(i).io.vagqReqMeta := vagqDownstream.io.lduReqMeta(i)
+    vagqDownstream.io.lduResp(i) := newLoadUnits(i).io.vagqResp
     io.mem_to_ooo.ldCancel(i).ld1Cancel := false.B
     io.mem_to_ooo.ldCancel(i).ld2Cancel := newLoadUnits(i).io.cancel
     io.mem_to_ooo.wakeup(i) := newLoadUnits(i).io.wakeup
