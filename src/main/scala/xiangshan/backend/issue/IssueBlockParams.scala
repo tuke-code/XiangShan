@@ -261,7 +261,12 @@ case class IssueBlockParams(
   def needSnResp = this.isVecStuIQ || this.isLdAddrIQ
 
   // TODO needOg0Resp needOg1Resp
-  def issueTimerMaxValue: Int = 1 + Seq(needOg2Resp, needS0Resp, needFakeS1Resp, needS2Resp, needSnResp).count(_ == true)
+  def needEarlyFmaWakeup: Boolean = inFpSchd && FmulCnt > 0 && numFpSrc >= 3
+
+  def issueTimerMaxValue: Int = {
+    val respMax = 1 + Seq(needOg2Resp, needS0Resp, needFakeS1Resp, needS2Resp, needSnResp).count(_ == true)
+    if (needEarlyFmaWakeup) respMax max 3 else respMax
+  }
 
   def issueTimerWidth = issueTimerMaxValue.U.getWidth
 

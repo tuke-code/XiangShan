@@ -853,6 +853,12 @@ object Bundles {
     }
   }
 
+  class EarlyFmaSrc2Info(implicit p: Parameters) extends XSBundle {
+    val sourceExuIdx = UInt(backendParams.numExu.W)
+    val targetExuIdx = UInt(backendParams.numExu.W)
+    val robIdx = new RobPtr
+  }
+
   class VPUCtrlSignals(implicit p: Parameters) extends XSBundle {
     // vtype
     val vill      = Bool()

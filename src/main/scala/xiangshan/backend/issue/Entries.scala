@@ -30,13 +30,14 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
   val io = IO(new EntriesIO)
 
   val fakeS1Resp = Option.when(params.needFakeS1Resp)(0.U.asTypeOf(io.og0Resp))
-  val allResps = Seq(
+  val allRespsBase = Seq(
     Some(io.og0Resp),
     Some(io.og1Resp),
     io.og2Resp.orElse(io.s0Resp),
     if (io.og2Resp.nonEmpty) io.s0Resp else fakeS1Resp,
     io.s2Resp.orElse(io.snResp)
   ).filter(_.nonEmpty).map(_.get)
+  val allResps = allRespsBase ++ Seq.fill((params.issueTimerMaxValue + 1 - allRespsBase.length).max(0))(0.U.asTypeOf(io.og0Resp))
   assert(allResps.length == params.issueTimerMaxValue + 1, "allResps.length == params.issueTimerMaxValue + 1")
   val resps = Wire(Vec(allResps.length, chiselTypeOf(io.og0Resp)))
   resps := allResps
@@ -62,6 +63,8 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
   val rfWenVec            = Wire(Vec(params.numEntries, Bool()))
   val fuTypeVec           = Wire(Vec(params.numEntries, FuType()))
   val isFmaVec            = Wire(Vec(params.numEntries, Bool()))
+  val earlyFmaSrc2Vec     = OptionWrapper(params.needEarlyFmaWakeup, Wire(Vec(params.numEntries, Bool())))
+  val earlyFmaSourceVec   = OptionWrapper(params.needEarlyFmaWakeup, Wire(Vec(params.numEntries, UInt(backendParams.numExu.W))))
   val isFirstIssueVec     = Wire(Vec(params.numEntries, Bool()))
   val issueTimerVec       = Wire(Vec(params.numEntries, UInt(params.issueTimerWidth.W)))
   val sqIdxVec            = OptionWrapper(params.needFeedBackSqIdx, Wire(Vec(params.numEntries, new SqPtr())))
@@ -397,6 +400,7 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
     in.flush                    := io.flush
     in.wakeUpFromWB             := io.wakeUpFromWB
     in.wakeUpFromIQ             := io.wakeUpFromIQ
+    in.earlyFmaWakeup.foreach(_ := io.earlyFmaWakeup.get)
     in.vlFromIntIsZero          := io.vlFromIntIsZero
     in.vlFromIntIsVlmax         := io.vlFromIntIsVlmax
     in.og0Cancel                := io.og0Cancel
@@ -413,6 +417,8 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
     srcReadyVec(entryIdx)       := out.srcReady
     fuTypeVec(entryIdx)         := out.fuType
     isFmaVec(entryIdx)          := out.isFma
+    earlyFmaSrc2Vec.foreach(_(entryIdx) := out.earlyFmaSrc2.get)
+    earlyFmaSourceVec.foreach(_(entryIdx) := out.earlyFmaSource.get)
     robIdxVec(entryIdx)         := out.robIdx
     isFirstIssueVec(entryIdx)   := out.isFirstIssue
     entries(entryIdx)           := out.entry
@@ -434,6 +440,28 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
     }
     validVecRegNext(entryIdx)   := out.validRegNext
     issuedVecRegNext(entryIdx)  := out.issuedRegNext
+  }
+
+  io.earlyFmaSrc2ToFalu.foreach { out =>
+    val candidates = Wire(Vec(params.numEntries, Bool()))
+    candidates.zipWithIndex.foreach { case (candidate, idx) =>
+      candidate := validVec(idx) &&
+        issuedVec(idx) &&
+        isFmaVec(idx) &&
+        earlyFmaSrc2Vec.get(idx) &&
+        issueTimerVec(idx) === 3.U
+    }
+    out.valid := candidates.asUInt.orR
+    out.bits.sourceExuIdx := Mux1H(candidates, earlyFmaSourceVec.get)
+    val targetExuIdxVec = entries.map { entry =>
+      Mux1H(
+        (0 until params.numDeq).map(idx => entry.bits.status.deqPortIdx === idx.U),
+        params.exuBlockParams.map(exu => MathUtils.IntToOH(exu.exuIdx).U(backendParams.numExu.W))
+      )
+    }
+    out.bits.targetExuIdx := Mux1H(candidates, targetExuIdxVec)
+    out.bits.robIdx := Mux1H(candidates, robIdxVec)
+    XSError(PopCount(candidates) > 1.U, "multiple early fma src2 candidates in one IQ\n")
   }
 
   // entries perf counter
@@ -528,6 +556,10 @@ class EntriesIO(implicit p: Parameters, params: IssueBlockParams) extends XSBund
   // wakeup
   val wakeUpFromWB: MixedVec[ValidIO[IssueQueueWBWakeUpBundle]] = Flipped(params.genWBWakeUpSinkValidBundle)
   val wakeUpFromIQ: MixedVec[ValidIO[IssueQueueIQWakeUpBundle]] = Flipped(params.genIQWakeUpSinkValidBundle)
+  val earlyFmaWakeup: Option[MixedVec[ValidIO[IssueQueueIQWakeUpBundle]]] =
+    Option.when(params.needEarlyFmaWakeup)(Flipped(MixedVec(params.backendParam.fpSchdParams.get.exuBlockParams.map(exu =>
+      ValidIO(new IssueQueueIQWakeUpBundle(exu.exuIdx, params.backendParam))
+    ))))
   val wakeUpFromWBDelayed: MixedVec[ValidIO[IssueQueueWBWakeUpBundle]] = Flipped(params.genWBWakeUpSinkValidBundle)
   val wakeUpFromIQDelayed: MixedVec[ValidIO[IssueQueueIQWakeUpBundle]] = Flipped(params.genIQWakeUpSinkValidBundle)
   val vlFromIntIsZero     = Input(Bool())
@@ -543,6 +575,7 @@ class EntriesIO(implicit p: Parameters, params: IssueBlockParams) extends XSBund
   val srcReady            = Output(UInt(params.numEntries.W))
   val fuType              = Vec(params.numEntries, Output(FuType()))
   val isFma               = Vec(params.numEntries, Output(Bool()))
+  val earlyFmaSrc2ToFalu  = Option.when(params.needEarlyFmaWakeup)(ValidIO(new EarlyFmaSrc2Info))
   val loadDependency      = Vec(params.numEntries, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
   val exuSources          = OptionWrapper(params.hasIQWakeUp, Vec(params.numEntries, Vec(params.numRegSrc, Output(ExuSource()))))
   // for enq.ready timing

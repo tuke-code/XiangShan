@@ -21,6 +21,8 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     val robIdx                = new RobPtr
     val fuType                = IQFuType()
     val isFmac                = Option.when(params.FmulCnt > 0)(Bool())
+    val earlyFmaSrc2          = Option.when(params.needEarlyFmaWakeup)(Bool())
+    val earlyFmaSource        = Option.when(params.needEarlyFmaWakeup)(UInt(backendParams.numExu.W))
     //src status
     val srcStatus             = Vec(params.numRegSrc, new SrcStatus)
     val srcStatusV0           = Option.when(params.readV0Rf)(new V0SrcStatus)
@@ -142,6 +144,10 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     //wakeup
     val wakeUpFromWB: MixedVec[ValidIO[IssueQueueWBWakeUpBundle]] = Flipped(params.genWBWakeUpSinkValidBundle)
     val wakeUpFromIQ: MixedVec[ValidIO[IssueQueueIQWakeUpBundle]] = Flipped(params.genIQWakeUpSinkValidBundle)
+    val earlyFmaWakeup: Option[MixedVec[ValidIO[IssueQueueIQWakeUpBundle]]] =
+      Option.when(params.needEarlyFmaWakeup)(Flipped(MixedVec(params.backendParam.fpSchdParams.get.exuBlockParams.map(exu =>
+        ValidIO(new IssueQueueIQWakeUpBundle(exu.exuIdx, params.backendParam))
+      ))))
     // vl
     val vlFromIntIsZero       = Input(Bool())
     val vlFromIntIsVlmax      = Input(Bool())
@@ -194,6 +200,8 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     val perfOg0Cancel         = Option.when(params.hasIQWakeUp)(Output(Vec(params.numRegSrc, Bool())))
     val perfWakeupByWB        = Output(Vec(params.numRegSrc, Bool()))
     val perfWakeupByIQ        = Option.when(params.hasIQWakeUp)(Output(Vec(params.numRegSrc, Vec(params.numWakeupFromIQ, Bool()))))
+    val earlyFmaSrc2          = Option.when(params.needEarlyFmaWakeup)(Output(Bool()))
+    val earlyFmaSource        = Option.when(params.needEarlyFmaWakeup)(Output(UInt(backendParams.numExu.W)))
   }
 
   class CommonWireBundle(implicit p: Parameters, params: IssueBlockParams) extends XSBundle {
@@ -223,7 +231,15 @@ object EntryBundles extends HasCircularQueuePtrHelper {
                                     status.issueTimer === params.issueTimerMaxValue.U && og1Payload.lqIdx.get === commonIn.issueResp.lqIdx.get && commonIn.issueResp.finalSuccess
                                   else
                                     commonIn.issueResp.finalSuccess)
-    common.deqSuccess         := status.issued && finalSuccess && !common.srcLoadCancelVec.asUInt.orR
+    val earlyFmaWait          = params.needEarlyFmaWakeup.B &&
+                                  status.isFmac.getOrElse(false.B) &&
+                                  status.earlyFmaSrc2.getOrElse(false.B) &&
+                                  status.issueTimer =/= 3.U
+    val earlyFmaComplete      = params.needEarlyFmaWakeup.B &&
+                                  status.isFmac.getOrElse(false.B) &&
+                                  status.earlyFmaSrc2.getOrElse(false.B) &&
+                                  status.issueTimer === 3.U
+    common.deqSuccess         := status.issued && ((finalSuccess && !earlyFmaWait) || earlyFmaComplete) && !common.srcLoadCancelVec.asUInt.orR
     common.srcWakeupByWB      := commonIn.wakeUpFromWB.map{ bundle =>
                                     val psrcSrcTypeVec = status.srcStatus.map(_.psrc) zip status.srcStatus.map(_.srcType)
                                     if (params.numRegSrc == 3) {
@@ -284,6 +300,8 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     val wakeupLoadDependencyByIQVec               = Vec(params.numWakeupFromIQ, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
     val shiftedWakeupLoadDependencyByIQVec        = Vec(params.numWakeupFromIQ, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
     val canIssueBypass                            = Bool()
+    val earlyFmaSrc2Wakeup                         = Bool()
+    val earlyFmaSrc2SourceOH                       = UInt(backendParams.numExu.W)
   }
 
   def CommonIQWakeupConnect(common: CommonWireBundle, hasIQWakeupGet: CommonIQWakeupBundle, validReg: Bool, status: Status, commonIn: CommonInBundle, isEnq: Boolean)(implicit p: Parameters, params: IssueBlockParams) = {
@@ -320,9 +338,30 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     hasIQWakeupGet.srcWakeupByIQButCancel           := wakeupVec.map(x => VecInit(x.zip(cancelSel).map { case (wakeup, cancel) => wakeup && cancel }))
     hasIQWakeupGet.srcWakeupByIQWithoutCancel       := wakeupVec.map(x => VecInit(x))
     hasIQWakeupGet.wakeupLoadDependencyByIQVec      := commonIn.wakeUpFromIQ.map(_.bits.loadDependency).toSeq
+    if (params.needEarlyFmaWakeup) {
+      val src2Status = status.srcStatus(2)
+      val normalSrc2Wakeup = hasIQWakeupGet.srcWakeupByIQWithoutCancel(2).asUInt.orR
+      val earlyFmaWakeupVec = commonIn.earlyFmaWakeup.get.map { wakeup =>
+        wakeup.valid &&
+          wakeup.bits.fpWen &&
+          wakeup.bits.pdest === src2Status.psrc &&
+          SrcType.isFp(src2Status.srcType) &&
+          status.isFmac.getOrElse(false.B) &&
+          !normalSrc2Wakeup
+      }
+      hasIQWakeupGet.earlyFmaSrc2Wakeup := VecInit(earlyFmaWakeupVec).asUInt.orR
+      hasIQWakeupGet.earlyFmaSrc2SourceOH := Mux1H(
+        earlyFmaWakeupVec,
+        commonIn.earlyFmaWakeup.get.map(w => MathUtils.IntToOH(w.bits.exuIdx).U(p(XSCoreParamsKey).backendParams.numExu.W))
+      )
+    } else {
+      hasIQWakeupGet.earlyFmaSrc2Wakeup := false.B
+      hasIQWakeupGet.earlyFmaSrc2SourceOH := 0.U
+    }
     hasIQWakeupGet.canIssueBypass                   := validReg && !status.issued && !status.blocked &&
       VecInit(status.srcStatus.map(_.srcState).zip(hasIQWakeupGet.srcWakeupByIQWithoutCancel).zipWithIndex.map { case ((state, wakeupVec), srcIdx) =>
-        wakeupVec.asUInt.orR | state
+        val earlyFmaReady = if (params.needEarlyFmaWakeup && srcIdx == 2) hasIQWakeupGet.earlyFmaSrc2Wakeup else false.B
+        wakeupVec.asUInt.orR | state | earlyFmaReady
       }).asUInt.andR
   }
 
@@ -351,6 +390,7 @@ object EntryBundles extends HasCircularQueuePtrHelper {
   def EntryRegCommonConnect(common: CommonWireBundle, hasIQWakeup: Option[CommonIQWakeupBundle], validReg: Bool, entryUpdate: EntryBundle, entryReg: EntryBundle, status: Status, commonIn: CommonInBundle, isEnq: Boolean, isComp: Boolean)(implicit p: Parameters, params: IssueBlockParams) = {
     val hasIQWakeupGet                                 = hasIQWakeup.getOrElse(0.U.asTypeOf(new CommonIQWakeupBundle))
     val cancelBypassVec                                = Wire(Vec(params.numRegSrc, Bool()))
+    val earlyFmaComplete                               = params.needEarlyFmaWakeup.B && status.isFmac.getOrElse(false.B) && status.earlyFmaSrc2.getOrElse(false.B) && status.issueTimer === 3.U
     val srcCancelByLoad                                = common.srcLoadCancelVec.asUInt.orR
     val sqIdxHit                                       = (if (params.needFeedBackSqIdx)
                                                             status.issueTimer =/= params.issueTimerMaxValue.U ||
@@ -359,6 +399,8 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     val respIssueFail                                  = commonIn.issueResp.failed && sqIdxHit
     entryUpdate.status.robIdx                         := status.robIdx
     entryUpdate.status.isFmac.foreach(_               := status.isFmac.get)
+    entryUpdate.status.earlyFmaSrc2.foreach(_         := status.earlyFmaSrc2.get)
+    entryUpdate.status.earlyFmaSource.foreach(_       := status.earlyFmaSource.get)
     entryUpdate.status.fuType                         := IQFuType.readFuType(status.fuType, params.getFuCfgs.map(_.fuType))
     entryUpdate.status.srcStatus.zip(status.srcStatus).zipWithIndex.foreach { case ((srcStatusNext, srcStatus), srcIdx) =>
       val srcLoadCancel = common.srcLoadCancelVec(srcIdx)
@@ -400,7 +442,8 @@ object EntryBundles extends HasCircularQueuePtrHelper {
 
       srcStatusNext.psrc                              := srcStatus.psrc
       srcStatusNext.srcType                           := Mux(ignoreOldVd, SrcType.no, srcStatus.srcType)
-      srcStatusNext.srcState                          := srcStatus.srcState & !srcLoadCancel | wakeupByWB | wakeupByIQ | ignoreOldVd
+      val wakeupByEarlyFma = if (params.needEarlyFmaWakeup && srcIdx == 2) hasIQWakeupGet.earlyFmaSrc2Wakeup else false.B
+      srcStatusNext.srcState                          := srcStatus.srcState & !srcLoadCancel | wakeupByWB | wakeupByIQ | wakeupByEarlyFma | ignoreOldVd
       srcStatusNext.dataSources.value                 := (if (params.inVfSchd && params.readVfRf && params.hasIQWakeUp) {
                                                             // Vf / Mem -> Vf
                                                             MuxCase(srcStatus.dataSources.value, Seq(
@@ -424,7 +467,7 @@ object EntryBundles extends HasCircularQueuePtrHelper {
                                                             srcStatus.exuSources.get.value)
         srcStatusNext.srcLoadDependency               := Mux(wakeupByIQ,
                                                             Mux1H(wakeupByIQOH, hasIQWakeupGet.shiftedWakeupLoadDependencyByIQVec),
-                                                            common.srcLoadDependencyNext(srcIdx))
+                                                            Mux(wakeupByEarlyFma, 0.U.asTypeOf(srcStatusNext.srcLoadDependency), common.srcLoadDependencyNext(srcIdx)))
       } else {
         srcStatusNext.srcLoadDependency               := common.srcLoadDependencyNext(srcIdx)
       }
@@ -467,6 +510,7 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     entryUpdate.status.blocked                        := false.B
     entryUpdate.status.issued                         := MuxCase(status.issued, Seq(
                                                           (commonIn.deqSel && !cancelBypassVec.asUInt.orR)  -> true.B,
+                                                          earlyFmaComplete                                  -> false.B,
                                                           (srcCancelByLoad || respIssueFail)                -> false.B,
                                                          ))
     entryUpdate.status.firstIssue                     := Mux(status.firstIssue && status.issueTimer === params.issueTimerMaxValue.U, !respIssueFail, status.firstIssue)
@@ -474,6 +518,20 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     entryUpdate.status.issueTimer                     := Mux(validReg && status.issued, updateIssueTimer, 0.U)
     entryUpdate.status.deqPortIdx                     := Mux(commonIn.deqSel, commonIn.deqPortIdxWrite, Mux(status.issued, status.deqPortIdx, 0.U))
     entryUpdate.payload                               := entryReg.payload
+
+    if (params.needEarlyFmaWakeup) {
+      val setEarlyFmaSrc2 = hasIQWakeupGet.earlyFmaSrc2Wakeup && !common.srcLoadTransCancelVec(2) && !common.srcLoadCancelVec(2)
+      entryUpdate.status.earlyFmaSrc2.get := Mux(
+        setEarlyFmaSrc2,
+        true.B,
+        Mux(srcCancelByLoad || respIssueFail, false.B, status.earlyFmaSrc2.get)
+      )
+      entryUpdate.status.earlyFmaSource.get := Mux(
+        setEarlyFmaSrc2,
+        hasIQWakeupGet.earlyFmaSrc2SourceOH,
+        status.earlyFmaSource.get
+      )
+    }
   }
 
   def CommonOutConnect(commonOut: CommonOutBundle, common: CommonWireBundle, hasIQWakeup: Option[CommonIQWakeupBundle], validReg: Bool, entryUpdate: EntryBundle, entryReg: EntryBundle, status: Status, commonIn: CommonInBundle, isEnq: Boolean, isComp: Boolean)(implicit p: Parameters, params: IssueBlockParams) = {
@@ -572,6 +630,8 @@ object EntryBundles extends HasCircularQueuePtrHelper {
     commonOut.entryOutDeqValid                        := validReg && (common.flushed || common.deqSuccess)
     commonOut.entryOutTransValid                      := validReg && commonIn.transSel && !(common.flushed || common.deqSuccess)
     commonOut.perfWakeupByWB                          := common.srcWakeupByWB.zip(status.srcStatus).map{ case (w, s) => w && SrcState.isBusy(s.srcState) && validReg }
+    commonOut.earlyFmaSrc2.foreach(_                  := entryUpdate.status.earlyFmaSrc2.get)
+    commonOut.earlyFmaSource.foreach(_                := entryUpdate.status.earlyFmaSource.get)
     if (params.hasIQWakeUp) {
       commonOut.perfLdCancel.get                      := common.srcCancelVec.map(_ && validReg)
       commonOut.perfOg0Cancel.get                     := hasIQWakeupGet.srcWakeupByIQButCancel.map(_.asUInt.orR && validReg)

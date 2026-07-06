@@ -618,11 +618,40 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
       sink.valid := source.valid
       sink.bits := source.bits
     }
+    val earlyFmaWakeups = Wire(MixedVec(params.exuBlockParams.map(exu =>
+      ValidIO(new IssueQueueIQWakeUpBundle(exu.exuIdx, backendParams))
+    )))
+    earlyFmaWakeups.foreach(w => w := 0.U.asTypeOf(w))
+    issueQueues.foreach { iq =>
+      iq.io.earlyFmaWakeup.foreach { wakeups =>
+        wakeups.zip(earlyFmaWakeups).foreach { case (sink, source) =>
+          sink := source
+        }
+      }
+    }
+    val earlyFmaSrc2ToFalu = issueQueues.map { iq =>
+      val out = Wire(ValidIO(new EarlyFmaSrc2Info))
+      out := 0.U.asTypeOf(out)
+      iq.io.earlyFmaSrc2ToFalu.foreach(x => out := x)
+      out
+    }
     for (i <- 0 until exuBlock.io.in.length) {
       for (j <- 0 until exuBlock.io.in(i).length) {
+        val fpExuParam = params.issueBlockParams.filterNot(_.isMemBlockIQ)(i).exuBlockParams(j)
+        val fpExuFlatIdx = params.exuBlockParams.indexWhere(_.name == fpExuParam.name)
         val fpExuIn = bypassNetwork.io.toExus.fp(i)(j)
         val shouldLdCancel = LoadShouldCancel(fpExuIn.bits.ctrl.loadDependency, io.ldCancel)
         val isFaluOp = fpExuIn.bits.params.hasFaluFu.B && fpExuIn.bits.ctrl.fuType === FuType.falu.U
+        val earlyFmaOg1Cancel = og1Cancel(fpExuIn.bits.params.exuIdx)
+        val isFmac = fpExuIn.bits.ctrl.fuType === FuType.fmul.U && FuOpType.FMacOpcodes.isOP3(fpExuIn.bits.ctrl.fuOpType)
+        earlyFmaWakeups(fpExuFlatIdx).valid := fpExuIn.valid &&
+          !fpExuIn.bits.robIdx.needFlush(flushCopyRegVec.last) &&
+          !shouldLdCancel &&
+          !earlyFmaOg1Cancel &&
+          isFmac
+        earlyFmaWakeups(fpExuFlatIdx).bits := 0.U.asTypeOf(earlyFmaWakeups(fpExuFlatIdx).bits)
+        earlyFmaWakeups(fpExuFlatIdx).bits.fpWen := true.B
+        earlyFmaWakeups(fpExuFlatIdx).bits.pdest := fpExuIn.bits.toRF.pdest
         val pipeToExu = Wire(chiselTypeOf(fpExuIn))
         pipeToExu.valid := fpExuIn.valid && !isFaluOp
         pipeToExu.bits := fpExuIn.bits
@@ -631,6 +660,31 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
         assert(PopCount(VecInit(fpExuIn.valid && isFaluOp, fromFmulValid)) < 2.U, s"fpExuIn.valid && isFaluOp and fromFmulValid conflict")
         pipeToFalu.valid := fpExuIn.valid && isFaluOp || fromFmulValid
         pipeToFalu.bits := Mux(fromFmulValid, exuBlock.io.outToFalu.get(i).head.bits, fpExuIn.bits)
+        val earlyFmaSrc2Matches = earlyFmaSrc2ToFalu.map { src2 =>
+          src2.valid &&
+            src2.bits.targetExuIdx(fpExuIn.bits.params.exuIdx) &&
+            src2.bits.robIdx === pipeToFalu.bits.robIdx
+        }
+        val earlyFmaSourceData = earlyFmaSrc2ToFalu.map { src2 =>
+          Mux1H(
+            params.exuBlockParams.map(exu => src2.bits.sourceExuIdx(exu.exuIdx)),
+            exuBlock.io.out.flatten.map(_.bits.toFpRf.get.bits)
+          )
+        }
+        val earlyFmaSourceValid = earlyFmaSrc2ToFalu.map { src2 =>
+          Mux1H(
+            params.exuBlockParams.map(exu => src2.bits.sourceExuIdx(exu.exuIdx)),
+            exuBlock.io.out.flatten.map(out => out.valid && out.bits.toFpRf.get.valid)
+          )
+        }
+        val earlyFmaSrc2ReadyMatches = earlyFmaSrc2Matches.zip(earlyFmaSourceValid).map { case (m, v) => m && v }
+        when (fromFmulValid && VecInit(earlyFmaSrc2ReadyMatches).asUInt.orR) {
+          pipeToFalu.bits.data.src(1) := Mux1H(earlyFmaSrc2ReadyMatches, earlyFmaSourceData)
+        }
+        XSError(
+          fromFmulValid && VecInit(earlyFmaSrc2Matches).asUInt.orR && !VecInit(earlyFmaSrc2ReadyMatches).asUInt.orR,
+          "early fma src2 source data is not valid\n"
+        )
 
         val rightOut = Wire(chiselTypeOf(exuBlock.io.in(i)(j)))
         val rightFaluOut = Wire(chiselTypeOf(exuBlock.io.faluIn.get(i)(j)))

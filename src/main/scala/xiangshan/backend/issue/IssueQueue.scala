@@ -34,6 +34,10 @@ class IssueQueueIO()(implicit p: Parameters, params: IssueBlockParams) extends X
   val wakeupFromF2I: Option[ValidIO[IssueQueueIQWakeUpBundle]] = Option.when(params.needWakeupFromF2I)(Flipped(ValidIO(new IssueQueueIQWakeUpBundle(params.backendParam.getExuIdxF2I, params.backendParam))))
   val wakeupFromWBDelayed: MixedVec[ValidIO[IssueQueueWBWakeUpBundle]] = Flipped(params.genWBWakeUpSinkValidBundle)
   val wakeupFromIQDelayed: MixedVec[ValidIO[IssueQueueIQWakeUpBundle]] = Flipped(params.genIQWakeUpSinkValidBundle)
+  val earlyFmaWakeup: Option[MixedVec[ValidIO[IssueQueueIQWakeUpBundle]]] =
+    Option.when(params.needEarlyFmaWakeup)(Flipped(MixedVec(params.backendParam.fpSchdParams.get.exuBlockParams.map(exu =>
+      ValidIO(new IssueQueueIQWakeUpBundle(exu.exuIdx, params.backendParam))
+    ))))
   val vlFromIntIsZero = Input(Bool())
   val vlFromIntIsVlmax = Input(Bool())
   val og0Cancel = Input(ExuVec())
@@ -45,6 +49,8 @@ class IssueQueueIO()(implicit p: Parameters, params: IssueBlockParams) extends X
 
   // Outputs
   val wakeupToIQ: MixedVec[ValidIO[IssueQueueIQWakeUpBundle]] = params.genIQWakeUpSourceValidBundle
+  val earlyFmaSrc2ToFalu: Option[ValidIO[EarlyFmaSrc2Info]] =
+    Option.when(params.needEarlyFmaWakeup)(ValidIO(new EarlyFmaSrc2Info))
   val validCntDeqVec = Output(Vec(params.numDeq,UInt(params.numEntries.U.getWidth.W)))
   // perf counter
   val validVec = Output(Vec(params.numEntries, Bool()))
@@ -291,6 +297,8 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       enq.bits.status.robIdx                                    := s0_enqBits(enqIdx).robIdx
       enq.bits.status.fuType                                    := IQFuType.readFuType(VecInit(s0_enqBits(enqIdx).fuType.asBools), params.getFuCfgs.map(_.fuType))
       enq.bits.status.isFmac.foreach(_                          := FuType.isFmul(s0_enqBits(enqIdx).fuType) && FuOpType.FMacOpcodes.isOP3(s0_enqBits(enqIdx).fuOpType))
+      enq.bits.status.earlyFmaSrc2.foreach(_                    := false.B)
+      enq.bits.status.earlyFmaSource.foreach(_                  := 0.U)
       val numLsrc = s0_enqBits(enqIdx).srcType.size.min(enq.bits.status.srcStatus.map(_.srcType).size)
       for(j <- 0 until numLsrc) {
         enq.bits.status.srcStatus(j).psrc                       := s0_enqBits(enqIdx).psrc(j)
@@ -355,6 +363,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     }
     entriesIO.wakeUpFromWB                                      := 0.U.asTypeOf(io.wakeupFromWB)
     entriesIO.wakeUpFromIQ                                      := wakeupFromIQ
+    entriesIO.earlyFmaWakeup.foreach(_                          := io.earlyFmaWakeup.get)
     entriesIO.wakeUpFromWBDelayed                               := 0.U.asTypeOf(io.wakeupFromWBDelayed)
     println(s"[issueQueue] name = ${params.getIQName}")
     val wakeupFromWBExuName = io.wakeupFromWB.map(x => x.bits.exuIndices).map(i => i.map(backendParams.allExuParams(_).name))
@@ -905,6 +914,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       })
     }
   }
+  io.earlyFmaSrc2ToFalu.foreach(_ := entries.io.earlyFmaSrc2ToFalu.get)
   io.deqDelay.zip(deqDelay).foreach { case (sink, source) =>
     sink.valid := source.valid
     sink.bits := source.bits
