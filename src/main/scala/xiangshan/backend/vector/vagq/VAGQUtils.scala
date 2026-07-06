@@ -2,9 +2,11 @@ package xiangshan.backend.vector.vagq
 
 import chisel3._
 import chisel3.util._
+import utility.HasCircularQueuePtrHelper
 import xiangshan._
+import xiangshan.mem.{genVSData, genVWdata}
 
-trait HasVAGQHelper { this: HasVAGQParameters =>
+trait HasVAGQHelper extends HasCircularQueuePtrHelper { this: HasVAGQParameters =>
   protected def entryAt(entries: Vec[VAGQEntry], idx: UInt): VAGQEntry = {
     Mux1H((0 until vagqSize).map(i => (idx === i.U(vagqEntryIdxWidth.W)) -> entries(i)))
   }
@@ -50,8 +52,47 @@ trait HasVAGQHelper { this: HasVAGQParameters =>
     VecInit((0 until vagqFlowBytes).map(i => i.U < limit)).asUInt
   }
 
+  protected def lowBit(mask: UInt): UInt = PriorityEncoder(mask)
+
+  protected def highBit(mask: UInt): UInt = (vagqFlowBytes - 1).U - PriorityEncoder(Reverse(mask))
+
+  protected def bitMask(idx: UInt): UInt = UIntToOH(idx, vagqFlowBytes)
+
+  protected def storeFlowData(data: UInt, elemIdx: UInt, alignedType: UInt): UInt = {
+    genVWdata(genVSData(data, elemIdx, alignedType), alignedType)
+  }
+
+  protected def byteMaskToEntryMask(mask: UInt, deew: UInt): UInt = {
+    VecInit((0 until vagqFlowBytes).map { elem =>
+      VecInit((0 until vagqFlowBytes).map { byte =>
+        mask(byte) && ((byte.U(vagqFlowByteWidth.W) >> deew) === elem.U(vagqFlowByteWidth.W))
+      }).asUInt.orR
+    }).asUInt
+  }
+
   protected def mergeEntryAt(entries: Vec[CtrlInput], idx: UInt, numEntries: Int): CtrlInput = {
     Mux1H(idxHitSeq(idx, numEntries), entries)
+  }
+
+  protected def oldestEntryOH(valids: Seq[Bool], entries: Vec[CtrlInput], numEntries: Int): UInt = {
+    require(valids.length == numEntries)
+    VecInit((0 until numEntries).map { i =>
+      val thisEntry = entries(i).entry
+      val olderThanAll = (0 until numEntries).map { j =>
+        if (i == j) {
+          true.B
+        } else {
+          val thatEntry = entries(j).entry
+          val sameRob = thatEntry.robIdx === thisEntry.robIdx
+          val thisOlderSameRob = sameRob && (
+            thisEntry.uopIdx < thatEntry.uopIdx ||
+              (thisEntry.uopIdx === thatEntry.uopIdx && (i < j).B)
+          )
+          !valids(j) || isAfter(thatEntry.robIdx, thisEntry.robIdx) || thisOlderSameRob
+        }
+      }.reduce(_ && _)
+      valids(i) && olderThanAll
+    }).asUInt
   }
 
   protected def mergeBytes(oldData: UInt, newData: UInt, mask: UInt): UInt = {
