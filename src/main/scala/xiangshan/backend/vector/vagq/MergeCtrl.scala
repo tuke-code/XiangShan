@@ -9,7 +9,7 @@ import xiangshan.backend.rob.RobPtr
 class MergeCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
   val io = IO(new MergeCtrlIO(numEntries))
 
-  private val respVec = io.lsuResp.toSeq ++ Seq(io.lsqEmptyResp)
+  private val respVec = io.lduResp.toSeq ++ io.staResp.toSeq ++ Seq(io.lsqEmptyResp)
   private val respExceptionHit = Wire(Vec(numEntries, Bool()))
   for (i <- 0 until numEntries) {
     respExceptionHit(i) := respVec.map { resp =>
@@ -64,7 +64,8 @@ class MergeCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
   private val excpEntry      = io.entry(excpSel)
   private val splitDoneEntry = io.entry(splitDoneSel)
 
-  private val skipMerge = !splitDoneEntry.entry.vta && !splitDoneEntry.entry.vma && !splitDoneEntry.entry.useVstart // | vstart === 0
+  private val splitDoneNonActiveMask = ~splitDoneEntry.entry.elemActiveMask
+  private val skipMerge = !splitDoneNonActiveMask.orR
   private val splitDoneStateNext = Mux(
     splitDoneEntry.entry.isStore | skipMerge,
     VAGQEntryState.wb,
@@ -119,9 +120,9 @@ class MergeCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
   io.vrfWriteReq.bits.data     := mergeWriteData
   io.vrfWriteReq.bits.mask     := nonActiveMask
 
-  private val vrfWriteFire = io.vrfWriteReq.valid && io.vrfWriteReq.ready
+  private val vrfWriteValid = io.vrfWriteReq.valid
 
-  io.robWriteback.valid                := (hasWb || hasExcp) && !hasSplitDone && !vrfWriteFire
+  io.robWriteback.valid                := (hasWb || hasExcp) && !hasSplitDone && !vrfWriteValid
   io.robWriteback.bits                 := 0.U.asTypeOf(io.robWriteback.bits)
   io.robWriteback.bits.meta            := Mux(hasExcp, excpEntry.entry.meta, wbEntry.entry.meta)
   io.robWriteback.bits.entryIdx        := Mux(hasExcp, excpEntry.entryIdx, wbEntry.entryIdx)
@@ -142,7 +143,7 @@ class MergeCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
   }
 
   when(mergeRespValid) {
-    when(!mergeRespValid || vrfWriteFire) {
+    when(!mergeRespValid || vrfWriteValid) {
       mergeRespValid := false.B
     }
   }.elsewhen(vrfReadRespAlive) {
@@ -156,7 +157,7 @@ class MergeCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
     io.stateUpdate.valid := true.B
     io.stateUpdate.bits.entryIdx  := splitDoneEntry.entryIdx
     io.stateUpdate.bits.stateNext := splitDoneStateNext
-  }.elsewhen(vrfWriteFire) {
+  }.elsewhen(vrfWriteValid) {
     io.stateUpdate.valid := true.B
     io.stateUpdate.bits.entryIdx  := io.vrfWriteReq.bits.entryIdx
     io.stateUpdate.bits.stateNext := VAGQEntryState.wb
@@ -169,13 +170,14 @@ class MergeCtrl(numEntries: Int)(implicit p: Parameters) extends VAGQModule {
 
 class MergeCtrlIO(numEntries: Int)(implicit p: Parameters) extends VAGQBundle {
   val entry        = Input(Vec(numEntries, new CtrlInput))
-  val lsuResp      = Flipped(Vec(VAGQConstants.LsuRespWidth, Valid(new VAGQResp)))
+  val lduResp      = Flipped(Vec(VAGQConstants.LduRespWidth, Valid(new VAGQResp)))
+  val staResp      = Flipped(Vec(VAGQConstants.StaRespWidth, Valid(new VAGQResp)))
   val lsqEmptyResp = Flipped(Valid(new VAGQResp))
   val reqUpdate    = Vec(VAGQConstants.MergeRespWidth, Valid(new VAGQReqBitmapUpdate))
   val stateUpdate  = Valid(new VAGQEntryStateUpdate)
   val vrfReadReq   = Decoupled(new VAGQVRFReadReq)
   val vrfReadResp  = Flipped(Valid(new VAGQVRFReadResp))
-  val vrfWriteReq  = Decoupled(new VAGQVRFWriteReq)
+  val vrfWriteReq  = ValidIO(new VAGQVRFWriteReq)
   val robWriteback = Decoupled(new VAGQWritebackReq)
   val redirect     = Flipped(Valid(new Redirect))
 }
