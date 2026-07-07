@@ -83,8 +83,11 @@ class CompareMatrix(n: Int) extends Bundle {
     })
   }
 
-  def getLeaseElementIdx(valid: Vec[Bool]): UInt =
+  def getLeastElementIdx(valid: Vec[Bool]): UInt =
     OHToUInt(getLeastElementOH(valid))
+
+  def getLeaseElementIdx(valid: Vec[Bool]): UInt =
+    getLeastElementIdx(valid)
 
   def getLeastElement[T <: Data](valid: Vec[Bool], value: Vec[T]): T =
     Mux1H(getLeastElementOH(valid), value)
