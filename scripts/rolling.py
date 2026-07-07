@@ -1,9 +1,15 @@
 import argparse
+import http.server
 import os
 import re
+import shlex
+import socketserver
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import threading
+import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -16,13 +22,16 @@ class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter, argparse.RawDescript
 
 
 EPILOG = """Examples:
-  python3 scripts/rolling/rolling.py plot run.db --perf-name ipc --output ipc.png
-  python3 scripts/rolling/rolling.py plot run.db --hart all --include-prefix td_ --output td.png
-  python3 scripts/rolling/rolling.py diff run1.db run2.db --perf-name ipc
-  python3 scripts/rolling/rolling.py corr run.db --include-prefix td_ --csv /tmp/ipc_corr.csv
+  python3 scripts/rolling.py plot run.db --perf-name ipc --output ipc.png
+  python3 scripts/rolling.py plot run.db --perf-name ipc --web
+  python3 scripts/rolling.py plot run.db --hart all --include-prefix td_ --output td.png
+  python3 scripts/rolling.py diff run1.db run2.db --perf-name ipc
+  python3 scripts/rolling.py corr run.db --include-prefix td_ --csv /tmp/ipc_corr.csv
 """
 
 PNG_SAVE_DPI = 300
+WEB_PLOT_HOST = "127.0.0.1"
+WEB_PLOT_PORT = 0
 
 
 ROLLING_TABLE_PATTERN = re.compile(r"^(?P<perf_name>\w+)_rolling_(?P<hart>\d+)$")
@@ -68,12 +77,19 @@ class CorrelationResult:
         return abs(self.corr)
 
 
+@dataclass(frozen=True)
+class PlotTrace:
+    label: str
+    xdata: List[float]
+    ydata: List[float]
+
+
 def err_exit(msg: str) -> None:
     print(msg)
     sys.exit(1)
 
 
-def load_perf_file(path: Optional[str]) -> List[str]:
+def read_non_comment_lines(path: Optional[str]) -> List[str]:
     if not path:
         return []
     with open(path) as fp:
@@ -82,6 +98,10 @@ def load_perf_file(path: Optional[str]) -> List[str]:
             for line in fp
             if line.strip() and not line.lstrip().startswith(("//", "#"))
         ]
+
+
+def load_perf_file(path: Optional[str]) -> List[str]:
+    return read_non_comment_lines(path)
 
 
 def normalize_progress(xdata: np.ndarray) -> np.ndarray:
@@ -114,12 +134,7 @@ def is_sqlite_db(path: str) -> bool:
 
 
 def read_db_list_file(path: str) -> List[str]:
-    with open(path) as fp:
-        return [
-            line.strip()
-            for line in fp
-            if line.strip() and not line.lstrip().startswith(("//", "#"))
-        ]
+    return read_non_comment_lines(path)
 
 
 def resolve_diff_db_paths(raw_paths: List[str]) -> List[str]:
@@ -307,9 +322,16 @@ def get_pyplot(output: Optional[str]):
 
 def plot_dataset(plt, path: str, perf_names: List[str], aggregate: int, clk_itval: int,
                  hart: Optional[int], label_suffix: str = "") -> int:
-    dataset = DataSet(path)
-    plotted = 0
+    traces = collect_plot_traces(path, perf_names, aggregate, clk_itval, hart, label_suffix)
+    for trace in traces:
+        plt.plot(trace.xdata, trace.ydata, lw=1, ls="-", label=trace.label)
+    return len(traces)
 
+
+def collect_plot_traces(path: str, perf_names: List[str], aggregate: int, clk_itval: int,
+                        hart: Optional[int], label_suffix: str = "") -> List[PlotTrace]:
+    dataset = DataSet(path)
+    traces: List[PlotTrace] = []
     try:
         table_harts = {}
         if hart is None:
@@ -328,11 +350,10 @@ def plot_dataset(plt, path: str, perf_names: List[str], aggregate: int, clk_itva
                     label = f"{perf}@h{table_hart}{label_suffix}"
                 else:
                     label = perf + label_suffix
-                plt.plot(xplot, yplot, lw=1, ls="-", label=label)
-                plotted += 1
+                traces.append(PlotTrace(label=label, xdata=xplot, ydata=yplot))
     finally:
         dataset.close()
-    return plotted
+    return traces
 
 
 def finalize_plot(plt, output: Optional[str]) -> None:
@@ -351,6 +372,148 @@ def finalize_plot(plt, output: Optional[str]) -> None:
             err_exit("no GUI display detected; use --output to save the plot")
         plt.show()
     plt.close()
+
+
+def build_web_plot_html(traces: List[PlotTrace], title: str) -> str:
+    if not traces:
+        err_exit("no rolling counters could be plotted")
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        err_exit("plotly is required for --web; install scripts/requirements.txt first")
+    fig = go.Figure()
+    for trace in traces:
+        fig.add_trace(
+            go.Scattergl(
+                x=trace.xdata,
+                y=trace.ydata,
+                mode="lines",
+                name=trace.label,
+                hovertemplate="x=%{x}<br>y=%{y}<extra>%{fullData.name}</extra>",
+            )
+        )
+    fig.update_layout(
+        title=title,
+        template="plotly_white",
+        hovermode="closest",
+        margin=dict(l=56, r=24, t=64, b=48),
+        xaxis=dict(showgrid=True, zeroline=False),
+        yaxis=dict(showgrid=True, zeroline=False),
+        legend=dict(orientation="v"),
+    )
+    return fig.to_html(
+        include_plotlyjs=True,
+        full_html=True,
+        config={
+            "responsive": True,
+            "displaylogo": False,
+            "scrollZoom": True,
+        },
+    )
+
+
+def launch_browser_command(browser_spec: str, url: str) -> bool:
+    for candidate in browser_spec.split(os.pathsep):
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        try:
+            argv = shlex.split(candidate)
+        except ValueError:
+            continue
+        if not argv:
+            continue
+        if any("%s" in arg for arg in argv):
+            argv = [arg.replace("%s", url) for arg in argv]
+        else:
+            argv.append(url)
+        try:
+            with open(os.devnull, "wb") as devnull:
+                subprocess.Popen(
+                    argv,
+                    stdout=devnull,
+                    stderr=devnull,
+                    start_new_session=True,
+                )
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def open_web_plot_in_browser(url: str) -> None:
+    browser_spec = os.environ.get("BROWSER")
+    if browser_spec and launch_browser_command(browser_spec, url):
+        print("opened web plot in browser")
+        return
+    try:
+        if webbrowser.open(url, new=2):
+            print("opened web plot in browser")
+            return
+    except webbrowser.Error:
+        pass
+    print(f"failed to open browser automatically; open this URL manually: {url}")
+
+
+def make_web_plot_handler(html_content: str):
+    body = html_content.encode("utf-8")
+
+    class WebPlotRequestHandler(http.server.BaseHTTPRequestHandler):
+        def _serve_headers(self) -> bool:
+            if self.path not in {"/", "/index.html"}:
+                self.send_error(404)
+                return False
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            return True
+
+        def do_HEAD(self) -> None:
+            self._serve_headers()
+
+        def do_GET(self) -> None:
+            if not self._serve_headers():
+                return
+            self.wfile.write(body)
+
+        def log_message(self, fmt: str, *args) -> None:
+            return
+
+    return WebPlotRequestHandler
+
+
+class ReusableThreadingHttpServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+
+
+def serve_web_plot(html_content: str, host: str, port: int) -> None:
+    handler = make_web_plot_handler(html_content)
+    with ReusableThreadingHttpServer((host, port), handler) as httpd:
+        actual_host, actual_port = httpd.server_address
+        display_host = "127.0.0.1" if actual_host in {"", "0.0.0.0"} else actual_host
+        url = f"http://{display_host}:{actual_port}/"
+        print(f"serving web plot at {url}")
+        threading.Thread(target=open_web_plot_in_browser, args=(url,), daemon=True).start()
+        print("keep this command running while viewing the page; press Ctrl-C to stop")
+        try:
+            httpd.serve_forever()
+        except KeyboardInterrupt:
+            print("\nstopped web plot server")
+
+
+def write_and_serve_web_plot(traces: List[PlotTrace], title: str) -> None:
+    serve_web_plot(build_web_plot_html(traces, title), WEB_PLOT_HOST, WEB_PLOT_PORT)
+
+
+def collect_diff_plot_traces(db_paths: List[str], perf_names: List[str], aggregate: int,
+                             clk_itval: int, hart: Optional[int]) -> List[PlotTrace]:
+    traces: List[PlotTrace] = []
+    for db_path in db_paths:
+        db_label = "@" + Path(db_path).name
+        traces.extend(collect_plot_traces(db_path, perf_names, aggregate, clk_itval, hart, db_label))
+    return traces
 
 
 def align_by_index(ref: RollingSeries, target: RollingSeries) -> Tuple[np.ndarray, np.ndarray]:
@@ -428,6 +591,12 @@ def handle_plot(args: argparse.Namespace) -> None:
         dataset.close()
     if not perf_names:
         err_exit("no rolling counters matched the selection")
+    if args.web:
+        traces = collect_plot_traces(args.db_path, perf_names, args.aggregate, args.interval, args.hart)
+        if getattr(args, "output", None):
+            print("ignoring --output in --web mode")
+        write_and_serve_web_plot(traces, f"rolling plot: {Path(args.db_path).name}")
+        return
     output = resolve_output_path(getattr(args, "output", None), perf_names)
     plt = get_pyplot(output)
     if plot_dataset(plt, args.db_path, perf_names, args.aggregate, args.interval, args.hart) == 0:
@@ -449,6 +618,13 @@ def handle_diff(args: argparse.Namespace) -> None:
 
     if not perf_names:
         err_exit("no rolling counters matched the selection")
+
+    if args.web:
+        traces = collect_diff_plot_traces(db_paths, perf_names, args.aggregate, args.interval, args.hart)
+        if getattr(args, "output", None):
+            print("ignoring --output in --web mode")
+        write_and_serve_web_plot(traces, "rolling diff")
+        return
 
     output = resolve_output_path(getattr(args, "output", None), perf_names)
     plt = get_pyplot(output)
@@ -595,6 +771,7 @@ def build_parser() -> argparse.ArgumentParser:
     cmd_plot.add_argument("--aggregate", "-A", default=1, type=int, help="aggregation ratio")
     cmd_plot.add_argument("--interval", "-I", default=-1, type=int, help="interval value in interval-based mode")
     cmd_plot.add_argument("--hart", default=0, type=parse_hart, help="hart id to analyze, or 'all' to overlay every hart")
+    cmd_plot.add_argument("--web", action="store_true", help="serve an interactive HTML plot with hover coordinates")
     add_common_perf_selection_args(cmd_plot)
     cmd_plot.add_argument(
         "--output",
@@ -620,6 +797,7 @@ def build_parser() -> argparse.ArgumentParser:
     cmd_diff.add_argument("--aggregate", "-A", default=1, type=int, help="aggregation ratio")
     cmd_diff.add_argument("--interval", "-I", default=-1, type=int, help="interval value in interval-based mode")
     cmd_diff.add_argument("--hart", default=0, type=parse_hart, help="hart id to analyze, or 'all' to overlay every hart")
+    cmd_diff.add_argument("--web", action="store_true", help="serve an interactive HTML plot with hover coordinates")
     add_common_perf_selection_args(cmd_diff)
     cmd_diff.add_argument(
         "--output",
