@@ -93,6 +93,108 @@ class SignedSaturateCounterTest extends AnyFlatSpec {
     }
   }
 
+  class SignedCounterView(width: Int) extends Bundle {
+    val value: SInt = SInt(width.W)
+    val isPositive: Bool = Bool()
+    val isNegative: Bool = Bool()
+    val isSaturatePositive: Bool = Bool()
+    val isSaturateNegative: Bool = Bool()
+    val isWeakPositive: Bool = Bool()
+    val isWeakNegative: Bool = Bool()
+    val isWeak: Bool = Bool()
+  }
+
+  class ResetAndConstructorModule(width: Int) extends Module {
+    val resetTarget: UInt = IO(Input(UInt(3.W)))
+    val constructedZero: SignedCounterView = IO(Output(new SignedCounterView(width)))
+    val constructedWeakPositive: SignedCounterView = IO(Output(new SignedCounterView(width)))
+    val constructedWeakNegative: SignedCounterView = IO(Output(new SignedCounterView(width)))
+    val resetCounter: SignedCounterView = IO(Output(new SignedCounterView(width)))
+
+    private val cnt = RegInit(SignedSaturateCounter.Zero(width))
+
+    when(resetTarget === 1.U) {
+      cnt.resetWeakPositive()
+    }.elsewhen(resetTarget === 2.U) {
+      cnt.resetWeakNegative()
+    }.elsewhen(resetTarget === 3.U) {
+      cnt.resetSaturatePositive()
+    }.elsewhen(resetTarget === 4.U) {
+      cnt.resetSaturateNegative()
+    }
+
+    private def connectView(view: SignedCounterView, counter: SignedSaturateCounter): Unit = {
+      view.value := counter.value
+      view.isPositive := counter.isPositive
+      view.isNegative := counter.isNegative
+      view.isSaturatePositive := counter.isSaturatePositive
+      view.isSaturateNegative := counter.isSaturateNegative
+      view.isWeakPositive := counter.isWeakPositive
+      view.isWeakNegative := counter.isWeakNegative
+      view.isWeak := counter.isWeak
+    }
+
+    connectView(constructedZero, SignedSaturateCounter.Zero(width))
+    connectView(constructedWeakPositive, SignedSaturateCounter.WeakPositive(width))
+    connectView(constructedWeakNegative, SignedSaturateCounter.WeakNegative(width))
+    connectView(resetCounter, cnt)
+  }
+
+  private def expectWeakPositive(view: SignedCounterView): Unit = {
+    view.value.expect(0.S)
+    view.isPositive.expect(true.B)
+    view.isNegative.expect(false.B)
+    view.isSaturatePositive.expect(false.B)
+    view.isSaturateNegative.expect(false.B)
+    view.isWeakPositive.expect(true.B)
+    view.isWeakNegative.expect(false.B)
+    view.isWeak.expect(true.B)
+  }
+
+  private def expectWeakNegative(view: SignedCounterView): Unit = {
+    view.value.expect((-1).S)
+    view.isPositive.expect(false.B)
+    view.isNegative.expect(true.B)
+    view.isSaturatePositive.expect(false.B)
+    view.isSaturateNegative.expect(false.B)
+    view.isWeakPositive.expect(false.B)
+    view.isWeakNegative.expect(true.B)
+    view.isWeak.expect(true.B)
+  }
+
+  private def expectSaturatePositive(view: SignedCounterView, width: Int): Unit = {
+    view.value.expect(SignedSaturateCounter.Value.SaturatePositive(width).S)
+    view.isPositive.expect(true.B)
+    view.isNegative.expect(false.B)
+    view.isSaturatePositive.expect(true.B)
+    view.isSaturateNegative.expect(false.B)
+    view.isWeakPositive.expect(false.B)
+    view.isWeakNegative.expect(false.B)
+    view.isWeak.expect(false.B)
+  }
+
+  private def expectSaturateNegative(view: SignedCounterView, width: Int): Unit = {
+    view.value.expect(SignedSaturateCounter.Value.SaturateNegative(width).S)
+    view.isPositive.expect(false.B)
+    view.isNegative.expect(true.B)
+    view.isSaturatePositive.expect(false.B)
+    view.isSaturateNegative.expect(true.B)
+    view.isWeakPositive.expect(false.B)
+    view.isWeakNegative.expect(false.B)
+    view.isWeak.expect(false.B)
+  }
+
+  private def expectCompanionConstants(width: Int): Unit = {
+    assert(
+      SignedSaturateCounter.Value.WeakPositive(width) == 0,
+      s"weak positive for width $width must be the signed threshold value 0"
+    )
+    assert(
+      SignedSaturateCounter.Value.WeakNegative(width) == -1,
+      s"weak negative for width $width must be the signed threshold value -1"
+    )
+  }
+
   def maxValue(implicit width: Int): Int = pow(2, width - 1).toInt - 1
   def minValue(implicit width: Int): Int = -pow(2, width - 1).toInt
   def thres(implicit width: Int): Int = 0
@@ -123,6 +225,40 @@ class SignedSaturateCounterTest extends AnyFlatSpec {
   }
 
   behavior of "SignedSaturateCounter"
+  it should "align signed weak-state constants with constructors, predicates, and reset methods" in {
+    for (width <- Seq(2, 3, 4, 8)) {
+      simulate(new ResetAndConstructorModule(width)) { dut =>
+        dut.reset.poke(true.B)
+        dut.resetTarget.poke(0.U)
+        dut.clock.step(1)
+        dut.reset.poke(false.B)
+
+        expectWeakPositive(dut.constructedZero)
+        expectWeakPositive(dut.constructedWeakPositive)
+        expectWeakNegative(dut.constructedWeakNegative)
+        expectWeakPositive(dut.resetCounter)
+
+        dut.resetTarget.poke(1.U)
+        dut.clock.step(1)
+        expectWeakPositive(dut.resetCounter)
+
+        dut.resetTarget.poke(2.U)
+        dut.clock.step(1)
+        expectWeakNegative(dut.resetCounter)
+
+        dut.resetTarget.poke(3.U)
+        dut.clock.step(1)
+        expectSaturatePositive(dut.resetCounter, width)
+
+        dut.resetTarget.poke(4.U)
+        dut.clock.step(1)
+        expectSaturateNegative(dut.resetCounter, width)
+      }
+
+      expectCompanionConstants(width)
+    }
+  }
+
   it should "work" in {
     def test(implicit width: Int): Unit = {
       print(f"===== test SignedSaturateCounter width=${width} =====\n")

@@ -138,7 +138,7 @@ object SignedSaturateCounter {
     def SaturateNegative(width: Int): Int = -(1 << (width - 1))
     def WeakPositive(width: Int): Int = {
       require(width >= 2, "SignedSaturateCounter width must be at least 2 to have weak states")
-      1
+      0
     }
     def WeakNegative(width: Int): Int = {
       require(width >= 2, "SignedSaturateCounter width must be at least 2 to have weak states")
