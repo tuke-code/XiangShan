@@ -1546,11 +1546,15 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   val ldDeqCount = PopCount(issueLda.map(_.valid))
   val stDeqCount = PopCount(issueSta.take(StaCnt).map(_.valid))
   val iqDeqCount = ldDeqCount +& stDeqCount
+  val loadBankConflictCount = PopCount(newLoadUnits.map(_.io.debugInfo.s2_isBankConflict))
   XSPerfAccumulate("load_iq_deq_count", ldDeqCount)
   XSPerfHistogram("load_iq_deq_count", ldDeqCount, true.B, 0, LdExuCnt + 1)
   XSPerfAccumulate("store_iq_deq_count", stDeqCount)
   XSPerfHistogram("store_iq_deq_count", stDeqCount, true.B, 0, StAddrCnt + 1)
   XSPerfAccumulate("ls_iq_deq_count", iqDeqCount)
+  XSPerfAccumulate("load_bank_conflict_ge2", loadBankConflictCount > 1.U)
+  XSPerfAccumulate("load_bank_conflict_eq2", loadBankConflictCount === 2.U)
+  XSPerfAccumulate("load_bank_conflict_eq3", loadBankConflictCount === 3.U)
 
   val pfevent = Module(new PFEvent)
   pfevent.io.distribute_csr := csrCtrl.distribute_csr
