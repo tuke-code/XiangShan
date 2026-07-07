@@ -137,6 +137,21 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   private val s1_prediction = Wire(new Prediction)
   private val s3_prediction = Wire(new Prediction)
+  private def withURasReturnTarget(prediction: Prediction): Prediction = {
+    val patched = WireInit(prediction)
+    when(prediction.attribute.isReturn && uras.io.specOut.isCanUse) {
+      patched.target := uras.io.specOut.retTarget
+    }
+    patched
+  }
+
+  private def withURasReturnTarget(prediction: Valid[Prediction]): Valid[Prediction] = {
+    val patched = WireInit(prediction)
+    when(prediction.valid && prediction.bits.attribute.isReturn && uras.io.specOut.isCanUse) {
+      patched.bits.target := uras.io.specOut.retTarget
+    }
+    patched
+  }
 
   private val debug_bpId = RegInit(0.U(XLEN.W))
 
@@ -293,12 +308,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
 
   private val s1_ubtbPrediction = Wire(new Prediction)
   private val s1_abtbPrediction = Wire(Vec(NumAheadBtbPredictionEntries, new Prediction))
-  s1_ubtbPrediction := ubtb.io.prediction.bits
-  s1_ubtbPrediction.target := Mux(
-    ubtb.io.prediction.bits.attribute.isReturn && uras.io.specOut.isCanUse,
-    uras.io.specOut.retTarget,
-    ubtb.io.prediction.bits.target
-  )
+  s1_ubtbPrediction := withURasReturnTarget(ubtb.io.prediction.bits)
   for (i <- 0 until NumAheadBtbPredictionEntries) {
     s1_abtbPrediction(i) := abtb.io.prediction(i).bits
   }
@@ -326,13 +336,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s1_abtbValid          = abtb.io.prediction.map(_.valid).reduce(_ || _)
 
   private val s1_abtbResult = Wire(new Prediction)
-  s1_abtbResult       := s1_abtbFirstTakenBr
+  s1_abtbResult       := withURasReturnTarget(s1_abtbFirstTakenBr)
   s1_abtbResult.taken := s1_abtbTakenMask.reduce(_ || _)
-  s1_abtbResult.target := Mux(
-    s1_abtbFirstTakenBr.attribute.isReturn && uras.io.specOut.isCanUse,
-    uras.io.specOut.retTarget,
-    s1_abtbFirstTakenBr.target
-  )
   s1_prediction := Mux(
     s1_abtbValid,
     Mux(s1_abtbResult.taken, s1_abtbResult, fallThrough.io.prediction),
@@ -511,17 +516,8 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   private val s3_foldedPhr   = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
   private val trainFoldedPhr = WireInit(0.U.asTypeOf(new PhrAllFoldedHistories(AllFoldedHistoryInfo)))
 
-  private val s1_ubtbPredWithURas = WireInit(ubtb.io.prediction)
-  when(s1_ubtbPredWithURas.valid && s1_ubtbPredWithURas.bits.attribute.isReturn && uras.io.specOut.isCanUse) {
-    s1_ubtbPredWithURas.bits.target := uras.io.specOut.retTarget
-  }
-
-  private val s1_abtbPredWithURas = WireInit(abtb.io.prediction)
-  s1_abtbPredWithURas.foreach {
-    case p => when(p.valid && p.bits.attribute.isReturn && uras.io.specOut.isCanUse) {
-        p.bits.target := uras.io.specOut.retTarget
-      }
-  }
+  private val s1_ubtbPredWithURas = withURasReturnTarget(ubtb.io.prediction)
+  private val s1_abtbPredWithURas = VecInit(abtb.io.prediction.map(withURasReturnTarget))
 
   phr.io.train.s0_stall             := s0_stall
   phr.io.train.stageCtrl            := stageCtrl
