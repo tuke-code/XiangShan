@@ -1583,7 +1583,7 @@ class LoadUnitS3(param: ExeUnitParams)(
   io.vecldout.valid := vecldoutValid
   io.vecldout.bits := vecldout
 
-  io.fastReplay.valid := pipeIn.valid && shouldFastReplay
+  io.fastReplay.valid := pipeIn.valid && shouldFastReplay && allowBankConflictFastReplay
   io.fastReplay.bits := fastReplay
   io.bankConflictFastReplayCandidate := bankConflictFastReplayCandidate
 
