@@ -167,6 +167,44 @@ trait IfuHelper extends HasIfuParameters with PreDecodeHelper {
     out
   }
 
+  def genCountVec(validVec: Vec[Bool]): Vec[UInt] = {
+    val n = validVec.length
+    require(n > 0, "validVec cannot be empty")
+    val rankWidth = log2Ceil(n + 1)
+
+    // ------------ 1. 扩展有效位为 rankWidth 宽 ----------
+    def expandBool(b: Bool): UInt = {
+      if (rankWidth == 1) b.asUInt
+      else Cat(0.U((rankWidth - 1).W), b.asUInt)
+    }
+
+    // ---------- 2. 并行前缀求和（尾递归，完全无 var） ----------
+    // 初始前缀：每个有效位扩展为数值
+    val initialPrefix = VecInit(validVec.map(expandBool(_)))
+
+    // 递归计算，step 是当前距离，prefix 是上一轮结果
+    def computePrefix(step: Int, prefix: Vec[UInt]): Vec[UInt] = {
+      if (step >= n) prefix
+      else {
+        val nextPrefix = VecInit((0 until n).map { i =>
+          if (i < step) prefix(i)
+          else (prefix(i) + prefix(i - step))(rankWidth - 1, 0)
+        })
+        computePrefix(step << 1, nextPrefix)
+      }
+    }
+
+    val finalPrefix = computePrefix(1, initialPrefix)
+
+    // ---------- 3. 计算每个位置的 rank（之前有几个有效位） ----------
+    val rank = Wire(Vec(n, UInt(rankWidth.W)))
+    rank(0) := 0.U
+    for (i <- 1 until n) {
+      rank(i) := finalPrefix(i - 1)
+    }
+    rank
+  }
+
   def compact(in: Vec[Instruction], fire: Bool): Vec[Instruction] = {
     val n = in.length
     require(n > 0)
@@ -174,11 +212,7 @@ trait IfuHelper extends HasIfuParameters with PreDecodeHelper {
     // 1. Valid flag vector
     val validVec = VecInit(in.map(_.valid))
 
-    // rank(i) = number of valid elements in [0, i)
-    val rank = VecInit((0 until n).map { i =>
-      if (i == 0) 0.U
-      else PopCount(validVec.take(i))
-    })
+    val rank = genCountVec(validVec)
 
     val inReg = RegEnable(in, fire)
 

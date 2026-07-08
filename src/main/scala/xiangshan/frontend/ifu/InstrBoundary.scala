@@ -31,6 +31,7 @@ class InstrBoundary(implicit p: Parameters) extends IfuModule with PreDecodeHelp
     }
     class Resp(implicit p: Parameters) extends IfuBundle {
       val rawInstrVec:       Vec[Instruction] = Vec(FetchBlockInstNum, new Instruction)
+      // val compactSelect:     Vec[UInt]        = Vec(FetchBlockInstNum, UInt(FetchBlockInstNum.W))
       val instrEndMask:      Vec[Bool]        = Vec(FetchBlockInstNum, Bool())
       val firstEndIsHalfRvi: Bool             = Bool()
       val totalEndIsHalfRvi: Bool             = Bool()
@@ -78,7 +79,7 @@ class InstrBoundary(implicit p: Parameters) extends IfuModule with PreDecodeHelp
     )
   }
 
-  io.resp.rawInstrVec := (0 until FetchBlockInstNum).map { i =>
+  private val rawInstrVec = VecInit((0 until FetchBlockInstNum).map { i =>
     val instr   = Wire(new Instruction)
     val isStart = boundary(i)
 
@@ -123,7 +124,10 @@ class InstrBoundary(implicit p: Parameters) extends IfuModule with PreDecodeHelp
     instr.endOffset   := Mux(maybeRvc(i), startOffset, startOffset + 1.U)
 
     instr
-  }
+  })
+
+  io.resp.rawInstrVec   := rawInstrVec
+  // io.resp.compactSelect := genCompactSelect(VecInit(rawInstrVec.map(_.valid)))
 
   io.resp.instrEndMask := boundary.zip(maybeRvc.asBools).zip(range.asBools).map { case ((boundary, isRvc), range) =>
     (!boundary || (boundary && isRvc)) && range
