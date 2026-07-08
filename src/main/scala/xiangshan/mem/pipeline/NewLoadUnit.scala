@@ -1247,6 +1247,8 @@ class LoadUnitS3(param: ExeUnitParams)(
 
     // Fast replay
     val fastReplay = DecoupledIO(new FastReplayIO)
+    val bankConflictFastReplayCandidate = Output(Bool())
+    val bankConflictFastReplayGrant = Input(Bool())
 
     // RAR / RAW revoke and RAR response
     val rarNukeQueryResp = Flipped(ValidIO(new LoadNukeQueryResp))
@@ -1820,6 +1822,9 @@ class LoadUnitIO(val param: ExeUnitParams)(implicit p: Parameters) extends XSBun
   // IQ wakeup and load cancel
   val wakeup = ValidIO(new MemWakeUpBundle)
   val cancel = Output(Bool())
+  // Global fast replay grant for bank conflict candidates
+  val bankConflictFastReplayCandidate = Output(Bool())
+  val bankConflictFastReplayGrant = Input(Bool())
   // Exception info
   val exceptionInfo = ValidIO(new MemExceptionInfo)
   // Data forwarding and bypass
@@ -1867,6 +1872,8 @@ class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   s4 <> s3
   s0.io.unalignTail <> s1.io.unalignTail
   s0.io.fastReplay <> s3.io.fastReplay
+  io.bankConflictFastReplayCandidate := s3.io.bankConflictFastReplayCandidate
+  s3.io.bankConflictFastReplayGrant := io.bankConflictFastReplayGrant
   s3.io.unalignTailValid := s2.io.unalignTailValid
   s3.io.unalignConcat <> s4.io.unalignConcat
   s1.io.kill := false.B
