@@ -1546,7 +1546,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   val ldDeqCount = PopCount(issueLda.map(_.valid))
   val stDeqCount = PopCount(issueSta.take(StaCnt).map(_.valid))
   val iqDeqCount = ldDeqCount +& stDeqCount
-  val loadBankConflictCount = PopCount(newLoadUnits.map(_.io.debugInfo.s2_isBankConflict))
+  val loadBankConflictCount = PopCount(dcache.io.lsu.s2_bank_conflict_no_wr)
   XSPerfAccumulate("load_iq_deq_count", ldDeqCount)
   XSPerfHistogram("load_iq_deq_count", ldDeqCount, true.B, 0, LdExuCnt + 1)
   XSPerfAccumulate("store_iq_deq_count", stDeqCount)

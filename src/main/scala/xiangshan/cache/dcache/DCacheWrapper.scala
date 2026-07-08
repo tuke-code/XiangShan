@@ -803,6 +803,7 @@ class StorePrefetchReq(implicit p: Parameters) extends DCacheBundle {
 class DCacheToLsuIO(implicit p: Parameters) extends DCacheBundle {
   val load  = Vec(LoadPipelineWidth, Flipped(new DCacheLoadIO)) // for speculative load
   val sta   = Vec(StorePipelineWidth, Flipped(new DCacheStoreIO)) // for non-blocking store
+  val s2_bank_conflict_no_wr = Output(Vec(LoadPipelineWidth, Bool()))
   val loadWakeup = ValidIO(new DCacheLoadWakeup())
   val store = new DCacheToSbufferIO // for sbuffer
   val atomics  = Flipped(new AtomicWordIO)  // atomics reqs
@@ -1302,6 +1303,8 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     ldu(i).io.banked_data_resp := bankedDataArray.io.read_resp(i)
 
     ldu(i).io.bank_conflict_slow := bankedDataArray.io.bank_conflict_slow(i)
+    io.lsu.s2_bank_conflict_no_wr(i) :=
+      bankedDataArray.io.bank_conflict_slow(i) && !bankedDataArray.io.wr_bank_conflict_slow(i)
   })
 
   io.lsu.forward_D.zipWithIndex.foreach { case (forward, i) =>
