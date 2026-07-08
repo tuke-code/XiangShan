@@ -43,6 +43,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   addrFields.show(indent = 4)
 
   io.sramResetDone := true.B
+  io.resetDone    := !io.contextFlush
   io.trainReady    := true.B
 
   /* *** submodules *** */
@@ -50,6 +51,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
 
   private val replacer = Module(new MicroBtbReplacer)
   replacer.io.usefulCnt := VecInit(entries.map(_.usefulCnt))
+  replacer.io.contextFlush := io.contextFlush
 
   /* *** predict stage 0 ***
    * - io.startPc timing might be bad, simply cache it
@@ -79,7 +81,12 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
 
   private val s1_startPc = RegEnable(s0_startPc, s0_fire)
 
-  private val s1_hitOH       = RegEnable(s0_hitOH, s0_fire)
+  private val s1_hitOH = RegInit(0.U(NumEntries.W))
+  when(io.contextFlush) {
+    s1_hitOH := 0.U(NumEntries.W)
+  }.elsewhen(s0_fire) {
+    s1_hitOH := s0_hitOH
+  }
   private val s1_hitT1Victim = RegEnable(s0_hitT1Victim, s0_fire)
 
   // if hit t1 victim, the original entry pointed by s1_hitOH is overwritten in this cycle, treat as a miss
@@ -115,7 +122,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   private val t0_attribute   = Wire(new BranchAttribute)
 
   if (UseFastTrain) {
-    t0_fire        := io.fastTrain.get.valid && io.enable
+    t0_fire        := io.fastTrain.get.valid && io.enable && !io.contextFlush
     t0_startPc     := io.fastTrain.get.bits.startPc
     t0_actualTaken := io.fastTrain.get.bits.finalPrediction.taken
     t0_position    := io.fastTrain.get.bits.finalPrediction.cfiPosition
@@ -123,7 +130,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
     t0_attribute   := io.fastTrain.get.bits.finalPrediction.attribute
   } else {
     // FIXME: not sure if first mispredict is the best, maybe first taken?
-    t0_fire        := io.stageCtrl.t0_fire && io.train.mispredictBranch.valid && io.enable
+    t0_fire        := io.stageCtrl.t0_fire && io.train.mispredictBranch.valid && io.enable && !io.contextFlush
     t0_startPc     := io.train.startPc
     t0_actualTaken := io.train.mispredictBranch.bits.taken
     t0_position    := io.train.mispredictBranch.bits.cfiPosition
@@ -144,9 +151,15 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   // the second train might be a false "not hit" and allocate a new entry, causing a multi-hit;
   // or, the first may replace the entry, causing a false "hit" in the second train, causing wrong update.
   // So, we define some of the t1 signals in advance, and use them to check if the contiguous trains are hit.
-  private val t1_tag          = Wire(UInt(TagWidth.W))
+
+  /* 方案 A（保留备查，当前未启用）
+  private val t1_tag = Wire(UInt(TagWidth.W))
+  private val t1_hitEntry = Wire(new MicroBtbEntry)
+  */
+  // 方案 B（当前启用）
+  private val t1_tag          = Reg(UInt(TagWidth.W))
   private val t1_updateIdx    = Wire(UInt(log2Up(NumEntries).W))
-  private val t1_hitEntry     = Wire(new MicroBtbEntry)
+  private val t1_hitEntry     = Reg(new MicroBtbEntry)
   private val t1_updatedEntry = WireDefault(t1_hitEntry) // will be updated in t1, then write back to entries
 
   // if t0_tag === t1_tag, t1 must be updating the entry, so we can see it as a hit, and use t1_updateIdx as hitIdx
@@ -173,6 +186,7 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
    * - update replacer
    */
   t1_fire := RegNext(t0_fire, false.B)
+  /* 方案 A（保留备查，当前未启用）
   t1_tag  := RegEnable(t0_tag, t0_fire)
   private val t1_actualTaken = RegEnable(t0_actualTaken, t0_fire)
   private val t1_position    = RegEnable(t0_position, t0_fire)
@@ -189,6 +203,70 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   private val t1_hitPositionSame  = RegEnable(t0_hitPositionSame, t0_fire)
   private val t1_hitAttributeSame = RegEnable(t0_hitAttributeSame, t0_fire)
   private val t1_hitTargetSame    = RegEnable(t0_hitTargetSame, t0_fire)
+
+  when(io.contextFlush) {
+    t1_tag               := 0.U
+    t1_actualTaken       := false.B
+    t1_position          := 0.U
+    t1_target            := 0.U
+    t1_attribute         := 0.U.asTypeOf(t1_attribute)
+    t1_targetCarry.foreach(_ := 0.U.asTypeOf(t1_targetCarry.get))
+    t1_hit               := false.B
+    t1_hitIdx            := 0.U
+    t1_hitEntry          := 0.U.asTypeOf(t1_hitEntry)
+    t1_hitNotUseful      := false.B
+    t1_hitPositionSame   := false.B
+    t1_hitAttributeSame  := false.B
+    t1_hitTargetSame     := false.B
+  }
+  */
+  // 方案 B（当前启用）
+  private val t1_actualTaken = RegInit(false.B)
+  private val t1_position    = Reg(chiselTypeOf(t0_position))
+  private val t1_target      = Reg(chiselTypeOf(t0_target))
+  private val t1_attribute   = Reg(chiselTypeOf(t0_attribute))
+  private val t1_targetCarry = t0_targetCarry.map(w => Reg(chiselTypeOf(w))) // if (EnableTargetFix)
+
+  private val t1_hit    = RegInit(false.B)
+  private val t1_hitIdx = Reg(chiselTypeOf(t0_hitIdx))
+
+  // hit states (flags), valid only when t1_hit
+  private val t1_hitNotUseful     = RegInit(false.B)
+  private val t1_hitPositionSame  = RegInit(false.B)
+  private val t1_hitAttributeSame = RegInit(false.B)
+  private val t1_hitTargetSame    = RegInit(false.B)
+
+  when(io.contextFlush) {
+    t1_tag               := 0.U
+    t1_actualTaken       := false.B
+    t1_position          := 0.U
+    t1_target            := 0.U
+    t1_attribute         := 0.U.asTypeOf(t1_attribute)
+    t1_targetCarry.foreach(c => c := 0.U.asTypeOf(c))
+    t1_hit               := false.B
+    t1_hitIdx            := 0.U
+    t1_hitEntry          := 0.U.asTypeOf(t1_hitEntry)
+    t1_hitNotUseful      := false.B
+    t1_hitPositionSame   := false.B
+    t1_hitAttributeSame  := false.B
+    t1_hitTargetSame     := false.B
+  }.elsewhen(t0_fire) {
+    t1_tag               := t0_tag
+    t1_actualTaken       := t0_actualTaken
+    t1_position          := t0_position
+    t1_target            := t0_target
+    t1_attribute         := t0_attribute
+    t1_targetCarry.foreach(c => c := t0_targetCarry.get) // if (EnableTargetFix)
+    t1_hit               := t0_hit
+    t1_hitIdx            := t0_hitIdx
+    t1_hitEntry          := t0_hitEntry
+    t1_hitNotUseful      := t0_hitNotUseful
+    t1_hitPositionSame   := t0_hitPositionSame
+    t1_hitAttributeSame  := t0_hitAttributeSame
+    t1_hitTargetSame     := t0_hitTargetSame
+  }
+
+  
   // only when t1 is updating/allocating can t0 hit it
   t0_hitT1Update := t1_fire && t0_tag === t1_tag && (t1_hit || t1_allocate)
   // init a new entry
@@ -232,7 +310,9 @@ class MicroBtb(implicit p: Parameters) extends BasePredictor with HasMicroBtbPar
   t1_allocate  := !t1_hit && t1_actualTaken
   t1_updateIdx := Mux(t1_hit, t1_hitIdx, replacer.io.victim)
   // and write back the updated entry
-  when(t1_fire && (t1_hit || t1_allocate)) { // update entry if hit, or alloc entry only for taken branches
+  when(io.contextFlush) {
+    entries.foreach(_ := 0.U.asTypeOf(new MicroBtbEntry))
+  }.elsewhen(t1_fire && (t1_hit || t1_allocate)) { // update entry if hit, or alloc entry only for taken branches
     entries(t1_updateIdx) := t1_updatedEntry
   }
 

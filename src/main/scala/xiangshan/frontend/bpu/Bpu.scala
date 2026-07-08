@@ -50,6 +50,7 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   class BpuIO extends Bundle {
     val ctrl:        BpuCtrl    = Input(new BpuCtrl)
     val resetVector: PrunedAddr = Input(PrunedAddr(PAddrBits))
+    val flush:       Bool       = Input(Bool())
     val fromFtq:     FtqToBpuIO = Flipped(new FtqToBpuIO)
     val toFtq:       BpuToFtqIO = new BpuToFtqIO
   }
@@ -271,6 +272,48 @@ class Bpu(implicit p: Parameters) extends BpuModule with HalfAlignHelper {
   when(predictors.map(_.io.sramResetDone).reduce(_ && _)) {
     sramResetDone := true.B
   }
+  /* *** context flush state machine *** */
+  private val bpuFlushEn = ctrl.bpuFlushEn
+  
+  private val resetDone = predictors.map(_.io.resetDone).reduce(_ && _)
+  private val allResetDone = RegInit(false.B)
+
+  private val s_idle :: s_waiting :: s_flushing :: s_done :: Nil = Enum(4)
+  private val flushState = RegInit(s_idle)
+  
+  private val contextFlush = (flushState === s_waiting) && redirect.valid
+  when(contextFlush) {
+    allResetDone := false.B
+  }.elsewhen(resetDone) {
+    allResetDone := true.B
+  }
+
+  when(flushState === s_idle && io.flush && bpuFlushEn) {
+    flushState := s_waiting
+  }.elsewhen(flushState === s_waiting && redirect.valid) {
+    flushState := s_flushing
+  }.elsewhen(flushState === s_flushing && allResetDone) {
+    flushState := s_done
+  }.elsewhen(flushState === s_done) {
+    flushState := s_idle
+  }
+
+  private def getSubFlushEnable(p: BasePredictor): Bool = p match {
+    case _: MicroBtb => io.ctrl.ubtbFlushEnable
+    case _: AheadBtb => io.ctrl.abtbFlushEnable
+    case _: MainBtb  => io.ctrl.mbtbFlushEnable
+    case _: Tage     => io.ctrl.tageFlushEnable
+    case _: Sc       => io.ctrl.scFlushEnable
+    case _: Ittage   => io.ctrl.ittageFlushEnable
+    case _: Ras      => io.ctrl.rasFlushEnable
+    case _           => true.B
+  }
+
+  predictors.foreach { p =>
+    p.io.contextFlush := contextFlush && getSubFlushEnable(p)
+  }
+
+
   s0_fire := s1_ready && sramResetDone
   s1_fire := s1_valid && s2_ready && io.toFtq.prediction.ready
   s2_fire := s2_valid && s3_ready
