@@ -45,7 +45,7 @@
 //  val redirect = Flipped(ValidIO(new Redirect))
 //  val canAccept = Output(Bool())
 //  // from Ibuffer
-//  val in = Vec(DecodeWidth, Flipped(DecoupledIO(new DecodeInUop)))
+//  val in = Vec(DecodeWidth, Flipped(DecoupledIO(new DecodeInMop)))
 //  // to Rename
 //  val out = Vec(DecodeWidth, DecoupledIO(new DecodeOutUop))
 //  // RAT read
@@ -84,8 +84,8 @@
 //  val io = IO(new DecodeStageIO)
 //
 //  val debugWidth = if(backendParams.debugEn) io.in.head.bits.debug.get.asUInt.getWidth else 0
-//  println(s"[DecodeStage]: decodeInUop real width is ${io.in.head.asUInt.getWidth - debugWidth}")
-//  println(s"[DecodeStage]: decodeInUop debug width is ${debugWidth}")
+//  println(s"[DecodeStage]: decodeInMop real width is ${io.in.head.asUInt.getWidth - debugWidth}")
+//  println(s"[DecodeStage]: decodeInMop debug width is ${debugWidth}")
 //
 //  if (backendParams.debugEn){
 //    io.in.zipWithIndex.foreach { case (d, i) =>
@@ -115,7 +115,7 @@
 //
 //  //Simple 6
 //  decoders.zip(io.in).foreach { case (dst, src) =>
-//    dst.io.enq.decodeInUop := src.bits
+//    dst.io.enq.decodeInMop := src.bits
 //    dst.io.csrCtrl := io.csrCtrl
 //    dst.io.fromCSR := io.fromCSR
 //    dst.io.enq.vstart := io.vstart

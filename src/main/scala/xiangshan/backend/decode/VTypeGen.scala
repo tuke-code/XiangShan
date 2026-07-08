@@ -25,9 +25,7 @@ class VTypeGen(implicit p: Parameters) extends XSModule {
 
   private val vtypeArchNext = WireInit(vtypeArch)
 
-  private val vtypeNewVec: Vec[VTypeNewEntry] = VecInit((0 until DecodeWidth).map { i =>
-     VTypeNewEntry.fromInst(in.insts(i))
-  })
+  private val vtypeNewVec   = in.vtypeNewEntries
 
   /**
    * Binary-tree parallel-prefix inclusive scan over 9 elements (seed + 8 slots).
@@ -131,7 +129,7 @@ object VTypeGen {
   }
 
   class In()(implicit p: Parameters) extends XSBundle {
-    val insts = Input(Vec(DecodeWidth, UInt(32.W)))
+    val vtypeNewEntries = Input(Vec(DecodeWidth, new VTypeNewEntry))
     val validNum = Input(UInt(DecodeWidth.U.getWidth.W))
     val walkToArchVType = Input(Bool())
     val walkVType   = Flipped(Valid(new VType))
@@ -184,6 +182,7 @@ class VTypeNewEntry extends Bundle {
 }
 
 object VTypeNewEntry {
+  def apply(): VTypeNewEntry = new VTypeNewEntry
 
   // Compute a 7-bit one-hot vlratio as vlmul/vsew * 16.
   def calVlratio(vtype: VType) : UInt = {

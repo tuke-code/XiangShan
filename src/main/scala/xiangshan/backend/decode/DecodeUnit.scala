@@ -23,7 +23,7 @@ import org.chipsalliance.cde.config.Parameters
 import utility._
 import xiangshan.ExceptionNO.{breakPoint, illegalInstr, virtualInstr}
 import xiangshan._
-import xiangshan.backend.Bundles.{DecodeInUop, DecodeOutUop}
+import xiangshan.backend.Bundles.{DecodeInMop, DecodeOutUop}
 import xiangshan.backend.decode.Zimop._
 import xiangshan.backend.decode.isa.CSRReadOnlyBlockInstructions._
 import xiangshan.backend.decode.isa.CSRs
@@ -741,7 +741,7 @@ object ImmUnion {
  */
 
 class DecodeUnitEnqIO(implicit p: Parameters) extends XSBundle {
-  val decodeInUop = Input(new DecodeInUop)
+  val decodeInMop = Input(new DecodeInMop)
   val vstart = Input(Vl())
 }
 
@@ -765,9 +765,9 @@ class DecodeUnitIO(implicit p: Parameters) extends XSBundle {
 class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstants {
   val io = IO(new DecodeUnitIO)
 
-  val ctrl_flow = io.enq.decodeInUop // input with RVC Expanded
+  val ctrl_flow = io.enq.decodeInMop // input with RVC Expanded
 
-  private val inst: XSInstBitFields = io.enq.decodeInUop.instr.asTypeOf(new XSInstBitFields)
+  private val inst: XSInstBitFields = io.enq.decodeInMop.instr.asTypeOf(new XSInstBitFields)
   val decode_table: Array[(BitPat, List[BitPat])] = XDecode.table ++
     FpDecode.table ++
 //    FDivSqrtDecode.table ++
@@ -789,7 +789,7 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
 
   // output
   val decodedInst: DecodeOutUop = Wire(new DecodeOutUop()).decode(ctrl_flow.instr, decode_table)
-  decodedInst.connectDecodeInUop(io.enq.decodeInUop)
+  decodedInst.connectDecodeInMop(io.enq.decodeInMop)
 
   decodedInst.uopIdx := 0.U
   decodedInst.firstUop := true.B
@@ -834,10 +834,10 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
   val isCsrrVlenb = isCsrr && inst.CSRIDX === CSRs.vlenb.U
   val isCsrrVl    = isCsrr && inst.CSRIDX === CSRs.vl.U
 
-  private val isCboClean = CBO_CLEAN === io.enq.decodeInUop.instr
-  private val isCboFlush = CBO_FLUSH === io.enq.decodeInUop.instr
-  private val isCboInval = CBO_INVAL === io.enq.decodeInUop.instr
-  private val isCboZero  = CBO_ZERO  === io.enq.decodeInUop.instr
+  private val isCboClean = CBO_CLEAN === io.enq.decodeInMop.instr
+  private val isCboFlush = CBO_FLUSH === io.enq.decodeInMop.instr
+  private val isCboInval = CBO_INVAL === io.enq.decodeInMop.instr
+  private val isCboZero  = CBO_ZERO  === io.enq.decodeInMop.instr
 
   // Note that rnum of aes64ks1i must be in the range 0x0..0xA. The values 0xB..0xF are reserved.
   private val isAes64ks1iIllegal =
@@ -884,7 +884,7 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
     io.fromCSR.virtualInst.cboI       && isCboInval
 
 
-  decodedInst.exceptionVec(illegalInstr) := exceptionII || io.enq.decodeInUop.exceptionVec(illegalInstr)
+  decodedInst.exceptionVec(illegalInstr) := exceptionII || io.enq.decodeInMop.exceptionVec(illegalInstr)
   decodedInst.exceptionVec(virtualInstr) := exceptionVI
 
   //update exceptionVec: from frontend trigger's breakpoint exception. To reduce 1 bit of overhead in ibuffer entry.
@@ -1047,12 +1047,12 @@ class DecodeUnit(implicit p: Parameters) extends XSModule with DecodeUnitConstan
   // decodedInst.needFrm.scalaNeedFrm := scalaNeedFrmInsts.map(_ === inst.ALL).reduce(_ || _)
   // decodedInst.needFrm.vectorNeedFrm := vectorNeedFrmInsts.map(_ === inst.ALL).reduce(_ || _)
   decodedInst.vpu := 0.U.asTypeOf(decodedInst.vpu) // Todo: Connect vpu decoder
-  decodedInst.vpu.vill  := io.enq.decodeInUop.vtype.illegal
-  decodedInst.vpu.vma   := io.enq.decodeInUop.vtype.vma
-  decodedInst.vpu.vta   := io.enq.decodeInUop.vtype.vta
-  decodedInst.vpu.vsew  := io.enq.decodeInUop.vtype.vsew
-  decodedInst.vpu.vlmul := io.enq.decodeInUop.vtype.vlmul
-  decodedInst.oldVType := io.enq.decodeInUop.oldVType
+  decodedInst.vpu.vill  := io.enq.decodeInMop.vtype.illegal
+  decodedInst.vpu.vma   := io.enq.decodeInMop.vtype.vma
+  decodedInst.vpu.vta   := io.enq.decodeInMop.vtype.vta
+  decodedInst.vpu.vsew  := io.enq.decodeInMop.vtype.vsew
+  decodedInst.vpu.vlmul := io.enq.decodeInMop.vtype.vlmul
+  decodedInst.oldVType := io.enq.decodeInMop.oldVType
   decodedInst.vpu.vm := inst.VM
   decodedInst.vpu.nf := inst.NF
   decodedInst.vpu.veew := inst.WIDTH

@@ -53,7 +53,6 @@ class DecodeChannelsCore(
   val in = IO(new Bundle {
     val mops = Input(Vec(mopWidth, Valid(new Bundle {
       val info = new DecodeChannelInput
-      val ctrl = new MopCtrlBundle
     } )))
   })
 
@@ -151,5 +150,19 @@ class DecodeChannelsCore(
     out.illegalChannel(i) := illegalChannelOut(i)
     out.vecUopNumOH(i) := vecUopNumOHs(i)
     out.simUopNumOH(i) := simpleUopNumOHs(i)
+  }
+
+  // Channel exclusivity invariants (relied on by uopNumOH selection):
+  // - at most one of {vset, vector, simple} channels is valid for a valid mop
+  // - if the pseudo channel is valid, the simple channel must also be valid
+  for (i <- 0 until mopWidth) {
+    val vecValid  = vecChannelOut(i).head.valid
+    val vsetValid = vsetChannelOut(i).valid
+    val simValid  = simChannelOut(i).head.valid
+    val psdValid  = psdChannelOut(i).valid
+    assert(!instValids(i) || PopCount(Seq(vsetValid, vecValid, simValid)) <= 1.U,
+      "DecodeChannelsCore: at most one of vset/vector/simple channels may be valid")
+    assert(!instValids(i) || !psdValid || simValid,
+      "DecodeChannelsCore: pseudo channel valid implies simple channel valid")
   }
 }
