@@ -857,6 +857,7 @@ object Bundles {
     val sourceExuIdx = UInt(backendParams.numExu.W)
     val targetExuIdx = UInt(backendParams.numExu.W)
     val robIdx = new RobPtr
+    val useBypass = Bool()
   }
 
   class VPUCtrlSignals(implicit p: Parameters) extends XSBundle {

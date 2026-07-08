@@ -635,6 +635,12 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
       iq.io.earlyFmaSrc2ToFalu.foreach(x => out := x)
       out
     }
+    val earlyFmaForwardData = VecInit(exuBlock.io.out.flatten.map(_.bits.toFpRf.get.bits))
+    val earlyFmaForwardValid = VecInit(exuBlock.io.out.flatten.map(out => out.valid && out.bits.toFpRf.get.valid))
+    val earlyFmaBypassData = VecInit(earlyFmaForwardData.zip(earlyFmaForwardValid).map { case (data, valid) =>
+      RegEnable(data, valid)
+    })
+    val earlyFmaBypassValid = RegNext(earlyFmaForwardValid)
     for (i <- 0 until exuBlock.io.in.length) {
       for (j <- 0 until exuBlock.io.in(i).length) {
         val fpExuParam = params.issueBlockParams.filterNot(_.isMemBlockIQ)(i).exuBlockParams(j)
@@ -666,15 +672,21 @@ class Region(val params: SchdBlockParams)(implicit p: Parameters) extends XSModu
             src2.bits.robIdx === pipeToFalu.bits.robIdx
         }
         val earlyFmaSourceData = earlyFmaSrc2ToFalu.map { src2 =>
+          val sourceData = earlyFmaForwardData.zip(earlyFmaBypassData).map { case (forward, bypass) =>
+            Mux(src2.bits.useBypass, bypass, forward)
+          }
           Mux1H(
             params.exuBlockParams.map(exu => src2.bits.sourceExuIdx(exu.exuIdx)),
-            exuBlock.io.out.flatten.map(_.bits.toFpRf.get.bits)
+            sourceData
           )
         }
         val earlyFmaSourceValid = earlyFmaSrc2ToFalu.map { src2 =>
+          val sourceValid = earlyFmaForwardValid.zip(earlyFmaBypassValid).map { case (forward, bypass) =>
+            Mux(src2.bits.useBypass, bypass, forward)
+          }
           Mux1H(
             params.exuBlockParams.map(exu => src2.bits.sourceExuIdx(exu.exuIdx)),
-            exuBlock.io.out.flatten.map(out => out.valid && out.bits.toFpRf.get.valid)
+            sourceValid
           )
         }
         val earlyFmaSrc2ReadyMatches = earlyFmaSrc2Matches.zip(earlyFmaSourceValid).map { case (m, v) => m && v }

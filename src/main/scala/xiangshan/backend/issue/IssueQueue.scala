@@ -299,6 +299,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       enq.bits.status.isFmac.foreach(_                          := FuType.isFmul(s0_enqBits(enqIdx).fuType) && FuOpType.FMacOpcodes.isOP3(s0_enqBits(enqIdx).fuOpType))
       enq.bits.status.earlyFmaSrc2.foreach(_                    := false.B)
       enq.bits.status.earlyFmaSource.foreach(_                  := 0.U)
+      enq.bits.status.earlyFmaSrc2UseBypass.foreach(_           := false.B)
       val numLsrc = s0_enqBits(enqIdx).srcType.size.min(enq.bits.status.srcStatus.map(_.srcType).size)
       for(j <- 0 until numLsrc) {
         enq.bits.status.srcStatus(j).psrc                       := s0_enqBits(enqIdx).psrc(j)

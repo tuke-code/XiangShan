@@ -65,6 +65,7 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
   val isFmaVec            = Wire(Vec(params.numEntries, Bool()))
   val earlyFmaSrc2Vec     = OptionWrapper(params.needEarlyFmaWakeup, Wire(Vec(params.numEntries, Bool())))
   val earlyFmaSourceVec   = OptionWrapper(params.needEarlyFmaWakeup, Wire(Vec(params.numEntries, UInt(backendParams.numExu.W))))
+  val earlyFmaSrc2UseBypassVec = OptionWrapper(params.needEarlyFmaWakeup, Wire(Vec(params.numEntries, Bool())))
   val isFirstIssueVec     = Wire(Vec(params.numEntries, Bool()))
   val issueTimerVec       = Wire(Vec(params.numEntries, UInt(params.issueTimerWidth.W)))
   val sqIdxVec            = OptionWrapper(params.needFeedBackSqIdx, Wire(Vec(params.numEntries, new SqPtr())))
@@ -419,6 +420,7 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
     isFmaVec(entryIdx)          := out.isFma
     earlyFmaSrc2Vec.foreach(_(entryIdx) := out.earlyFmaSrc2.get)
     earlyFmaSourceVec.foreach(_(entryIdx) := out.earlyFmaSource.get)
+    earlyFmaSrc2UseBypassVec.foreach(_(entryIdx) := out.earlyFmaSrc2UseBypass.get)
     robIdxVec(entryIdx)         := out.robIdx
     isFirstIssueVec(entryIdx)   := out.isFirstIssue
     entries(entryIdx)           := out.entry
@@ -453,6 +455,7 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
     }
     out.valid := candidates.asUInt.orR
     out.bits.sourceExuIdx := Mux1H(candidates, earlyFmaSourceVec.get)
+    out.bits.useBypass := Mux1H(candidates, earlyFmaSrc2UseBypassVec.get)
     val targetExuIdxVec = entries.map { entry =>
       Mux1H(
         (0 until params.numDeq).map(idx => entry.bits.status.deqPortIdx === idx.U),
