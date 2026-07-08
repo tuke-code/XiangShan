@@ -1383,7 +1383,8 @@ class LoadUnitS3(param: ExeUnitParams)(
     */
   val shouldFastReplay = in.shouldFastReplay.get
   val bankConflictFastReplayCandidate = pipeIn.valid && shouldFastReplay && cause(C_BC)
-  val allowFastReplay = io.fastReplay.ready
+  val allowBankConflictFastReplay = !bankConflictFastReplayCandidate || io.bankConflictFastReplayGrant
+  val allowFastReplay = io.fastReplay.ready && allowBankConflictFastReplay
   val doFastReplay = shouldFastReplay && allowFastReplay
   val fastReplay = Wire(new FastReplayIO)
   connectSamePort(fastReplay, in)
