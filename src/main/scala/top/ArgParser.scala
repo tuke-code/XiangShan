@@ -50,6 +50,7 @@ object ArgParser {
       |--disable-perf
       |--disable-alwaysdb
       |--disable-clockgate
+      |--external-llc
       |--enable-dfx
       |--dump-csr
       |--imsic-bus-type <NONE|TL|AXI>
@@ -160,6 +161,10 @@ object ArgParser {
         case "--disable-clockgate" :: tail =>
           nextOption(config.alter((site, here, up) => {
             case XSTileKey => up(XSTileKey).map(_.copy(EnableClockGate = false))
+          }), tail)
+        case "--external-llc" :: tail =>
+          nextOption(config.alter((site, here, up) => {
+            case UseExternalLLCKey => true
           }), tail)
         case "--xstop-prefix" :: value :: tail =>
           nextOption(config.alter((site, here, up) => {
