@@ -840,6 +840,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
       if (i == 0) false.B else VecInit(bankConflictFastReplayCandidates.take(i)).asUInt.orR
     bankConflictFastReplayCandidates(i) && !higherPriorityHasCandidate
   }
+  assert(PopCount(bankConflictFastReplayGrant) <= 1.U, "only one bank conflict fast replay grant is allowed")
 
   // LoadUnit
   for (i <- 0 until LduCnt) {
@@ -1555,6 +1556,8 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   val stDeqCount = PopCount(issueSta.take(StaCnt).map(_.valid))
   val iqDeqCount = ldDeqCount +& stDeqCount
   val loadBankConflictCount = PopCount(dcache.io.lsu.s2_bank_conflict_no_wr)
+  val bankConflictFastReplayCandidateCount = PopCount(bankConflictFastReplayCandidates)
+  val bankConflictFastReplayGrantCount = PopCount(bankConflictFastReplayGrant)
   XSPerfAccumulate("load_iq_deq_count", ldDeqCount)
   XSPerfHistogram("load_iq_deq_count", ldDeqCount, true.B, 0, LdExuCnt + 1)
   XSPerfAccumulate("store_iq_deq_count", stDeqCount)
@@ -1563,6 +1566,14 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   XSPerfAccumulate("load_bank_conflict_ge2", loadBankConflictCount > 1.U)
   XSPerfAccumulate("load_bank_conflict_eq2", loadBankConflictCount === 2.U)
   XSPerfAccumulate("load_bank_conflict_eq3", loadBankConflictCount === 3.U)
+  XSPerfAccumulate("bank_conflict_fast_replay_candidate", bankConflictFastReplayCandidateCount)
+  XSPerfAccumulate("bank_conflict_fast_replay_grant", bankConflictFastReplayGrantCount)
+  bankConflictFastReplayCandidates.zip(bankConflictFastReplayGrant).zipWithIndex.foreach {
+    case ((candidate, grant), i) =>
+      XSPerfAccumulate(s"bank_conflict_fast_replay_candidate_$i", candidate)
+      XSPerfAccumulate(s"bank_conflict_fast_replay_grant_$i", grant)
+      XSPerfAccumulate(s"bank_conflict_fast_replay_denied_$i", candidate && !grant)
+  }
 
   val pfevent = Module(new PFEvent)
   pfevent.io.distribute_csr := csrCtrl.distribute_csr
