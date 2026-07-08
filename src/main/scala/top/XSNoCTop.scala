@@ -248,6 +248,7 @@ trait HasXSTileImp[+L <: HasXSTile] { this: BaseXSSocImp with HasAsyncClockImp =
   core_with_l2.module.io.reset_vector := tileio.riscv_rst_vec
   core_with_l2.module.io.hartId := tileio.hartId
   core_with_l2.module.io.nodeID.get := tileio.nodeID
+  core_with_l2.module.io.perfClean := false.B
 
   /* dft */
   core_with_l2.module.io.dft.zip(io.dft).foreach { case (a, b) => a := b }
@@ -512,6 +513,7 @@ class XSNoCDiffTop(implicit p: Parameters) extends XSNoCTop
       val logEnable = if (hasPerfLog) WireDefault(difftest.logCtrl.enable(timer)) else WireDefault(false.B)
       val clean = if (hasPerf) WireDefault(difftest.perfCtrl.clean) else WireDefault(false.B)
       val dump = if (hasPerf) WireDefault(difftest.perfCtrl.dump) else WireDefault(false.B)
+      core_with_l2.module.io.perfClean := clean
       // XSLog will also be generated outside XSTop to keep design clean
       XSLog.collect(timer, logEnable, clean, dump)
     }

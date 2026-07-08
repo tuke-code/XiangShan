@@ -96,6 +96,7 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
         case Some(param) => Flipped(new AsyncBundle(UInt(64.W), param))
         case None => Input(ValidIO(UInt(64.W)))
       }
+      val perfClean = Input(Bool())
       val dft = Option.when(hasDFT)(Input(new SramBroadcastBundle))
       val dft_reset = Option.when(hasMbist)(Input(new DFTResetSignals()))
       val l2_flush_en = Option.when(EnablePowerDown) (Output(Bool()))
@@ -161,6 +162,7 @@ class XSTileWrap()(implicit p: Parameters) extends LazyModule
     io.debugTopDown <> tile.module.io.debugTopDown
     tile.module.io.l3Miss := io.l3Miss
     tile.module.io.nodeID.foreach(_ := io.nodeID.get)
+    tile.module.io.perfClean := io.perfClean
     io.l2_flush_en.foreach { _ := tile.module.io.l2_flush_en.getOrElse(false.B) }
     io.l2_flush_done.foreach { _ := tile.module.io.l2_flush_done.getOrElse(false.B) }
     io.pwrdown_ack_n.foreach { _ := DontCare }

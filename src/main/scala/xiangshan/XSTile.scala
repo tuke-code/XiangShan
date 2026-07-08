@@ -116,6 +116,7 @@ class XSTile()(implicit p: Parameters) extends LazyModule
       val chi = if (enableCHI) Some(new PortIO) else None
       val nodeID = if (enableCHI) Some(Input(UInt(NodeIDWidth.W))) else None
       val clintTime = Input(ValidIO(UInt(64.W)))
+      val perfClean = Input(Bool())
       val dft = Option.when(hasDFT)(Input(new SramBroadcastBundle))
       val dft_reset = Option.when(hasMbist)(Input(new DFTResetSignals()))
       val l2_flush_en = Option.when(EnablePowerDown) (Output(Bool()))
@@ -166,6 +167,7 @@ class XSTile()(implicit p: Parameters) extends LazyModule
     l2top.module.io.beu_errors.uncache <> core.module.io.beu_errors.uncache
 
     l2top.module.io.l2_flush_en.foreach { _ := core.module.io.l2_flush_en }
+    l2top.module.io.perfClean := io.perfClean
     io.l2_flush_en.foreach { _ := core.module.io.l2_flush_en }
     core.module.io.l2_flush_done := l2top.module.io.l2_flush_done.getOrElse(false.B)
     io.l2_flush_done.foreach { _ := l2top.module.io.l2_flush_done.getOrElse(false.B) }

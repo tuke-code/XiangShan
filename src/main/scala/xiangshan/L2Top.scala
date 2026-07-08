@@ -220,6 +220,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
       }
       val chi = if (enableCHI) Some(new PortIO) else None
       val nodeID = if (enableCHI) Some(Input(UInt(NodeIDWidth.W))) else None
+      val perfClean = Input(Bool())
       val pfCtrlFromCore = Input(new PrefetchCtrlFromCore)
       val l2_tlb_req = new TlbRequestIO(nRespDups = 2)
       val l2_pmp_resp = Flipped(new PMPRespBundle)
@@ -300,6 +301,7 @@ class L2TopInlined()(implicit p: Parameters) extends LazyModule
       val l2 = l2cache.get.module
 
       l2.io.pfCtrlFromCore := io.pfCtrlFromCore
+      l2.io.perfClean := io.perfClean
       l2.io.dft.zip(io.dft).foreach({ case(a, b) => a := b })
       l2.io.dft_reset.zip(io.dft_reset).foreach({ case(a, b) => a := b })
       io.l2_hint := l2.io.l2_hint

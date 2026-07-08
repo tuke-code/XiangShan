@@ -171,6 +171,7 @@ class XiangShanSim(implicit p: Parameters) extends Module with HasDiffTestInterf
     val logEnable = if (hasPerfLog) WireDefault(difftest.logCtrl.enable(timer)) else WireDefault(false.B)
     val clean = if (hasPerf) WireDefault(difftest.perfCtrl.clean) else WireDefault(false.B)
     val dump = if (hasPerf) WireDefault(difftest.perfCtrl.dump) else WireDefault(false.B)
+    soc.io.perfClean := clean
 
     XSLog.collect(timer, logEnable, clean, dump)
   }

@@ -20,7 +20,7 @@ package top
 import chisel3._
 import chisel3.util._
 import chisel3.experimental.dataview._
-import difftest.{DifftestMemIO, DifftestModule, HasDiffTestInterfaces}
+import difftest.{DifftestMemIO, DifftestModule, DifftestTopIO, HasDiffTestInterfaces}
 import xiangshan._
 import utils._
 import utility._
@@ -203,6 +203,7 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
       val extIntrs = Input(UInt(NrExtIntr.W))
       val pll0_lock = Input(Bool())
       val pll0_ctrl = Output(Vec(6, UInt(32.W)))
+      val perfClean = Input(Bool())
       val systemjtag = new Bundle {
         val jtag = Flipped(new JTAGIO(hasTRSTn = false))
         val reset = Input(AsyncReset()) // No reset allowed on top
@@ -300,6 +301,7 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc()
       core.module.io.dft.foreach(dontTouch(_) := DontCare)
       core.module.io.dft_reset.foreach(dontTouch(_) := DontCare)
       core.module.io.reset_vector := io.riscv_rst_vec(i)
+      core.module.io.perfClean := io.perfClean
     }
 
     withClockAndReset(io.clock, io.reset) {
@@ -402,6 +404,11 @@ class XSTileDiffTop(implicit p: Parameters) extends XSTop {
     override protected def implicitClock: Clock = io.clock
     override protected def implicitReset: Reset = io.reset
     override def difftestMemIO: Option[DifftestMemIO] = Some(DifftestMemIO(memory))
+    override def connectTopIOs(difftest: DifftestTopIO): Unit = {
+      val hasPerf = !debugOpts.FPGAPlatform && debugOpts.EnablePerfDebug
+      val clean = if (hasPerf) WireDefault(difftest.perfCtrl.clean) else WireDefault(false.B)
+      core_with_l2.foreach(_.module.io.perfClean := clean)
+    }
   }
   override lazy val module = new XSTileDiffTopImp(this)
 }
