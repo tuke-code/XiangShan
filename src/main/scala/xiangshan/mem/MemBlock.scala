@@ -834,9 +834,17 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
     vSegmentFlag := false.B
   }
 
+  val bankConflictFastReplayCandidates = newLoadUnits.map(_.io.bankConflictFastReplayCandidate)
+  val bankConflictFastReplayGrant = (0 until LduCnt).map { i =>
+    val higherPriorityHasCandidate =
+      if (i == 0) false.B else VecInit(bankConflictFastReplayCandidates.take(i)).asUInt.orR
+    bankConflictFastReplayCandidates(i) && !higherPriorityHasCandidate
+  }
+
   // LoadUnit
   for (i <- 0 until LduCnt) {
     newLoadUnits(i).io.redirect <> redirect
+    newLoadUnits(i).io.bankConflictFastReplayGrant := bankConflictFastReplayGrant(i)
 
     // get input form dispatch
     newLoadUnits(i).io.ldin <> issueLda(i)
