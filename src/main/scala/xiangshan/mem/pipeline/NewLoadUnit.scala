@@ -1382,6 +1382,7 @@ class LoadUnitS3(param: ExeUnitParams)(
     * Fast replay
     */
   val shouldFastReplay = in.shouldFastReplay.get
+  val bankConflictFastReplayCandidate = pipeIn.valid && shouldFastReplay && cause(C_BC)
   val allowFastReplay = io.fastReplay.ready
   val doFastReplay = shouldFastReplay && allowFastReplay
   val fastReplay = Wire(new FastReplayIO)
@@ -1583,6 +1584,7 @@ class LoadUnitS3(param: ExeUnitParams)(
 
   io.fastReplay.valid := pipeIn.valid && shouldFastReplay
   io.fastReplay.bits := fastReplay
+  io.bankConflictFastReplayCandidate := bankConflictFastReplayCandidate
 
   io.revokeLastCycle := revokeLastCycle
   io.revokeLastLastCycle := revokeLastLastCycle
