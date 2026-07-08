@@ -159,7 +159,9 @@ class XiangShanSim(implicit p: Parameters) extends Module with HasDiffTestInterf
   override def cpuName: Option[String] = Some("XiangShan")
 
   val uart = IO(new UARTIO)
+  val perfClean = IO(Input(Bool())).suggestName("bore_perfClean")
   simMMIO.io.uart <> uart
+  soc.io.perfClean := perfClean
 
   override def connectTopIOs(difftest: DifftestTopIO): Unit = {
     difftest.uart <> uart
@@ -171,7 +173,7 @@ class XiangShanSim(implicit p: Parameters) extends Module with HasDiffTestInterf
     val logEnable = if (hasPerfLog) WireDefault(difftest.logCtrl.enable(timer)) else WireDefault(false.B)
     val clean = if (hasPerf) WireDefault(difftest.perfCtrl.clean) else WireDefault(false.B)
     val dump = if (hasPerf) WireDefault(difftest.perfCtrl.dump) else WireDefault(false.B)
-    soc.io.perfClean := clean
+    perfClean := clean
 
     XSLog.collect(timer, logEnable, clean, dump)
   }
