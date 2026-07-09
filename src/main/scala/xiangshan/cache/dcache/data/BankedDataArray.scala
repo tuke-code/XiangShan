@@ -271,6 +271,7 @@ abstract class AbstractBankedDataArray(implicit p: Parameters) extends DCacheMod
     // val errors = Output(Vec(LoadPipelineWidth + 1, ValidIO(new L1CacheErrorInfo))) // read ports + readline port
     // when bank_conflict, read (1) port should be ignored
     val bank_conflict_slow = Output(Vec(LoadPipelineWidth, Bool()))
+    val rr_bank_conflict_slow = Output(Vec(LoadPipelineWidth, Bool()))
     val wr_bank_conflict_slow = Output(Vec(LoadPipelineWidth, Bool()))
     val disable_ld_fast_wakeup = Output(Vec(LoadPipelineWidth, Bool()))
     val pseudo_error = Flipped(DecoupledIO(Vec(DCacheBanks, new CtrlUnitSignalingBundle)))
@@ -464,6 +465,7 @@ class SramedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
     bank_conflict_fast(i) := wr_bank_conflict(i) || rrl_bank_conflict(i) ||
     rr_bank_conflict_oldest(i)
     io.bank_conflict_slow(i) := RegNext(bank_conflict_fast(i))
+    io.rr_bank_conflict_slow(i) := RegNext(rr_bank_conflict_oldest(i))
     io.wr_bank_conflict_slow(i) := RegNext(wr_bank_conflict(i))
     io.disable_ld_fast_wakeup(i) := wr_bank_conflict(i) || rrl_bank_conflict_intend(i) ||
       (if (i == 0) 0.B else (0 until i).map(rr_bank_conflict(_)(i)).reduce(_ || _))
@@ -797,6 +799,7 @@ class BankedDataArray(implicit p: Parameters) extends AbstractBankedDataArray {
     val real_other_bank_conflict_reg = real_wr_bank_conflict_reg || RegNext(rrl_bank_conflict(i))
     val real_rr_bank_conflict_reg = RegNext(rr_bank_conflict_oldest(i))
     io.bank_conflict_slow(i) := real_other_bank_conflict_reg || real_rr_bank_conflict_reg
+    io.rr_bank_conflict_slow(i) := real_rr_bank_conflict_reg
     io.wr_bank_conflict_slow(i) := real_wr_bank_conflict_reg
 
     // get result in s1

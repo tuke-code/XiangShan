@@ -40,6 +40,7 @@ class FakeDCache()(implicit p: Parameters) extends XSModule with HasDCacheParame
     io.lsu.load(i).resp.bits.id := DontCare
     io.lsu.load(i).s2_hit := true.B
     io.lsu.load(i).s2_bank_conflict := false.B
+    io.lsu.load(i).s2_rr_bank_conflict := false.B
     io.lsu.s2_bank_conflict_no_wr(i) := false.B
     io.lsu.load(i).s1_disable_fast_wakeup := false.B
   }
