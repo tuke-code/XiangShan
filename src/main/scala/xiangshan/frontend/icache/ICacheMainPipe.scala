@@ -149,19 +149,29 @@ class ICacheMainPipe(implicit p: Parameters) extends ICacheModule
   private val s1_fineShiftMaybeRvcMap = s1_maybeRvcShiftInfo.fineShiftMaybeRvcMap
   private val s1_rangeVec             = s1_maybeRvcShiftInfo.rangeVec
   // Finish maybeRvc alignment with the high bits after the s0 fine shift.
-  private val s1_coarseShiftNum = VecInit(
-    s1_shiftNum.map(
-      shift => Cat(shift(log2Ceil(MaxInstNumPerBlock) - 1, MaybeRvcFineShiftBits), 0.U(MaybeRvcFineShiftBits.W))
-    )
-  )
+  // private val s1_coarseShiftNum = VecInit(
+  //   s1_shiftNum.map(
+  //     shift => Cat(shift(log2Ceil(MaxInstNumPerBlock) - 1, MaybeRvcFineShiftBits), 0.U(MaybeRvcFineShiftBits.W))
+  //   )
+  // )
+  // private val s1_sramShiftMaybeRvc = VecInit(
+  //   VecInit(
+  //     shiftMaybeRvc(s1_fineShiftMaybeRvcMap(0), s1_coarseShiftNum(0), leftShift = false.B),
+  //     shiftMaybeRvc(s1_fineShiftMaybeRvcMap(1), s1_coarseShiftNum(1), leftShift = true.B)
+  //   ),
+  //   VecInit(
+  //     shiftMaybeRvc(s1_fineShiftMaybeRvcMap(2), s1_coarseShiftNum(2), leftShift = !s1_shiftFlag),
+  //     shiftMaybeRvc(s1_fineShiftMaybeRvcMap(3), s1_coarseShiftNum(3), leftShift = true.B)
+  //   )
+  // )
   private val s1_sramShiftMaybeRvc = VecInit(
     VecInit(
-      shiftMaybeRvc(s1_fineShiftMaybeRvcMap(0), s1_coarseShiftNum(0), leftShift = false.B),
-      shiftMaybeRvc(s1_fineShiftMaybeRvcMap(1), s1_coarseShiftNum(1), leftShift = true.B)
+      s1_fineShiftMaybeRvcMap(0),
+      s1_fineShiftMaybeRvcMap(1)
     ),
     VecInit(
-      shiftMaybeRvc(s1_fineShiftMaybeRvcMap(2), s1_coarseShiftNum(2), leftShift = !s1_shiftFlag),
-      shiftMaybeRvc(s1_fineShiftMaybeRvcMap(3), s1_coarseShiftNum(3), leftShift = true.B)
+      s1_fineShiftMaybeRvcMap(2),
+      s1_fineShiftMaybeRvcMap(3)
     )
   )
 
