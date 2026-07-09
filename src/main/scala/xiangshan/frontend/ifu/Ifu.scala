@@ -156,6 +156,9 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s0_rawInstrVec       = instrBoundary.io.resp.rawInstrVec
   private val s0_instrEndMask      = instrBoundary.io.resp.instrEndMask
   private val s0_rawInstrValid     = VecInit(s0_rawInstrVec.map(_.valid)).asUInt
+  private val s0_formerHalfBoundary = instrBoundary.io.resp.formerHalfBoundary
+  private val s0_latterHalfBoundary = instrBoundary.io.resp.latterHalfBoundary
+  private val formerLastIsRvi       = instrBoundary.io.resp.formerLastIsRvi
 
   // When invalidTaken is true, we can not flush s2_prevLastIsHalfRvi because the fetch block after it is fall-through.
   when(backendRedirect) {
@@ -197,7 +200,7 @@ class Ifu(implicit p: Parameters) extends IfuModule
   private val s1_fetchBlock         = RegEnable(s0_fetchBlock, s0_fire)
   private val s1_totalEndPos        = RegEnable(s0_totalEndPos, s0_fire)
   private val s1_instrEndMask       = RegEnable(s0_instrEndMask, s0_fire)
-  private val s1_compactedInstrVec  = compact(s0_rawInstrVec, s0_fire)
+  private val s1_compactedInstrVec  = compact(s0_rawInstrVec, s0_formerHalfBoundary, s0_latterHalfBoundary, formerLastIsRvi, s0_fire)
   private val s1_instrCount         = RegEnable(s0_instrCount, s0_fire)
   private val s1_instrValid         = Mux(s1_instrCount === FetchBlockInstNum.U, ~0.U(FetchBlockInstNum.W), UIntToMask(s1_instrCount, FetchBlockInstNum))
   private val s1_firstRawInstrValid = RegEnable(s0_firstRawInstrValid, s0_fire)

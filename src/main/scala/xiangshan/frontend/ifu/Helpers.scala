@@ -167,22 +167,18 @@ trait IfuHelper extends HasIfuParameters with PreDecodeHelper {
     out
   }
 
-  def genCountVec(validVec: Vec[Bool]): Vec[UInt] = {
+  def genPrefixCountVec(validVec: Vec[Bool]): Vec[UInt] = {
     val n = validVec.length
     require(n > 0, "validVec cannot be empty")
     val rankWidth = log2Ceil(n + 1)
 
-    // ------------ 1. 扩展有效位为 rankWidth 宽 ----------
     def expandBool(b: Bool): UInt = {
       if (rankWidth == 1) b.asUInt
       else Cat(0.U((rankWidth - 1).W), b.asUInt)
     }
 
-    // ---------- 2. 并行前缀求和（尾递归，完全无 var） ----------
-    // 初始前缀：每个有效位扩展为数值
     val initialPrefix = VecInit(validVec.map(expandBool(_)))
 
-    // 递归计算，step 是当前距离，prefix 是上一轮结果
     def computePrefix(step: Int, prefix: Vec[UInt]): Vec[UInt] = {
       if (step >= n) prefix
       else {
@@ -195,28 +191,43 @@ trait IfuHelper extends HasIfuParameters with PreDecodeHelper {
     }
 
     val finalPrefix = computePrefix(1, initialPrefix)
-
-    // ---------- 3. 计算每个位置的 rank（之前有几个有效位） ----------
-    val rank = Wire(Vec(n, UInt(rankWidth.W)))
-    rank(0) := 0.U
-    for (i <- 1 until n) {
-      rank(i) := finalPrefix(i - 1)
-    }
-    rank
+    finalPrefix
   }
 
-  def compact(in: Vec[Instruction], fire: Bool): Vec[Instruction] = {
+  def compact(
+      in:              Vec[Instruction],
+      former:          Vec[Bool],
+      latter:          Vec[Vec[Bool]],
+      formerLastIsRvi: Bool,
+      fire:            Bool
+  ): Vec[Instruction] = {
     val n = in.length
     require(n > 0)
 
-    // 1. Valid flag vector
     val validVec = VecInit(in.map(_.valid))
 
-    val rank = genCountVec(validVec)
+    val formerPrefixCount = genPrefixCountVec(former)
+    val latterPrefixCount1 = genPrefixCountVec(latter(0))
+    val latterPrefixCount2 = genPrefixCountVec(latter(1))
+    val globalPrefixCount = WireDefault(VecInit(Seq.fill(n)(0.U(log2Ceil(n + 1).W))))
+    val rank = WireDefault(VecInit(Seq.fill(n)(0.U(log2Ceil(n + 1).W))))
+    val formerCount = formerPrefixCount(n / 2 - 1)
+
+    for (i <- 0 until n / 2) {
+      globalPrefixCount(i) := formerPrefixCount(i)
+      globalPrefixCount(i + n / 2) := Mux(
+        formerLastIsRvi,
+        formerCount + latterPrefixCount1(i),
+        formerCount + latterPrefixCount2(i)
+      )
+    }
+
+    for (i <- 1 until n) {
+      rank(i) := globalPrefixCount(i - 1)
+    }
 
     val inReg = RegEnable(in, fire)
 
-    // 3. Output vector, default all zeros
     val out = WireDefault(0.U.asTypeOf(in))
 
     for (idx <- 0 until n) {

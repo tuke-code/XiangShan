@@ -35,6 +35,9 @@ class InstrBoundary(implicit p: Parameters) extends IfuModule with PreDecodeHelp
       val instrEndMask:      Vec[Bool]        = Vec(FetchBlockInstNum, Bool())
       val firstEndIsHalfRvi: Bool             = Bool()
       val totalEndIsHalfRvi: Bool             = Bool()
+      val formerLastIsRvi:   Bool             = Bool()
+      val formerHalfBoundary: Vec[Bool]       = Vec(FetchBlockInstNum / 2, Bool())
+      val latterHalfBoundary: Vec[Vec[Bool]]  = Vec(2, Vec(FetchBlockInstNum / 2, Bool()))
     }
     val req:  Req  = Flipped(new Req)
     val resp: Resp = new Resp
@@ -138,6 +141,12 @@ class InstrBoundary(implicit p: Parameters) extends IfuModule with PreDecodeHelp
 
   private val totalEndPos = io.req.totalEndPos
   io.resp.totalEndIsHalfRvi := range(totalEndPos) && boundary(totalEndPos) && !maybeRvc(totalEndPos)
+
+  io.resp.formerLastIsRvi := boundary(FetchBlockInstNum / 2 - 1) && !maybeRvc(FetchBlockInstNum / 2 - 1)
+  io.resp.formerHalfBoundary := boundary.slice(0, FetchBlockInstNum / 2)
+  io.resp.formerHalfBoundary(0) := boundary(0) || io.req.firstInstrIsHalfRvi
+  io.resp.latterHalfBoundary(0) := latterHalfBoundary1.slice(FetchBlockInstNum / 2, FetchBlockInstNum)
+  io.resp.latterHalfBoundary(1) := latterHalfBoundary2.slice(FetchBlockInstNum / 2, FetchBlockInstNum)
 
   // For differential test only. Will be optimized out in release
   private val boundDiff = WireInit(VecInit(Seq.fill(FetchBlockInstNum)(false.B)))
