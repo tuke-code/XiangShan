@@ -24,6 +24,7 @@ import utility._
 import xiangshan._
 import xiangshan.ExceptionNO._
 import xiangshan.backend.Bundles.{ExuInput, ExuOutput, MemWakeUpBundle, MemWriteBack, UopIdx, connectSamePort}
+import xiangshan.backend.fu.FuType
 import xiangshan.backend.fu.PMPRespBundle
 import xiangshan.backend.fu.FuConfig._
 import xiangshan.backend.fu.fpu.FPU
@@ -86,6 +87,33 @@ class LoadUnitS0(param: ExeUnitParams)(
       val pc = Output(UInt(VAddrBits.W))
     })
   })
+
+  class WakeupLUDBEntry extends XSBundle {
+    val timeCnt = UInt(64.W)
+    val valid = Bool()
+    val pc = UInt(VAddrBits.W)
+    val pdest = UInt(backendParams.pregIdxWidth.W)
+    val rfWen = Bool()
+    val fpWen = Bool()
+    val vecWen = Bool()
+    val v0Wen = Bool()
+    val vlWen = Bool()
+  }
+
+  class WakedupLUDBEntry extends XSBundle {
+    val timeCnt = UInt(64.W)
+    val pc = UInt(VAddrBits.W)
+    val wakedupPC = UInt(VAddrBits.W)
+    val robIdx = UInt(log2Ceil(RobSize).W)
+    val fuType = FuType()
+    val pdest = UInt(backendParams.pregIdxWidth.W)
+    val lqIdx = UInt(log2Up(VirtualLoadQueueSize).W)
+    val sqIdx = UInt(log2Up(StoreQueueSize).W)
+  }
+
+  val hartId = p(XSCoreParamsKey).HartId
+  val wakeupLUTable = ChiselDB.createTable(s"wakeupLU_${param.name}_hart$hartId", new WakeupLUDBEntry, basicDB = true)
+  val wakedupLUTable = ChiselDB.createTable(s"wakedupLU_${param.name}_hart$hartId", new WakedupLUDBEntry, basicDB = true)
 
   /**
     * Request sources arbitration, in order of priority:
@@ -467,9 +495,37 @@ class LoadUnitS0(param: ExeUnitParams)(
 
   io.debugInfo.pc := uop.pc
 
+  val wakeupLUEntry = Wire(new WakeupLUDBEntry)
+  wakeupLUEntry := 0.U.asTypeOf(wakeupLUEntry)
+  wakeupLUEntry.timeCnt := GTimer()
+  wakeupLUEntry.valid := io.wakeup.valid
+  wakeupLUEntry.pc := io.wakeup.bits.pc
+  wakeupLUEntry.pdest := io.wakeup.bits.pdest
+  wakeupLUEntry.rfWen := io.wakeup.bits.rfWen
+  wakeupLUEntry.fpWen := io.wakeup.bits.fpWen
+  wakeupLUEntry.vecWen := io.wakeup.bits.vecWen
+  wakeupLUEntry.v0Wen := io.wakeup.bits.v0Wen
+  wakeupLUEntry.vlWen := io.wakeup.bits.vlWen
+  wakeupLUTable.log(wakeupLUEntry, io.wakeup.valid, param.name, clock, reset)
+
+  val wakedupLUEntry = Wire(new WakedupLUDBEntry)
+  wakedupLUEntry := 0.U.asTypeOf(wakedupLUEntry)
+  wakedupLUEntry.timeCnt := GTimer()
+  wakedupLUEntry.pc := io.ldin.bits.pc.getOrElse(0.U)
+  wakedupLUEntry.wakedupPC := io.ldin.bits.wakedupPC
+  wakedupLUEntry.robIdx := io.ldin.bits.robIdx.value
+  wakedupLUEntry.fuType := io.ldin.bits.fuType
+  wakedupLUEntry.pdest := io.ldin.bits.pdest
+  io.ldin.bits.lqIdx.foreach(x => wakedupLUEntry.lqIdx := x.value)
+  io.ldin.bits.sqIdx.foreach(x => wakedupLUEntry.sqIdx := x.value)
+  val wakedupLoadReqFire = io.ldin.fire && io.ldin.bits.wakedup && FuType.isLoadVload(io.ldin.bits.fuType)
+  wakedupLUTable.log(wakedupLUEntry, wakedupLoadReqFire, param.name, clock, reset)
+
   /**
     *  Perf counters
     */
+  XSPerfAccumulate("wakeupLU_send_cnt", io.wakeup.valid)
+  XSPerfAccumulate("wakedupLU_load_req_fire_cnt", wakedupLoadReqFire)
   XSPerfAccumulate("ldin_valid", io.ldin.valid)
   XSPerfAccumulate("ldin_block", io.ldin.valid && !io.ldin.ready)
   XSPerfAccumulate("ldin_fire_first_issue", io.ldin.fire && firstIssue)

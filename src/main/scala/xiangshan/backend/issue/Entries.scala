@@ -107,6 +107,8 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
   val perfWakeupByWBVec      = Wire(Vec(params.numEntries, Vec(params.numRegSrc, Bool())))
   val perfWakeupByIQVec      = OptionWrapper(params.hasIQWakeUp, Wire(Vec(params.numEntries, Vec(params.numRegSrc, Vec(params.numWakeupFromIQ, Bool())))))
   val perfWakeupHitByIQVec   = OptionWrapper(params.hasIQWakeUp, Wire(Vec(params.numEntries, Vec(params.numWakeupFromIQ, Bool()))))
+  val perfEnqDelayLoadWakeupHitByIQVec = OptionWrapper(params.hasIQWakeUp, Wire(Vec(params.numEntries, Vec(params.numWakeupFromIQ, Bool()))))
+  val perfEnqDelayLoadWakeupPCByIQVec = OptionWrapper(params.hasIQWakeUp, Wire(Vec(params.numEntries, Vec(params.numWakeupFromIQ, UInt(VAddrBits.W)))))
   //cancel bypass
   val cancelBypassVec        = Wire(Vec(params.numEntries, Bool()))
 
@@ -418,6 +420,9 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
   io.othersEntryEnqSelVec.foreach(_ := finalOthersTransSelVec.get.zip(enqEntryTransVec).map(x => x._1 & Fill(OthersEntryNum, x._2.valid)))
   io.robIdx.foreach(_               := robIdxVec)
   io.wakeupHitByIQ.foreach(_        := perfWakeupHitByIQVec.get)
+  io.enqDelayLoadWakeupHitByIQ.foreach(_ := perfEnqDelayLoadWakeupHitByIQVec.get)
+  io.enqDelayLoadWakeupPCByIQ.foreach(_ := perfEnqDelayLoadWakeupPCByIQVec.get)
+  io.entryInfo                      := entries
   io.validRegNext                   := validVecRegNext.asUInt
   io.issuedRegNext                  := issuedVecRegNext.asUInt
 
@@ -464,6 +469,8 @@ class Entries(implicit p: Parameters, params: IssueBlockParams) extends XSModule
       perfWakeupHitByIQVec.get(entryIdx) := VecInit((0 until params.numWakeupFromIQ).map { iqIdx =>
         out.perfWakeupByIQ.get.map(_(iqIdx)).reduce(_ || _)
       })
+      perfEnqDelayLoadWakeupHitByIQVec.get(entryIdx) := out.perfEnqDelayLoadWakeupByIQ.get
+      perfEnqDelayLoadWakeupPCByIQVec.get(entryIdx) := out.perfEnqDelayLoadWakeupPCByIQ.get
     }
     validVecRegNext(entryIdx)   := out.validRegNext
     issuedVecRegNext(entryIdx)  := out.issuedRegNext
@@ -580,6 +587,9 @@ class EntriesIO(implicit p: Parameters, params: IssueBlockParams) extends XSBund
   val loadDependency      = Vec(params.numEntries, Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W)))
   val exuSources          = OptionWrapper(params.hasIQWakeUp, Vec(params.numEntries, Vec(params.numRegSrc, Output(ExuSource()))))
   val wakeupHitByIQ       = OptionWrapper(params.hasIQWakeUp, Vec(params.numEntries, Vec(params.numWakeupFromIQ, Output(Bool()))))
+  val enqDelayLoadWakeupHitByIQ = OptionWrapper(params.hasIQWakeUp, Vec(params.numEntries, Vec(params.numWakeupFromIQ, Output(Bool()))))
+  val enqDelayLoadWakeupPCByIQ = OptionWrapper(params.hasIQWakeUp, Vec(params.numEntries, Vec(params.numWakeupFromIQ, Output(UInt(VAddrBits.W)))))
+  val entryInfo           = Vec(params.numEntries, ValidIO(new EntryBundle(isDeq = true)))
   // for enq.ready timing
   val validRegNext        = Output(UInt(params.numEntries.W))
   val issuedRegNext       = Output(UInt(params.numEntries.W))

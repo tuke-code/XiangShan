@@ -689,6 +689,7 @@ object Bundles {
     val v0Wen = Bool()
     val vlWen = Bool() // fof may write vl
     val pdest = UInt(backendParams.pregIdxWidth.W)
+    val pc = UInt(VAddrBits.W)
   }
   /**
     *
@@ -785,6 +786,7 @@ object Bundles {
     copyWakeupOut: Boolean = false,
     copyNum: Int = 0
   )(implicit p: Parameters) extends IssueQueueWakeUpBaseBundle(backendParams.allExuParams(exuIdx).wbPregIdxWidth, Seq(exuIdx)) {
+    val pc = UInt(VAddrBits.W)
     val loadDependency = Vec(LoadPipelineWidth, UInt(LoadDependencyWidth.W))
     val is0Lat = Bool()
     val params = backendParams.allExuParams.filter(_.exuIdx == exuIdx).head
@@ -803,6 +805,7 @@ object Bundles {
       this.vecWen := exuInput.vecWen.getOrElse(false.B)
       this.v0Wen := exuInput.v0Wen.getOrElse(false.B)
       this.vlWen := exuInput.vlWen.getOrElse(false.B)
+      this.pc := exuInput.pc.getOrElse(0.U)
       this.loadDependency := exuInput.loadDependency.getOrElse(0.U.asTypeOf(this.loadDependency))
       this.is0Lat := exuInput.is0Lat.getOrElse(false.B)
       this.pdestVl := exuInput.pdestVl.getOrElse(0.U)
@@ -923,6 +926,8 @@ object Bundles {
     val robIdx         = new RobPtr
     val iqIdx          = UInt(log2Up(iqParams.numEntries).W)
     val isFirstIssue   = Bool()
+    val wakedup        = Bool()
+    val wakedupPC      = UInt(VAddrBits.W)
     val rfBankRen      = Option.when(exuParams.readIntRf)(Vec(exuParams.numRegSrc, Vec(coreParams.intPreg.numBank, Bool())))
     val fpRen          = Option.when(exuParams.readFpRf )(Vec(exuParams.numRegSrc, Bool()))
     val vecRen         = Option.when(exuParams.readVecRf)(Vec(exuParams.numRegSrc, Bool()))
@@ -938,6 +943,8 @@ object Bundles {
     val flushPipe      = Option.when(exuParams.flushPipe)    (Bool())
     val ftqIdx         = Option.when(exuParams.needFtqPtr)   (new FtqPtr)
     val ftqOffset      = Option.when(exuParams.needFtqPtrOffset)(UInt(FetchBlockInstOffsetWidth.W))
+    val lqIdx          = Option.when(iqParams.needLqIdx)(new LqPtr)
+    val sqIdx          = Option.when(iqParams.needSqIdx)(new SqPtr)
     // dataSources are used in issueQueue to generate regfile Ren
     val dataSources    = Vec(exuParams.numRegSrc, DataSource())
     val exuSources     = Option.when(exuParams.isIQWakeUpSink)(Vec(exuParams.numRegSrc, ExuSource(exuParams)))
@@ -955,6 +962,8 @@ object Bundles {
     val robIdx         = new RobPtr
     val iqIdx          = UInt(log2Up(iqParams.numEntries).W)
     val isFirstIssue   = Bool()
+    val wakedup        = Bool()
+    val wakedupPC      = UInt(VAddrBits.W)
     val rfRen          = Option.when(exuParams.readIntRf)(Vec(exuParams.numRegSrc, Bool()))
     val fpRen          = Option.when(exuParams.readFpRf )(Vec(exuParams.numRegSrc, Bool()))
     val vecRen         = Option.when(exuParams.readVecRf)(Vec(exuParams.numRegSrc, Bool()))
@@ -1083,6 +1092,8 @@ object Bundles {
     val robIdx        = new RobPtr
     val iqIdx         = UInt(log2Up(params.issueBlockParam.numEntries).W)
     val isFirstIssue  = Bool()
+    val wakedup       = Bool()
+    val wakedupPC     = UInt(VAddrBits.W)
     val pdestCopy  = OptionWrapper(copyWakeupOut, Vec(copyNum, UInt(params.wbPregIdxWidth.W)))
     val rfWenCopy  = OptionWrapper(copyWakeupOut && params.needIntWen, Vec(copyNum, Bool()))
     val fpWenCopy  = OptionWrapper(copyWakeupOut && params.needFpWen, Vec(copyNum, Bool()))
@@ -1262,6 +1273,8 @@ object Bundles {
     val copy           = new ExuCopyBundle(params, copyWakeupOut, copyNum, hasCopySrc)
     val iqIdx          = UInt(log2Up(params.issueBlockParam.numEntries).W)
     val isFirstIssue   = Bool()
+    val wakedup        = Bool()
+    val wakedupPC      = UInt(VAddrBits.W)
     val loadWaitBit    = Option.when(params.hasLoadExu)(Bool())
     val waitForRobIdx  = Option.when(params.hasLoadExu)(new RobPtr) // store set predicted previous store robIdx
     val storeSetHit    = Option.when(params.hasLoadExu || params.hasStoreAddrExu)(Bool())     // inst has been allocated an store set

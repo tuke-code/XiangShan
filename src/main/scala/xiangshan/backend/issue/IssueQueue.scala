@@ -88,6 +88,48 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
 
   lazy val io = IO(new IssueQueueIO())
 
+  class WakeupIQDBEntry extends XSBundle {
+    val timeCnt = UInt(64.W)
+    val iqIdx = UInt(8.W)
+    val exuIdx = UInt(8.W)
+    val valid = Bool()
+    val pc = UInt(VAddrBits.W)
+    val pdest = UInt(backendParams.pregIdxWidth.W)
+    val rfWen = Bool()
+    val fpWen = Bool()
+    val vecWen = Bool()
+    val v0Wen = Bool()
+    val vlWen = Bool()
+  }
+
+  class WakeupMatchIQDBEntry extends XSBundle {
+    val timeCnt = UInt(64.W)
+    val iqIdx = UInt(8.W)
+    val exuIdx = UInt(8.W)
+    val wakeupPC = UInt(VAddrBits.W)
+    val matchCount = UInt(log2Up(params.numEntries + 1).W)
+    val entryValid = Vec(params.numEntries, Bool())
+    val entryRobIdx = Vec(params.numEntries, UInt(log2Ceil(RobSize).W))
+    val entryFuType = Vec(params.numEntries, FuType())
+    val entryPdest = Vec(params.numEntries, UInt(PhyRegIdxWidth.W))
+    val entryLqIdx = Vec(params.numEntries, UInt(log2Up(VirtualLoadQueueSize).W))
+    val entrySqIdx = Vec(params.numEntries, UInt(log2Up(StoreQueueSize).W))
+    val entryFtqOffset = Vec(params.numEntries, UInt(FetchBlockInstOffsetWidth.W))
+  }
+
+  class WakedupIQDBEntry extends XSBundle {
+    val timeCnt = UInt(64.W)
+    val iqIdx = UInt(8.W)
+    val deqIdx = UInt(8.W)
+    val pc = UInt(VAddrBits.W)
+    val wakedupPC = UInt(VAddrBits.W)
+    val robIdx = UInt(log2Ceil(RobSize).W)
+    val fuType = FuType()
+    val pdest = UInt(PhyRegIdxWidth.W)
+    val lqIdx = UInt(log2Up(VirtualLoadQueueSize).W)
+    val sqIdx = UInt(log2Up(StoreQueueSize).W)
+  }
+
   io.enq.foreach { case enq =>
     enq.bits.debug.foreach(x => PerfCCT.updateInstPos(x.debug_seqNum, PerfCCT.InstPos.AtIssueQue.id.U, enq.valid, clock, reset))
   }
@@ -323,6 +365,8 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
       enq.bits.status.blocked                                   := false.B
       enq.bits.status.issued                                    := false.B
       enq.bits.status.firstIssue                                := true.B
+      enq.bits.status.wakedup                                   := false.B
+      enq.bits.status.wakedupPC                                 := 0.U
       enq.bits.status.issueTimer                                := 0.U
       enq.bits.status.deqPortIdx                                := 0.U
       connectSamePort(enq.bits.payload, s0_enqBits(enqIdx))
@@ -861,7 +905,24 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     }
     deq.bits.isFirstIssue := deqFirstIssueVec(i)
     deq.bits.iqIdx    := OHToUInt(finalDeqSelOHVec(i))
-    deq.bits.fuType   := IQFuType.readFuType(deqEntryVec(i).bits.status.fuType, params.getFuCfgs.map(_.fuType)).asUInt
+    val deqFuType = IQFuType.readFuType(deqEntryVec(i).bits.status.fuType, params.getFuCfgs.map(_.fuType)).asUInt
+    val sameCycleLoadWakeupHitOH = if (params.hasIQWakeUp) {
+      VecInit((0 until params.numWakeupFromIQ).map { iqIdx =>
+        if (wakeupFromIQ(iqIdx).bits.params.hasLoadExu) {
+          Mux1H(finalDeqSelOHVec(i), entries.io.wakeupHitByIQ.get.map(_(iqIdx)))
+        } else {
+          false.B
+        }
+      })
+    } else {
+      VecInit(Seq(false.B))
+    }
+    val sameCycleLoadWakeupHit = if (params.hasIQWakeUp) sameCycleLoadWakeupHitOH.asUInt.orR else false.B
+    val sameCycleLoadWakeupPC = if (params.hasIQWakeUp) Mux1H(sameCycleLoadWakeupHitOH, wakeupFromIQ.map(_.bits.pc)) else 0.U(VAddrBits.W)
+    val sameCycleLoadWakeupLoadDeq = sameCycleLoadWakeupHit && FuType.isLoadVload(deqFuType)
+    deq.bits.fuType   := deqFuType
+    deq.bits.wakedup  := deqEntryVec(i).bits.status.wakedup || sameCycleLoadWakeupLoadDeq
+    deq.bits.wakedupPC := Mux(sameCycleLoadWakeupLoadDeq, sameCycleLoadWakeupPC, deqEntryVec(i).bits.status.wakedupPC)
     // TODO: entries use Mux1H sel oldest uop, there can remove deq.valid
     deq.bits.rfBankRen.foreach(x => x.zipWithIndex.foreach{case (xx, idx) => xx.zipWithIndex.foreach{case (xxx, bank) => xxx :=
       deq.valid && deqEntryVec(i).bits.rfBankRen.get(idx)(bank)
@@ -903,6 +964,8 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     deq.bits.rcIdx.foreach(_ := deqEntryVec(i).bits.status.srcStatus.map(_.regCacheIdx.get))
     deq.bits.ftqIdx.foreach(_ := deqEntryVec(i).bits.payload.ftqPtr.get)
     deq.bits.ftqOffset.foreach(_ := deqEntryVec(i).bits.payload.ftqOffset.get)
+    deq.bits.lqIdx.foreach(_ := deqEntryVec(i).bits.payload.og1Payload.lqIdx.get)
+    deq.bits.sqIdx.foreach(_ := deqEntryVec(i).bits.payload.og1Payload.sqIdx.get)
     deq.bits.perfDebugInfo.foreach(_ := deqEntryVec(i).bits.payload.debug.get.perfDebugInfo)
     deq.bits.debug_seqNum.foreach(_ := deqEntryVec(i).bits.payload.debug.get.debug_seqNum)
     deq.bits.perfDebugInfo.foreach(_.selectTime := GTimer())
@@ -948,6 +1011,30 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
     dontTouch(io.deqDelay)
     dontTouch(deqBeforeDly)
   }
+
+  val hartId = p(XSCoreParamsKey).HartId
+  val wakeupIQTable = ChiselDB.createTable(s"wakeupIQ_${params.getIQName}_hart$hartId", new WakeupIQDBEntry, basicDB = true)
+  val wakeupMatchIQTable = ChiselDB.createTable(s"wakeupMatchIQ_${params.getIQName}_hart$hartId", new WakeupMatchIQDBEntry, basicDB = true)
+  val wakedupIQTable = ChiselDB.createTable(s"wakedupIQ_${params.getIQName}_hart$hartId", new WakedupIQDBEntry, basicDB = true)
+
+  io.deqDelay.zipWithIndex.foreach { case (deq, deqIdx) =>
+    val wakedupIQEntry = Wire(new WakedupIQDBEntry)
+    wakedupIQEntry := 0.U.asTypeOf(wakedupIQEntry)
+    wakedupIQEntry.timeCnt := GTimer()
+    wakedupIQEntry.iqIdx := 0.U
+    wakedupIQEntry.deqIdx := deqIdx.U
+    wakedupIQEntry.pc := 0.U
+    wakedupIQEntry.wakedupPC := deq.bits.wakedupPC
+    wakedupIQEntry.robIdx := deq.bits.robIdx.value
+    wakedupIQEntry.fuType := deq.bits.fuType
+    wakedupIQEntry.pdest := deq.bits.pdest
+    deq.bits.lqIdx.foreach(x => wakedupIQEntry.lqIdx := x.value)
+    deq.bits.sqIdx.foreach(x => wakedupIQEntry.sqIdx := x.value)
+    val wakedupLoadDeqFire = deq.fire && deq.bits.wakedup && FuType.isLoadVload(deq.bits.fuType)
+    wakedupIQTable.log(wakedupIQEntry, wakedupLoadDeqFire, params.getIQName, clock, reset)
+    XSPerfAccumulate(s"loadpipe_wakedup_iq_deq${deqIdx}_load_fire_cnt", wakedupLoadDeqFire)
+  }
+
   io.wakeupToIQ.zipWithIndex.foreach { case (wakeup, i) =>
     if (wakeUpQueues(i).nonEmpty) {
       wakeup.valid := wakeUpQueues(i).get.io.deq.valid
@@ -965,6 +1052,7 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
         wakeup.bits.v0Wen   := (param.writeV0Rf ).B && RegNext(loadWakeUp.bits.v0Wen && loadWakeUp.valid)
         wakeup.bits.vlWen   := (param.writeVlRf ).B && RegNext(loadWakeUp.bits.vlWen && loadWakeUp.valid)
         wakeup.bits.pdest   := RegNext(loadWakeUp.bits.pdest)
+        wakeup.bits.pc      := RegNext(loadWakeUp.bits.pc)
         wakeup.bits.pdestVl := 0.U
         wakeup.bits.rcDest.foreach(_ := io.replaceRCIdx.get(i))
         wakeup.bits.loadDependency.foreach(_ := 0.U) // this is correct for load only
@@ -1098,10 +1186,19 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
         val wakeupHitLoadVec = VecInit(wakeupHitVec.zip(fuTypeVec).map { case (hit, fu) =>
           hit && FuType.isLoadVload(fu)
         })
+        val enqDelayLoadWakeupHitVec = VecInit(entries.io.enqDelayLoadWakeupHitByIQ.get.map(_(iqIdx)))
+        val enqDelayLoadWakeupPCVec = VecInit(entries.io.enqDelayLoadWakeupPCByIQ.get.map(_(iqIdx)))
+        val wakeupHitOrEnqDelayLoadVec = VecInit(wakeupHitVec.zip(enqDelayLoadWakeupHitVec).map { case (hit, enqDelayHit) => hit || enqDelayHit })
+        val wakeupHitLoadWithEnqDelayVec = VecInit(wakeupHitLoadVec.zip(enqDelayLoadWakeupHitVec).map { case (hit, enqDelayHit) => hit || enqDelayHit })
+        val wakeupValidWithEnqDelay = wakeupValid || enqDelayLoadWakeupHitVec.asUInt.orR
+        val wakeupMatchLoadSuccess = PopCount(wakeupHitLoadWithEnqDelayVec) =/= 0.U
         val wakeupHitStoreVec = VecInit(wakeupHitVec.zip(fuTypeVec).map { case (hit, fu) =>
           hit && FuType.isStoreVstore(fu)
         })
-        val wakeupHitLoadStoreVec = VecInit(wakeupHitLoadVec.zip(wakeupHitStoreVec).map { case (ld, st) => ld || st })
+        val wakeupHitLoadStoreVec = VecInit(wakeupHitLoadWithEnqDelayVec.zip(wakeupHitStoreVec).map { case (ld, st) => ld || st })
+        val wakeupMatchInstrSuccess = PopCount(wakeupHitOrEnqDelayLoadVec) =/= 0.U
+        val wakeupMatchStoreSuccess = PopCount(wakeupHitStoreVec) =/= 0.U
+        val wakeupMatchLoadStoreSuccess = PopCount(wakeupHitLoadStoreVec) =/= 0.U
         val wakeupHitLoadDeqVec = VecInit((0 until params.numDeq).map { deqIdx =>
           deqBeforeDly(deqIdx).fire &&
             Mux1H(finalDeqSelOHVec(deqIdx), wakeupHitVec) &&
@@ -1113,25 +1210,97 @@ class IssueQueueImp(implicit p: Parameters, params: IssueBlockParams) extends XS
             FuType.isStoreVstore(deqBeforeDly(deqIdx).bits.fuType)
         })
         val wakeupHitLoadStoreDeqVec = VecInit(wakeupHitLoadDeqVec.zip(wakeupHitStoreDeqVec).map { case (ld, st) => ld || st })
+        val wakeupMatchLoadDeqSuccess = PopCount(wakeupHitLoadDeqVec) =/= 0.U
+        val wakeupMatchStoreDeqSuccess = PopCount(wakeupHitStoreDeqVec) =/= 0.U
+        val wakeupMatchLoadStoreDeqSuccess = PopCount(wakeupHitLoadStoreDeqVec) =/= 0.U
+        val wakeupIQEntry = Wire(new WakeupIQDBEntry)
+        wakeupIQEntry := 0.U.asTypeOf(wakeupIQEntry)
+        wakeupIQEntry.timeCnt := GTimer()
+        wakeupIQEntry.iqIdx := 0.U
+        wakeupIQEntry.exuIdx := wakeupSourceExuIdx.U
+        wakeupIQEntry.valid := wakeupRecvValid
+        wakeupIQEntry.pc := io.wakeupFromIQ(iqIdx).bits.pc
+        wakeupIQEntry.pdest := io.wakeupFromIQ(iqIdx).bits.pdest
+        wakeupIQEntry.rfWen := io.wakeupFromIQ(iqIdx).bits.rfWen
+        wakeupIQEntry.fpWen := io.wakeupFromIQ(iqIdx).bits.fpWen
+        wakeupIQEntry.vecWen := io.wakeupFromIQ(iqIdx).bits.vecWen
+        wakeupIQEntry.v0Wen := io.wakeupFromIQ(iqIdx).bits.v0Wen
+        wakeupIQEntry.vlWen := io.wakeupFromIQ(iqIdx).bits.vlWen
 
+        val wakeupMatchIQEntry = Wire(new WakeupMatchIQDBEntry)
+        wakeupMatchIQEntry := 0.U.asTypeOf(wakeupMatchIQEntry)
+        wakeupMatchIQEntry.timeCnt := GTimer()
+        wakeupMatchIQEntry.iqIdx := 0.U
+        wakeupMatchIQEntry.exuIdx := wakeupSourceExuIdx.U
+        wakeupMatchIQEntry.wakeupPC := wakeupFromIQ(iqIdx).bits.pc
+        wakeupMatchIQEntry.matchCount := PopCount(wakeupHitLoadVec)
+        wakeupMatchIQEntry.entryValid.zipWithIndex.foreach { case (entryValid, entryIdx) =>
+          val hit = wakeupHitLoadVec(entryIdx)
+          val entry = entries.io.entryInfo(entryIdx).bits
+          entryValid := hit
+          wakeupMatchIQEntry.entryRobIdx(entryIdx) := Mux(hit, entry.status.robIdx.value, 0.U)
+          wakeupMatchIQEntry.entryFuType(entryIdx) := Mux(hit, IQFuType.readFuType(entry.status.fuType, params.getFuCfgs.map(_.fuType)).asUInt, 0.U.asTypeOf(FuType()))
+          wakeupMatchIQEntry.entryPdest(entryIdx) := Mux(hit, entry.payload.pdest, 0.U)
+          entry.payload.og1Payload.lqIdx.foreach(x => wakeupMatchIQEntry.entryLqIdx(entryIdx) := Mux(hit, x.value, 0.U))
+          entry.payload.og1Payload.sqIdx.foreach(x => wakeupMatchIQEntry.entrySqIdx(entryIdx) := Mux(hit, x.value, 0.U))
+          entry.payload.ftqOffset.foreach(x => wakeupMatchIQEntry.entryFtqOffset(entryIdx) := Mux(hit, x, 0.U))
+        }
+
+        val enqDelayWakeupMatchIQEntry = Wire(new WakeupMatchIQDBEntry)
+        enqDelayWakeupMatchIQEntry := 0.U.asTypeOf(enqDelayWakeupMatchIQEntry)
+        enqDelayWakeupMatchIQEntry.timeCnt := GTimer()
+        enqDelayWakeupMatchIQEntry.iqIdx := 0.U
+        enqDelayWakeupMatchIQEntry.exuIdx := wakeupSourceExuIdx.U
+        enqDelayWakeupMatchIQEntry.wakeupPC := PriorityMux(enqDelayLoadWakeupHitVec, enqDelayLoadWakeupPCVec)
+        enqDelayWakeupMatchIQEntry.matchCount := PopCount(enqDelayLoadWakeupHitVec)
+        enqDelayWakeupMatchIQEntry.entryValid.zipWithIndex.foreach { case (entryValid, entryIdx) =>
+          val hit = enqDelayLoadWakeupHitVec(entryIdx)
+          val entry = entries.io.entryInfo(entryIdx).bits
+          entryValid := hit
+          enqDelayWakeupMatchIQEntry.entryRobIdx(entryIdx) := Mux(hit, entry.status.robIdx.value, 0.U)
+          enqDelayWakeupMatchIQEntry.entryFuType(entryIdx) := Mux(hit, IQFuType.readFuType(entry.status.fuType, params.getFuCfgs.map(_.fuType)).asUInt, 0.U.asTypeOf(FuType()))
+          enqDelayWakeupMatchIQEntry.entryPdest(entryIdx) := Mux(hit, entry.payload.pdest, 0.U)
+          entry.payload.og1Payload.lqIdx.foreach(x => enqDelayWakeupMatchIQEntry.entryLqIdx(entryIdx) := Mux(hit, x.value, 0.U))
+          entry.payload.og1Payload.sqIdx.foreach(x => enqDelayWakeupMatchIQEntry.entrySqIdx(entryIdx) := Mux(hit, x.value, 0.U))
+          entry.payload.ftqOffset.foreach(x => enqDelayWakeupMatchIQEntry.entryFtqOffset(entryIdx) := Mux(hit, x, 0.U))
+        }
+
+        wakeupIQTable.log(wakeupIQEntry, wakeupRecvValid, params.getIQName, clock, reset)
+        wakeupMatchIQTable.log(wakeupMatchIQEntry, wakeupValid && PopCount(wakeupHitLoadVec) =/= 0.U, params.getIQName, clock, reset)
+        wakeupMatchIQTable.log(enqDelayWakeupMatchIQEntry, PopCount(enqDelayLoadWakeupHitVec) =/= 0.U, params.getIQName, clock, reset)
         XSPerfAccumulate(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_recv_cnt", wakeupRecvValid)
+        XSPerfAccumulate(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_load_success_cnt", wakeupValidWithEnqDelay && wakeupMatchLoadSuccess)
         XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_instr_cnt_hist",
-          PopCount(wakeupHitVec), wakeupValid, 0, params.numEntries + 1, 1)
+          PopCount(wakeupHitOrEnqDelayLoadVec), wakeupValidWithEnqDelay, 0, params.numEntries + 1, 1)
         XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_load_instr_cnt_hist",
-          PopCount(wakeupHitLoadVec), wakeupValid, 0, params.numEntries + 1, 1)
+          PopCount(wakeupHitLoadWithEnqDelayVec), wakeupValidWithEnqDelay, 0, params.numEntries + 1, 1)
         XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_store_instr_cnt_hist",
-          PopCount(wakeupHitStoreVec), wakeupValid, 0, params.numEntries + 1, 1)
+          PopCount(wakeupHitStoreVec), wakeupValidWithEnqDelay, 0, params.numEntries + 1, 1)
         XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_loadstore_instr_cnt_hist",
-          PopCount(wakeupHitLoadStoreVec), wakeupValid, 0, params.numEntries + 1, 1)
+          PopCount(wakeupHitLoadStoreVec), wakeupValidWithEnqDelay, 0, params.numEntries + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_instr_success_cnt_hist",
+          PopCount(wakeupHitOrEnqDelayLoadVec), wakeupValidWithEnqDelay && wakeupMatchInstrSuccess, 1, params.numEntries + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_load_instr_success_cnt_hist",
+          PopCount(wakeupHitLoadWithEnqDelayVec), wakeupValidWithEnqDelay && wakeupMatchLoadSuccess, 1, params.numEntries + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_store_instr_success_cnt_hist",
+          PopCount(wakeupHitStoreVec), wakeupValidWithEnqDelay && wakeupMatchStoreSuccess, 1, params.numEntries + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_loadstore_instr_success_cnt_hist",
+          PopCount(wakeupHitLoadStoreVec), wakeupValidWithEnqDelay && wakeupMatchLoadStoreSuccess, 1, params.numEntries + 1, 1)
         XSPerfAccumulate(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_load_deq_cnt", PopCount(wakeupHitLoadDeqVec))
         XSPerfAccumulate(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_store_deq_cnt", PopCount(wakeupHitStoreDeqVec))
         XSPerfAccumulate(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_loadstore_deq_cnt", PopCount(wakeupHitLoadStoreDeqVec))
         XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_load_deq_cnt_hist",
-          PopCount(wakeupHitLoadDeqVec), wakeupValid, 0, params.numDeq + 1, 1)
+          PopCount(wakeupHitLoadDeqVec), wakeupValidWithEnqDelay, 0, params.numDeq + 1, 1)
         XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_store_deq_cnt_hist",
-          PopCount(wakeupHitStoreDeqVec), wakeupValid, 0, params.numDeq + 1, 1)
+          PopCount(wakeupHitStoreDeqVec), wakeupValidWithEnqDelay, 0, params.numDeq + 1, 1)
         XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_loadstore_deq_cnt_hist",
-          PopCount(wakeupHitLoadStoreDeqVec), wakeupValid, 0, params.numDeq + 1, 1)
+          PopCount(wakeupHitLoadStoreDeqVec), wakeupValidWithEnqDelay, 0, params.numDeq + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_load_deq_success_cnt_hist",
+          PopCount(wakeupHitLoadDeqVec), wakeupValidWithEnqDelay && wakeupMatchLoadDeqSuccess, 1, params.numDeq + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_store_deq_success_cnt_hist",
+          PopCount(wakeupHitStoreDeqVec), wakeupValidWithEnqDelay && wakeupMatchStoreDeqSuccess, 1, params.numDeq + 1, 1)
+        XSPerfHistogram(s"loadpipe_wakeup_iq_from_exu${wakeupSourceExuIdx}_match_loadstore_deq_success_cnt_hist",
+          PopCount(wakeupHitLoadStoreDeqVec), wakeupValidWithEnqDelay && wakeupMatchLoadStoreDeqSuccess, 1, params.numDeq + 1, 1)
       }
     }
   }
