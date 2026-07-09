@@ -1249,6 +1249,7 @@ class LoadUnitS3(param: ExeUnitParams)(
 
     // Fast replay
     val fastReplay = DecoupledIO(new FastReplayIO)
+    // rr bank conflict candidates participate in the global fast replay grant.
     val bankConflictFastReplayCandidate = Output(Bool())
     val bankConflictFastReplayGrant = Input(Bool())
 
@@ -1384,7 +1385,7 @@ class LoadUnitS3(param: ExeUnitParams)(
     * Fast replay
     */
   val shouldFastReplay = in.shouldFastReplay.get
-  val bankConflictFastReplayCandidate = pipeIn.valid && shouldFastReplay && cause(C_BC)
+  val bankConflictFastReplayCandidate = pipeIn.valid && shouldFastReplay && cause(C_BC) && in.rrBankConflict.get
   val allowBankConflictFastReplay = !bankConflictFastReplayCandidate || io.bankConflictFastReplayGrant
   val allowFastReplay = io.fastReplay.ready && allowBankConflictFastReplay
   val doFastReplay = shouldFastReplay && allowFastReplay
@@ -1827,7 +1828,7 @@ class LoadUnitIO(val param: ExeUnitParams)(implicit p: Parameters) extends XSBun
   // IQ wakeup and load cancel
   val wakeup = ValidIO(new MemWakeUpBundle)
   val cancel = Output(Bool())
-  // Global fast replay grant for bank conflict candidates
+  // Global fast replay grant for rr bank conflict candidates
   val bankConflictFastReplayCandidate = Output(Bool())
   val bankConflictFastReplayGrant = Input(Bool())
   // Exception info
