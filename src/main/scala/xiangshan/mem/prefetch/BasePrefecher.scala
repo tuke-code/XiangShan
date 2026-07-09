@@ -74,6 +74,16 @@ class L2PrefetchReq(implicit p: Parameters) extends XSBundle {
 
 class L3PrefetchReq(implicit p: Parameters) extends L2PrefetchReq
 
+class L2ResultTriggerReq(implicit p: Parameters) extends DCacheBundle {
+  val pc = UInt(VAddrBits.W)
+  val vaddr = UInt(VAddrBits.W)
+  val paddr = UInt(PAddrBits.W)
+  val miss = Bool()
+  val hitPrefetch = Bool()
+  val metaSource = UInt(L1PfSourceBits.W)
+  val reqSource = UInt(MemReqSource.reqSourceBits.W)
+}
+
 class TrainReqBundle()(implicit p: Parameters) extends DCacheBundle {
   val robIdx = new RobPtr
   val vaddr = UInt(VAddrBits.W)

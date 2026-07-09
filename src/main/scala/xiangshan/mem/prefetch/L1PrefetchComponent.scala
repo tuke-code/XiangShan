@@ -847,6 +847,7 @@ class MutiLevelPrefetchFilter(implicit p: Parameters) extends XSModule with HasL
 class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamPrefetchHelper with HasStridePrefetchHelper {
   val pf_ctrl = IO(Input(Vec(L1PrefetcherNum, new PrefetchControlBundle)))
   val stride_train = IO(Flipped(Vec(backendParams.LduCnt + backendParams.HyuCnt, ValidIO(new TrainReqBundle()))))
+  val l2ResultTrigger = IO(Flipped(ValidIO(new L2ResultTriggerReq)))
   val l2PfqBusy = IO(Input(Bool()))
   val strideEnable = IO(Input(Bool()))
 
@@ -885,12 +886,14 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
   stream_bit_vec_array.io.dynamic_depth := stream_pf_ctrl.dynamic_depth
   stream_bit_vec_array.io.confidence := stream_pf_ctrl.confidence
   stream_bit_vec_array.io.train_req <> stream_train_filter.io.trainReq
+  stream_bit_vec_array.io.l2_result_trigger := l2ResultTrigger
 
   stride_meta_array.io.enable := enable && strideEnable
   stride_meta_array.io.flush := stride_pf_ctrl.flush
   stride_meta_array.io.dynamic_depth := 0.U
   stride_meta_array.io.confidence := stride_pf_ctrl.confidence
   stride_meta_array.io.train_req <> stride_train_filter.io.trainReq
+  stride_meta_array.io.l2_result_trigger := l2ResultTrigger
   stride_meta_array.io.stream_lookup_req <> stream_bit_vec_array.io.stream_lookup_req
   stride_meta_array.io.stream_lookup_resp <> stream_bit_vec_array.io.stream_lookup_resp
 
@@ -902,11 +905,17 @@ class L1Prefetcher(implicit p: Parameters) extends BasePrefecher with HasStreamP
     stride_meta_array.io.l1_prefetch_req.bits
   )
 
-  pf_queue_filter.io.l2_l3_prefetch_req.valid := stream_bit_vec_array.io.l2_l3_prefetch_req.valid && stream_pf_ctrl.enable || stride_meta_array.io.l2_l3_prefetch_req.valid && stride_pf_ctrl.enable
+  val useL2ResultTriggeredL2PF = Constantin.createRecord(s"useL2ResultTriggeredL2PF${p(XSCoreParamsKey).HartId}", initValue = true)
+  val stream_l2_req_valid = Mux(useL2ResultTriggeredL2PF, stream_bit_vec_array.io.l2_prefetch_req_from_l2_trigger.valid, stream_bit_vec_array.io.l2_l3_prefetch_req.valid)
+  val stream_l2_req_bits = Mux(useL2ResultTriggeredL2PF, stream_bit_vec_array.io.l2_prefetch_req_from_l2_trigger.bits, stream_bit_vec_array.io.l2_l3_prefetch_req.bits)
+  val stride_l2_req_valid = Mux(useL2ResultTriggeredL2PF, stride_meta_array.io.l2_prefetch_req_from_l2_trigger.valid, stride_meta_array.io.l2_l3_prefetch_req.valid)
+  val stride_l2_req_bits = Mux(useL2ResultTriggeredL2PF, stride_meta_array.io.l2_prefetch_req_from_l2_trigger.bits, stride_meta_array.io.l2_l3_prefetch_req.bits)
+
+  pf_queue_filter.io.l2_l3_prefetch_req.valid := stream_l2_req_valid && stream_pf_ctrl.enable || stride_l2_req_valid && stride_pf_ctrl.enable
   pf_queue_filter.io.l2_l3_prefetch_req.bits := Mux(
-    stream_bit_vec_array.io.l2_l3_prefetch_req.valid && stream_pf_ctrl.enable,
-    stream_bit_vec_array.io.l2_l3_prefetch_req.bits,
-    stride_meta_array.io.l2_l3_prefetch_req.bits
+    stream_l2_req_valid && stream_pf_ctrl.enable,
+    stream_l2_req_bits,
+    stride_l2_req_bits
   )
 
   io.l1_req.valid := pf_queue_filter.io.l1_req.valid && enable

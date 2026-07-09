@@ -462,6 +462,7 @@ class MissEntry(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     // for main pipe s2
     val refill_info = ValidIO(new MissQueueRefillInfo)
     val refill_train = ValidIO(new TrainReqBundle)
+    val l2_result_trigger = ValidIO(new L2ResultTriggerReq)
 
     val occupy_way = Output(UInt(nWays.W))
 
@@ -1054,6 +1055,18 @@ for(i <- 0 until reqNum) {
   io.refill_train.bits.isFirstIssue := DontCare
   io.refill_train.bits.isHwPrefetch := DontCare
 
+  val l2_result_trigger_valid = io.l2_hint.valid &&
+    (io.l2_hint.bits.l2Miss || io.l2_hint.bits.l2HitPrefetch) &&
+    (req.isFromLoad || req.isFromStore || req.isFromPrefetch)
+  io.l2_result_trigger.valid := l2_result_trigger_valid
+  io.l2_result_trigger.bits.pc := req.pc
+  io.l2_result_trigger.bits.vaddr := req.vaddr
+  io.l2_result_trigger.bits.paddr := req.addr
+  io.l2_result_trigger.bits.miss := io.l2_hint.bits.l2Miss
+  io.l2_result_trigger.bits.hitPrefetch := io.l2_hint.bits.l2HitPrefetch
+  io.l2_result_trigger.bits.metaSource := fromL2PfSource(io.l2_hint.bits.pfSource)
+  io.l2_result_trigger.bits.reqSource := io.l2_hint.bits.reqSource
+
   XSPerfAccumulate("miss_refill_mainpipe_req", io.main_pipe_req.fire)
   XSPerfAccumulate("miss_refill_without_hint", io.main_pipe_req.fire && !mainpipe_req_fired && !w_l2hint)
   XSPerfAccumulate("miss_refill_replay", io.main_pipe_replay)
@@ -1159,6 +1172,7 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
     val mainpipe_info = Input(new MainPipeInfoToMQ)
     val refill_info = ValidIO(new MissQueueRefillInfo)
     val refill_train = ValidIO(new TrainReqBundle)
+    val l2_result_trigger = ValidIO(new L2ResultTriggerReq)
 
     // block probe
     val probe = Flipped(new MissQueueBlockIO)
@@ -1759,6 +1773,11 @@ class MissQueue(edge: TLEdgeOut, reqNum: Int)(implicit p: Parameters) extends DC
 
   io.refill_train.valid := VecInit(entries.zipWithIndex.map{ case(e,i) => e.io.refill_train.valid && io.mainpipe_info.s2_valid && io.mainpipe_info.s2_miss_id === i.U}).asUInt.orR
   io.refill_train.bits := Mux1H(entries.zipWithIndex.map{ case(e,i) => (io.mainpipe_info.s2_miss_id === i.U) -> e.io.refill_train.bits })
+
+  val l2_result_trigger_vec = VecInit(entries.map(_.io.l2_result_trigger.valid))
+  io.l2_result_trigger.valid := l2_result_trigger_vec.asUInt.orR
+  io.l2_result_trigger.bits := Mux1H(entries.map(e => e.io.l2_result_trigger.valid -> e.io.l2_result_trigger.bits))
+  assert(PopCount(l2_result_trigger_vec) <= 1.U)
 
   for(i <- 0 until reqNum) {
     acquire_from_pipereg_vec(i).valid := parallel_pipe_regs(i).alloc && !can_merge_store_from_pipe(i) && !io.wfi.wfiReq

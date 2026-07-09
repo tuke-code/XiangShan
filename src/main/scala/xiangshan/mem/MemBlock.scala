@@ -741,6 +741,7 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
   prefetcher.io.pfCtrlFromDCache <> dcache.io.pf_ctrl
   prefetcher.io.fromDCache.sms_agt_evict_req <> dcache.io.sms_agt_evict_req
   prefetcher.io.fromDCache.refillTrain := dcache.io.refillTrain
+  prefetcher.io.fromDCache.l2ResultTrigger := dcache.io.l2_result_trigger
   prefetcher.io.fromOOO.s1_loadPc := issueLda.map(x => RegNext(x.bits.pc.get)) ++ io.ooo_to_mem.hybridPc
   prefetcher.io.fromOOO.s1_storePc := io.ooo_to_mem.storePc ++ io.ooo_to_mem.hybridPc
   prefetcher.io.trainSource.s1_loadFireHint := newLoadUnits.map(_.io.prefetchTrainHintS1)
@@ -952,6 +953,10 @@ class MemBlockInlinedImp(outer: MemBlockInlined) extends LazyModuleImp(outer)
     lsq.io.l2_hint.valid := l2_hint.valid
     lsq.io.l2_hint.bits.sourceId := l2_hint.bits.sourceId
     lsq.io.l2_hint.bits.isKeyword := l2_hint.bits.isKeyword
+    lsq.io.l2_hint.bits.l2Miss := l2_hint.bits.l2Miss
+    lsq.io.l2_hint.bits.l2HitPrefetch := l2_hint.bits.l2HitPrefetch
+    lsq.io.l2_hint.bits.reqSource := l2_hint.bits.reqSource
+    lsq.io.l2_hint.bits.pfSource := l2_hint.bits.pfSource
 
     lsq.io.tlb_hint <> dtlbRepeater.io.hint.get
 

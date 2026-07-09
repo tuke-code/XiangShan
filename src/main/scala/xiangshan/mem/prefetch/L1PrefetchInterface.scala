@@ -48,6 +48,17 @@ trait HasL1PrefetchSourceParameter {
   def isFromStride(value: UInt)      = value === L1_HW_PREFETCH_STRIDE
   def isFromStream(value: UInt)      = value === L1_HW_PREFETCH_STREAM
   def isFromBerti(value: UInt) = value === L1_HW_PREFETCH_BERTI
+  def fromL2PfSource(value: UInt): UInt = {
+    MuxLookup(value, L1_HW_PREFETCH_NULL)(Seq(
+      MemReqSource.Prefetch2L2Stream.id.U -> L1_HW_PREFETCH_STREAM,
+      MemReqSource.Prefetch2L2Stride.id.U -> L1_HW_PREFETCH_STRIDE,
+      MemReqSource.Prefetch2L2BOP.id.U -> L1_HW_PREFETCH_NULL,
+      MemReqSource.Prefetch2L2PBOP.id.U -> L1_HW_PREFETCH_NULL,
+      MemReqSource.Prefetch2L2TP.id.U -> L1_HW_PREFETCH_NULL,
+      MemReqSource.Prefetch2L2SMS.id.U -> L1_HW_PREFETCH_CLEAR,
+      MemReqSource.Prefetch2L2Berti.id.U -> L1_HW_PREFETCH_BERTI
+    ))
+  }
 
   private val source2string = scala.collection.mutable.Map[String, BigInt]()
 }

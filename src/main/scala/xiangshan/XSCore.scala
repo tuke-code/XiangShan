@@ -227,6 +227,10 @@ class XSCoreImp(outer: XSCoreBase) extends LazyModuleImp(outer)
   memBlock.io.l2_tlb_req <> io.l2_tlb_req
   memBlock.io.l2_pmp_resp <> io.l2_pmp_resp
   memBlock.io.l2_hint.bits.isKeyword := io.l2_hint.bits.isKeyword
+  memBlock.io.l2_hint.bits.l2Miss := io.l2_hint.bits.l2Miss
+  memBlock.io.l2_hint.bits.l2HitPrefetch := io.l2_hint.bits.l2HitPrefetch
+  memBlock.io.l2_hint.bits.reqSource := io.l2_hint.bits.reqSource
+  memBlock.io.l2_hint.bits.pfSource := io.l2_hint.bits.pfSource
   memBlock.io.l2PfqBusy := io.l2PfqBusy
 
   // if l2 prefetcher use stream prefetch, it should be placed in XSCore

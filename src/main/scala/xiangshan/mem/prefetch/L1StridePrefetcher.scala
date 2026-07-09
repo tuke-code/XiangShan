@@ -124,6 +124,8 @@ class StrideMetaArray(implicit p: Parameters) extends XSModule with HasStridePre
     val train_req = Flipped(DecoupledIO(new TrainReqBundle))
     val l1_prefetch_req = ValidIO(new StreamPrefetchReqBundle)
     val l2_l3_prefetch_req = ValidIO(new StreamPrefetchReqBundle)
+    val l2_result_trigger = Flipped(ValidIO(new L2ResultTriggerReq))
+    val l2_prefetch_req_from_l2_trigger = ValidIO(new StreamPrefetchReqBundle)
     // query Stream component to see if a stream pattern has already been detected
     val stream_lookup_req  = ValidIO(UInt(VAddrBits.W))
     val stream_lookup_resp = Input(Bool())
@@ -250,9 +252,37 @@ class StrideMetaArray(implicit p: Parameters) extends XSModule with HasStridePre
   io.l2_l3_prefetch_req.valid := s4_valid && io.enable
   io.l2_l3_prefetch_req.bits := s4_l2_pf_req_bits
 
+  val l2_trigger_valid = io.l2_result_trigger.valid && (io.l2_result_trigger.bits.miss || io.l2_result_trigger.bits.hitPrefetch)
+  val l2_trigger_pc_hash = pc_hash_tag(io.l2_result_trigger.bits.pc)
+  val l2_trigger_match_vec = VecInit(array zip valids map { case (e, v) => e.tag_match(v, l2_trigger_valid, l2_trigger_pc_hash) })
+  val l2_trigger_hit = l2_trigger_match_vec.asUInt.orR
+  val l2_trigger_index = OHToUInt(l2_trigger_match_vec)
+  val l2_trigger_entry = array(l2_trigger_index)
+  val l2_trigger_can_send = l2_trigger_valid && l2_trigger_hit && l2_trigger_entry.confidence >= CONF_THRESHOLD.U
+  val l2_trigger_stride = l2_trigger_entry.stride
+  val l2_trigger_depth = l2_trigger_stride << l2_stride_ratio
+  val l2_trigger_vaddr = io.l2_result_trigger.bits.vaddr
+  val l2_trigger_incr_vaddr = (l2_trigger_vaddr + l2_trigger_depth)(VAddrBits - 1, 0)
+  val l2_trigger_decr_vaddr = (l2_trigger_vaddr - l2_trigger_depth)(VAddrBits - 1, 0)
+  val l2_trigger_pf_vaddr = Mux(l2_trigger_entry.decr_mode, l2_trigger_decr_vaddr, l2_trigger_incr_vaddr)
+  val l2_trigger_pf_req_bits = (new StreamPrefetchReqBundle).getStreamPrefetchReqBundle(
+    valid = l2_trigger_can_send,
+    vaddr = l2_trigger_pf_vaddr,
+    width = STRIDE_WIDTH_BLOCKS,
+    decr_mode = l2_trigger_entry.decr_mode,
+    sink = SINK_L2,
+    source = L1_HW_PREFETCH_STRIDE,
+    confidence = io.confidence,
+    t_pc = io.l2_result_trigger.bits.pc,
+    t_va = io.l2_result_trigger.bits.vaddr
+  )
+  io.l2_prefetch_req_from_l2_trigger.valid := l2_trigger_can_send && io.enable
+  io.l2_prefetch_req_from_l2_trigger.bits := l2_trigger_pf_req_bits
+
   XSPerfAccumulate("pf_valid", PopCount(Seq(io.l1_prefetch_req.valid, io.l2_l3_prefetch_req.valid)))
   XSPerfAccumulate("l1_pf_valid", s3_valid)
   XSPerfAccumulate("l2_pf_valid", s4_valid)
+  XSPerfAccumulate("l2_result_trigger_pf_valid", l2_trigger_can_send)
   XSPerfAccumulate("detect_stream", io.stream_lookup_resp)
   XSPerfHistogram("high_conf_num", PopCount(VecInit(array.zipWithIndex.map { case (entry, idx) => valids(idx) && entry.confidence >= CONF_THRESHOLD.U })).asUInt, true.B, 0, STRIDE_ENTRY_NUM, 1)
   for(i <- 0 until STRIDE_ENTRY_NUM) {

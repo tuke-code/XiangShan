@@ -830,6 +830,7 @@ class DCacheIO(implicit p: Parameters) extends DCacheBundle {
   val lqEmpty = Input(Bool())
   val pf_ctrl = Output(Vec(L1PrefetcherNum, new PrefetchControlBundle))
   val refillTrain = ValidIO(new TrainReqBundle)
+  val l2_result_trigger = ValidIO(new L2ResultTriggerReq)
   val force_write = Input(Bool())
   val sms_agt_evict_req = DecoupledIO(new AGTEvictReq)
   val debugTopDown = new DCacheTopDownIO
@@ -1055,6 +1056,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   io.memSetPattenDetected := missQueue.io.memSetPattenDetected
   io.wfi <> missQueue.io.wfi
   io.refillTrain := missQueue.io.refill_train
+  io.l2_result_trigger := missQueue.io.l2_result_trigger
   mainPipe.io.prefetch_req <> io.prefetch_req
 
   // l1 dcache controller

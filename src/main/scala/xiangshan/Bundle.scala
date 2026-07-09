@@ -27,6 +27,7 @@ import _root_.utils.{OptionWrapper, NamedUInt}
 
 import org.chipsalliance.cde.config.Parameters
 
+import xscache.coupledL2.prefetch.PfSource
 import xiangshan.frontend.IfuToBackendIO
 import xiangshan.frontend.PreDecodeInfo
 import xiangshan.frontend.PrunedAddr
@@ -798,6 +799,10 @@ class StallReasonIO(width: Int) extends Bundle {
 class L2ToL1Hint(implicit p: Parameters) extends XSBundle with HasDCacheParameters {
   val sourceId = UInt(log2Up(cfg.nMissEntries).W)    // tilelink sourceID -> mshr id
   val isKeyword = Bool()                             // miss entry keyword -> L1 load queue replay
+  val l2Miss = Bool()
+  val l2HitPrefetch = Bool()
+  val reqSource = UInt(MemReqSource.reqSourceBits.W)
+  val pfSource = UInt(PfSource.pfSourceBits.W)
 }
 
 class TopDownInfo(implicit p: Parameters) extends XSBundle {
