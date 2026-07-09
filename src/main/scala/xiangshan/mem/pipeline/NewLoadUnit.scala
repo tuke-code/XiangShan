@@ -827,6 +827,7 @@ class LoadUnitS2(param: ExeUnitParams)(
     val dcacheResp = Flipped(DecoupledIO(new DCacheWordResp))
     // TODO: move this inside of dcacheResp
     val dcacheBankConflict = Input(Bool())
+    val dcacheRRBankConflict = Input(Bool())
     val dcacheMSHRNack = Input(Bool())
 
     /**
@@ -1136,6 +1137,7 @@ class LoadUnitS2(param: ExeUnitParams)(
   stageInfo.tlbFull.get := io.tlbHint.full
   // Pre-process for s3
   stageInfo.troubleMaker.get := troubleMaker
+  stageInfo.rrBankConflict.get := io.dcacheRRBankConflict
   stageInfo.shouldFastReplay.get := in.shouldFastReplay.get || fastReplay && !exception
   stageInfo.matchInvalid.get := matchInvalid && troubleMaker
   stageInfo.shouldWakeup.get := shouldWakeup
@@ -1935,6 +1937,7 @@ class NewLoadUnit(val param: ExeUnitParams)(implicit p: Parameters) extends XSMo
   io.dcache.s2_kill := s2.io.dcacheKill
   s2.io.dcacheResp <> io.dcache.resp
   s2.io.dcacheBankConflict := io.dcache.s2_bank_conflict
+  s2.io.dcacheRRBankConflict := io.dcache.s2_rr_bank_conflict
   s2.io.dcacheMSHRNack := io.dcache.s2_mq_nack
   s2.io.sqForwardResp := io.sqForward.s2Resp
   s2.io.sbufferForwardResp := io.sbufferForward.s2Resp
